@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  spike-m0:
+    name: Milestone 0 spike
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: spikes/m0
+    steps:
+      - uses: actions/checkout@v4
+      - name: LF line endings
+        working-directory: .
+        run: |
+          if git ls-files -z | xargs -0 grep -lI $'\r' ; then
+            echo "::error::files with CRLF line endings"; exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/m0
+      - name: libclang (bindgen in mxl-sys)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
