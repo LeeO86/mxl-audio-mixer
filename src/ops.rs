@@ -1,5 +1,5 @@
 //! The web port (G7, G10): probes, metrics, status, settings, export/import and
-//! the inputs API.
+//! the inputs API. The mix API is in [`crate::api`].
 
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
@@ -14,8 +14,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::{Config, SETTINGS};
+use crate::control::Control;
 use crate::engine::BLOCK_BUCKETS_US;
-use crate::inputs::{ExtraDelay, InputConfig, Inputs};
+use crate::inputs::{ExtraDelay, InputConfig};
+use crate::mix::Mix;
 use crate::timing;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -24,19 +26,26 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct App {
     pub config: Arc<Config>,
     pub node: mxl_nmos::Node,
-    pub inputs: Arc<Mutex<Inputs>>,
+    pub control: Arc<Mutex<Control>>,
+    /// Serialises mix changes, which may wait for a fade between stage and swap.
+    pub changes: Arc<tokio::sync::Mutex<()>>,
     pub tai_offset_s: i64,
     pub timing_trusted: bool,
     pub started: std::time::Instant,
 }
 
 impl App {
-    fn inputs(&self) -> std::sync::MutexGuard<'_, Inputs> {
-        self.inputs.lock().unwrap_or_else(|e| e.into_inner())
+    pub fn control(&self) -> std::sync::MutexGuard<'_, Control> {
+        self.control.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn ready(&self) -> (bool, Value) {
-        let engine = self.inputs().counters().running.load(Ordering::Relaxed);
+        let engine = self
+            .control()
+            .engine
+            .counters
+            .running
+            .load(Ordering::Relaxed);
         let required = self.node.registration_required();
         let registered = self.node.is_registered();
         let ready = engine && (!required || registered);
@@ -66,10 +75,11 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/inputs", get(inputs))
         .route("/api/v1/inputs/{input}", get(input).patch(patch_input))
         .route("/api/v1/inputs/{input}/delay/confirm", post(confirm_delay))
+        .merge(crate::api::routes())
         .with_state(app)
 }
 
-fn error(status: StatusCode, message: impl Into<String>) -> Response {
+pub fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({"error": message.into()}))).into_response()
 }
 
@@ -85,8 +95,14 @@ async fn readyz(State(app): State<App>) -> Response {
 
 async fn status(State(app): State<App>) -> Json<Value> {
     let (_, readiness) = app.ready();
-    let inputs = app.inputs();
-    let c = inputs.counters();
+    let control = app.control();
+    let c = &control.engine.counters;
+    let scheduling = control
+        .engine
+        .scheduling
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
     Json(json!({
         "application": "mxl-audio-mixer",
         "version": VERSION,
@@ -106,12 +122,19 @@ async fn status(State(app): State<App>) -> Json<Value> {
         "dsp": {
             "block_samples": app.config.block_samples,
             "read_offset_ms": f64::from(app.config.read_offset_samples) / 48.0,
-            "scheduling": inputs.scheduling(),
+            "scheduling": scheduling,
             "blocks": c.blocks.load(Ordering::Relaxed),
             "deadline_misses": c.deadline_misses.load(Ordering::Relaxed),
             "load_ratio": c.load_ratio(),
+            "plan_swaps": c.plan_swaps.load(Ordering::Relaxed),
         },
-        "inputs": inputs.status(),
+        "inputs": control.inputs.status(),
+        "mix": {
+            "strips": control.mix.strips.len(),
+            "buses": control.mix.buses.len(),
+            "sends": control.mix.sends.len(),
+        },
+        "outputs": control.outputs.status(&control.engine, &app.node),
     }))
 }
 
@@ -148,7 +171,8 @@ async fn export(State(app): State<App>) -> Json<Value> {
         "version": 1,
         "application_version": VERSION,
         "settings": settings,
-        "inputs": app.inputs().configs(),
+        "inputs": app.control().inputs.configs(),
+        "mix": app.control().mix,
         "connections": app.node.connections(),
     }))
 }
@@ -158,6 +182,8 @@ struct ShowFile {
     version: u32,
     #[serde(default)]
     inputs: Vec<InputConfig>,
+    #[serde(default)]
+    mix: Option<Mix>,
     #[serde(default)]
     connections: Vec<mxl_nmos::SavedConnection>,
 }
@@ -173,22 +199,46 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
             format!("show file version {} is not supported", show.version),
         );
     }
-    if let Err(e) = app.inputs().replace_configs(&show.inputs) {
+    if let Some(mix) = &show.mix {
+        let inputs = app.control().inputs.len();
+        if let Err(e) = mix.validate(inputs, app.config.block_samples) {
+            return error(StatusCode::BAD_REQUEST, format!("mix: {e}"));
+        }
+    }
+    let result = {
+        let mut control = app.control();
+        let c = &mut *control;
+        c.inputs.replace_configs(&mut c.engine, &show.inputs)
+    };
+    if let Err(e) = result {
         return error(StatusCode::BAD_REQUEST, e);
     }
     for input in &show.inputs {
         let _ = app.node.insert_receiver(crate::nmos::receiver(input));
     }
+    let mut output_errors = Vec::new();
+    if let Some(mix) = show.mix {
+        match crate::api::apply(&app, crate::engine::FADE_SAMPLES, move |m| {
+            *m = mix;
+            Ok(())
+        })
+        .await
+        {
+            Ok(errors) => output_errors = errors,
+            Err(r) => return *r,
+        }
+    }
     let failed = app.node.restore(show.connections).await;
     Json(json!({
         "imported": true,
         "rejected_connections": failed.iter().map(|(_, key, reason)| json!({"key": key, "reason": reason})).collect::<Vec<_>>(),
+        "output_errors": output_errors,
     }))
     .into_response()
 }
 
 fn input_index(app: &App, input: usize) -> Result<usize, Box<Response>> {
-    let count = app.inputs().len();
+    let count = app.control().inputs.len();
     if input == 0 || input > count {
         Err(Box::new(error(
             StatusCode::NOT_FOUND,
@@ -200,12 +250,12 @@ fn input_index(app: &App, input: usize) -> Result<usize, Box<Response>> {
 }
 
 async fn inputs(State(app): State<App>) -> Json<Value> {
-    Json(json!(app.inputs().status()))
+    Json(json!(app.control().inputs.status()))
 }
 
 async fn input(State(app): State<App>, Path(input): Path<usize>) -> Response {
     match input_index(&app, input) {
-        Ok(i) => Json(json!(app.inputs().status()[i])).into_response(),
+        Ok(i) => Json(json!(app.control().inputs.status()[i])).into_response(),
         Err(r) => *r,
     }
 }
@@ -230,11 +280,16 @@ async fn patch_input(
         Ok(p) => p,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    let result = app.inputs().update(i, patch.label, patch.extra_delay);
+    let result = {
+        let mut control = app.control();
+        let c = &mut *control;
+        c.inputs
+            .update(&mut c.engine, i, patch.label, patch.extra_delay)
+    };
     match result {
         Ok(config) => {
             let _ = app.node.insert_receiver(crate::nmos::receiver(&config));
-            Json(json!(app.inputs().status()[i])).into_response()
+            Json(json!(app.control().inputs.status()[i])).into_response()
         }
         Err(e) => error(StatusCode::BAD_REQUEST, e),
     }
@@ -245,9 +300,13 @@ async fn confirm_delay(State(app): State<App>, Path(input): Path<usize>) -> Resp
         Ok(i) => i,
         Err(r) => return *r,
     };
-    let result = app.inputs().confirm_delay(i);
+    let result = {
+        let mut control = app.control();
+        let c = &mut *control;
+        c.inputs.confirm_delay(&mut c.engine, i)
+    };
     match result {
-        Ok(()) => Json(json!(app.inputs().status()[i])).into_response(),
+        Ok(()) => Json(json!(app.control().inputs.status()[i])).into_response(),
         Err(e) => error(StatusCode::CONFLICT, e),
     }
 }
@@ -262,7 +321,8 @@ async fn metrics(State(app): State<App>) -> Response {
             let _ = writeln!(out, "{p}{name}{line}");
         }
     };
-    let inputs = app.inputs();
+    let control = app.control();
+    let inputs = &control.inputs;
     let c = inputs.counters();
     let period = app.config.block_period().as_secs_f64();
     let mut cumulative = 0u64;
@@ -302,8 +362,47 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "output_blocks_total",
         "counter",
-        "Blocks written to MXL outputs.",
+        "Blocks written to MXL outputs (one per output and block).",
         vec![format!(" {}", c.output_blocks.load(Ordering::Relaxed))],
+    );
+    metric(
+        "plan_swaps_total",
+        "counter",
+        "Execution plans swapped in by the DSP thread.",
+        vec![format!(" {}", c.plan_swaps.load(Ordering::Relaxed))],
+    );
+    metric(
+        "plan_compile_seconds",
+        "gauge",
+        "Duration of the last plan compile.",
+        vec![format!(" {}", control.compile_seconds)],
+    );
+    metric(
+        "signals",
+        "gauge",
+        "Signals of the mix (strips and buses).",
+        vec![format!(" {}", control.signals())],
+    );
+    metric(
+        "nodes",
+        "gauge",
+        "Steps of the running plan by type.",
+        control
+            .step_counts
+            .iter()
+            .map(|(kind, n)| format!("{{type=\"{kind}\"}} {n}"))
+            .collect(),
+    );
+    metric(
+        "output_commit_lag_ms",
+        "gauge",
+        "TAI time of an output's last commit minus the time of its last sample.",
+        control
+            .outputs
+            .status(&control.engine, &app.node)
+            .iter()
+            .map(|o| format!("{{output=\"{}\"}} {}", o.signal, o.commit_lag_ms))
+            .collect(),
     );
     metric(
         "timing_trusted",
@@ -369,7 +468,7 @@ async fn metrics(State(app): State<App>) -> Response {
         "Times the input was opened again.",
         per(&|s| s.reopens.to_string()),
     );
-    drop(inputs);
+    drop(control);
     metric(
         "process_cpu_seconds_total",
         "counter",
