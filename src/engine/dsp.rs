@@ -1,4 +1,5 @@
-//! The DSP thread's loop. Everything it touches is allocated before the loop.
+//! The DSP thread's loop. Everything it touches is allocated before the loop or
+//! on the control side.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -6,8 +7,10 @@ use std::time::Duration;
 
 use mxl::Error as MxlError;
 
+use super::plan::{InputSource, OutputSink};
 use super::{
-    Command, EngineConfig, EngineCounters, Returned, BLOCK_BUCKETS_US, FADE_SAMPLES, MAX_CHANNELS,
+    Command, EngineConfig, EngineCounters, OutputWriter, Plan, Returned, BLOCK_BUCKETS_US,
+    FADE_SAMPLES, MAX_CHANNELS, MAX_OUTPUTS,
 };
 use crate::mxlio::SamplesReader;
 use crate::timing::{index_at, sleep_until_tai, tai_ns, time_of};
@@ -48,6 +51,45 @@ impl Input {
             last_head: 0,
         }
     }
+
+    /// Silent: no reader and the fade-out is over.
+    fn silent(&self) -> bool {
+        self.reader.is_none() && self.gain <= 0.0
+    }
+}
+
+struct Inputs<'a> {
+    inputs: &'a [Input],
+    block: usize,
+}
+
+impl InputSource for Inputs<'_> {
+    fn channel(&self, input: usize, channel: usize) -> Option<&[f32]> {
+        let i = self.inputs.get(input)?;
+        if i.silent() || channel >= i.channels {
+            return None;
+        }
+        Some(&i.buffer[channel * self.block..(channel + 1) * self.block])
+    }
+}
+
+struct Outputs<'a> {
+    slots: &'a mut [Option<Box<OutputWriter>>],
+    block: usize,
+}
+
+impl OutputSink for Outputs<'_> {
+    fn write(&mut self, slot: usize, channel: usize, _channels: usize, samples: &[f32]) {
+        let Some(Some(o)) = self.slots.get_mut(slot) else {
+            return;
+        };
+        if channel >= o.channels() {
+            return;
+        }
+        let at = channel * o.commit + o.filled;
+        o.staging[at..at + self.block].copy_from_slice(&samples[..self.block]);
+        o.staged = true;
+    }
 }
 
 const FADE_STEP: f32 = 1.0 / FADE_SAMPLES as f32;
@@ -85,10 +127,28 @@ pub(super) fn run(
     // Bounded wait for samples that are almost there: a quarter block.
     let read_wait = Duration::from_nanos(period_ns / 4);
     let mut inputs: Vec<Input> = (0..config.inputs).map(|_| Input::new(block)).collect();
+    let mut outputs: Vec<Option<Box<OutputWriter>>> = (0..MAX_OUTPUTS).map(|_| None).collect();
+    let mut plan: Option<Box<Plan>> = None;
+    let mut stopping = false;
+    // The fade-out takes FADE_SAMPLES; a few blocks more cover a full commit.
+    let mut stop_blocks = (FADE_SAMPLES as usize / block + 2) as u32 * 4;
     let mut n = index_at(tai_ns()) / b + 1;
     counters.running.store(true, Ordering::SeqCst);
 
-    while !counters.stop.load(Ordering::Relaxed) {
+    loop {
+        if counters.stop.load(Ordering::Relaxed) && !stopping {
+            // G8: fade every output out before the writers are released.
+            stopping = true;
+            for o in outputs.iter_mut().flatten() {
+                o.fading = -1;
+            }
+        }
+        if stopping {
+            if outputs.iter().flatten().all(|o| o.gain <= 0.0) || stop_blocks == 0 {
+                break;
+            }
+            stop_blocks -= 1;
+        }
         let start = n * b;
         let deadline = time_of(start + b);
         sleep_until_tai(deadline);
@@ -142,12 +202,46 @@ pub(super) fn run(
                         }
                     }
                 }
+                Command::SetPlan(mut next) => {
+                    if let Some(old) = plan.take() {
+                        next.adopt(&old, FADE_SAMPLES);
+                        let _ = returned.push(Returned::Plan(old));
+                    }
+                    plan = Some(next);
+                    counters.plan_swaps.fetch_add(1, Ordering::Relaxed);
+                }
+                Command::Param {
+                    node,
+                    values,
+                    len,
+                    ramp,
+                } => {
+                    if let Some(p) = plan.as_mut() {
+                        p.set_param(node, &values[..len as usize], ramp);
+                    }
+                }
+                Command::SetOutput { slot, mut output } => {
+                    if let Some(s) = outputs.get_mut(slot) {
+                        output.next = start;
+                        if let Some(old) = s.replace(output) {
+                            let _ = returned.push(Returned::Output(old));
+                        }
+                    }
+                }
+                Command::ClearOutput { slot } => {
+                    if let Some(old) = outputs.get_mut(slot).and_then(|s| s.take()) {
+                        let _ = returned.push(Returned::Output(old));
+                    }
+                }
             }
         }
 
         for (i, input) in inputs.iter_mut().enumerate() {
             let c = &counters.inputs[i];
             let Some(reader) = input.reader.as_ref() else {
+                if input.gain > 0.0 {
+                    apply_fades(input, block, c, false);
+                }
                 continue;
             };
             let total = u64::from(config.read_offset) + u64::from(input.delay);
@@ -205,6 +299,51 @@ pub(super) fn run(
             }
         }
 
+        for o in outputs.iter_mut().flatten() {
+            if o.next != start {
+                o.filled = 0;
+            }
+            o.next = start + b;
+            o.staged = false;
+            for c in 0..o.channels() {
+                let at = c * o.commit + o.filled;
+                o.staging[at..at + block].fill(0.0);
+            }
+        }
+        if let Some(p) = plan.as_mut() {
+            p.process(
+                &Inputs {
+                    inputs: &inputs,
+                    block,
+                },
+                &mut Outputs {
+                    slots: &mut outputs,
+                    block,
+                },
+            );
+        }
+        for (slot, o) in outputs.iter_mut().enumerate() {
+            let Some(o) = o.as_mut() else {
+                continue;
+            };
+            if !o.staged {
+                o.filled = 0;
+                if stopping {
+                    o.gain = 0.0;
+                }
+                continue;
+            }
+            fade_output(o, block);
+            o.filled += block;
+            let oc = &counters.outputs[slot];
+            oc.blocks.fetch_add(1, Ordering::Relaxed);
+            counters.output_blocks.fetch_add(1, Ordering::Relaxed);
+            let last = stopping && o.gain <= 0.0;
+            if o.filled >= o.commit || last {
+                commit(o, start + b, oc);
+            }
+        }
+
         let done = tai_ns();
         record_block_time(&counters, done - woke, period_ns);
         counters.blocks.fetch_add(1, Ordering::Relaxed);
@@ -215,6 +354,59 @@ pub(super) fn run(
     for input in &mut inputs {
         if let Some(reader) = input.reader.take() {
             let _ = returned.push(Returned::Reader(reader));
+        }
+    }
+    for o in outputs.iter_mut() {
+        if let Some(o) = o.take() {
+            let _ = returned.push(Returned::Output(o));
+        }
+    }
+    if let Some(p) = plan.take() {
+        let _ = returned.push(Returned::Plan(p));
+    }
+}
+
+/// Apply the output's fade to the block just staged.
+fn fade_output(o: &mut OutputWriter, block: usize) {
+    if o.fading == 0 && o.gain >= 1.0 {
+        return;
+    }
+    let channels = o.channels();
+    for k in 0..block {
+        match o.fading {
+            1 => {
+                o.gain = (o.gain + FADE_STEP).min(1.0);
+                if o.gain >= 1.0 {
+                    o.fading = 0;
+                }
+            }
+            -1 => o.gain = (o.gain - FADE_STEP).max(0.0),
+            _ => {}
+        }
+        for c in 0..channels {
+            o.staging[c * o.commit + o.filled + k] *= o.gain;
+        }
+    }
+}
+
+/// Write the staged samples, which end at index `head`.
+fn commit(o: &mut OutputWriter, head: u64, counters: &super::OutputCounters) {
+    let count = o.filled;
+    let commit = o.commit;
+    let staging = &o.staging;
+    let result = o.writer.write(head, count, |c, offset, samples| {
+        let from = c * commit + offset;
+        samples.copy_from_slice(&staging[from..from + samples.len()]);
+    });
+    o.filled = 0;
+    match result {
+        Ok(()) => {
+            counters.commits.fetch_add(1, Ordering::Relaxed);
+            let lag = tai_ns().saturating_sub(time_of(head)) / 1_000;
+            counters.commit_lag_us.store(lag, Ordering::Relaxed);
+        }
+        Err(_) => {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

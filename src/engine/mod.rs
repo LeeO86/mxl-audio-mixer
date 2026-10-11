@@ -2,21 +2,27 @@
 //!
 //! Block n covers output samples [n·B, (n+1)·B). The thread sleeps until the TAI
 //! time of sample (n+1)·B, then reads every routed input's block ending at
-//! (n+1)·B − (read offset + the input's extra delay). The control side talks to it
-//! only through lock-free single-producer/single-consumer rings and atomics; the
-//! thread never allocates, locks or does I/O other than MXL reads.
+//! (n+1)·B − (read offset + the input's extra delay), runs the current plan and
+//! writes the outputs' block ending at (n+1)·B. The control side talks to it only
+//! through lock-free single-producer/single-consumer rings and atomics; the thread
+//! never allocates, locks or does I/O other than MXL reads and writes.
 
 mod dsp;
+pub mod plan;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::mxlio::writer::SamplesWriter;
 use crate::mxlio::SamplesReader;
+pub use plan::{NodeId, Plan, MAX_NODE_VALUES};
 
 /// Largest channel count of an input flow (§4.2).
 pub const MAX_CHANNELS: usize = 64;
 /// Length of every fade in samples: the parameter ramp of §2 (10 ms).
 pub const FADE_SAMPLES: u32 = 480;
+/// Output slots of the DSP thread.
+pub const MAX_OUTPUTS: usize = crate::mix::model::MAX_OUTPUTS;
 
 /// A message from the control side to the DSP thread.
 pub enum Command {
@@ -30,11 +36,62 @@ pub enum Command {
     ClearInput { index: usize },
     /// Change input `index`'s extra delay, fading out and in.
     SetDelay { index: usize, samples: u32 },
+    /// Run this plan from the next block on.
+    SetPlan(Box<Plan>),
+    /// Ramp node `node` to `values[..len]` over `ramp` samples (§2).
+    Param {
+        node: NodeId,
+        values: [f32; MAX_NODE_VALUES],
+        len: u8,
+        ramp: u32,
+    },
+    /// Write output slot `slot` with this writer from the next block on.
+    SetOutput {
+        slot: usize,
+        output: Box<OutputWriter>,
+    },
+    /// Stop writing output slot `slot`; the writer comes back to be released.
+    ClearOutput { slot: usize },
 }
 
 /// A message from the DSP thread back: things it must not free itself.
 pub enum Returned {
     Reader(Box<SamplesReader>),
+    Plan(Box<Plan>),
+    Output(Box<OutputWriter>),
+}
+
+/// An output's writer with its commit staging (§4.3: the commit size is separate
+/// from the block size) and its fade.
+pub struct OutputWriter {
+    pub writer: SamplesWriter,
+    commit: usize,
+    staging: Vec<f32>,
+    filled: usize,
+    staged: bool,
+    next: u64,
+    gain: f32,
+    fading: i8,
+}
+
+impl OutputWriter {
+    pub fn new(writer: SamplesWriter, commit: usize) -> Self {
+        let channels = writer.channels;
+        Self {
+            writer,
+            commit,
+            staging: vec![0.0; channels * commit],
+            filled: 0,
+            staged: false,
+            next: 0,
+            gain: 0.0,
+            fading: 1,
+        }
+    }
+
+    pub fn channels(&self) -> usize {
+        self.writer.channels
+    }
 }
 
 /// Upper bucket bounds (µs) of the block-time histogram.
@@ -60,6 +117,17 @@ pub struct InputCounters {
     pub channels: AtomicU32,
 }
 
+/// Counters of one output slot.
+#[derive(Default)]
+pub struct OutputCounters {
+    /// Blocks staged for this output.
+    pub blocks: AtomicU64,
+    pub commits: AtomicU64,
+    pub errors: AtomicU64,
+    /// TAI time of the last commit minus the time of its last sample, in µs.
+    pub commit_lag_us: AtomicU64,
+}
+
 /// Counters of the DSP thread.
 pub struct EngineCounters {
     pub blocks: AtomicU64,
@@ -69,9 +137,11 @@ pub struct EngineCounters {
     /// Block time / block period of the last block, in parts per million.
     pub load_ppm: AtomicU32,
     pub output_blocks: AtomicU64,
+    pub plan_swaps: AtomicU64,
     pub running: AtomicBool,
     pub stop: AtomicBool,
     pub inputs: Vec<InputCounters>,
+    pub outputs: Vec<OutputCounters>,
 }
 
 impl EngineCounters {
@@ -83,9 +153,13 @@ impl EngineCounters {
             block_time_sum_ns: AtomicU64::new(0),
             load_ppm: AtomicU32::new(0),
             output_blocks: AtomicU64::new(0),
+            plan_swaps: AtomicU64::new(0),
             running: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             inputs: (0..inputs).map(|_| InputCounters::default()).collect(),
+            outputs: (0..MAX_OUTPUTS)
+                .map(|_| OutputCounters::default())
+                .collect(),
         }
     }
 
@@ -117,8 +191,8 @@ impl Engine {
     /// Start the DSP thread.
     pub fn start(config: EngineConfig) -> std::io::Result<Self> {
         let counters = Arc::new(EngineCounters::new(config.inputs));
-        let (commands, command_rx) = rtrb::RingBuffer::new(1024);
-        let (returned_tx, returned) = rtrb::RingBuffer::new(1024);
+        let (commands, command_rx) = rtrb::RingBuffer::new(4096);
+        let (returned_tx, returned) = rtrb::RingBuffer::new(4096);
         let mut lag_tx = Vec::new();
         let mut lags = Vec::new();
         for _ in 0..config.inputs {
@@ -158,13 +232,33 @@ impl Engine {
         }
     }
 
-    /// Stop the thread and wait for it.
+    /// Ramp node `node` to `values` over `ramp` samples.
+    pub fn param(&mut self, node: NodeId, values: &[f32], ramp: u32) {
+        let mut v = [0.0; MAX_NODE_VALUES];
+        let len = values.len().min(MAX_NODE_VALUES);
+        v[..len].copy_from_slice(&values[..len]);
+        self.send(Command::Param {
+            node,
+            values: v,
+            len: len as u8,
+            ramp,
+        });
+    }
+
+    /// Free what the DSP thread handed back.
+    pub fn collect(&mut self) {
+        while let Ok(item) = self.returned.pop() {
+            drop(item);
+        }
+    }
+
+    /// Fade the outputs out, stop the thread and wait for it (G8).
     pub fn stop(&mut self) {
         self.counters.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        while self.returned.pop().is_ok() {}
+        self.collect();
     }
 }
 
