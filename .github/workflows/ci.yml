@@ -81,6 +81,11 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/mix.sh
+        run: tests/integration/mix.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

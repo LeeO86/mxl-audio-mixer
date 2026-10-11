@@ -8,6 +8,7 @@
 
 use std::ffi::CString;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::Api;
 
@@ -44,10 +45,10 @@ impl WriterInstance {
     /// Create (or open) a continuous flow. `commit_samples` becomes both the commit
     /// and the sync batch hint.
     pub fn create_samples_writer(
-        &self,
+        self: &Arc<Self>,
         flow_def: &str,
         commit_samples: u32,
-    ) -> Result<SamplesWriter<'_>, String> {
+    ) -> Result<SamplesWriter, String> {
         let def = CString::new(flow_def).map_err(|e| e.to_string())?;
         let options = CString::new(
             serde_json::json!({"maxCommitBatchSizeHint": commit_samples, "maxSyncBatchSizeHint": commit_samples}).to_string(),
@@ -81,7 +82,7 @@ impl WriterInstance {
             )
         };
         Ok(SamplesWriter {
-            owner: self,
+            owner: self.clone(),
             writer,
             channels: channels as usize,
             buffer_length: buffer,
@@ -99,8 +100,8 @@ impl Drop for WriterInstance {
 }
 
 /// A continuous-flow writer. Not thread-safe; owned by one thread at a time.
-pub struct SamplesWriter<'a> {
-    owner: &'a WriterInstance,
+pub struct SamplesWriter {
+    owner: Arc<WriterInstance>,
     writer: mxl_sys::FlowWriter,
     pub channels: usize,
     pub buffer_length: u32,
@@ -108,9 +109,9 @@ pub struct SamplesWriter<'a> {
     pub created: bool,
 }
 
-unsafe impl Send for SamplesWriter<'_> {}
+unsafe impl Send for SamplesWriter {}
 
-impl SamplesWriter<'_> {
+impl SamplesWriter {
     /// Write `count` samples per channel ending before head index `head`
     /// (`[head − count, head)`). `fill(channel, offset, samples)` fills the samples
     /// starting at `offset` within the range (a range that wraps the ring comes in
@@ -161,7 +162,7 @@ impl SamplesWriter<'_> {
     }
 }
 
-impl Drop for SamplesWriter<'_> {
+impl Drop for SamplesWriter {
     fn drop(&mut self) {
         // SAFETY: the writer belongs to this instance. Releasing the last writer
         // deletes the flow (§4.2), so writers are only dropped on unpublish or stop.

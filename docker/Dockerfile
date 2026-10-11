@@ -19,7 +19,8 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 RUN cargo build --release --locked --bins \
-    && install -m 0755 target/release/mxl-audio-mixer target/release/mxl-mixer-tone /usr/local/bin/
+    && install -m 0755 target/release/mxl-audio-mixer target/release/mxl-mixer-tone \
+        target/release/mxl-mixer-probe /usr/local/bin/
 
 FROM ubuntu:24.04 AS runtime
 ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
@@ -28,7 +29,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /config && chown 1000:1000 /config
 COPY --from=mxl /opt/mxl/lib/libmxl.so* /usr/local/lib/
-COPY --from=build /usr/local/bin/mxl-audio-mixer /usr/local/bin/mxl-mixer-tone /usr/local/bin/
+COPY --from=build /usr/local/bin/mxl-audio-mixer /usr/local/bin/mxl-mixer-tone \
+    /usr/local/bin/mxl-mixer-probe /usr/local/bin/
 RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found")
 USER 1000
 EXPOSE 8160 3312

@@ -7,17 +7,18 @@ current so that work can resume after an interruption.
 
 | Step | State |
 | --- | --- |
-| M0a `mxl-nmos` extracted and tested | done: PRs 1–3 merged, **v0.1.0 released** (`88e04c5`) |
+| M0a `mxl-nmos` extracted and tested | done: PRs 1–3 merged, **v0.1.0 released** (`88e04c5`); **v0.1.1** (`f949a69`, PRs 5–7: DNS names, scheduled activations on time) |
 | M0a Strom switched to the crate | patches against Strom `c2e27a6` in `LeeO86/mxl-nmos` `contrib/strom-switch/` (PR 4); the maintainer applies them in Strom (this environment cannot push there) |
 | M0b spike: NMOS audio receiver + sender on real flows, AMWA | done (below) |
 | M0c spike: MXL float32 read/write on the TAI block clock, jitter | done on the dev VM (below); real-time run: `tests/hw/m0-block-clock` (maintainers) |
-| M1 skeleton, config, ops, metrics, CI, image, MXL I/O | done, in review (branch `cursor/m1-skeleton-4d44`) |
+| M1 skeleton, config, ops, metrics, CI, image, MXL I/O | done, merged (PRs 1 and 2) |
+| M2 plan compiler and DSP core, buses, sends, outputs, meters, input patch | done, in review (branch `cursor/m2-plan-dsp-core-4d44`, PR 3) |
 
 ## Resume
 
-- `mxl-nmos` v0.1.0 is released; the spike depends on the tag.
+- `mxl-nmos` v0.1.1 is released; the mixer depends on the tag.
 - Strom: the four patches are in `mxl-nmos` `contrib/strom-switch/` (README: how to apply).
-- This repo: `cursor/m0-spikes-4d44` (M0), `cursor/m1-skeleton-4d44` (M1, stacked on M0).
+- This repo: `main` has M0 and M1; M2 is on `cursor/m2-plan-dsp-core-4d44`.
 - Environment: `docs/development.md`.
 
 ## Decisions
@@ -177,11 +178,130 @@ SCHED_FIFO on exclusive CPUs; the real-time run is `tests/hw/m0-block-clock`.
   into `mxl-nmos` `Settings::apply_env` (0.1.1).
 - M0 and M1 merged with the maintainer's approval.
 
+## M2: plan compiler and DSP core
+
+### What exists
+
+- `src/mix/`: the mix model (strips, buses, sends, outputs, mix settings) with its
+  validation, the channel formats and width mapping (`format.rs`), and the plan
+  compiler (`compile.rs`).
+- `src/engine/plan.rs`: plans and their executor, a pure function of the inputs
+  (unit-tested without MXL): patch, gain, panner matrix, clear, send (with a width
+  mapping), meter and output steps over numbered block buffers; nodes with
+  smoothed values; parameter messages by stable node id.
+- `src/engine/dsp.rs`: the DSP thread swaps plans at a block boundary, applies
+  parameter messages, and writes the output slots (staging for the commit size,
+  fade in on publish, fade out on SIGTERM).
+- `src/control.rs`: stage → (fade wait) → swap; `src/outputs.rs`: MXL writers and
+  NMOS senders; `src/meters.rs`; `src/api.rs`: the mix API.
+- `src/bin/mxl-mixer-probe.rs`: a reader that checks a flow sample by sample against
+  the `mxl-mixer-tone` signal.
+
+### Decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D14 | The signals of M2 are strips and buses. Auxes, groups and N-1s are buses with their own sends; the N-1 and group operations come with M6, monitor paths with M5. Inputs reach the matrix through the input patch and strips, not as send sources. | §19 puts buses and the input patch in M2, N-1 and groups in M6. A raw input has no fixed format (its flow decides the channel count), a strip does. |
+| D15 | Strip chain in M2: patch → trim and polarity → fader and mute → panner. Taps: `input`, `pre-fader`, `post-fader`, `post-pan`. The pre/post-EQ and pre/post-dynamics taps and "after any node" come with those nodes in M3. | §5 tap list, minus the nodes that do not exist yet. |
+| D16 | Panner: a mono strip becomes stereo with the pan law (its post-pan tap is stereo). A stereo strip has balance and width (M/S; 0 mono, 1 unchanged, 2 double side). Wider formats have no panner. | §6 "pan/balance/width". The spec has no surround panner. |
+| D17 | Channel order as SMPTE ST 2110-30 (L R C LFE, surrounds, heights). Width mapping by channel label: equal labels 1:1; missing ones fold down at −3 dB per step (ITU-R BS.775, LFE dropped): C → L + R, Ls → L (or Lss), Lss/Lrs → Ls, Ltf → L, Ltr → Lrs (or Ls), stereo → mono with the stereo-to-mono sum, mono → C (3.0 and surround) or L + R with the pan law (stereo); up-mixing leaves new channels silent (5.1 → 7.1 puts Ls on Lss). NMOS Source channels carry the VSF TR-03 symbols where TR-03 has one (`M1` for mono; heights have none). | §5 "up/down-mix presets for 5.1/7.1"; §4.1 formats incl. 3.0 and 5.1.4 (spec change of 2026-10-11). One rule set covers every pair of the seven formats. |
+| D18 | Only buses are published (§4.3 lists bus, output, N-1, aux, group and monitor path; in M2 all of them are buses). An output is the bus post-fader; `format` maps it to another layout with D17. | §4.3. |
+| D19 | Changes of the mix are compiled on the control side. When only values differ (same node signatures), the new values go to the DSP thread as ramped messages (`ramp_ms`, default 10 ms). Otherwise the nodes whose wiring changes or that disappear ramp to 0, the API waits 10 ms + 3 blocks, then the new plan is swapped in; nodes with the same signature carry their current values over, new ones ramp in from 0. A rewiring answers about 16 ms later (block 96). | §2 (state preserved, nothing clicks), §17 (swap without discontinuities). |
+| D20 | Output writers live in DSP-thread slots, independent of the plan (writers stay open across swaps, §4.3). The commit size is staged in the slot: block n is committed when the staging holds `commit_samples`; after a deadline miss a partial staging is dropped. Publish fades in, SIGTERM fades out (10 ms) before the writers are released. | §4.3 commit size, G8 "fade outputs". |
+| D21 | Meters in M2: sample peak (since the last 40 ms update), a peak hold (highest peak until cleared with `POST /api/v1/meters[/<id>]/clear`; kept across plan swaps) and RMS over 300 ms per strip and bus, post-fader, through `GET /api/v1/meters`. True peak, loudness and PPM ballistics come with M3, the WebSocket with the UI (M4). | §19 (true peak and loudness in M3); §7's 25 Hz update. |
+| D22 | MXL flow id of an output = UUIDv5(`NMOS_SEED`, `output/<bus>/mxl-flow`); it differs from the IS-04 Flow id (allowed by BCP-007-03). NMOS keys `out-<bus>` for Source, Flow and Sender; labels = bus name; group hint `<name>:Audio`. | §4.3, G3. |
+| D23 | IS-05 activations of a sender are accepted and reported; they do not stop or move the flow, which is written while the bus is published. | The flow belongs to the published signal; readers find it by its stable id. |
+| D24 | −∞ is `"-inf"` in JSON (fader and send gains). | JSON has no infinity. |
+| D25 | A `mix.json` that cannot be read or validated is moved to `mix.json.bad` and the mixer starts with an empty mix. | Never overwrite an operator's show by accident. |
+| D26 | The first mix is empty: no strips, buses or outputs until they are created through the API or an import. | The spec has no default layout; inventing one would publish NMOS senders nobody asked for. |
+
+### Deviations
+
+None.
+
+### Results (dev VM)
+
+- `cargo test`: 38 unit tests, including:
+  - pan laws and BS.775 coefficients;
+  - feedback rejection;
+  - a plan swap that keeps unchanged nodes without a discontinuity;
+  - linear, bounded ramps;
+  - summing with width mapping;
+  - proptests for the mapping bounds, the constant-power law and ramps.
+- Clippy `-D warnings`, rustfmt and shellcheck are clean.
+- `tests/integration/mix.sh`, every check sample-exact (max error < 1e-5) with
+  `mxl-mixer-probe`:
+  - a mono strip centred into a stereo bus: L = R = tone × 0.7071;
+  - 15 plan swaps (other buses and sends created and deleted) while reading: the
+    output stayed sample-exact;
+  - mute (ramped) plus a new send at −6.02 dB with phase: L = −0.5 × tone 1,
+    R = −0.5 × tone 2;
+  - pan hard left and a deleted send: L = tone 1, R = 0;
+  - the bus published as mono: (L + R) × 0.7079;
+  - meter peak −20.0 dBFS for a −20 dBFS tone;
+  - the NMOS sender reports the output's `mxl_flow_id`;
+  - SIGTERM deletes the flow;
+  - after a restart the flow id is the same, the mix and the connection are
+    restored, and a second mixer reading the output is `running` again with 0
+    missing samples over 2 s;
+  - unpublish removes the flow and the sender;
+  - a bus loop is rejected with the loop in the message.
+- `lifecycle.sh` and `inputs.sh` pass unchanged (writer 30 ms late: arrival lag
+  p99.9 32.25 ms, effective delay 33.08 ms, 0 missing).
+- AMWA with one published stereo bus, 0 Fail and 0 Warning:
+  - IS-04-01: Pass 39;
+  - IS-05-01: Pass 53;
+  - IS-05-02: Pass 55;
+  - BCP-007-03-01: Pass 55 + Manual 1.
+
+  The M1 "no senders yet" entries are gone from `ci/amwa-expected-off.json`. Six
+  IS-05-01 sender tests stay Could Not Test because the tool leaves MXL to
+  BCP-007-03-01.
+- Load (release build, SCHED_OTHER on the shared 4-vCPU VM, block 96):
+  - mix: 64 mono strips (patched, panned), 16 stereo buses, 264 sends, 8 published
+    outputs (80 meters);
+  - over 60 s: mean block time 61 µs (`dsp_load_ratio` 0.031), 99.85 % of blocks
+    ≤ 100 µs, max bucket ≤ 500 µs;
+  - 2 wake-up deadline misses (the VM without real-time scheduling, as in M0);
+  - 0 missing input samples, 0 output errors, commit lag 0.08 ms.
+
+  The §16 target load (EQ, dynamics, VCAs) is measured from M3 on.
+
+### Findings
+
+- AMWA IS-05-01 test_28 ("relative activation later than expected") warned in the
+  first `main` run after the M1 merge. It reads `/active` exactly 200 ms after the
+  PATCH reply, and the crate's scheduled activations fired on tokio's 1 ms timer.
+  Measured with a probe of the same timing: the mixer was late in 23 of 150 runs
+  and the crate's example in 4 of 150. Fixed in `mxl-nmos` PR 6 (prepare 2 ms
+  early, block on the system clock for the last part): 0 of 300 and 1 of 300.
+  Released in `mxl-nmos` v0.1.1, which the mixer uses from M2 on.
+- `NMOS_REGISTRY_ADDRESS` / `NMOS_QUERY_ADDRESS` DNS names in the crate:
+  `mxl-nmos` PR 5. The mixer already accepts them in its own settings (M1).
+- A mixer reading another mixer's output on the same TAI block grid sees an
+  arrival lag of about one block (p50 2.08 ms with 96-sample blocks): both wake at
+  the same deadline, and the reader finds the previous block. The automatic delay
+  covers it (3.25 ms effective in the hw dry run).
+
+### Answers (maintainer, 2026-10-11)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Defaults of a new strip, bus, send | Fader 0 dB, unmuted, pan centre, width 1; a send 0 dB from a strip's post-pan or a bus's post-fader. Accepted. |
+| 2 | Trim range | ±42 dB (changed from the proposed ±24). |
+| 3 | Stereo width range | 0–2. Accepted. |
+| 4 | Default stereo-to-mono sum | −3 dB. Accepted. |
+| 5 | Meters | Peak per 40 ms update and RMS over 300 ms, post-fader, accepted; plus a peak hold that is cleared manually (`POST /api/v1/meters[/<id>]/clear`). |
+| 6 | Mono into 3.0 and surround | Into C (changed from the proposed front L/R pair). |
+| 7 | Published outputs | At most 128. Accepted. |
+| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. |
+
 ## tests/hw scripts for the maintainers
 
 | Script | What |
 | --- | --- |
 | `tests/hw/m0-block-clock/run.sh [minutes]` | Block clock at SCHED_FIFO 49 on an exclusive CPU: 0 deadline misses, max jitter < 2 ms, 0 read/write errors, 0 mismatched samples. |
+| `tests/hw/m2-mirrored-output/run.sh source [commit]` (node A), `… check <sender> <domain> <flow> [s]` (node B) | §17 mirrored outputs through mxl-fabrics-agent at the default commit size and at 480: full sample rate, 0 gaps, sample error < 1e-5, 0 missing samples at a downstream mixer. |
 
 ## Answers (maintainer, 2026-10-11)
 

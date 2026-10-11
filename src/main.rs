@@ -7,11 +7,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mxl_audio_mixer::config::{self, Config};
+use mxl_audio_mixer::control::{self, Control, Staged};
 use mxl_audio_mixer::engine::{Engine, EngineConfig};
 use mxl_audio_mixer::inputs::{self, Inputs};
+use mxl_audio_mixer::meters::METER_TICK;
 use mxl_audio_mixer::mxlio::{self, domain};
 use mxl_audio_mixer::nmos::{self, RouteRequest};
 use mxl_audio_mixer::ops::{self, App};
+use mxl_audio_mixer::outputs::Outputs;
 use mxl_audio_mixer::{state, timing};
 
 const EX_CONFIG: u8 = 78;
@@ -95,7 +98,7 @@ async fn run(config: Config) -> ExitCode {
         Err(e) => return fail(EX_CONFIG, e),
     };
 
-    let engine = match Engine::start(EngineConfig {
+    let mut engine = match Engine::start(EngineConfig {
         inputs: config.input_flows,
         block: config.block_samples,
         read_offset: config.read_offset_samples,
@@ -107,26 +110,76 @@ async fn run(config: Config) -> ExitCode {
     };
     let inputs_path = config.state_dir.join("inputs.json");
     let connections_path = config.state_dir.join("connections.json");
-    let inputs = Inputs::new(api, engine, &config, inputs::load_configs(&inputs_path));
+    let inputs = Inputs::new(
+        api.clone(),
+        &mut engine,
+        &config,
+        inputs::load_configs(&inputs_path),
+    );
     let configs = inputs.configs();
-    let inputs = Arc::new(Mutex::new(inputs));
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::unbounded_channel::<RouteRequest>();
     let node = match nmos::build(&config, &configs, route_tx, connections_path.clone()) {
         Ok(node) => node,
         Err(e) => return fail(EX_CONFIG, format!("NMOS: {e}")),
     };
+    let outputs = match Outputs::new(
+        api,
+        &config.output_domain_dir,
+        config.output_domain_id,
+        &config.nmos_seed,
+    ) {
+        Ok(o) => o,
+        Err(e) => return fail(EX_CONFIG, format!("MXL output domain: {e}")),
+    };
+    let mut control = Control::new(engine, inputs, outputs, node.clone(), &config);
+    // The mix of the last run, with its published outputs, before the IS-05
+    // connections (of their senders) are restored.
+    let mix_path = config.state_dir.join("mix.json");
+    let saved_mix = control::load_mix(&mix_path);
+    let staged = match control.stage(saved_mix, 0) {
+        Ok(s) => s,
+        Err(e) => {
+            let bad = mix_path.with_extension("json.bad");
+            tracing::error!(
+                "the saved mix is not valid ({e}); moved to {} and starting with an empty mix",
+                bad.display()
+            );
+            let _ = std::fs::rename(&mix_path, &bad);
+            control
+                .stage(Default::default(), 0)
+                .unwrap_or(Staged::Swap { wait: false })
+        }
+    };
+    if staged != Staged::Done {
+        match control.swap() {
+            Ok(errors) => {
+                for e in errors {
+                    tracing::error!("{e}");
+                }
+            }
+            Err(e) => tracing::error!("saving the mix: {e}"),
+        }
+    }
+    let control = Arc::new(Mutex::new(control));
 
-    let ticking = inputs.clone();
+    let ticking = control.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut meter_tick = tokio::time::interval(METER_TICK);
+        let lock = || ticking.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             tokio::select! {
                 request = route_rx.recv() => match request {
-                    Some(r) => ticking.lock().unwrap_or_else(|e| e.into_inner()).route(r.index, r.route),
+                    Some(r) => {
+                        let mut c = lock();
+                        let c = &mut *c;
+                        c.inputs.route(&mut c.engine, r.index, r.route);
+                    }
                     None => break,
                 },
-                _ = tick.tick() => ticking.lock().unwrap_or_else(|e| e.into_inner()).tick(),
+                _ = tick.tick() => lock().tick(),
+                _ = meter_tick.tick() => lock().meters.tick(),
             }
         }
     });
@@ -159,7 +212,8 @@ async fn run(config: Config) -> ExitCode {
     let app = App {
         config: config.clone(),
         node: node.clone(),
-        inputs: inputs.clone(),
+        control: control.clone(),
+        changes: Arc::new(tokio::sync::Mutex::new(())),
         tai_offset_s,
         timing_trusted,
         started: Instant::now(),
@@ -186,8 +240,8 @@ async fn run(config: Config) -> ExitCode {
     tracing::info!("shutting down");
     let deadline = config.shutdown_timeout;
     let sequence = async {
-        // G8 1: stop media and release the MXL readers and writers.
-        tokio::task::block_in_place(|| inputs.lock().unwrap_or_else(|e| e.into_inner()).stop());
+        // G8 1: fade the outputs, stop media and release the MXL readers and writers.
+        tokio::task::block_in_place(|| control.lock().unwrap_or_else(|e| e.into_inner()).stop());
         // G8 2: deregister every NMOS resource, the Node last.
         node.shutdown(
             deadline

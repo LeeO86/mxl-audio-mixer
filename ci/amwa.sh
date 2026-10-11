@@ -58,6 +58,12 @@ start_node() { # <suite>
     local root
     root=$(mktemp -d /dev/shm/mixer-amwa.XXXXXX)
     mkdir -p "$root/mxl" "$root/state"
+    # One published stereo bus, so the sender tests have a sender.
+    cat >"$root/state/mix.json" <<'EOF'
+{"version": 1, "mix": {
+  "buses": [{"id": "pgm", "name": "PGM", "format": "stereo", "fader_db": 0, "mute": false}],
+  "outputs": [{"signal": "pgm"}]}}
+EOF
     local env=(NMOS_SEED=amwa-ci NMOS_HOST_ADDRESS="$HOST_IP" NMOS_PORT="$NODE_PORT" HOST_ID=amwa
         MXL_DOMAIN_SCAN_PATH="$root/mxl" MIXER_STATE_DIR="$root/state" MXL_CLEANUP_ON_EXIT=true)
     if [[ "$MODE" == off ]]; then

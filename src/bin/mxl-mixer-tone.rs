@@ -63,10 +63,10 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(1)
     });
-    let instance = WriterInstance::new(api, &domain_dir).unwrap_or_else(|e| {
+    let instance = Arc::new(WriterInstance::new(api, &domain_dir).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1)
-    });
+    }));
     let def = serde_json::json!({
         "id": flow.to_string(),
         "source_id": Uuid::new_v5(&flow, b"source").to_string(),

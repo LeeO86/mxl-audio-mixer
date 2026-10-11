@@ -1,0 +1,600 @@
+//! The mix API (§5, §12.4): strips, buses, sends, published outputs, mix
+//! settings and meters. Every parameter is addressed by its signal id and field
+//! (`/api/v1/strips/{id}` `fader_db`, `/api/v1/sends/{from}/{to}` `gain_db`); a
+//! PATCH may carry `ramp_ms` (default 10 ms) for the parameters it changes.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::control::{fade_wait, Staged};
+use crate::mix::model::{
+    Bus, Db, Kind, MixSettings, Output, PatchPoint, Send, Strip, Tap, DEFAULT_RAMP_MS, MAX_RAMP_MS,
+};
+use crate::mix::{Format, Mix};
+use crate::ops::{error, App};
+
+pub fn routes() -> Router<App> {
+    Router::new()
+        .route("/api/v1/mix", get(mix))
+        .route("/api/v1/mix/settings", get(settings).patch(patch_settings))
+        .route("/api/v1/strips", get(strips).post(create_strip))
+        .route(
+            "/api/v1/strips/{id}",
+            get(strip).patch(patch_strip).delete(delete_signal),
+        )
+        .route("/api/v1/buses", get(buses).post(create_bus))
+        .route(
+            "/api/v1/buses/{id}",
+            get(bus).patch(patch_bus).delete(delete_signal),
+        )
+        .route("/api/v1/sends", get(sends))
+        .route(
+            "/api/v1/sends/{from}/{to}",
+            get(send).put(put_send).delete(delete_send),
+        )
+        .route("/api/v1/outputs", get(outputs))
+        .route(
+            "/api/v1/outputs/{signal}",
+            get(output).put(put_output).delete(delete_output),
+        )
+        .route("/api/v1/meters", get(meters))
+        .route("/api/v1/meters/clear", post(clear_holds))
+        .route("/api/v1/meters/{signal}/clear", post(clear_hold))
+}
+
+pub type ApiResult<T> = Result<T, Box<Response>>;
+
+fn bad(message: impl Into<String>) -> Box<Response> {
+    Box::new(error(StatusCode::BAD_REQUEST, message))
+}
+
+fn not_found(message: impl Into<String>) -> Box<Response> {
+    Box::new(error(StatusCode::NOT_FOUND, message))
+}
+
+fn conflict(message: impl Into<String>) -> Box<Response> {
+    Box::new(error(StatusCode::CONFLICT, message))
+}
+
+fn internal(message: impl Into<String>) -> Box<Response> {
+    Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, message))
+}
+
+fn body<T: DeserializeOwned>(bytes: &[u8]) -> ApiResult<T> {
+    serde_json::from_slice(bytes).map_err(|e| bad(e.to_string()))
+}
+
+fn ramp(ms: Option<f64>) -> ApiResult<u32> {
+    let ms = ms.unwrap_or(DEFAULT_RAMP_MS);
+    if !(0.0..=MAX_RAMP_MS).contains(&ms) {
+        return Err(bad(format!("ramp_ms must be 0 to {MAX_RAMP_MS}")));
+    }
+    Ok((ms * 48.0).round() as u32)
+}
+
+/// Apply a change of the mix: stage it, wait for the fade when the change
+/// rewires something, then swap. Returns output publishing errors.
+pub async fn apply(
+    app: &App,
+    ramp: u32,
+    change: impl FnOnce(&mut Mix) -> ApiResult<()>,
+) -> ApiResult<Vec<String>> {
+    let _serial = app.changes.lock().await;
+    let staged = {
+        let mut control = app.control();
+        let mut next = control.mix.clone();
+        change(&mut next)?;
+        control.stage(next, ramp).map_err(bad)?
+    };
+    match staged {
+        Staged::Done => Ok(Vec::new()),
+        Staged::Swap { wait } => {
+            if wait {
+                tokio::time::sleep(fade_wait(app.config.block_samples)).await;
+            }
+            tokio::task::block_in_place(|| app.control().swap()).map_err(internal)
+        }
+    }
+}
+
+fn with_errors(mut value: Value, errors: Vec<String>) -> Value {
+    if !errors.is_empty() {
+        value["output_errors"] = json!(errors);
+    }
+    value
+}
+
+async fn mix(State(app): State<App>) -> Json<Value> {
+    Json(json!(app.control().mix))
+}
+
+async fn settings(State(app): State<App>) -> Json<Value> {
+    Json(json!(app.control().mix.settings))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettingsBody {
+    pan_law_db: Option<crate::mix::format::PanLaw>,
+    mono_sum_db: Option<crate::mix::format::MonoSum>,
+}
+
+async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
+    let run = async {
+        let b: SettingsBody = body(&bytes)?;
+        let errors = apply(&app, crate::engine::FADE_SAMPLES, |m| {
+            if let Some(law) = b.pan_law_db {
+                m.settings.pan_law_db = law;
+            }
+            if let Some(sum) = b.mono_sum_db {
+                m.settings.mono_sum_db = sum;
+            }
+            Ok(())
+        })
+        .await?;
+        let s: MixSettings = app.control().mix.settings;
+        Ok::<_, Box<Response>>(Json(with_errors(json!(s), errors)).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+fn strip_json(app: &App, s: &Strip) -> Value {
+    let control = app.control();
+    let mut v = json!(s);
+    v["patch_state"] = json!(control.patch_state(s));
+    v["published"] = json!(control.mix.output(&s.id).is_some());
+    v
+}
+
+fn bus_json(app: &App, b: &Bus) -> Value {
+    let mut v = json!(b);
+    v["published"] = json!(app.control().mix.output(&b.id).is_some());
+    v
+}
+
+async fn strips(State(app): State<App>) -> Json<Value> {
+    let list = app.control().mix.strips.clone();
+    Json(Value::Array(
+        list.iter().map(|s| strip_json(&app, s)).collect(),
+    ))
+}
+
+async fn strip(State(app): State<App>, Path(id): Path<String>) -> Response {
+    let found = app.control().mix.strip(&id).cloned();
+    match found {
+        Some(s) => Json(strip_json(&app, &s)).into_response(),
+        None => *not_found(format!("strip {id} does not exist")),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct StripBody {
+    id: Option<String>,
+    name: Option<String>,
+    format: Option<Format>,
+    patch: Option<Vec<Option<PatchPoint>>>,
+    trim_db: Option<f64>,
+    polarity: Option<Vec<bool>>,
+    fader_db: Option<Db>,
+    mute: Option<bool>,
+    pan: Option<f64>,
+    width: Option<f64>,
+    ramp_ms: Option<f64>,
+}
+
+impl StripBody {
+    fn apply(self, s: &mut Strip) {
+        if let Some(format) = self.format {
+            let n = format.channels();
+            s.format = format;
+            s.patch.resize(n, None);
+            s.polarity.resize(n, false);
+        }
+        if let Some(v) = self.name {
+            s.name = v;
+        }
+        if let Some(v) = self.patch {
+            s.patch = v;
+        }
+        if let Some(v) = self.trim_db {
+            s.trim_db = v;
+        }
+        if let Some(v) = self.polarity {
+            s.polarity = v;
+        }
+        if let Some(v) = self.fader_db {
+            s.fader_db = v;
+        }
+        if let Some(v) = self.mute {
+            s.mute = v;
+        }
+        if let Some(v) = self.pan {
+            s.pan = v;
+        }
+        if let Some(v) = self.width {
+            s.width = v;
+        }
+    }
+}
+
+async fn create_strip(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
+    let run = async {
+        let mut b: StripBody = body(&bytes)?;
+        let format = b.format.ok_or_else(|| bad("format is required"))?;
+        let id = match b.id.take() {
+            Some(id) => id,
+            None => app.control().mix.next_id("strip"),
+        };
+        let n = format.channels();
+        let mut s = Strip {
+            id: id.clone(),
+            name: id.clone(),
+            format,
+            patch: vec![None; n],
+            trim_db: 0.0,
+            polarity: vec![false; n],
+            fader_db: Db(0.0),
+            mute: false,
+            pan: 0.0,
+            width: 1.0,
+        };
+        b.apply(&mut s);
+        let errors = apply(&app, 0, |m| {
+            if m.kind(&id).is_some() {
+                return Err(conflict(format!("signal {id} exists")));
+            }
+            m.strips.push(s);
+            Ok(())
+        })
+        .await?;
+        let s = app.control().mix.strip(&id).cloned();
+        let v = s.map(|s| strip_json(&app, &s)).unwrap_or_default();
+        Ok::<_, Box<Response>>((StatusCode::CREATED, Json(with_errors(v, errors))).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn patch_strip(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    bytes: axum::body::Bytes,
+) -> Response {
+    let run = async {
+        let mut b: StripBody = body(&bytes)?;
+        if b.id.take().is_some_and(|new| new != id) {
+            return Err(bad("a signal id cannot be changed"));
+        }
+        let ramp = ramp(b.ramp_ms.take())?;
+        let errors = apply(&app, ramp, |m| {
+            let s = m
+                .strips
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or_else(|| not_found(format!("strip {id} does not exist")))?;
+            b.apply(s);
+            Ok(())
+        })
+        .await?;
+        let s = app.control().mix.strip(&id).cloned();
+        let v = s.map(|s| strip_json(&app, &s)).unwrap_or_default();
+        Ok(Json(with_errors(v, errors)).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn delete_signal(State(app): State<App>, Path(id): Path<String>) -> Response {
+    let run = async {
+        apply(&app, 0, |m| {
+            if m.kind(&id).is_none() {
+                return Err(not_found(format!("signal {id} does not exist")));
+            }
+            m.remove_signal(&id);
+            Ok(())
+        })
+        .await?;
+        Ok::<_, Box<Response>>(StatusCode::NO_CONTENT.into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn buses(State(app): State<App>) -> Json<Value> {
+    let list = app.control().mix.buses.clone();
+    Json(Value::Array(
+        list.iter().map(|b| bus_json(&app, b)).collect(),
+    ))
+}
+
+async fn bus(State(app): State<App>, Path(id): Path<String>) -> Response {
+    let found = app.control().mix.bus(&id).cloned();
+    match found {
+        Some(b) => Json(bus_json(&app, &b)).into_response(),
+        None => *not_found(format!("bus {id} does not exist")),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct BusBody {
+    id: Option<String>,
+    name: Option<String>,
+    format: Option<Format>,
+    fader_db: Option<Db>,
+    mute: Option<bool>,
+    ramp_ms: Option<f64>,
+}
+
+impl BusBody {
+    fn apply(self, b: &mut Bus) {
+        if let Some(v) = self.name {
+            b.name = v;
+        }
+        if let Some(v) = self.format {
+            b.format = v;
+        }
+        if let Some(v) = self.fader_db {
+            b.fader_db = v;
+        }
+        if let Some(v) = self.mute {
+            b.mute = v;
+        }
+    }
+}
+
+async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
+    let run = async {
+        let mut b: BusBody = body(&bytes)?;
+        let format = b.format.ok_or_else(|| bad("format is required"))?;
+        let id = match b.id.take() {
+            Some(id) => id,
+            None => app.control().mix.next_id("bus"),
+        };
+        let mut bus = Bus {
+            id: id.clone(),
+            name: id.clone(),
+            format,
+            fader_db: Db(0.0),
+            mute: false,
+        };
+        b.apply(&mut bus);
+        let errors = apply(&app, 0, |m| {
+            if m.kind(&id).is_some() {
+                return Err(conflict(format!("signal {id} exists")));
+            }
+            m.buses.push(bus);
+            Ok(())
+        })
+        .await?;
+        let b = app.control().mix.bus(&id).cloned();
+        let v = b.map(|b| bus_json(&app, &b)).unwrap_or_default();
+        Ok::<_, Box<Response>>((StatusCode::CREATED, Json(with_errors(v, errors))).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn patch_bus(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    bytes: axum::body::Bytes,
+) -> Response {
+    let run = async {
+        let mut b: BusBody = body(&bytes)?;
+        if b.id.take().is_some_and(|new| new != id) {
+            return Err(bad("a signal id cannot be changed"));
+        }
+        let ramp = ramp(b.ramp_ms.take())?;
+        let errors = apply(&app, ramp, |m| {
+            let bus = m
+                .buses
+                .iter_mut()
+                .find(|x| x.id == id)
+                .ok_or_else(|| not_found(format!("bus {id} does not exist")))?;
+            b.apply(bus);
+            Ok(())
+        })
+        .await?;
+        let b = app.control().mix.bus(&id).cloned();
+        let v = b.map(|b| bus_json(&app, &b)).unwrap_or_default();
+        Ok(Json(with_errors(v, errors)).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn sends(State(app): State<App>) -> Json<Value> {
+    Json(json!(app.control().mix.sends))
+}
+
+async fn send(State(app): State<App>, Path((from, to)): Path<(String, String)>) -> Response {
+    match app.control().mix.send(&from, &to) {
+        Some(s) => Json(json!(s)).into_response(),
+        None => *not_found(format!("send {from} → {to} does not exist")),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SendBody {
+    tap: Option<Tap>,
+    gain_db: Option<Db>,
+    mute: Option<bool>,
+    phase: Option<bool>,
+    ramp_ms: Option<f64>,
+}
+
+/// Create or change a send. A new send defaults to 0 dB from the source's
+/// output tap (a strip's post-pan, a bus's post-fader).
+async fn put_send(
+    State(app): State<App>,
+    Path((from, to)): Path<(String, String)>,
+    bytes: axum::body::Bytes,
+) -> Response {
+    let run = async {
+        let mut b: SendBody = if bytes.is_empty() {
+            SendBody::default()
+        } else {
+            body(&bytes)?
+        };
+        let ramp = ramp(b.ramp_ms.take())?;
+        let created = app.control().mix.send(&from, &to).is_none();
+        let errors = apply(&app, ramp, |m| {
+            if m.kind(&from).is_none() {
+                return Err(not_found(format!("signal {from} does not exist")));
+            }
+            if m.kind(&to) != Some(Kind::Bus) {
+                return Err(not_found(format!("bus {to} does not exist")));
+            }
+            let tap = m.default_tap(&from);
+            if m.send(&from, &to).is_none() {
+                m.sends.push(Send {
+                    from: from.clone(),
+                    to: to.clone(),
+                    tap,
+                    gain_db: Db(0.0),
+                    mute: false,
+                    phase: false,
+                });
+            }
+            let s = m
+                .sends
+                .iter_mut()
+                .find(|s| s.from == from && s.to == to)
+                .expect("just added");
+            if let Some(v) = b.tap {
+                s.tap = v;
+            }
+            if let Some(v) = b.gain_db {
+                s.gain_db = v;
+            }
+            if let Some(v) = b.mute {
+                s.mute = v;
+            }
+            if let Some(v) = b.phase {
+                s.phase = v;
+            }
+            Ok(())
+        })
+        .await?;
+        let s = app.control().mix.send(&from, &to).cloned();
+        let code = if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        };
+        Ok::<_, Box<Response>>((code, Json(with_errors(json!(s), errors))).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn delete_send(State(app): State<App>, Path((from, to)): Path<(String, String)>) -> Response {
+    let run = async {
+        apply(&app, 0, |m| {
+            if m.send(&from, &to).is_none() {
+                return Err(not_found(format!("send {from} → {to} does not exist")));
+            }
+            m.sends.retain(|s| !(s.from == from && s.to == to));
+            Ok(())
+        })
+        .await?;
+        Ok::<_, Box<Response>>(StatusCode::NO_CONTENT.into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn outputs(State(app): State<App>) -> Json<Value> {
+    let control = app.control();
+    Json(json!(control.outputs.status(&control.engine, &app.node)))
+}
+
+async fn output(State(app): State<App>, Path(signal): Path<String>) -> Response {
+    let control = app.control();
+    let status = control.outputs.status(&control.engine, &app.node);
+    match status.into_iter().find(|o| o.signal == signal) {
+        Some(o) => Json(json!(o)).into_response(),
+        None => *not_found(format!("{signal} is not published")),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct OutputBody {
+    #[serde(default)]
+    format: Option<Format>,
+    #[serde(default)]
+    commit_samples: Option<u32>,
+}
+
+/// Publish a signal (or change its layout or commit size).
+async fn put_output(
+    State(app): State<App>,
+    Path(signal): Path<String>,
+    bytes: axum::body::Bytes,
+) -> Response {
+    let run = async {
+        let b: OutputBody = if bytes.is_empty() {
+            OutputBody::default()
+        } else {
+            body(&bytes)?
+        };
+        let errors = apply(&app, 0, |m| {
+            if m.kind(&signal).is_none() {
+                return Err(not_found(format!("signal {signal} does not exist")));
+            }
+            m.outputs.retain(|o| o.signal != signal);
+            m.outputs.push(Output {
+                signal: signal.clone(),
+                format: b.format,
+                commit_samples: b.commit_samples,
+            });
+            Ok(())
+        })
+        .await?;
+        if !errors.is_empty() {
+            return Err(internal(errors.join("; ")));
+        }
+        let control = app.control();
+        let status = control.outputs.status(&control.engine, &app.node);
+        let o = status.into_iter().find(|o| o.signal == signal);
+        Ok::<_, Box<Response>>(Json(json!(o)).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn delete_output(State(app): State<App>, Path(signal): Path<String>) -> Response {
+    let run = async {
+        apply(&app, 0, |m| {
+            if m.output(&signal).is_none() {
+                return Err(not_found(format!("{signal} is not published")));
+            }
+            m.outputs.retain(|o| o.signal != signal);
+            Ok(())
+        })
+        .await?;
+        Ok::<_, Box<Response>>(StatusCode::NO_CONTENT.into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn meters(State(app): State<App>) -> Json<Value> {
+    Json(json!(app.control().meters.values()))
+}
+
+/// Clear every peak hold.
+async fn clear_holds(State(app): State<App>) -> StatusCode {
+    app.control().meters.clear_hold(None);
+    StatusCode::NO_CONTENT
+}
+
+/// Clear the peak hold of one strip or bus.
+async fn clear_hold(State(app): State<App>, Path(signal): Path<String>) -> Response {
+    if app.control().meters.clear_hold(Some(&signal)) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        *not_found(format!("signal {signal} has no meter"))
+    }
+}

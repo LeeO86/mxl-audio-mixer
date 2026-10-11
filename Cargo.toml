@@ -17,7 +17,7 @@ libc = "0.2"
 # built with -DMXL_ENABLE_FABRICS_OFI=OFF (scripts/build-mxl.sh) and loaded at run time.
 mxl = { git = "https://github.com/dmf-mxl/mxl", rev = "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7", features = ["mxl-not-built"] }
 mxl-sys = { git = "https://github.com/dmf-mxl/mxl", rev = "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7", features = ["mxl-not-built"] }
-mxl-nmos = { git = "https://github.com/LeeO86/mxl-nmos", tag = "v0.1.0" }
+mxl-nmos = { git = "https://github.com/LeeO86/mxl-nmos", tag = "v0.1.1" }
 rtrb = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.23", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 tempfile = "3.27"
 tower = { version = "0.5", features = ["util"] }
 

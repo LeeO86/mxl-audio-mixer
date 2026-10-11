@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::{Config, SAMPLE_RATE};
-use crate::engine::{Command, Engine, EngineCounters, Returned};
+use crate::engine::{Command, Engine, EngineCounters};
 use crate::mxlio::{self, Api, MxlInstance};
 
 /// Length of the sliding window of arrival lags.
@@ -206,9 +206,9 @@ fn samples(ms: f64) -> u32 {
     (ms * f64::from(SAMPLE_RATE) / 1000.0).round().max(0.0) as u32
 }
 
+/// The inputs' state. Methods that talk to the DSP thread take the [`Engine`].
 pub struct Inputs {
     api: Api,
-    engine: Engine,
     counters: Arc<EngineCounters>,
     slots: Vec<Slot>,
     instances: HashMap<PathBuf, MxlInstance>,
@@ -220,7 +220,7 @@ pub struct Inputs {
 }
 
 impl Inputs {
-    pub fn new(api: Api, engine: Engine, config: &Config, saved: Vec<InputConfig>) -> Self {
+    pub fn new(api: Api, engine: &mut Engine, config: &Config, saved: Vec<InputConfig>) -> Self {
         let counters = engine.counters.clone();
         let now = Instant::now();
         let slots = (0..config.input_flows)
@@ -246,7 +246,6 @@ impl Inputs {
             .collect();
         let mut inputs = Self {
             api,
-            engine,
             counters,
             slots,
             instances: HashMap::new(),
@@ -258,7 +257,7 @@ impl Inputs {
         };
         for i in 0..inputs.slots.len() {
             if let ExtraDelay::Ms(value) = inputs.slots[i].config.extra_delay {
-                inputs.set_delay(i, samples(value).min(inputs.delay_max));
+                inputs.set_delay(engine, i, samples(value).min(inputs.delay_max));
             }
         }
         inputs
@@ -280,24 +279,16 @@ impl Inputs {
         &self.counters
     }
 
-    pub fn scheduling(&self) -> String {
-        self.engine
-            .scheduling
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default()
-    }
-
-    fn set_delay(&mut self, index: usize, delay: u32) {
+    fn set_delay(&mut self, engine: &mut Engine, index: usize, delay: u32) {
         self.slots[index].delay = delay;
-        self.engine.send(Command::SetDelay {
+        engine.send(Command::SetDelay {
             index,
             samples: delay,
         });
     }
 
     /// Route input `index` from an IS-05 activation (`None`: stop reading).
-    pub fn route(&mut self, index: usize, route: Option<Route>) {
+    pub fn route(&mut self, engine: &mut Engine, index: usize, route: Option<Route>) {
         let Some(slot) = self.slots.get_mut(index) else {
             return;
         };
@@ -305,7 +296,7 @@ impl Inputs {
             return;
         }
         if slot.route.is_some() {
-            self.engine.send(Command::ClearInput { index });
+            engine.send(Command::ClearInput { index });
         }
         let slot = &mut self.slots[index];
         slot.route = route;
@@ -318,11 +309,11 @@ impl Inputs {
         };
         tracing::info!(input = index + 1, state = ?slot.state, flow = ?slot.route.as_ref().map(|r| r.flow), "input routed");
         if slot.route.is_some() {
-            self.try_open(index);
+            self.try_open(engine, index);
         }
     }
 
-    fn try_open(&mut self, index: usize) -> bool {
+    fn try_open(&mut self, engine: &mut Engine, index: usize) -> bool {
         let Some(route) = self.slots[index].route.clone() else {
             return false;
         };
@@ -349,7 +340,7 @@ impl Inputs {
         match mxlio::open_reader(&instance, route.flow) {
             Ok((reader, channels)) => {
                 let inode = mxlio::flow_inode(&route.domain, route.flow);
-                self.engine.send(Command::SetInput {
+                engine.send(Command::SetInput {
                     index,
                     reader: Box::new(reader),
                     channels: channels as usize,
@@ -379,35 +370,32 @@ impl Inputs {
     }
 
     /// The 100 ms tick.
-    pub fn tick(&mut self) {
-        while let Ok(Returned::Reader(reader)) = self.engine.returned.pop() {
-            drop(reader);
-        }
+    pub fn tick(&mut self, engine: &mut Engine) {
         let now = Instant::now();
         for i in 0..self.slots.len() {
-            while let Ok(lag) = self.engine.lags[i].pop() {
+            while let Ok(lag) = engine.lags[i].pop() {
                 self.slots[i].last_lag = lag;
                 self.slots[i].lag.push(lag, now);
             }
             match self.slots[i].state {
                 State::Unrouted => {}
                 State::Waiting => {
-                    self.try_open(i);
+                    self.try_open(engine, i);
                 }
-                State::Running | State::Stalled => self.watch(i, now),
+                State::Running | State::Stalled => self.watch(engine, i, now),
             }
-            self.auto_delay(i);
+            self.auto_delay(engine, i);
         }
     }
 
-    fn watch(&mut self, i: usize, now: Instant) {
+    fn watch(&mut self, engine: &mut Engine, i: usize, now: Instant) {
         let Some(route) = self.slots[i].route.clone() else {
             return;
         };
         let inode = mxlio::flow_inode(&route.domain, route.flow);
         if inode.is_none() {
             tracing::info!(input = i + 1, flow = %route.flow, "input_flow_gone: waiting for the flow");
-            self.engine.send(Command::ClearInput { index: i });
+            engine.send(Command::ClearInput { index: i });
             let slot = &mut self.slots[i];
             slot.state = State::Waiting;
             slot.reopens += 1;
@@ -415,7 +403,7 @@ impl Inputs {
         }
         if inode != self.slots[i].inode {
             tracing::info!(input = i + 1, flow = %route.flow, "input flow re-created: re-opening");
-            self.try_open(i);
+            self.try_open(engine, i);
             return;
         }
         let head = self.counters.inputs[i].head_index.load(Ordering::Relaxed);
@@ -433,11 +421,11 @@ impl Inputs {
             slot.state = State::Stalled;
             tracing::warn!(input = i + 1, "input_stalled");
             // The flow may have been re-created under the same inode: open it again once.
-            self.try_open(i);
+            self.try_open(engine, i);
         }
     }
 
-    fn auto_delay(&mut self, i: usize) {
+    fn auto_delay(&mut self, engine: &mut Engine, i: usize) {
         let slot = &self.slots[i];
         if slot.config.extra_delay != ExtraDelay::default() || slot.state != State::Running {
             return;
@@ -472,21 +460,22 @@ impl Inputs {
                 to_ms = ms(target),
                 "input delay set"
             );
-            self.set_delay(i, target);
+            self.set_delay(engine, i, target);
         }
     }
 
     /// Apply a proposed automatic delay (confirmation mode).
-    pub fn confirm_delay(&mut self, index: usize) -> Result<(), String> {
+    pub fn confirm_delay(&mut self, engine: &mut Engine, index: usize) -> Result<(), String> {
         let slot = self.slots.get_mut(index).ok_or("no such input")?;
         let target = slot.proposed.take().ok_or("no delay change is pending")?;
-        self.set_delay(index, target);
+        self.set_delay(engine, index, target);
         Ok(())
     }
 
     /// Change an input's label or extra delay; saved in the show file.
     pub fn update(
         &mut self,
+        engine: &mut Engine,
         index: usize,
         label: Option<String>,
         extra_delay: Option<ExtraDelay>,
@@ -511,7 +500,7 @@ impl Inputs {
             slot.config.extra_delay = delay;
             slot.proposed = None;
             match delay {
-                ExtraDelay::Ms(value) => self.set_delay(index, samples(value)),
+                ExtraDelay::Ms(value) => self.set_delay(engine, index, samples(value)),
                 ExtraDelay::Auto(_) => self.slots[index].lag.clear(),
             }
         }
@@ -521,14 +510,23 @@ impl Inputs {
     }
 
     /// Replace every input's settings (import).
-    pub fn replace_configs(&mut self, configs: &[InputConfig]) -> Result<(), String> {
+    pub fn replace_configs(
+        &mut self,
+        engine: &mut Engine,
+        configs: &[InputConfig],
+    ) -> Result<(), String> {
         for c in configs {
             if c.input == 0 || c.input > self.slots.len() {
                 return Err(format!("input {} does not exist", c.input));
             }
         }
         for c in configs {
-            self.update(c.input - 1, Some(c.label.clone()), Some(c.extra_delay))?;
+            self.update(
+                engine,
+                c.input - 1,
+                Some(c.label.clone()),
+                Some(c.extra_delay),
+            )?;
         }
         Ok(())
     }
@@ -581,10 +579,17 @@ impl Inputs {
             .collect()
     }
 
-    /// Stop the DSP thread and release every reader (G8).
-    pub fn stop(&mut self) {
-        self.engine.stop();
+    /// Release the MXL instances once the DSP thread has stopped (G8).
+    pub fn release(&mut self) {
         self.instances.clear();
+    }
+
+    /// Whether input `index` (from 0) runs and has at least `channels` channels.
+    pub fn has_channels(&self, index: usize, channels: usize) -> bool {
+        self.slots
+            .get(index)
+            .is_some_and(|s| s.state == State::Running)
+            && self.counters.inputs[index].channels.load(Ordering::Relaxed) as usize >= channels
     }
 }
 

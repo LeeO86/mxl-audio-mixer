@@ -5,10 +5,12 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Status: milestone 1** (§19): the skeleton. Settings, probes, metrics, the NMOS
-node with its MXL audio receivers, and the inputs read on the TAI block clock
-(waiting, stalled and re-created flows, arrival lag and automatic delay). There is
-no mixing and there are no published outputs yet (milestone 2).
+**Status: milestone 2** (§19). Settings, probes, metrics, the NMOS node with its
+MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
+and re-created flows, arrival lag and automatic delay), plus the mix: input patch,
+strips (trim, polarity, fader, mute, pan/balance/width), buses, a send matrix with
+width mapping, peak and RMS meters, and buses published as MXL flows with NMOS
+senders. There is no EQ or dynamics yet (milestone 3) and no UI (milestone 4).
 
 ## Run
 
@@ -76,6 +78,45 @@ over the last 10 s and sets the extra delay to its 99.9th percentile plus 1 ms,
 minus the read offset, within `MIXER_INPUT_DELAY_MAX_MS`; a change is applied with a fade, or waits
 for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true`.
 
+## The mix
+
+Kept in `MIXER_STATE_DIR/mix.json` and in the show file. Signal ids (strips and
+buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
+an id gets `strip-<n>` or `bus-<n>`.
+
+- **Strip:** patch → trim and polarity → fader and mute → panner. `patch` has one
+  entry per strip channel: `{"input": n, "channel": c}` (both from 1) or `null`. A
+  channel the input does not have is silent and shows `missing` in `patch_state`.
+  `trim_db` ±42, `fader_db` `"-inf"` … +10, `pan` −1 … +1 (mono: position; stereo:
+  balance), `width` 0 … 2 (stereo; 1 unchanged). Taps: `input`, `pre-fader`,
+  `post-fader`, `post-pan`. A mono strip is stereo after its panner.
+- **Bus:** sum of its sends → fader and mute. Taps: `pre-fader`, `post-fader`.
+- **Send** (`from` a strip or bus `to` a bus): `tap`, `gain_db` (`"-inf"` … +10),
+  `mute`, `phase`. New sends default to 0 dB from a strip's post-pan or a bus's
+  post-fader. A loop between buses is rejected (§4.4: feedback needs a block
+  delay, which comes with milestone 3).
+- **Output:** a bus published as an `audio/float32` MXL flow in the own domain and
+  an NMOS Source, Flow and Sender (label = bus name, group hint `<name>:Audio`).
+  `format` (default: the bus's) maps it to another layout; `commit_samples`
+  (default `MIXER_OUTPUT_COMMIT_SAMPLES`) is a multiple of the block size. The MXL
+  flow id is UUIDv5 of `NMOS_SEED` and the bus id, so it survives restarts. At most
+  128 outputs.
+- **Formats** (§4.1), channel order as SMPTE ST 2110-30: mono `M`; stereo `L R`;
+  `3.0` `L R C`; `5.1` `L R C LFE Ls Rs`; `7.1` `L R C LFE Lss Rss Lrs Rrs`;
+  `5.1.4` = 5.1 + `Ltf Rtf Ltr Rtr`; `7.1.4` = 7.1 + the same heights.
+- **Width mapping** (sends and outputs): same channels map 1:1; missing ones fold
+  down at −3 dB per step (ITU-R BS.775; LFE dropped): C → L + R; Ls → L (or Lss);
+  Lss, Lrs → Ls; Ltf → L; Ltr → Lrs (or Ls); stereo → mono with the stereo-to-mono
+  sum; mono → C (3.0 and the surround formats) or L + R with the pan law
+  (stereo); channels the source lacks stay silent.
+- **Mix settings:** `pan_law_db` 0, −3 (default), −4.5, −6; `mono_sum_db` −3
+  (default) or −6.
+
+Parameter changes ramp over `ramp_ms` (default 10 ms). A change that rewires the
+graph fades the affected paths out and in (10 ms) around the plan swap; unrelated
+paths are not touched. Parameters are addressed by signal id and field (§12.4),
+e.g. `strips/vox/fader_db`, `sends/vox/main/gain_db`, `buses/main/mute`.
+
 ## Ports and exit codes
 
 | Port | Default | |
@@ -97,19 +138,33 @@ for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true
 | `GET /livez` | 200 while the process runs; never depends on the registry |
 | `GET /readyz` | 200 when the engine runs and, with a registry, the node is registered and listed by the Query API; JSON details incl. `timing_trusted` |
 | `GET /metrics` | Prometheus text, prefix `mxl_audio_mixer_` |
-| `GET /api/v1/status` | version, readiness, NMOS, MXL domain, DSP, every input |
+| `GET /api/v1/status` | version, readiness, NMOS, MXL domain, DSP, every input, the mix's size, every output |
 | `GET /api/v1/config` | every setting: value, origin (`environment`, `file`, `default`), default, description |
-| `GET /api/v1/config/export` | the show file: settings (for the record), inputs, active connections |
-| `POST /api/v1/config/import` | restores the inputs and the connections (through IS-05); settings are not applied |
+| `GET /api/v1/config/export` | the show file: settings (for the record), inputs, mix, active connections |
+| `POST /api/v1/config/import` | restores the inputs, the mix and the connections (through IS-05); settings are not applied |
+| `GET /api/v1/mix` | the whole mix |
+| `GET`, `PATCH /api/v1/mix/settings` | `{"pan_law_db": …, "mono_sum_db": …}` |
+| `GET`, `POST /api/v1/strips` | list (with `patch_state`), create (`format` required) |
+| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field, `ramp_ms`; delete removes its sends |
+| `GET`, `POST /api/v1/buses` | list, create (`format` required) |
+| `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format`, `fader_db`, `mute`, `ramp_ms`; delete removes its sends and output |
+| `GET /api/v1/sends` | every send |
+| `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
+| `GET /api/v1/outputs`, `GET /api/v1/outputs/<bus>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
+| `PUT`, `DELETE /api/v1/outputs/<bus>` | publish (`{"format": …, "commit_samples": …}`, both optional) or unpublish |
+| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared) and `rms_dbfs` (300 ms) |
+| `POST /api/v1/meters/clear`, `POST /api/v1/meters/<id>/clear` | clear every peak hold, or one signal's |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
 | `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |
-| `/x-nmos/…` on `NMOS_PORT` | IS-04 v1.3, IS-05 v1.2, BCP-007-03 ([mxl-nmos](https://github.com/LeeO86/mxl-nmos) v0.1.0) |
+| `/x-nmos/…` on `NMOS_PORT` | IS-04 v1.3, IS-05 v1.2, BCP-007-03 ([mxl-nmos](https://github.com/LeeO86/mxl-nmos) v0.1.1) |
 
 ## Metrics
 
 `dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`,
-`output_blocks_total`, `timing_trusted`, and per input: `input_state`,
+`plan_swaps_total`, `plan_compile_seconds` (last compile), `signals`,
+`nodes{type}` (steps of the running plan), `output_blocks_total`,
+`output_commit_lag_ms{output}`, `timing_trusted`, and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
 `input_effective_delay_ms`, `input_late_samples_total`,
 `input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
@@ -120,9 +175,15 @@ for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true
 `cargo test` (unit), `tests/integration/lifecycle.sh` (G14: start, ready, SIGTERM,
 exit 143, deregistered, own domain removed; connections survive a restart),
 `tests/integration/inputs.sh` (§17: activation before the flow exists, stalled and
-re-created writers, a writer 30 ms late), `ci/amwa.sh off` (AMWA IS-04-01,
-IS-05-01, IS-05-02, BCP-007-03-01 against the mixer). Hardware tests for the
-maintainers are in `tests/hw/`.
+re-created writers, a writer 30 ms late), `tests/integration/mix.sh` (the mix
+end to end: sample-exact output checks with `mxl-mixer-probe`, plan swaps that
+leave other paths untouched, meters, the NMOS sender, a restart with a downstream
+reader, unpublish, loop rejection), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
+IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
+the maintainers are in `tests/hw/`.
+
+`mxl-mixer-tone` (a test tone writer) and `mxl-mixer-probe` (a reader that checks
+a flow against the tone) are in the image too.
 
 ## Licence
 

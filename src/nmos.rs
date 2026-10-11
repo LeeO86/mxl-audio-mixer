@@ -1,5 +1,5 @@
 //! The NMOS node (`mxl-nmos`, §3.1): one Device and `MIXER_INPUT_FLOWS` audio
-//! receivers. Published outputs (senders) come with the signal model (milestone 2).
+//! receivers. The senders of published outputs are in [`crate::outputs`].
 
 use std::path::PathBuf;
 
