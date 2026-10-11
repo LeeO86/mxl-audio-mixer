@@ -20,6 +20,7 @@
 - Metrics `plan_swaps_total`, `plan_compile_seconds`, `signals`, `nodes{type}`,
   `output_commit_lag_ms{output}`.
 - `mxl-mixer-probe`, a test reader.
+- `mxl-nmos` v0.1.1: scheduled IS-05 activations fire at their time.
 
 ### Milestone 1: skeleton
 

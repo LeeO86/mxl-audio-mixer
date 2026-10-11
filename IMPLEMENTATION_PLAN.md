@@ -7,7 +7,7 @@ current so that work can resume after an interruption.
 
 | Step | State |
 | --- | --- |
-| M0a `mxl-nmos` extracted and tested | done: PRs 1–3 merged, **v0.1.0 released** (`88e04c5`) |
+| M0a `mxl-nmos` extracted and tested | done: PRs 1–3 merged, **v0.1.0 released** (`88e04c5`); **v0.1.1** (`f949a69`, PRs 5–7: DNS names, scheduled activations on time) |
 | M0a Strom switched to the crate | patches against Strom `c2e27a6` in `LeeO86/mxl-nmos` `contrib/strom-switch/` (PR 4); the maintainer applies them in Strom (this environment cannot push there) |
 | M0b spike: NMOS audio receiver + sender on real flows, AMWA | done (below) |
 | M0c spike: MXL float32 read/write on the TAI block clock, jitter | done on the dev VM (below); real-time run: `tests/hw/m0-block-clock` (maintainers) |
@@ -16,8 +16,7 @@ current so that work can resume after an interruption.
 
 ## Resume
 
-- `mxl-nmos` v0.1.0 is released; the mixer depends on the tag. Two fixes wait for
-  0.1.1 (`mxl-nmos` PRs 5 and 6, see "M2: findings").
+- `mxl-nmos` v0.1.1 is released; the mixer depends on the tag.
 - Strom: the four patches are in `mxl-nmos` `contrib/strom-switch/` (README: how to apply).
 - This repo: `main` has M0 and M1; M2 is on `cursor/m2-plan-dsp-core-4d44`.
 - Environment: `docs/development.md`.
@@ -276,7 +275,7 @@ None.
   Measured with a probe of the same timing: the mixer was late in 23 of 150 runs
   and the crate's example in 4 of 150. Fixed in `mxl-nmos` PR 6 (prepare 2 ms
   early, block on the system clock for the last part): 0 of 300 and 1 of 300.
-  Until a release with it, the mixer's CI can still hit the warning.
+  Released in `mxl-nmos` v0.1.1, which the mixer uses from M2 on.
 - `NMOS_REGISTRY_ADDRESS` / `NMOS_QUERY_ADDRESS` DNS names in the crate:
   `mxl-nmos` PR 5. The mixer already accepts them in its own settings (M1).
 - A mixer reading another mixer's output on the same TAI block grid sees an
