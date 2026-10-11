@@ -181,7 +181,7 @@ rates other than 48 kHz, recording.
 - 48 kHz, 32-bit float internally (64-bit accumulators for summing busses and
   loudness integration).
 - **Block size** configurable: 48, 96, 144, 240 samples (1, 2, 3, 5 ms; default 96).
-- Channel formats for strips and buses: mono, stereo, 5.1, 7.1, 7.1.4 (linked
+- Channel formats for strips and buses: mono, stereo, 3.0, 5.1, 7.1, 5.1.4, 7.1.4 (linked
   processing across a strip's channels).
 
 ### 4.2 MXL inputs (NMOS receivers)
