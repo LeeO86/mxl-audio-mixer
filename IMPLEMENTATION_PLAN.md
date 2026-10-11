@@ -7,20 +7,16 @@ current so that work can resume after an interruption.
 
 | Step | State |
 | --- | --- |
-| M0a `mxl-nmos` extracted and tested | done, waiting for review: LeeO86/mxl-nmos PRs 1 (plan) → 2 (history) → 3 (crate, CI green). Not tagged. |
-| M0a Strom switched to the crate | done and tested locally; **no PR yet**: this environment cannot push to `LeeO86/strom` (HTTP 403). Patches and a git bundle are kept (see "Resume"). |
+| M0a `mxl-nmos` extracted and tested | done: PRs 1–3 merged, **v0.1.0 released** (`88e04c5`) |
+| M0a Strom switched to the crate | patches against Strom `c2e27a6` in `LeeO86/mxl-nmos` `contrib/strom-switch/` (PR 4); the maintainer applies them in Strom (this environment cannot push there) |
 | M0b spike: NMOS audio receiver + sender on real flows, AMWA | done (below) |
 | M0c spike: MXL float32 read/write on the TAI block clock, jitter | done on the dev VM (below); real-time run: `tests/hw/m0-block-clock` (maintainers) |
 | M1 skeleton, config, ops, metrics, CI, image, MXL I/O | not started; waits for the M0 report |
 
 ## Resume
 
-- `mxl-nmos`: branches `cursor/extraction-plan-4d44` → `cursor/import-strom-history-4d44`
-  → `cursor/crate-v0-1-4d44` (stacked PRs; PR 2 must be merged with a merge commit).
-  The 0.1.0 candidate is `995e0c0`. The spike and Strom depend on that rev until
-  `v0.1.0` is tagged.
-- Strom: branch `cursor/mxl-nmos-crate-4d44` on `c2e27a6` (4 commits). Kept as patches
-  and a bundle in the cloud agent's artifacts (`strom-switch/`) and its store.
+- `mxl-nmos` v0.1.0 is released; the spike depends on the tag.
+- Strom: the four patches are in `mxl-nmos` `contrib/strom-switch/` (README: how to apply).
 - This repo: branch `cursor/m0-spikes-4d44`.
 - Environment: `docs/development.md`.
 
@@ -39,7 +35,7 @@ current so that work can resume after an interruption.
 
 | # | Spec | Deviation | Reason |
 | --- | --- | --- | --- |
-| X1 | §4.3 `MIXER_OUTPUT_COMMIT_SAMPLES` | Not settable yet: the spike creates writers without options, so libmxl's default commit/sync hint (480 samples, 10 ms) applies; blocks are still committed one at a time (96 samples). | Bug in the bindings at the pin: `MxlInstance::create_flow_writer` frees the options string before libmxl reads it (use after free; libmxl logged "Invalid JSON options"). Fixed upstream on `main` (`aed4cac6`), not on `release/v1.1`. See Q1. |
+| X1 | §4.3 `MIXER_OUTPUT_COMMIT_SAMPLES` | The spike creates writers without options (libmxl's default hint, 480 samples). From milestone 1 the mixer creates writers through `mxl-sys` directly (a small unsafe wrapper) so the commit and sync hints can be set; back to the safe API when a v1.1 release has the fix. | Bug in the bindings at the pin: `MxlInstance::create_flow_writer` frees the options string before libmxl reads it (use after free; libmxl logged "Invalid JSON options"). Fixed upstream on `main` (`aed4cac6`), not on `release/v1.1`. Approach approved (Q1). |
 
 ## M0 results
 
@@ -118,18 +114,11 @@ SCHED_FIFO on exclusive CPUs; the real-time run is `tests/hw/m0-block-clock`.
 | --- | --- |
 | `tests/hw/m0-block-clock/run.sh [minutes]` | Block clock at SCHED_FIFO 49 on an exclusive CPU: 0 deadline misses, max jitter < 2 ms, 0 read/write errors, 0 mismatched samples. |
 
-## Open questions
+## Answers (maintainer, 2026-10-11)
 
-1. **Writer options at the pin (X1).** `MIXER_OUTPUT_COMMIT_SAMPLES` needs writer
-   options, which the bindings at `218ddaa` corrupt. Options: (a) ask for the upstream
-   fix `aed4cac6` on `release/v1.1` and move the pin; (b) create writers through
-   `mxl-sys` directly (a small unsafe wrapper) at the current pin; (c) take the bindings
-   from a later commit than libmxl. Proposal: (b) now, (a) when a release has it.
-2. **Block size setting name.** §4.1 makes the block size configurable (48/96/144/240,
-   default 96) but names no setting; milestone 1 would use `TODO_MIXER_BLOCK_SAMPLES`
-   until you name it. Same for the libmxl path (`TODO_MIXER_MXL_LIBRARY`, default
-   `/opt/mxl/lib/libmxl.so`) and the read timeout of §4.2's "bounded wait".
-3. **Release of `mxl-nmos` v0.1.0.** Strom and the mixer should depend on the tag. May I
-   tag after you merge PRs 1–3?
-4. **Strom PR.** Please give this agent push access to `LeeO86/strom` (or add the repo to
-   its repositories) so the prepared branch can become the PR.
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Writer options at the pin | Yes: an `mxl-sys` wrapper now, the upstream fix later (X1). |
+| 2 | Names for block size, libmxl path, read timeout | Follow the sibling repos. They prefix function settings and put the unit in the name (`MV_INPUT_OFFSET_GRAINS`, `REPLAY_INPUT_STALL_S`), and none has a library path or read-timeout setting (they load libmxl from the system library path). So: `MIXER_BLOCK_SAMPLES` (default 96); no libmxl path setting (`libmxl.so.1` through the dynamic linker; the image installs it in the linker path); the read timeout is internal, bounded by the block period. |
+| 3 | Tag `mxl-nmos` v0.1.0 | Merged PRs 1–3 and released v0.1.0 with the B.3 notes. |
+| 4 | Strom PR | Delivered as patches in `mxl-nmos` `contrib/strom-switch/` (PR 4). |

@@ -847,7 +847,7 @@ dependencies = [
 [[package]]
 name = "mxl-nmos"
 version = "0.1.0"
-source = "git+https://github.com/LeeO86/mxl-nmos?rev=995e0c0898b9df5dd34b0cc8c68a2fd62e3a8243#995e0c0898b9df5dd34b0cc8c68a2fd62e3a8243"
+source = "git+https://github.com/LeeO86/mxl-nmos?tag=v0.1.0#88e04c5330752af0cbeaa05f83f3c54afb56d7a1"
 dependencies = [
  "axum",
  "futures",

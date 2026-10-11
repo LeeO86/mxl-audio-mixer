@@ -10,8 +10,7 @@ description = "Milestone 0 spike: mxl-nmos audio receiver and sender on real MXL
 # Official MXL Rust bindings at the platform pin (release/v1.1 218ddaa). `mxl-not-built`:
 # libmxl is built separately with -DMXL_ENABLE_FABRICS_OFI=OFF and loaded at run time.
 mxl = { git = "https://github.com/dmf-mxl/mxl", rev = "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7", features = ["mxl-not-built"] }
-# The 0.1.0 candidate under review (LeeO86/mxl-nmos PR 3); a release tag once v0.1.0 exists.
-mxl-nmos = { git = "https://github.com/LeeO86/mxl-nmos", rev = "995e0c0898b9df5dd34b0cc8c68a2fd62e3a8243" }
+mxl-nmos = { git = "https://github.com/LeeO86/mxl-nmos", tag = "v0.1.0" }
 libc = "0.2"
 serde_json = "1.0"
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
