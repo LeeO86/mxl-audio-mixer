@@ -9,6 +9,7 @@
 
 mod dsp;
 pub mod plan;
+pub mod proc;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;

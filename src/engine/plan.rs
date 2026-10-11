@@ -10,6 +10,8 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+pub use super::proc::{NodeMeter, Processor};
+
 /// Values per node: the widest format's channels, or a 2 × 2 panner.
 pub const MAX_NODE_VALUES: usize = 12;
 
