@@ -330,8 +330,14 @@ pub(super) fn run(
             }
         }
 
-        for o in outputs.iter_mut().flatten() {
+        for (slot, o) in outputs.iter_mut().enumerate() {
+            let Some(o) = o.as_mut() else {
+                continue;
+            };
             if o.next != start {
+                if o.next < start {
+                    fill_gap(o, start, &counters.outputs[slot]);
+                }
                 o.filled = 0;
             }
             o.next = start + b;
@@ -380,8 +386,15 @@ pub(super) fn run(
         let done = tai_ns();
         record_block_time(&counters, done - woke, period_ns);
         counters.blocks.fetch_add(1, Ordering::Relaxed);
-        // After a miss, continue with the first block that has not ended yet.
-        n = (n + 1).max(index_at(done) / b);
+        // After a miss, continue with the first block that has not ended yet; the
+        // skipped blocks count as missed (their outputs get silence, fill_gap).
+        let next = (n + 1).max(index_at(done) / b);
+        if next > n + 1 {
+            counters
+                .deadline_misses
+                .fetch_add(next - n - 1, Ordering::Relaxed);
+        }
+        n = next;
     }
     counters.running.store(false, Ordering::SeqCst);
     for input in &mut inputs {
@@ -424,6 +437,27 @@ fn fade_output(o: &mut OutputWriter, block: usize) {
         for c in 0..channels {
             o.staging[c * o.commit + o.filled + k] *= o.gain;
         }
+    }
+}
+
+/// After skipped blocks (a missed deadline): commit what was staged and write
+/// silence up to `start`. Unwritten ranges would keep the ring's samples of one
+/// buffer length earlier, which readers cannot tell from fresh ones.
+fn fill_gap(o: &mut OutputWriter, start: u64, counters: &super::OutputCounters) {
+    if o.filled > 0 {
+        let end = o.next;
+        commit(o, end, counters);
+    }
+    let len = u64::from(o.writer.buffer_length.max(1));
+    let chunk = o.commit as u64;
+    let mut from = o.next.max(start.saturating_sub(len.saturating_sub(chunk)));
+    while from < start {
+        let n = chunk.min(start - from);
+        let result = o.writer.write(from + n, n as usize, |_, _, s| s.fill(0.0));
+        if result.is_err() {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        from += n;
     }
 }
 

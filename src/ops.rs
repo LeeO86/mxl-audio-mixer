@@ -350,7 +350,7 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "dsp_deadline_misses_total",
         "counter",
-        "Blocks whose wake-up came later than one block period.",
+        "Blocks woken later than one block period, plus blocks skipped after a late one.",
         vec![format!(" {}", c.deadline_misses.load(Ordering::Relaxed))],
     );
     metric(
