@@ -11,13 +11,13 @@ current so that work can resume after an interruption.
 | M0a Strom switched to the crate | patches against Strom `c2e27a6` in `LeeO86/mxl-nmos` `contrib/strom-switch/` (PR 4); the maintainer applies them in Strom (this environment cannot push there) |
 | M0b spike: NMOS audio receiver + sender on real flows, AMWA | done (below) |
 | M0c spike: MXL float32 read/write on the TAI block clock, jitter | done on the dev VM (below); real-time run: `tests/hw/m0-block-clock` (maintainers) |
-| M1 skeleton, config, ops, metrics, CI, image, MXL I/O | not started; waits for the M0 report |
+| M1 skeleton, config, ops, metrics, CI, image, MXL I/O | done, in review (branch `cursor/m1-skeleton-4d44`) |
 
 ## Resume
 
 - `mxl-nmos` v0.1.0 is released; the spike depends on the tag.
 - Strom: the four patches are in `mxl-nmos` `contrib/strom-switch/` (README: how to apply).
-- This repo: branch `cursor/m0-spikes-4d44`.
+- This repo: `cursor/m0-spikes-4d44` (M0), `cursor/m1-skeleton-4d44` (M1, stacked on M0).
 - Environment: `docs/development.md`.
 
 ## Decisions
@@ -107,6 +107,71 @@ SCHED_FIFO on exclusive CPUs; the real-time run is `tests/hw/m0-block-clock`.
 - The writer's flow is deleted when it releases it (§4.2 confirmed).
 - The VM's kernel TAI offset was 0 (CLOCK_TAI = UTC); NMOS scheduled activations were
   37 s late until it was set. §4.4's start-up check is needed.
+
+## M1: skeleton
+
+### What exists
+
+- `src/config.rs`: every setting in one table (README generated from it; a test
+  fails when one is missing), env > `MIXER_CONFIG_FILE` > defaults, origins, exit 78.
+- `src/engine/`: the DSP thread. Block n ends at TAI index (n+1)·B; it sleeps with
+  `clock_nanosleep(CLOCK_TAI, TIMER_ABSTIME)`, reads each routed input's block ending
+  at (n+1)·B − (read offset + extra delay) with a bounded wait of a quarter block,
+  fades in after a gap and out over one (10 ms, the ramp of §2), and counts late and
+  missing samples (start-up silence is not counted). After a deadline miss it goes on
+  with the first block that has not ended. Lock-free SPSC rings (`rtrb`) carry
+  commands in and readers (freed on the control side) and arrival lags out; counters
+  are atomics. Buffers are allocated before the loop.
+- `src/inputs.rs`: the control side on a 100 ms tick: routing from IS-05, `waiting`
+  until the flow exists, re-open on a new inode or after a stall, `input_stalled` /
+  `input_resumed` logged once per change, the arrival-lag window and the automatic
+  delay.
+- `src/mxlio/`: libmxl through the dynamic linker, domains (G2), and the
+  `mxl-sys` writer wrapper that passes the commit/sync hints (X1).
+- `src/nmos.rs`, `src/ops.rs`, `src/state.rs`, `src/main.rs`: the node, the web
+  port, the files under `MIXER_STATE_DIR`, start-up and the G8 sequence.
+- `src/bin/mxl-mixer-tone.rs`: the test writer (also in the image).
+- `docker/Dockerfile`, `.github/workflows/{ci,publish}.yml`, `deploy/k8s`,
+  `deploy/grafana`.
+
+### Decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D7 | No outputs are published in M1; the writer path (`mxlio::writer`) is exercised by `mxl-mixer-tone` in the tests. Senders come with the signals of M2. | §19 puts NMOS senders and the signal model in M2; a placeholder output would invent behaviour. |
+| D8 | Inputs are numbered from 1 everywhere (`in-1`, "Input 1", `input="1"`, `/api/v1/inputs/1`). | One number for operators, NMOS and metrics. |
+| D9 | Setting names follow the sibling repos: `HOST_ID`, `MIXER_CONFIG_FILE`, `MIXER_STATE_DIR` (default `/config`), `MIXER_LOG_LEVEL`, `MIXER_BLOCK_SAMPLES`, `MIXER_INPUT_STALL_S` (default 2 like `REPLAY_INPUT_STALL_S`); default seed `<HOST_ID>-mixer`, node label `HOST_ID`, Device "<label> Audio Mixer", output domain `<scan>/mixer-<8 hex>` (the `cc-<8 hex>` pattern). | Maintainer answer 2. |
+| D10 | `MIXER_READ_OFFSET` keeps the spec's name, in ms (may be fractional). | §4.2 names it and gives "2 ms". |
+| D11 | Automatic delay: extra = p99.9(lag) + margin − read offset, clamped to `MIXER_INPUT_DELAY_MAX_MS`; changed when it differs by more than the margin. Lags count only while the flow's head moves (a stopped writer is a stall). | §4.2. Without the last rule a stall drove the delay to its maximum (found in testing). |
+| D12 | Readiness = the engine runs and, with a registry, the node is registered and listed by the Query API. `/readyz` answers JSON details; an untrusted TAI offset is reported there and in `timing_trusted` but does not block readiness. | G7, §4.4 ("start anyway"). |
+| D13 | Import restores inputs and connections (through `restore`, so the activation callback runs); settings in the file are not applied. | G1: settings come from the environment and the config file. |
+
+### Results (dev VM)
+
+- `cargo test`: 14 unit tests; clippy `-D warnings`, rustfmt and shellcheck clean.
+- `tests/integration/lifecycle.sh`: ready (registered, listed by the Query API),
+  SIGTERM → exit 143, node 404 in the Query API, own domain removed and another domain
+  kept; after a restart the connection is active again and the node id is the same.
+- `tests/integration/inputs.sh`:
+  - activation before the flow exists → `waiting`, → `running` once the writer starts;
+  - 0 missing samples over 3 s while running;
+  - writer stopped (SIGSTOP) → `stalled` after 2 s and staying stalled, → `running` on SIGCONT;
+  - writer restarted (flow deleted and re-created) → re-opened by itself, 0 missing
+    samples afterwards;
+  - writer 30 ms late → arrival lag p99.9 32.25 ms, effective delay settled at
+    33.08 ms, 0 missing samples over the next 5 s;
+  - `master_enable: false` → `unrouted`.
+- AMWA against the mixer (DNS-SD off, nmos-cpp registry): 0 Fail, 0 Warning.
+  IS-04-01 Pass 29, IS-05-01 Pass 33, IS-05-02 Pass 38, BCP-007-03-01 Pass 40 +
+  Manual 1. Every sender test is Could Not Test until M2 publishes outputs; all of
+  them are listed in `ci/amwa-expected-off.json`.
+
+### Open values (TODO_)
+
+- `MIXER_INPUT_DELAY_MAX_MS` default (provisional 150 ms; must stay below the MXL
+  history of 200 ms minus the read offset).
+- The automatic delay's margin/hysteresis (provisional 1 ms) and lag window
+  (provisional 10 s) (`src/inputs.rs`).
 
 ## tests/hw scripts for the maintainers
 

@@ -1,0 +1,133 @@
+# mxl-audio-mixer
+
+A broadcast audio engine on MXL, in Rust: a freely routable audio matrix, channel
+strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation.
+The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
+results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
+
+**Status: milestone 1** (§19): the skeleton. Settings, probes, metrics, the NMOS
+node with its MXL audio receivers, and the inputs read on the TAI block clock
+(waiting, stalled and re-created flows, arrival lag and automatic delay). There is
+no mixing and there are no published outputs yet (milestone 2).
+
+## Run
+
+```sh
+scripts/build-mxl.sh                               # libmxl at the pin, into /opt/mxl
+cargo build --release
+LD_LIBRARY_PATH=/opt/mxl/lib NMOS_HOST_ADDRESS=192.0.2.10 MXL_DOMAIN_SCAN_PATH=/dev/shm/mxl \
+    MIXER_STATE_DIR=/tmp/mixer target/release/mxl-audio-mixer
+```
+
+The image is `ghcr.io/leeo86/mxl-audio-mixer` (uid 1000; tags `X.Y.Z`, `X.Y`, `X`,
+`git-<sha7>`, `nightly-dev`). `deploy/k8s/deployment.yaml` shows the platform
+conventions; `deploy/grafana/` has a dashboard. The development set-up is in
+[`docs/development.md`](docs/development.md).
+
+On the platform: the MXL root at `/Volumes/mxl` (hostPath), a writable `/config`,
+the pod IP in `NMOS_HOST_ADDRESS`, the registry in `NMOS_REGISTRY_ADDRESS` /
+`NMOS_REGISTRY_PORT`, and the node's kernel TAI offset set (CLOCK_TAI = UTC + 37 s).
+Guaranteed QoS with whole CPUs for the DSP thread; `MIXER_RT_PRIORITY` (≤ 49) needs
+the `SYS_NICE` capability.
+
+## Settings
+
+Environment first, then the JSON file `MIXER_CONFIG_FILE` (an object of these keys),
+then the defaults. Unknown environment variables are ignored; unknown file keys and
+invalid values exit with code 78. `GET /api/v1/config` lists every value with its
+origin. No setting is a secret.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `HOST_ID` | the host name | Instance name; the default node label and the start of the default NMOS seed. |
+| `WEB_PORT` | 8160 | Port of the web UI, the API, /livez, /readyz and /metrics. |
+| `NMOS_PORT` | 3312 | Port of the IS-04 Node API and the IS-05 Connection API. |
+| `NMOS_SEED` | <HOST_ID>-mixer | Seed of every NMOS id, the output domain id and the MXL flow ids (UUIDv5). |
+| `NMOS_LABEL` | <HOST_ID> | Node label; the Device is "<label> Audio Mixer". |
+| `NMOS_TAGS` | {} | JSON object of tag name to string arrays, on the Node and the Device. |
+| `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | IPv4 literal announced in NMOS (the pod IP on the platform). |
+| `NMOS_REGISTRY_ADDRESS` | unset | IPv4 address of the IS-04 Registration API. Unset: no registration. |
+| `NMOS_REGISTRY_PORT` | unset | Port of the Registration API (set together with the address). |
+| `NMOS_QUERY_ADDRESS` | registry address | Query API address, used for readiness. |
+| `NMOS_QUERY_PORT` | registration port + 1 | Query API port. |
+| `NMOS_DNS_SD` | false | mDNS/DNS-SD browsing and advertisement (needs a build with the dns-sd feature). |
+| `MXL_DOMAIN_SCAN_PATH` | /Volumes/mxl | Parent of the MXL domain directories; input domains (mirrors included) are found below it. |
+| `MXL_OUTPUT_DOMAIN_DIR` | <scan path>/mixer-<first 8 hex of the domain id> | The mixer's own output domain. Created if missing. |
+| `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 of NMOS_SEED | Id of the own output domain. |
+| `MXL_HISTORY_DURATION_NS` | 200000000 | history_duration written into a new output domain. |
+| `MXL_CLEANUP_ON_EXIT` | false | Remove the own output domain directory on SIGTERM. |
+| `SHUTDOWN_TIMEOUT_S` | 10 | Time for the SIGTERM sequence (1–120). |
+| `MIXER_CONFIG_FILE` | unset | JSON file with any of these settings (environment wins). |
+| `MIXER_STATE_DIR` | /config | Directory of everything the mixer writes itself (show file, connections). |
+| `MIXER_LOG_LEVEL` | info | Log level: error, warn, info, debug, trace. |
+| `MIXER_INPUT_FLOWS` | 16 | Number of MXL audio inputs (NMOS receivers), 1–256. |
+| `MIXER_BLOCK_SAMPLES` | 96 | DSP block size in samples at 48 kHz: 48, 96, 144 or 240. |
+| `MIXER_READ_OFFSET` | 2 | Read offset in ms: every input is read at t_out − (offset + its extra delay). |
+| `MIXER_OUTPUT_COMMIT_SAMPLES` | one block | Samples per MXL commit of an output (a multiple of the block size). |
+| `MIXER_RT_PRIORITY` | off | SCHED_FIFO priority of the DSP thread, 1–49 (needs CAP_SYS_NICE). |
+| `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move for this long is stalled and re-opened. |
+| `MIXER_INPUT_DELAY_MAX_MS` | TODO_ (provisional 150) | Upper limit of an input's automatic extra delay. |
+| `MIXER_INPUT_DELAY_CONFIRM` | false | true: an automatic delay change waits for operator confirmation instead of applying with a fade. |
+
+`TODO_` marks a default the specification does not give; it is provisional until
+confirmed.
+
+Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
+group hint, default `Input <n>`) and `extra_delay` (`"auto"`, the default, or ms).
+`auto` measures the arrival lag (TAI now minus the flow's head index, sliding window)
+and sets the extra delay to its 99.9th percentile plus a margin, minus the read
+offset, within `MIXER_INPUT_DELAY_MAX_MS`; a change is applied with a fade, or waits
+for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true`.
+
+## Ports and exit codes
+
+| Port | Default | |
+| --- | --- | --- |
+| `WEB_PORT` | 8160 | API, probes, metrics (the UI from milestone 4) |
+| `NMOS_PORT` | 3312 | IS-04 Node API, IS-05 Connection API |
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | stopped by Ctrl-C |
+| 75 | a port cannot be bound, or the DSP thread cannot start |
+| 78 | invalid configuration, libmxl missing, output domain id clash |
+| 143 | SIGTERM: media stopped, MXL released, node deregistered, own domain removed with `MXL_CLEANUP_ON_EXIT=true`, within `SHUTDOWN_TIMEOUT_S` |
+
+## API
+
+| Method and path | |
+| --- | --- |
+| `GET /livez` | 200 while the process runs; never depends on the registry |
+| `GET /readyz` | 200 when the engine runs and, with a registry, the node is registered and listed by the Query API; JSON details incl. `timing_trusted` |
+| `GET /metrics` | Prometheus text, prefix `mxl_audio_mixer_` |
+| `GET /api/v1/status` | version, readiness, NMOS, MXL domain, DSP, every input |
+| `GET /api/v1/config` | every setting: value, origin (`environment`, `file`, `default`), default, description |
+| `GET /api/v1/config/export` | the show file: settings (for the record), inputs, active connections |
+| `POST /api/v1/config/import` | restores the inputs and the connections (through IS-05); settings are not applied |
+| `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
+| `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
+| `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |
+| `/x-nmos/…` on `NMOS_PORT` | IS-04 v1.3, IS-05 v1.2, BCP-007-03 ([mxl-nmos](https://github.com/LeeO86/mxl-nmos) v0.1.0) |
+
+## Metrics
+
+`dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`,
+`output_blocks_total`, `timing_trusted`, and per input: `input_state`,
+`input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
+`input_effective_delay_ms`, `input_late_samples_total`,
+`input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
+`process_resident_memory_bytes`. All prefixed `mxl_audio_mixer_`.
+
+## Tests
+
+`cargo test` (unit), `tests/integration/lifecycle.sh` (G14: start, ready, SIGTERM,
+exit 143, deregistered, own domain removed; connections survive a restart),
+`tests/integration/inputs.sh` (§17: activation before the flow exists, stalled and
+re-created writers, a writer 30 ms late), `ci/amwa.sh off` (AMWA IS-04-01,
+IS-05-01, IS-05-02, BCP-007-03-01 against the mixer). Hardware tests for the
+maintainers are in `tests/hw/`.
+
+## Licence
+
+MIT. Dependencies: `mxl` / `mxl-sys` (Apache-2.0, dmf-mxl), `mxl-nmos`
+(MIT OR Apache-2.0), and MIT or Apache-2.0 crates.
