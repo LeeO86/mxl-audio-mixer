@@ -205,11 +205,11 @@ SCHED_FIFO on exclusive CPUs; the real-time run is `tests/hw/m0-block-clock`.
 | D14 | The signals of M2 are strips and buses. Auxes, groups and N-1s are buses with their own sends; the N-1 and group operations come with M6, monitor paths with M5. Inputs reach the matrix through the input patch and strips, not as send sources. | §19 puts buses and the input patch in M2, N-1 and groups in M6. A raw input has no fixed format (its flow decides the channel count), a strip does. |
 | D15 | Strip chain in M2: patch → trim and polarity → fader and mute → panner. Taps: `input`, `pre-fader`, `post-fader`, `post-pan`. The pre/post-EQ and pre/post-dynamics taps and "after any node" come with those nodes in M3. | §5 tap list, minus the nodes that do not exist yet. |
 | D16 | Panner: a mono strip becomes stereo with the pan law (its post-pan tap is stereo). A stereo strip has balance and width (M/S; 0 mono, 1 unchanged, 2 double side). Wider formats have no panner. | §6 "pan/balance/width". The spec has no surround panner. |
-| D17 | Channel order as SMPTE ST 2110-30 (L R C LFE, surrounds, heights). Width mapping by channel label: equal labels 1:1; missing ones fold down at −3 dB per step (ITU-R BS.775, LFE dropped): C → L + R, Ls → L (or Lss), Lss/Lrs → Ls, Ltf → L, Ltr → Lrs (or Ls), stereo → mono with the stereo-to-mono sum, mono → L + R with the pan law; up-mixing leaves new channels silent (5.1 → 7.1 puts Ls on Lss). NMOS Source channels carry the VSF TR-03 symbols where TR-03 has one (`M1` for mono; heights have none). | §5 "up/down-mix presets for 5.1/7.1"; §4.1 formats incl. 3.0 and 5.1.4 (spec change of 2026-10-11). One rule set covers every pair of the seven formats. |
+| D17 | Channel order as SMPTE ST 2110-30 (L R C LFE, surrounds, heights). Width mapping by channel label: equal labels 1:1; missing ones fold down at −3 dB per step (ITU-R BS.775, LFE dropped): C → L + R, Ls → L (or Lss), Lss/Lrs → Ls, Ltf → L, Ltr → Lrs (or Ls), stereo → mono with the stereo-to-mono sum, mono → C (3.0 and surround) or L + R with the pan law (stereo); up-mixing leaves new channels silent (5.1 → 7.1 puts Ls on Lss). NMOS Source channels carry the VSF TR-03 symbols where TR-03 has one (`M1` for mono; heights have none). | §5 "up/down-mix presets for 5.1/7.1"; §4.1 formats incl. 3.0 and 5.1.4 (spec change of 2026-10-11). One rule set covers every pair of the seven formats. |
 | D18 | Only buses are published (§4.3 lists bus, output, N-1, aux, group and monitor path; in M2 all of them are buses). An output is the bus post-fader; `format` maps it to another layout with D17. | §4.3. |
 | D19 | Changes of the mix are compiled on the control side. When only values differ (same node signatures), the new values go to the DSP thread as ramped messages (`ramp_ms`, default 10 ms). Otherwise the nodes whose wiring changes or that disappear ramp to 0, the API waits 10 ms + 3 blocks, then the new plan is swapped in; nodes with the same signature carry their current values over, new ones ramp in from 0. A rewiring answers about 16 ms later (block 96). | §2 (state preserved, nothing clicks), §17 (swap without discontinuities). |
 | D20 | Output writers live in DSP-thread slots, independent of the plan (writers stay open across swaps, §4.3). The commit size is staged in the slot: block n is committed when the staging holds `commit_samples`; after a deadline miss a partial staging is dropped. Publish fades in, SIGTERM fades out (10 ms) before the writers are released. | §4.3 commit size, G8 "fade outputs". |
-| D21 | Meters in M2: sample peak (since the last 40 ms update) and RMS over 300 ms per strip and bus, post-fader, through `GET /api/v1/meters`. True peak, loudness and PPM ballistics come with M3, the WebSocket with the UI (M4). | §19 (true peak and loudness in M3); §7's 25 Hz update. |
+| D21 | Meters in M2: sample peak (since the last 40 ms update), a peak hold (highest peak until cleared with `POST /api/v1/meters[/<id>]/clear`; kept across plan swaps) and RMS over 300 ms per strip and bus, post-fader, through `GET /api/v1/meters`. True peak, loudness and PPM ballistics come with M3, the WebSocket with the UI (M4). | §19 (true peak and loudness in M3); §7's 25 Hz update. |
 | D22 | MXL flow id of an output = UUIDv5(`NMOS_SEED`, `output/<bus>/mxl-flow`); it differs from the IS-04 Flow id (allowed by BCP-007-03). NMOS keys `out-<bus>` for Source, Flow and Sender; labels = bus name; group hint `<name>:Audio`. | §4.3, G3. |
 | D23 | IS-05 activations of a sender are accepted and reported; they do not stop or move the flow, which is written while the bus is published. | The flow belongs to the published signal; readers find it by its stable id. |
 | D24 | −∞ is `"-inf"` in JSON (fader and send gains). | JSON has no infinity. |
@@ -284,29 +284,18 @@ None.
   the same deadline, and the reader finds the previous block. The automatic delay
   covers it (3.25 ms effective in the hw dry run).
 
-### Questions (values chosen where the spec has none; `TODO_` until confirmed)
+### Answers (maintainer, 2026-10-11)
 
-1. `TODO_` defaults of a new strip, bus and send. I chose fader 0 dB, unmuted,
-   pan centre, width 1; a new send is 0 dB from a strip's post-pan or a bus's
-   post-fader. The alternative is new faders at −∞.
-2. `TODO_` trim range: ±24 dB.
-3. `TODO_` stereo width range: 0–2 (0 %–200 %).
-4. `TODO_` default stereo-to-mono sum: −3 dB. §5 offers −3 or −6 dB without a
-   default; the pan law default −3 dB is from the spec.
-5. `TODO_` meters: sample peak since the last 40 ms update and RMS over 300 ms,
-   metered post-fader.
-6. `TODO_` mono into 3.0 and the surround formats: the front L/R pair with the pan
-   law, not C.
-7. `TODO_` limit of 128 published outputs.
-8. §8.2 (spec change of 2026-10-11) asks to integrate a function of
-   `andyweiss/Com-IS-Assist`: the COM/IS loudness-ratio ducker (two VADs, four
-   states, three cascaded gain stages). That repository is GPLv3 and this one is
-   MIT, so its code cannot be copied in.
-   - Can its author license the `com-is-assist-core` crate under MIT or
-     Apache-2.0?
-   - Or should the mixer implement the algorithm from `Specs/TechnicalConcept.md`?
-
-   It belongs to milestone 7 (1.1.0).
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Defaults of a new strip, bus, send | Fader 0 dB, unmuted, pan centre, width 1; a send 0 dB from a strip's post-pan or a bus's post-fader. Accepted. |
+| 2 | Trim range | ±42 dB (changed from the proposed ±24). |
+| 3 | Stereo width range | 0–2. Accepted. |
+| 4 | Default stereo-to-mono sum | −3 dB. Accepted. |
+| 5 | Meters | Peak per 40 ms update and RMS over 300 ms, post-fader, accepted; plus a peak hold that is cleared manually (`POST /api/v1/meters[/<id>]/clear`). |
+| 6 | Mono into 3.0 and surround | Into C (changed from the proposed front L/R pair). |
+| 7 | Published outputs | At most 128. Accepted. |
+| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. |
 
 ## tests/hw scripts for the maintainers
 

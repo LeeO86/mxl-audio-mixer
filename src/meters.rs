@@ -1,6 +1,7 @@
 //! Meters (§7) on the control side: the DSP thread accumulates peak and energy
 //! per signal channel; every [`METER_TICK`] this takes the peak since the last
-//! tick and the RMS over [`RMS_WINDOW`].
+//! tick and the RMS over [`RMS_WINDOW`]. The peak hold keeps the highest peak per
+//! signal channel until it is cleared through the API; it survives plan swaps.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
@@ -31,6 +32,7 @@ struct Channel {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MeterValues {
     pub peak_dbfs: Vec<Db>,
+    pub peak_hold_dbfs: Vec<Db>,
     pub rms_dbfs: Vec<Db>,
 }
 
@@ -38,6 +40,7 @@ pub struct Meters {
     bank: Arc<MeterBank>,
     signals: Vec<(String, u32, usize)>,
     channels: Vec<Channel>,
+    holds: BTreeMap<String, Vec<f32>>,
 }
 
 impl Default for Meters {
@@ -46,6 +49,7 @@ impl Default for Meters {
             bank: Arc::new(MeterBank::new(0)),
             signals: Vec::new(),
             channels: Vec::new(),
+            holds: BTreeMap::new(),
         }
     }
 }
@@ -63,7 +67,35 @@ impl Meters {
     pub fn set_plan(&mut self, bank: Arc<MeterBank>, signals: Vec<(String, u32, usize)>) {
         self.channels = vec![Channel::default(); bank.channels.len()];
         self.bank = bank;
+        self.holds.retain(|s, hold| {
+            signals
+                .iter()
+                .any(|(signal, _, n)| signal == s && *n == hold.len())
+        });
+        for (signal, _, n) in &signals {
+            self.holds
+                .entry(signal.clone())
+                .or_insert_with(|| vec![0.0; *n]);
+        }
         self.signals = signals;
+    }
+
+    /// Clear the peak hold of `signal`, or of every signal; `false` when there is
+    /// no such signal.
+    pub fn clear_hold(&mut self, signal: Option<&str>) -> bool {
+        match signal {
+            Some(s) => match self.holds.get_mut(s) {
+                Some(hold) => {
+                    hold.fill(0.0);
+                    true
+                }
+                None => false,
+            },
+            None => {
+                self.holds.values_mut().for_each(|h| h.fill(0.0));
+                true
+            }
+        }
     }
 
     pub fn tick(&mut self) {
@@ -99,6 +131,14 @@ impl Meters {
                 0.0
             };
         }
+        for (signal, first, n) in &self.signals {
+            if let Some(hold) = self.holds.get_mut(signal) {
+                let peaks = &self.channels[*first as usize..*first as usize + n];
+                for (h, c) in hold.iter_mut().zip(peaks) {
+                    *h = h.max(c.peak);
+                }
+            }
+        }
     }
 
     pub fn values(&self) -> BTreeMap<String, MeterValues> {
@@ -107,10 +147,18 @@ impl Meters {
             .map(|(signal, first, n)| {
                 let range = *first as usize..*first as usize + n;
                 let chans = &self.channels[range];
+                let hold = self.holds.get(signal);
                 (
                     signal.clone(),
                     MeterValues {
                         peak_dbfs: chans.iter().map(|c| dbfs(f64::from(c.peak))).collect(),
+                        peak_hold_dbfs: (0..*n)
+                            .map(|i| {
+                                dbfs(f64::from(
+                                    hold.and_then(|h| h.get(i)).copied().unwrap_or(0.0),
+                                ))
+                            })
+                            .collect(),
                         rms_dbfs: chans.iter().map(|c| dbfs(c.rms)).collect(),
                     },
                 )
@@ -155,5 +203,14 @@ mod tests {
             meters.tick();
         }
         assert_eq!(meters.values()["main"].rms_dbfs[0], Db::MINUS_INF);
+        // The hold keeps the −6 dB peak through silence and a plan swap, until cleared.
+        assert!((meters.values()["main"].peak_hold_dbfs[0].0 + 6.0206).abs() < 1e-3);
+        let next = Arc::new(MeterBank::new(3));
+        meters.set_plan(next, vec![("other".into(), 0, 2), ("main".into(), 2, 1)]);
+        meters.tick();
+        assert!((meters.values()["main"].peak_hold_dbfs[0].0 + 6.0206).abs() < 1e-3);
+        assert!(!meters.clear_hold(Some("gone")));
+        assert!(meters.clear_hold(Some("main")));
+        assert_eq!(meters.values()["main"].peak_hold_dbfs[0], Db::MINUS_INF);
     }
 }

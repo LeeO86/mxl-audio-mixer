@@ -11,7 +11,7 @@ use super::format::{Format, Laws, MonoSum, PanLaw};
 /// Largest fader and send gain (§5: −∞ … +10 dB).
 pub const MAX_GAIN_DB: f64 = 10.0;
 /// Trim range, ± dB.
-pub const TRIM_RANGE_DB: f64 = 24.0;
+pub const TRIM_RANGE_DB: f64 = 42.0;
 /// Default parameter ramp (§2).
 pub const DEFAULT_RAMP_MS: f64 = 10.0;
 /// Longest parameter ramp accepted.

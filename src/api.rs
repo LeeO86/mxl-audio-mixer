@@ -6,7 +6,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -44,6 +44,8 @@ pub fn routes() -> Router<App> {
             get(output).put(put_output).delete(delete_output),
         )
         .route("/api/v1/meters", get(meters))
+        .route("/api/v1/meters/clear", post(clear_holds))
+        .route("/api/v1/meters/{signal}/clear", post(clear_hold))
 }
 
 pub type ApiResult<T> = Result<T, Box<Response>>;
@@ -580,4 +582,19 @@ async fn delete_output(State(app): State<App>, Path(signal): Path<String>) -> Re
 
 async fn meters(State(app): State<App>) -> Json<Value> {
     Json(json!(app.control().meters.values()))
+}
+
+/// Clear every peak hold.
+async fn clear_holds(State(app): State<App>) -> StatusCode {
+    app.control().meters.clear_hold(None);
+    StatusCode::NO_CONTENT
+}
+
+/// Clear the peak hold of one strip or bus.
+async fn clear_hold(State(app): State<App>, Path(signal): Path<String>) -> Response {
+    if app.control().meters.clear_hold(Some(&signal)) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        *not_found(format!("signal {signal} has no meter"))
+    }
 }

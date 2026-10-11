@@ -16,7 +16,7 @@
   `NMOS_SEED` and the bus id), commit staging (`MIXER_OUTPUT_COMMIT_SAMPLES`, per
   output overridable), fades on publish and on SIGTERM; NMOS Source, Flow and
   Sender per output.
-- Peak and RMS meters per strip and bus.
+- Peak, peak hold (cleared through the API) and RMS meters per strip and bus.
 - Metrics `plan_swaps_total`, `plan_compile_seconds`, `signals`, `nodes{type}`,
   `output_commit_lag_ms{output}`.
 - `mxl-mixer-probe`, a test reader.

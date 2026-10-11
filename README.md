@@ -87,7 +87,7 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Strip:** patch → trim and polarity → fader and mute → panner. `patch` has one
   entry per strip channel: `{"input": n, "channel": c}` (both from 1) or `null`. A
   channel the input does not have is silent and shows `missing` in `patch_state`.
-  `trim_db` ±24, `fader_db` `"-inf"` … +10, `pan` −1 … +1 (mono: position; stereo:
+  `trim_db` ±42, `fader_db` `"-inf"` … +10, `pan` −1 … +1 (mono: position; stereo:
   balance), `width` 0 … 2 (stereo; 1 unchanged). Taps: `input`, `pre-fader`,
   `post-fader`, `post-pan`. A mono strip is stereo after its panner.
 - **Bus:** sum of its sends → fader and mute. Taps: `pre-fader`, `post-fader`.
@@ -107,7 +107,8 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Width mapping** (sends and outputs): same channels map 1:1; missing ones fold
   down at −3 dB per step (ITU-R BS.775; LFE dropped): C → L + R; Ls → L (or Lss);
   Lss, Lrs → Ls; Ltf → L; Ltr → Lrs (or Ls); stereo → mono with the stereo-to-mono
-  sum; mono → L + R with the pan law; channels the source lacks stay silent.
+  sum; mono → C (3.0 and the surround formats) or L + R with the pan law
+  (stereo); channels the source lacks stay silent.
 - **Mix settings:** `pan_law_db` 0, −3 (default), −4.5, −6; `mono_sum_db` −3
   (default) or −6.
 
@@ -151,7 +152,8 @@ e.g. `strips/vox/fader_db`, `sends/vox/main/gain_db`, `buses/main/mute`.
 | `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
 | `GET /api/v1/outputs`, `GET /api/v1/outputs/<bus>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
 | `PUT`, `DELETE /api/v1/outputs/<bus>` | publish (`{"format": …, "commit_samples": …}`, both optional) or unpublish |
-| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update) and `rms_dbfs` (300 ms) |
+| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared) and `rms_dbfs` (300 ms) |
+| `POST /api/v1/meters/clear`, `POST /api/v1/meters/<id>/clear` | clear every peak hold, or one signal's |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
 | `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |

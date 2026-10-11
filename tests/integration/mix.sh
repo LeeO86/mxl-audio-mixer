@@ -91,6 +91,16 @@ peak=$(json "$WEB/api/v1/meters" "d['vox']['peak_dbfs'][0]")
 python3 -c "exit(0 if -20.5 < $peak < -19.5 else 1)" || fail "vox meter peak $peak dBFS, not about −20"
 pass "meters: vox peak $peak dBFS"
 
+hold=$(json "$WEB/api/v1/meters" "d['vox']['peak_hold_dbfs'][0]")
+python3 -c "exit(0 if -20.5 < $hold < -19.5 else 1)" || fail "vox peak hold $hold dBFS"
+api PATCH /api/v1/strips/vox '{"mute": true}' >/dev/null
+sleep 0.3
+curl -fsS -X POST "$WEB/api/v1/meters/vox/clear"
+sleep 0.2
+[[ "$(json "$WEB/api/v1/meters" "d['vox']['peak_hold_dbfs'][0]")" == -inf ]] || fail "peak hold not cleared"
+api PATCH /api/v1/strips/vox '{"mute": false}' >/dev/null
+pass "peak hold $hold dBFS, cleared on request"
+
 sender=$(json "$NMOS/x-nmos/node/v1.3/senders" "[s['id'] for s in d if s['label'] == 'Main'][0]")
 active_flow=$(json "$NMOS/x-nmos/connection/v1.2/single/senders/$sender/active" "d['transport_params'][0]['mxl_flow_id']")
 [[ "$active_flow" == "$OUT_FLOW" ]] || fail "sender active mxl_flow_id $active_flow, not $OUT_FLOW"

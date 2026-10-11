@@ -183,7 +183,8 @@ fn db_to_gain(db: f64) -> f64 {
 /// ones it has (ITU-R BS.775 down-mix at −3 dB per step, LFE dropped):
 /// C → L + R; Ls → L (or Lss when `dst` has side surrounds); Lss, Lrs → Ls;
 /// Ltf → L; Ltr → Lrs (or Ls); L, R → mono with the stereo-to-mono sum; mono →
-/// L + R with the pan law. Channels `dst` has and `src` lacks stay silent.
+/// C, or L + R with the pan law when `dst` has no C. Channels `dst` has and `src`
+/// lacks stay silent.
 pub fn width_matrix(src: Format, dst: Format, laws: Laws) -> Vec<f32> {
     let columns = src.channels();
     let mut m = vec![0f64; dst.channels() * columns];
@@ -201,6 +202,7 @@ fn fold(label: &str, dst: Format, gain: f64, laws: Laws, add: &mut dyn FnMut(usi
     let h = FRAC_1_SQRT_2;
     let mut to = |l: &str, g: f64| fold(l, dst, gain * g, laws, add);
     match label {
+        "M" if dst.index("C").is_some() => to("C", 1.0),
         "M" => {
             let (l, r) = pan_gains(0.0, laws.pan);
             to("L", l);
@@ -352,9 +354,13 @@ mod tests {
         };
         let m = width_matrix(Format::Stereo, Format::Mono, six);
         assert!(close(m[0].into(), 0.501_187_2));
-        // Mono into 5.1 goes to the front pair.
-        let m = width_matrix(Format::Mono, Format::Surround51, laws);
-        assert!(m[0] > 0.7 && m[1] > 0.7 && m[2..].iter().all(|g| *g == 0.0));
+        // Mono into 3.0 and the surround formats goes to C.
+        for dst in [Format::Lcr, Format::Surround51, Format::Surround714] {
+            let m = width_matrix(Format::Mono, dst, laws);
+            for (d, g) in m.iter().enumerate() {
+                assert_eq!(*g, if d == 2 { 1.0 } else { 0.0 }, "{dst:?}");
+            }
+        }
     }
 
     #[test]
