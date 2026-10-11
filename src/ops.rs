@@ -245,6 +245,12 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
     }
     let mut output_errors = Vec::new();
     if let Some(mix) = show.mix {
+        {
+            let control = app.control();
+            if let Err(e) = control.history.record(&control.mix, None) {
+                tracing::warn!("show history before import: {e}");
+            }
+        }
         match crate::api::apply(&app, crate::engine::FADE_SAMPLES, move |m| {
             *m = mix;
             Ok(())

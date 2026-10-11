@@ -112,6 +112,7 @@ impl Control {
     pub fn tick(&mut self) {
         self.engine.collect();
         self.inputs.tick(&mut self.engine);
+        self.history.tick(&self.mix);
     }
 
     /// The meter tick (§7, 25 Hz): meters, loudness, the analyser.

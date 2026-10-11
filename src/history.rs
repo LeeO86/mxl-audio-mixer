@@ -1,8 +1,10 @@
 //! Show history (§12.5): versions of the mix in `<state dir>/history/`.
 //!
-//! After a change, a version is kept when the last automatic one is older than
-//! [`AUTO_INTERVAL`]; the newest [`AUTO_KEEP`] automatic versions stay. Named
-//! versions (saved by an operator) are never removed automatically.
+//! A changed show is kept as an automatic version at most every
+//! [`AUTO_INTERVAL`]: at once when the last one is older, otherwise when that
+//! interval has passed (the control tick). The newest [`AUTO_KEEP`] automatic
+//! versions stay. Named versions (saved by an operator) are never removed
+//! automatically.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -38,6 +40,8 @@ pub struct Entry {
 pub struct History {
     dir: PathBuf,
     last_auto: Option<Instant>,
+    /// Changed since the last automatic version.
+    dirty: bool,
 }
 
 pub fn now_ms() -> u64 {
@@ -55,6 +59,7 @@ impl History {
         Self {
             dir: state_dir.join("history"),
             last_auto: None,
+            dirty: false,
         }
     }
 
@@ -79,11 +84,19 @@ impl History {
         Ok(id)
     }
 
-    /// After a change: keep an automatic version if the last one is old enough.
+    /// After a change: keep an automatic version now if the last one is old
+    /// enough, otherwise later from [`History::tick`].
     pub fn changed(&mut self, mix: &Mix) {
-        if self.last_auto.is_some_and(|t| t.elapsed() < AUTO_INTERVAL) {
+        self.dirty = true;
+        self.tick(mix);
+    }
+
+    /// The control tick: keep a pending change once the interval has passed.
+    pub fn tick(&mut self, mix: &Mix) {
+        if !self.dirty || self.last_auto.is_some_and(|t| t.elapsed() < AUTO_INTERVAL) {
             return;
         }
+        self.dirty = false;
         match self.record(mix, None) {
             Ok(_) => {
                 self.last_auto = Some(Instant::now());
@@ -157,9 +170,31 @@ mod tests {
         let mut h = History::new(&dir);
         let mut mix = Mix::default();
         h.changed(&mix);
-        // Within the interval: no second automatic version.
+        // Within the interval: no second automatic version yet, but one once the
+        // interval has passed.
         mix.settings.loudness_target_lufs = -24.0;
         h.changed(&mix);
+        h.tick(&mix);
+        assert_eq!(h.list().len(), 1);
+        h.last_auto = Some(Instant::now() - AUTO_INTERVAL);
+        h.tick(&mix);
+        assert_eq!(h.list().len(), 2);
+        assert_eq!(
+            h.get(&h.list()[0].id)
+                .unwrap()
+                .settings
+                .loudness_target_lufs,
+            -24.0
+        );
+        h.tick(&mix);
+        assert_eq!(h.list().len(), 2, "nothing changed since");
+        for e in h.list() {
+            h.delete(&e.id).unwrap();
+        }
+        h.changed(&mix);
+        assert_eq!(h.list().len(), 0, "within the interval again");
+        h.last_auto = Some(Instant::now() - AUTO_INTERVAL);
+        h.tick(&mix);
         assert_eq!(h.list().len(), 1);
         let named = h.record(&mix, Some("before show".into())).unwrap();
         let list = h.list();
