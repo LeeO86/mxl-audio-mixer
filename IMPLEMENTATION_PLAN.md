@@ -331,7 +331,7 @@ None.
 | D33 | Taps pre/post-EQ and pre/post-dynamics: the input of the first and the output of the last node of that kind (EQ: `eq`, `filter`, `dynamic-eq`; dynamics: the compressors, limiter, expander, gate, de-esser, ducker, multiband). Without such a node both are the chain's input. `{"after": id}` taps after any node. A key reads another signal's tap, never its own. | §5 tap list. A key from the node's own signal could form a loop inside a block. |
 | D34 | All signals are scheduled in one dependency order: sends and keys are edges, block-delay sends are not. A loop without a block-delay send is rejected and the message names the loop. | §4.4 feedback rule; keys need their source first. |
 | D35 | Delay compensation per bus (`compensate`, default on): every send is delayed to the largest latency among the bus's sends. Keys and block-delay sends are left out. Outputs report `processing_latency_ms` and `latency_ms` = read offset + one block + processing (local inputs; mirrored ones add their extra delay). | §4.4, §12 "resulting latency per output". |
-| D36 | Loudness per signal with `loudness: true`, post-fader. The DSP thread sends exact 100 ms segment energies (aligned to the sample index); the control side gates and computes momentary, short-term, integrated and LRA. The meter lives in a DSP slot of its own, so the integration continues over plan swaps. A measurement runs from when it is switched on; stop, reset and start through the API. | §7 BS.1770 / R 128 / Tech 3342; "start/stop/reset … from UI, logic or API". Exact segments are what the gating needs. |
+| D36 | Loudness per signal with `loudness: true`, post-fader. The DSP thread sends exact 10 ms segment energies (aligned to the sample index; 100 ms before the EBU file tests, see below); the control side gates and computes momentary, short-term, integrated and LRA. The meter lives in a DSP slot of its own, so the integration continues over plan swaps. A measurement runs from when it is switched on; stop, reset and start through the API. | §7 BS.1770 / R 128 / Tech 3342; "start/stop/reset … from UI, logic or API". Exact segments are what the gating needs. |
 | D37 | True peak: a 4× polyphase interpolator of my own design (48-tap Kaiser-windowed sinc, β 6, every phase at unity DC gain), on every meter channel. BS.1770-4 allows other filters than its example. | §7 "true peak (ITU-R BS.1770 oversampling)". |
 | D38 | A change of a chain's structure (a node added, removed, moved, or a type or structural parameter changed) fades the signal's fader, sends and output out and in around the swap; processors whose own structure did not change keep their state (filter memories, envelopes). | §2: no clicks, state kept for unchanged nodes. |
 | D39 | After a missed deadline the DSP thread commits what it staged and writes silence over the output blocks it skips, and counts them in `dsp_deadline_misses_total`. | Found in testing (below): unwritten ranges kept the ring's samples of one buffer length earlier, which readers took for fresh audio. |
@@ -395,18 +395,38 @@ None.
   them. On this shared VM that happens about once in ten runs; a gap without either
   still fails the test.
 
-### Questions
+### Answers (maintainer, 2026-10-11)
 
-1. `TODO_` value ranges: EQ gain ±24 dB, Q 0.1–40, thresholds −100…0 dB, ratio up
-   to 1000 (≈ ∞), knee 0–24 dB, makeup ±24 dB, limiter look-ahead 0.1–20 ms and
-   ceiling −40…0 dB, delay node at most 2000 ms, a chain at most 32 nodes.
-2. `TODO_` loudness: tolerance default ±1 LU around −23 LUFS (R 128 live
-   programmes); a measurement starts running when `loudness` is switched on.
-3. The linear-phase multiband crossover (X3): in the performance milestone (M10), or
-   not at all?
-4. EBU Tech 3341 cases 7–23 and Tech 3342 cases 5–6 use the EBU's authentic
-   programme files. May CI download the EBU test set (not committed), or do the
-   synthetic cases suffice?
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Value ranges (EQ gain ±24 dB, Q 0.1–40, thresholds −100…0 dB, ratio ≤ 1000, knee 0–24 dB, makeup ±24 dB, look-ahead 0.1–20 ms, ceiling −40…0 dB, delay ≤ 2000 ms, ≤ 32 nodes) | Accepted. |
+| 2 | Loudness tolerance ±1 LU around −23 LUFS; running when switched on | Accepted, both. |
+| 3 | Linear-phase multiband crossover (X3) | In M10; ask again then. |
+| 4 | EBU authentic test files | Download them in CI (below). |
+| 5 | Merge PR 4 | Merged. |
+
+### EBU test set (after the answers)
+
+- `tests/ebu_loudness.rs` runs the EBU loudness test set v5 through the mixer's
+  pipeline (segment meter in 96-sample blocks, gating, true-peak interpolator). CI
+  downloads it (87 MB, cached), checks the official file's SHA-256 (`9cc500b4…b062`)
+  and runs it with `cargo test`. Without `EBU_TEST_SET` the test is skipped.
+- The download: tech.ebu.ch answers automated requests with a Cloudflare challenge
+  (403). A GitHub release of the same zip, hosted with the EBU's permission
+  (`maxwalley/EBULoudnessTestSetV5`), is used, verified by the hash.
+- The expected values are those of Tech 3341 and Tech 3342. The `sdroege/ebur128`
+  reference tests helped to read them per file.
+- First run: everything passed except case 13-2 (maximum momentary −23.22 LUFS
+  instead of −23.0 ± 0.1). Momentary loudness came every 100 ms, so a burst's
+  maximum between two steps was missed. The DSP segments are now 10 ms (480
+  samples, still aligned to the sample index): momentary and short-term every 10 ms,
+  gating blocks and range values every 100 ms as before.
+- Result: **Tech 3341 cases 1–23 and Tech 3342 cases 1–6 pass on the EBU files**:
+  - integrated (1–8, incl. 5.0 and the 6-channel WAVE-EX file), ±0.1 LU;
+  - momentary and short-term constant (1, 2, 9, 12) and maximum (10, 11, 13, 14),
+    ±0.1 LU;
+  - true peak (15–23), +0.2 / −0.4 dB;
+  - loudness range (3342 1–6), ±1 LU.
 
 ## tests/hw scripts for the maintainers
 

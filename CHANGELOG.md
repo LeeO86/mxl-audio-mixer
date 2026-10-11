@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### EBU test set
+
+- Loudness checked on the EBU loudness test set v5 in CI: Tech 3341 cases 1–23,
+  Tech 3342 cases 1–6. Momentary and short-term loudness now update every 10 ms.
+
 ### Milestone 3: EQ, filters, dynamics, delay, delay compensation, loudness
 
 - Processing chains on strips and buses: EQ (8 bands), Butterworth filters

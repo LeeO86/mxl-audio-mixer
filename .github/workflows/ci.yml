@@ -47,7 +47,22 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
-      - run: cargo test
+      # EBU loudness test set v5 (87 MB, not committed). tech.ebu.ch refuses
+      # automated downloads; this GitHub copy is hosted with the EBU's permission and
+      # is checked against the official file's SHA-256.
+      - name: EBU loudness test set v5
+        id: ebu-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ebu-loudness-test-set
+          key: ebu-loudness-test-setv05-9cc500b4df83f7c2
+      - if: steps.ebu-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/ebu-loudness-test-set && cd ~/ebu-loudness-test-set
+          curl -fsSL --retry 3 -o ebu.zip https://github.com/maxwalley/EBULoudnessTestSetV5/releases/download/EBU_Loudness_Test_Set_v5/ebu-loudness-test-setv05.zip
+          echo "9cc500b4df83f7c21855c74dce795ef5209a752bf884253ae57d0ce512efb062  ebu.zip" | sha256sum -c
+          unzip -q ebu.zip && rm ebu.zip
+      - run: EBU_TEST_SET="$HOME/ebu-loudness-test-set" cargo test
 
   integration:
     name: Integration (libmxl, nmos-cpp registry, AMWA)
