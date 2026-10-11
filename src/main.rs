@@ -179,7 +179,7 @@ async fn run(config: Config) -> ExitCode {
                     None => break,
                 },
                 _ = tick.tick() => lock().tick(),
-                _ = meter_tick.tick() => lock().meters.tick(),
+                _ = meter_tick.tick() => lock().meter_tick(),
             }
         }
     });

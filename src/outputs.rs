@@ -51,6 +51,11 @@ pub struct OutputStatus {
     pub commits: u64,
     pub errors: u64,
     pub commit_lag_ms: f64,
+    /// Processing latency of the bus (look-ahead, delay compensation).
+    pub processing_latency_ms: f64,
+    /// Input sample to output sample for local inputs (§4.4): read offset + one
+    /// block + processing latency. Mirrored inputs add their extra delay.
+    pub latency_ms: f64,
 }
 
 pub fn nmos_key(signal: &str) -> String {
@@ -282,6 +287,8 @@ impl Outputs {
                     commits: c.commits.load(Relaxed),
                     errors: c.errors.load(Relaxed),
                     commit_lag_ms: c.commit_lag_us.load(Relaxed) as f64 / 1000.0,
+                    processing_latency_ms: 0.0,
+                    latency_ms: 0.0,
                 }
             })
             .collect();

@@ -13,6 +13,7 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::engine::{Command, Engine, NodeId, FADE_SAMPLES};
 use crate::inputs::Inputs;
+use crate::loudness::LoudnessMeters;
 use crate::meters::Meters;
 use crate::mix::compile::{Compiler, LayoutNode};
 use crate::mix::model::{Kind, Mix, Strip, Tap};
@@ -47,13 +48,18 @@ pub struct Control {
     pub inputs: Inputs,
     pub outputs: Outputs,
     pub meters: Meters,
+    pub loudness: LoudnessMeters,
     pub mix: Mix,
     node: mxl_nmos::Node,
     compiler: Compiler,
     layout: HashMap<NodeId, LayoutNode>,
+    procs: HashMap<NodeId, LayoutNode>,
+    /// Processing latency of each signal's post-fader point, in samples.
+    pub latency: HashMap<String, usize>,
     structure: Option<u64>,
     pending: Option<Mix>,
     block: u32,
+    read_offset: u32,
     input_count: usize,
     default_commit: u32,
     mix_path: PathBuf,
@@ -76,13 +82,17 @@ impl Control {
             inputs,
             outputs,
             meters: Meters::default(),
+            loudness: LoudnessMeters::default(),
             mix: Mix::default(),
             node,
             compiler: Compiler::default(),
             layout: HashMap::new(),
+            procs: HashMap::new(),
+            latency: HashMap::new(),
             structure: None,
             pending: None,
             block: config.block_samples,
+            read_offset: config.read_offset_samples,
             input_count: config.input_flows,
             default_commit: config.output_commit_samples,
             mix_path: config.state_dir.join("mix.json"),
@@ -97,6 +107,13 @@ impl Control {
         self.inputs.tick(&mut self.engine);
     }
 
+    /// The meter tick (§7, 25 Hz): meters, then loudness.
+    pub fn meter_tick(&mut self) {
+        self.meters.tick();
+        let true_peaks = self.meters.true_peaks();
+        self.loudness.tick(&true_peaks);
+    }
+
     fn specs(&self, mix: &Mix) -> Vec<OutputSpec> {
         mix.outputs
             .iter()
@@ -104,7 +121,7 @@ impl Control {
                 let (name, _) = mix.signal(&o.signal)?;
                 let format = match o.format {
                     Some(f) => f,
-                    None => mix.tap_format(&o.signal, Tap::PostFader)?,
+                    None => mix.tap_format(&o.signal, &Tap::PostFader)?,
                 };
                 Some(OutputSpec {
                     signal: o.signal.clone(),
@@ -126,6 +143,7 @@ impl Control {
             self.block as usize,
             FADE_SAMPLES,
             &self.outputs.slots(),
+            &self.loudness.slots(),
         );
         let same_outputs = self
             .specs(&next)
@@ -135,13 +153,25 @@ impl Control {
                 .specs(&self.mix)
                 .iter()
                 .map(|s| (&s.signal, s.format, s.commit)));
-        if self.structure == Some(compiled.structure) && same_outputs {
+        let same_loudness = LoudnessMeters::wanted(&next) == self.loudness.measured();
+        if self.structure == Some(compiled.structure) && same_outputs && same_loudness {
             for (id, n) in &compiled.nodes {
                 if self.layout.get(id).map(|o| &o.values) != Some(&n.values) {
                     self.engine.param(*id, &n.values, ramp);
                 }
             }
+            for (id, p) in &compiled.procs {
+                let Some(old) = self.procs.get(id) else {
+                    continue;
+                };
+                for (i, (v, o)) in p.values.iter().zip(old.values.iter()).enumerate() {
+                    if v != o {
+                        self.engine.proc_param(*id, i, *v, ramp);
+                    }
+                }
+            }
             self.layout = compiled.nodes;
+            self.procs = compiled.procs;
             let renamed = self.specs(&next) != self.specs(&self.mix);
             self.mix = next;
             if renamed {
@@ -177,27 +207,40 @@ impl Control {
         let errors = self.outputs.sync(&mut self.engine, &self.node, &specs);
         let slots = self.outputs.slots();
         next.outputs.retain(|o| slots.contains_key(&o.signal));
+        self.loudness.sync(&mut self.engine, &next);
         let started = Instant::now();
-        let mut compiled = self
-            .compiler
-            .compile(&next, self.block as usize, FADE_SAMPLES, &slots);
+        let mut compiled = self.compiler.compile(
+            &next,
+            self.block as usize,
+            FADE_SAMPLES,
+            &slots,
+            &self.loudness.slots(),
+        );
         self.compile_seconds = started.elapsed().as_secs_f64();
-        compiled.plan.carry = compiled
-            .nodes
-            .iter()
-            .filter_map(|(id, n)| {
-                let old = self.layout.get(id)?;
-                (old.signature == n.signature).then_some((n.index, old.index))
-            })
-            .collect();
+        let carry = |new: &HashMap<NodeId, LayoutNode>, old: &HashMap<NodeId, LayoutNode>| {
+            new.iter()
+                .filter_map(|(id, n)| {
+                    let o = old.get(id)?;
+                    (o.signature == n.signature).then_some((n.index, o.index))
+                })
+                .collect()
+        };
+        compiled.plan.carry = carry(&compiled.nodes, &self.layout);
+        compiled.plan.proc_carry = carry(&compiled.procs, &self.procs);
         self.step_counts = BTreeMap::new();
         for step in &compiled.plan.steps {
             *self.step_counts.entry(step.kind()).or_default() += 1;
         }
         self.meters
             .set_plan(compiled.plan.meters.clone(), compiled.meters.clone());
+        self.meters.set_nodes(
+            compiled.plan.node_meters.clone(),
+            compiled.node_meters.clone(),
+        );
         self.engine.send(Command::SetPlan(Box::new(compiled.plan)));
         self.layout = compiled.nodes;
+        self.procs = compiled.procs;
+        self.latency = compiled.latency;
         self.structure = Some(compiled.structure);
         self.mix = next;
         self.save()?;
@@ -223,6 +266,17 @@ impl Control {
                 Some(_) => PatchState::Missing,
             })
             .collect()
+    }
+
+    /// The published outputs with their latency.
+    pub fn output_status(&self) -> Vec<crate::outputs::OutputStatus> {
+        let mut status = self.outputs.status(&self.engine, &self.node);
+        for o in &mut status {
+            let processing = self.latency.get(&o.signal).copied().unwrap_or(0) as f64 / 48.0;
+            o.processing_latency_ms = processing;
+            o.latency_ms = f64::from(self.read_offset + self.block) / 48.0 + processing;
+        }
+        status
     }
 
     pub fn signals(&self) -> usize {

@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::config::SAMPLE_RATE;
-use crate::engine::plan::MeterBank;
+use crate::engine::plan::{MeterBank, NodeMeter};
 use crate::mix::model::Db;
 
 /// Meter update period (§7: about 25 Hz).
@@ -25,15 +25,27 @@ struct Channel {
     samples: u64,
     window: VecDeque<(f64, u64)>,
     peak: f32,
+    true_peak: f32,
     rms: f64,
 }
 
-/// One signal's meter values per channel, in dBFS.
+/// One processing node's meters: gain reduction (dB, ≥ 0) and the peaks at its
+/// input and output since the last update.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct NodeValues {
+    pub gain_reduction_db: f64,
+    pub in_peak_dbfs: Db,
+    pub out_peak_dbfs: Db,
+}
+
+/// One signal's meter values per channel, in dBFS (true peak in dBTP).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MeterValues {
     pub peak_dbfs: Vec<Db>,
     pub peak_hold_dbfs: Vec<Db>,
+    pub true_peak_dbtp: Vec<Db>,
     pub rms_dbfs: Vec<Db>,
+    pub nodes: BTreeMap<String, NodeValues>,
 }
 
 pub struct Meters {
@@ -41,6 +53,9 @@ pub struct Meters {
     signals: Vec<(String, u32, usize)>,
     channels: Vec<Channel>,
     holds: BTreeMap<String, Vec<f32>>,
+    node_bank: Arc<[NodeMeter]>,
+    nodes: Vec<(String, String, usize)>,
+    node_values: Vec<(f32, f32, f32)>,
 }
 
 impl Default for Meters {
@@ -50,6 +65,9 @@ impl Default for Meters {
             signals: Vec::new(),
             channels: Vec::new(),
             holds: BTreeMap::new(),
+            node_bank: Arc::new([]),
+            nodes: Vec::new(),
+            node_values: Vec::new(),
         }
     }
 }
@@ -80,6 +98,27 @@ impl Meters {
         self.signals = signals;
     }
 
+    /// Follow a new plan's node meters; `nodes` is `(signal, node id, slot)`.
+    pub fn set_nodes(&mut self, bank: Arc<[NodeMeter]>, nodes: Vec<(String, String, usize)>) {
+        self.node_values = vec![(0.0, 0.0, 0.0); bank.len()];
+        self.node_bank = bank;
+        self.nodes = nodes;
+    }
+
+    /// Each signal's largest true peak (linear) since the last tick.
+    pub fn true_peaks(&self) -> BTreeMap<String, f32> {
+        self.signals
+            .iter()
+            .map(|(s, first, n)| {
+                let range = *first as usize..*first as usize + n;
+                let tp = self.channels[range]
+                    .iter()
+                    .fold(0f32, |m, c| m.max(c.true_peak));
+                (s.clone(), tp)
+            })
+            .collect()
+    }
+
     /// Clear the peak hold of `signal`, or of every signal; `false` when there is
     /// no such signal.
     pub fn clear_hold(&mut self, signal: Option<&str>) -> bool {
@@ -103,6 +142,7 @@ impl Meters {
         for (i, m) in self.bank.channels.iter().enumerate() {
             let c = &mut self.channels[i];
             c.peak = f32::from_bits(m.peak.swap(0, Ordering::Relaxed));
+            c.true_peak = f32::from_bits(m.true_peak.swap(0, Ordering::Relaxed));
             let energy = f64::from_bits(m.energy.load(Ordering::Relaxed));
             let samples = m.samples.load(Ordering::Relaxed);
             c.window
@@ -130,6 +170,13 @@ impl Meters {
             } else {
                 0.0
             };
+        }
+        for (v, m) in self.node_values.iter_mut().zip(self.node_bank.iter()) {
+            *v = (
+                f32::from_bits(m.reduction.swap(0, Ordering::Relaxed)),
+                f32::from_bits(m.in_peak.swap(0, Ordering::Relaxed)),
+                f32::from_bits(m.out_peak.swap(0, Ordering::Relaxed)),
+            );
         }
         for (signal, first, n) in &self.signals {
             if let Some(hold) = self.holds.get_mut(signal) {
@@ -159,7 +206,27 @@ impl Meters {
                                 ))
                             })
                             .collect(),
+                        true_peak_dbtp: chans
+                            .iter()
+                            .map(|c| dbfs(f64::from(c.true_peak)))
+                            .collect(),
                         rms_dbfs: chans.iter().map(|c| dbfs(c.rms)).collect(),
+                        nodes: self
+                            .nodes
+                            .iter()
+                            .filter(|(s, _, _)| s == signal)
+                            .filter_map(|(_, node, slot)| {
+                                let (gr, i, o) = *self.node_values.get(*slot)?;
+                                Some((
+                                    node.clone(),
+                                    NodeValues {
+                                        gain_reduction_db: f64::from(gr),
+                                        in_peak_dbfs: dbfs(f64::from(i)),
+                                        out_peak_dbfs: dbfs(f64::from(o)),
+                                    },
+                                ))
+                            })
+                            .collect(),
                     },
                 )
             })
