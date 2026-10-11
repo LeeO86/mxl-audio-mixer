@@ -9,6 +9,14 @@ COPY scripts/build-mxl.sh /usr/local/bin/build-mxl.sh
 RUN VCPKG_ROOT=/opt/vcpkg MXL_BUILD_DIR=/tmp/mxl /usr/local/bin/build-mxl.sh /opt/mxl \
     && rm -rf /tmp/mxl /opt/vcpkg/buildtrees /opt/vcpkg/downloads
 
+FROM node:22-bookworm-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/index.html web/vite.config.js ./
+COPY web/src ./src
+RUN npm run build
+
 FROM ubuntu:24.04 AS build
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential curl ca-certificates git pkg-config clang libclang-dev \
@@ -16,8 +24,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
 WORKDIR /src
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY src ./src
+COPY --from=web /web/dist/index.html ./web/dist/index.html
 RUN cargo build --release --locked --bins \
     && install -m 0755 target/release/mxl-audio-mixer target/release/mxl-mixer-tone \
         target/release/mxl-mixer-probe /usr/local/bin/

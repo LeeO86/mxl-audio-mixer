@@ -2,3 +2,5 @@ target
 spikes
 ci-artifacts
 .git
+web/node_modules
+web/dist
