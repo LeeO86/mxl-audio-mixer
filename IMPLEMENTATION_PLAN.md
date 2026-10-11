@@ -12,13 +12,14 @@ current so that work can resume after an interruption.
 | M0b spike: NMOS audio receiver + sender on real flows, AMWA | done (below) |
 | M0c spike: MXL float32 read/write on the TAI block clock, jitter | done on the dev VM (below); real-time run: `tests/hw/m0-block-clock` (maintainers) |
 | M1 skeleton, config, ops, metrics, CI, image, MXL I/O | done, merged (PRs 1 and 2) |
-| M2 plan compiler and DSP core, buses, sends, outputs, meters, input patch | done, in review (branch `cursor/m2-plan-dsp-core-4d44`, PR 3) |
+| M2 plan compiler and DSP core, buses, sends, outputs, meters, input patch | done, merged (PR 3) |
+| M3 EQ, filters, dynamics, de-esser, delay; delay compensation; true peak and loudness | done, in review (branch `cursor/m3-eq-dynamics-loudness-4d44`, PR 4) |
 
 ## Resume
 
 - `mxl-nmos` v0.1.1 is released; the mixer depends on the tag.
 - Strom: the four patches are in `mxl-nmos` `contrib/strom-switch/` (README: how to apply).
-- This repo: `main` has M0 and M1; M2 is on `cursor/m2-plan-dsp-core-4d44`.
+- This repo: `main` has M0–M2; M3 is on `cursor/m3-eq-dynamics-loudness-4d44`.
 - Environment: `docs/development.md`.
 
 ## Decisions
@@ -295,6 +296,117 @@ None.
 | 6 | Mono into 3.0 and surround | Into C (changed from the proposed front L/R pair). |
 | 7 | Published outputs | At most 128. Accepted. |
 | 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. |
+
+## M3: EQ, filters, dynamics, delay; delay compensation; true peak and loudness
+
+### What exists
+
+- `src/dsp/`: biquads (RBJ cookbook, Butterworth cascades), dynamics building blocks
+  (gain computers, ballistics, sliding minimum, look-ahead gain), the true-peak
+  interpolator, BS.1770-4 K-weighting with the segment meter and the gating, loudness
+  range.
+- `src/mix/chain.rs`: the node types with validation, the smoothed parameter vector,
+  structural signature and latency of each.
+- `src/engine/proc.rs`: the processors as the DSP thread runs them (storage allocated
+  on the control side), with per-block parameter ramps, the bypass crossfade, node
+  meters and state handover.
+- `src/mix/compile.rs`: all signals in dependency order; chains as process steps;
+  named and after-node taps; keys; per-bus delay compensation; block-delay sends
+  through a hold; true peak on every meter; loudness steps.
+- `src/loudness.rs`: loudness meters per signal in DSP slots of their own, with
+  start/stop/reset.
+- API: chain nodes, loudness; meters with true peak and node meters.
+- `tests/integration/processing.sh`.
+
+### Decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D27 | A strip runs trim → chain → fader → panner; a bus runs sum → chain → fader. Trim, fader and panner stay fixed stages (D15); the chain holds the §6 nodes. | §2 "channel strips are processing graphs" with nodes added, removed and reordered at runtime; the console stages every strip has. |
+| D28 | Every node parameter is required when a node is created; the engine invents no defaults. Ranges are validated (README table). | "Unknown values are never invented." The UI (M4) supplies its defaults. |
+| D29 | Dynamics after Giannoulis, Massberg and Reiss (JAES 2012): feed-forward, quadratic soft knee, smooth branching ballistics on the gain in dB. Detection is linked: the largest level of all channels. `peak` is the instantaneous level; `rms` smooths the mean square with the attack (rising) and release (falling) times. Expanders and gates smooth the level instead, so that a sine's zero crossings do not close them. Attack and release are time constants (63 %). De-esser and ducker ballistics are parameters too. | §6 "documented detector types (peak/RMS), ballistics", "linked operation across multichannel signals". §6 names no de-esser ballistics; they need values, so they are parameters, not invented constants. |
+| D30 | Limiter: required gain → sliding minimum over the look-ahead + 1 → average over the look-ahead (the attack) → exponential release. The output delayed by the look-ahead never exceeds the ceiling (sample peaks); `true_peak` detects on 4× oversampled peaks. Latency = look-ahead. | §6 "look-ahead, true-peak option"; a provable ceiling. |
+| D31 | Filters are RBJ cookbook biquads and Butterworth cascades, in transposed direct form II in f64. Coefficients are recomputed every block while a parameter ramps. | §6 "biquads … with coefficient smoothing; designs documented with references". Recomputing per block keeps every intermediate filter a valid design, which interpolating coefficients would not. |
+| D32 | Bypass crossfades the wet share over one block; the dry path is delayed by the node's latency. A bypassed node keeps running, so it can come back without a jump. | §6 "bypass" without clicks. |
+| D33 | Taps pre/post-EQ and pre/post-dynamics: the input of the first and the output of the last node of that kind (EQ: `eq`, `filter`, `dynamic-eq`; dynamics: the compressors, limiter, expander, gate, de-esser, ducker, multiband). Without such a node both are the chain's input. `{"after": id}` taps after any node. A key reads another signal's tap, never its own. | §5 tap list. A key from the node's own signal could form a loop inside a block. |
+| D34 | All signals are scheduled in one dependency order: sends and keys are edges, block-delay sends are not. A loop without a block-delay send is rejected and the message names the loop. | §4.4 feedback rule; keys need their source first. |
+| D35 | Delay compensation per bus (`compensate`, default on): every send is delayed to the largest latency among the bus's sends. Keys and block-delay sends are left out. Outputs report `processing_latency_ms` and `latency_ms` = read offset + one block + processing (local inputs; mirrored ones add their extra delay). | §4.4, §12 "resulting latency per output". |
+| D36 | Loudness per signal with `loudness: true`, post-fader. The DSP thread sends exact 100 ms segment energies (aligned to the sample index); the control side gates and computes momentary, short-term, integrated and LRA. The meter lives in a DSP slot of its own, so the integration continues over plan swaps. A measurement runs from when it is switched on; stop, reset and start through the API. | §7 BS.1770 / R 128 / Tech 3342; "start/stop/reset … from UI, logic or API". Exact segments are what the gating needs. |
+| D37 | True peak: a 4× polyphase interpolator of my own design (48-tap Kaiser-windowed sinc, β 6, every phase at unity DC gain), on every meter channel. BS.1770-4 allows other filters than its example. | §7 "true peak (ITU-R BS.1770 oversampling)". |
+| D38 | A change of a chain's structure (a node added, removed, moved, or a type or structural parameter changed) fades the signal's fader, sends and output out and in around the swap; processors whose own structure did not change keep their state (filter memories, envelopes). | §2: no clicks, state kept for unchanged nodes. |
+| D39 | After a missed deadline the DSP thread commits what it staged and writes silence over the output blocks it skips, and counts them in `dsp_deadline_misses_total`. | Found in testing (below): unwritten ranges kept the ring's samples of one buffer length earlier, which readers took for fresh audio. |
+| D40 | Placed in later milestones: PPM ballistics and scales, the spectrum analyser, phase correlation and goniometer (§7) with the metering UI (M4); the oscillator (§6 utility) with the control room (M5); the loudness normaliser for outputs (§6) with auto-level (M7); ducking keyed by VAD (§8.4) with M7. | §19 M3 names EQ, filters, dynamics, de-esser, delay, delay compensation, true peak and loudness. These belong with their users. |
+
+### Deviations
+
+| # | Spec | Deviation | Reason |
+| --- | --- | --- | --- |
+| X2 | §4.4 / §6: a loop is accepted only with an explicit `block delay` node | The block delay is a property of a send (`block_delay: true`), not a chain node. | A loop always closes through a send, and the matrix is where an operator sees it. A node inside a chain would split a signal's processing into a part before and a part after the delay within one block. Same effect: an explicit delay of one block on the loop. |
+| X3 | §6 multiband "linear-phase crossover option" | Not implemented yet; the multiband uses minimum-phase Linkwitz-Riley crossovers. | A linear-phase crossover needs long FIR filters (thousands of taps for low crossovers), so partitioned FFT convolution in the DSP thread, and adds tens of ms of latency. Proposed for the performance milestone (M10); question 3. |
+
+### Results (dev VM)
+
+- `cargo test`: 70 unit tests, including:
+  - **filters:** every design matches its analog prototype on the warped axis
+    (1e-6 dB); Butterworth −3.01 dB at the corner, 12–48 dB/oct;
+  - **dynamics:** static curves (knee, ratio, expander, range); attack and release
+    time constants (63 % within 0.3 dB);
+  - **limiter:** never above its ceiling, latency = look-ahead;
+  - **processors:** gate, expander and ducker levels; de-esser in both modes (only the
+    sibilant band reduced); dynamic EQ; multiband flat within 0.01 dB at unity and
+    compressing one band; delay; bypass and state handover;
+  - **EBU Tech 3341** synthetic cases 1–5 (±0.1 LU) and the true-peak sines (fs/4 at
+    0°, 45°, 60°, 67.5°: −6.0 dBTP within +0.2/−0.4);
+  - **EBU Tech 3342** cases 1–4 (±1 LU);
+  - **5.0 weighting** and LFE excluded;
+  - **engine:** the delay-compensation null test (§17; uncompensated does not null);
+    block-delay feedback (1, 0.5, 0.25, 0.125 per block).
+- `tests/integration/processing.sh`, through MXL:
+  - EQ +6.02 dB bell: L = 2 × tone, sample-exact;
+  - EQ gain ramped to 0 dB without a plan swap;
+  - bypass passes the input unchanged;
+  - 48 dB/oct high-pass at 4 kHz: the 1 kHz tone at −117.8 dBFS;
+  - compressor −30 dB 4:1: gain reduction 7.4 dB, peak −27.4 dBFS;
+  - limiter at −26 dBFS: peak −26.000 dBFS; output latency 5.5 ms (2 + 2 + 1.5);
+  - loudness: momentary, short-term and integrated −23.0 LUFS, max true peak
+    −20.0 dBTP; stop, reset, start.
+- `mix.sh`, `inputs.sh` and `lifecycle.sh` pass; AMWA in CI as in M2.
+- **§16-shaped load** (release build, SCHED_OTHER on the shared 4-vCPU VM, block 96):
+  - mix: 64 mono strips, each with HPF, 4-band EQ and compressor; de-esser on 16;
+    32 stereo buses, 16 aux and 8 N-1 buses; 696 sends; 8 published outputs;
+    true peak on all 120 meters;
+  - over 60 s: mean block time 656 µs (`dsp_load_ratio` **0.33**, target < 0.5), all
+    blocks ≤ 1.5 ms;
+  - 0 deadline misses, 0 missing input samples, 0 output errors, commit lag 0.62 ms.
+
+  VCAs (§16: 4) come with M6; the one-hour run on the reference CPU is for
+  `tests/hw` with M10.
+
+### Findings
+
+- **Unwritten output ranges replay old audio.** After a missed deadline the DSP thread
+  used to skip the late blocks without writing them. Readers of the output then
+  found the ring's samples of one buffer length earlier (19 456 samples for a 200 ms
+  history) and took them for fresh audio. Now the skipped blocks get silence and
+  count as missed (D39). The same held for the test writer, which now catches up
+  instead of skipping. The probe found it: 19 456 mod 48 = 16, so the stale tone was
+  16 samples out of phase.
+- Probes are retried once when the input was late or the DSP missed a deadline during
+  them. On this shared VM that happens about once in ten runs; a gap without either
+  still fails the test.
+
+### Questions
+
+1. `TODO_` value ranges: EQ gain ±24 dB, Q 0.1–40, thresholds −100…0 dB, ratio up
+   to 1000 (≈ ∞), knee 0–24 dB, makeup ±24 dB, limiter look-ahead 0.1–20 ms and
+   ceiling −40…0 dB, delay node at most 2000 ms, a chain at most 32 nodes.
+2. `TODO_` loudness: tolerance default ±1 LU around −23 LUFS (R 128 live
+   programmes); a measurement starts running when `loudness` is switched on.
+3. The linear-phase multiband crossover (X3): in the performance milestone (M10), or
+   not at all?
+4. EBU Tech 3341 cases 7–23 and Tech 3342 cases 5–6 use the EBU's authentic
+   programme files. May CI download the EBU test set (not committed), or do the
+   synthetic cases suffice?
 
 ## tests/hw scripts for the maintainers
 
