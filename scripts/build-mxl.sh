@@ -8,6 +8,9 @@
 # fmt and picojson; no tests, tools, utils or docs.
 set -euo pipefail
 
+# Root (e.g. in an image build) needs no sudo.
+as_root() { if [[ $(id -u) == 0 ]]; then "$@"; else sudo "$@"; fi; }
+
 MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 PREFIX="${1:-/opt/mxl}"
 WORK="${MXL_BUILD_DIR:-/tmp/mxl-build}"
@@ -15,8 +18,8 @@ VCPKG="${VCPKG_ROOT:-/opt/vcpkg}"
 
 if [[ ! -x "$VCPKG/vcpkg" ]]; then
     if [[ ! -d "$VCPKG/.git" ]]; then
-        sudo mkdir -p "$VCPKG"
-        sudo chown "$(id -u):$(id -g)" "$VCPKG"
+        as_root mkdir -p "$VCPKG"
+        as_root chown "$(id -u):$(id -g)" "$VCPKG"
         git clone -q --depth 1 https://github.com/microsoft/vcpkg "$VCPKG"
     fi
     "$VCPKG/bootstrap-vcpkg.sh" -disableMetrics
@@ -45,9 +48,5 @@ cmake -S "$WORK/src" -B "$WORK/build" -G Ninja \
     -DMXL_ENABLE_FABRICS_OFI=OFF \
     -DCMAKE_INSTALL_PREFIX="$PREFIX"
 cmake --build "$WORK/build" -j"$(nproc)"
-if [[ -w "$(dirname "$PREFIX")" ]]; then
-    cmake --install "$WORK/build"
-else
-    sudo cmake --install "$WORK/build"
-fi
+as_root cmake --install "$WORK/build"
 echo "libmxl $MXL_REF installed to $PREFIX/lib"
