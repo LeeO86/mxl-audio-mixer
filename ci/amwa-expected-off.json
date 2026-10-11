@@ -1,0 +1,655 @@
+{
+  "_comment": "Every non-Pass result of ci/amwa.sh off against the mixer, with the reason. ci/check_amwa.py fails on any other result.",
+  "IS-04-01": {
+    "__init__": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "set_up_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "auto_node_7": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_13": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_15": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_17": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_18": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_19": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_20": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_21": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_22": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_23": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "test_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_01_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_02": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_02_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_03": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_03_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_05": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_07_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_08": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_08_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_09": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_09_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_10": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_10_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_11_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_12": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_12_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_13": {
+      "state": "Could Not Test",
+      "reason": "MXL node: no RTP receivers"
+    },
+    "test_14": {
+      "state": "Could Not Test",
+      "reason": "MXL node: no RTP receivers"
+    },
+    "test_15": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_16": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_16_01": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_20_01": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_21": {
+      "state": "Test Disabled",
+      "reason": "DNS-SD is off (platform default)"
+    },
+    "test_22": {
+      "state": "Manual",
+      "reason": "manual: ids derive from NMOS_SEED (unit-tested)"
+    },
+    "test_24": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_24_01": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_26": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_27_4": {
+      "state": "Not Implemented",
+      "reason": "optional BCP-004-01 feature not used"
+    },
+    "test_27_5": {
+      "state": "Not Implemented",
+      "reason": "optional BCP-004-01 feature not used"
+    },
+    "test_27_6": {
+      "state": "Not Implemented",
+      "reason": "optional BCP-004-01 feature not used"
+    },
+    "test_28": {
+      "state": "Not Implemented",
+      "reason": "optional BCP-002-02 asset tags not used"
+    },
+    "tear_down_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    }
+  },
+  "IS-05-01": {
+    "__init__": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "set_up_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "auto_connection_16": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_17": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_18": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_19": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_20": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_21": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_23": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_24": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_25": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_26": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_27": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_28": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_29": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "test_01": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_02": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_03": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_04": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_05": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_06": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_07": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_08": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_09": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_09_01": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_11": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_11_01": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_11_02": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_12": {
+      "state": "Could Not Test",
+      "reason": "MXL senders/receivers are tested by BCP-007-03-01"
+    },
+    "test_12_02": {
+      "state": "Could Not Test",
+      "reason": "MXL senders/receivers are tested by BCP-007-03-01"
+    },
+    "test_13": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_15": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_16": {
+      "state": "Could Not Test",
+      "reason": "MXL senders/receivers are tested by BCP-007-03-01"
+    },
+    "test_17": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_19": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_22": {
+      "state": "Could Not Test",
+      "reason": "manual: ids derive from NMOS_SEED (unit-tested)"
+    },
+    "test_23": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_23_01": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_25": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_27": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_29": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_31": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_33": {
+      "state": "Not Applicable",
+      "reason": "replaced by the tool's auto tests"
+    },
+    "test_36": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_38": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_41": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_42": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "tear_down_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    }
+  },
+  "IS-05-02": {
+    "__init__": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "set_up_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "auto_connection_16": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_17": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_18": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_19": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_20": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_21": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_23": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_24": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_25": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_26": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_27": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_28": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_29": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_7": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_13": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_15": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_17": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_18": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_19": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_20": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_21": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_22": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_23": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "test_06": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_09": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_10": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_11": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_14": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_15": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_16": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_17": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_18": {
+      "state": "Could Not Test",
+      "reason": "MXL node: no RTP receivers"
+    },
+    "tear_down_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    }
+  },
+  "BCP-007-03-01": {
+    "__init__": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "set_up_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    },
+    "auto_connection_16": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_17": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_18": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_19": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_20": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_21": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_connection_23": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_24": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_25": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_26": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_27": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_28": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_connection_29": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_7": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_13": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_15": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "auto_node_17": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_18": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_19": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_20": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_21": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_22": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "auto_node_23": {
+      "state": "Test Disabled",
+      "reason": "IS-10 authorization is out of scope"
+    },
+    "test_02": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_03": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_04": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_05": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_06": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "test_15": {
+      "state": "Manual",
+      "reason": "manual: the tool cannot see MXL reads; tests/integration/inputs.sh covers it"
+    },
+    "test_17": {
+      "state": "Could Not Test",
+      "reason": "no senders yet: published outputs come with milestone 2"
+    },
+    "tear_down_tests": {
+      "state": "Not Applicable",
+      "reason": "tool set-up step"
+    }
+  }
+}
