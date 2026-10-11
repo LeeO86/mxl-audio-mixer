@@ -134,7 +134,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
             "buses": control.mix.buses.len(),
             "sends": control.mix.sends.len(),
         },
-        "outputs": control.outputs.status(&control.engine, &app.node),
+        "outputs": control.output_status(),
     }))
 }
 
@@ -350,7 +350,7 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "dsp_deadline_misses_total",
         "counter",
-        "Blocks whose wake-up came later than one block period.",
+        "Blocks woken later than one block period, plus blocks skipped after a late one.",
         vec![format!(" {}", c.deadline_misses.load(Ordering::Relaxed))],
     );
     metric(
@@ -402,6 +402,45 @@ async fn metrics(State(app): State<App>) -> Response {
             .status(&control.engine, &app.node)
             .iter()
             .map(|o| format!("{{output=\"{}\"}} {}", o.signal, o.commit_lag_ms))
+            .collect(),
+    );
+    // −∞ is not exported: a series without a value is absent.
+    let finite = |db: crate::mix::model::Db| db.0.is_finite().then_some(db.0);
+    let loudness = control.loudness.values(&control.mix.settings);
+    let mut lines = Vec::new();
+    for (signal, v) in &loudness {
+        for (window, value) in [
+            ("momentary", v.momentary_lufs),
+            ("short-term", v.short_term_lufs),
+            ("integrated", v.integrated_lufs),
+        ] {
+            if let Some(x) = finite(value) {
+                lines.push(format!("{{signal=\"{signal}\",window=\"{window}\"}} {x}"));
+            }
+        }
+    }
+    metric(
+        "loudness_lufs",
+        "gauge",
+        "Loudness (ITU-R BS.1770-4) of the measured signals by window.",
+        lines,
+    );
+    let meters = control.meters.values();
+    metric(
+        "true_peak_dbtp",
+        "gauge",
+        "Largest true peak of a signal over its channels since the last meter update.",
+        meters
+            .iter()
+            .filter_map(|(signal, m)| {
+                let tp = m
+                    .true_peak_dbtp
+                    .iter()
+                    .filter_map(|d| finite(*d))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                tp.is_finite()
+                    .then(|| format!("{{signal=\"{signal}\"}} {tp}"))
+            })
             .collect(),
     );
     metric(

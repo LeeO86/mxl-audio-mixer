@@ -3,8 +3,10 @@
 pub mod api;
 pub mod config;
 pub mod control;
+pub mod dsp;
 pub mod engine;
 pub mod inputs;
+pub mod loudness;
 pub mod meters;
 pub mod mix;
 pub mod mxlio;

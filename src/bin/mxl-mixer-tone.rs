@@ -112,7 +112,10 @@ fn main() {
                 *s = tone(c, start + (offset + k) as u64);
             }
         });
-        n = (n + 1).max(index_at(tai_ns().saturating_sub(delay_ns)) / block);
+        // A late writer catches up block by block instead of skipping: a skipped
+        // range would keep the ring's data of one buffer length earlier, which a
+        // reader cannot tell from fresh samples.
+        n += 1;
     }
 }
 

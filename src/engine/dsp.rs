@@ -10,8 +10,9 @@ use mxl::Error as MxlError;
 use super::plan::{InputSource, OutputSink};
 use super::{
     Command, EngineConfig, EngineCounters, OutputWriter, Plan, Returned, BLOCK_BUCKETS_US,
-    FADE_SAMPLES, MAX_CHANNELS, MAX_OUTPUTS,
+    FADE_SAMPLES, MAX_CHANNELS, MAX_LOUDNESS, MAX_OUTPUTS,
 };
+use crate::dsp::loudness::SegmentMeter;
 use crate::mxlio::SamplesReader;
 use crate::timing::{index_at, sleep_until_tai, tai_ns, time_of};
 
@@ -75,10 +76,17 @@ impl InputSource for Inputs<'_> {
 
 struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
+    loudness: &'a mut [Option<Box<SegmentMeter>>],
     block: usize,
 }
 
 impl OutputSink for Outputs<'_> {
+    fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
+        if let Some(Some(m)) = self.loudness.get_mut(slot) {
+            m.feed(start, channel, samples);
+        }
+    }
+
     fn write(&mut self, slot: usize, channel: usize, _channels: usize, samples: &[f32]) {
         let Some(Some(o)) = self.slots.get_mut(slot) else {
             return;
@@ -128,6 +136,7 @@ pub(super) fn run(
     let read_wait = Duration::from_nanos(period_ns / 4);
     let mut inputs: Vec<Input> = (0..config.inputs).map(|_| Input::new(block)).collect();
     let mut outputs: Vec<Option<Box<OutputWriter>>> = (0..MAX_OUTPUTS).map(|_| None).collect();
+    let mut loudness: Vec<Option<Box<SegmentMeter>>> = (0..MAX_LOUDNESS).map(|_| None).collect();
     let mut plan: Option<Box<Plan>> = None;
     let mut stopping = false;
     // The fade-out takes FADE_SAMPLES; a few blocks more cover a full commit.
@@ -203,8 +212,8 @@ pub(super) fn run(
                     }
                 }
                 Command::SetPlan(mut next) => {
-                    if let Some(old) = plan.take() {
-                        next.adopt(&old, FADE_SAMPLES);
+                    if let Some(mut old) = plan.take() {
+                        next.adopt(&mut old, FADE_SAMPLES);
                         let _ = returned.push(Returned::Plan(old));
                     }
                     plan = Some(next);
@@ -231,6 +240,28 @@ pub(super) fn run(
                 Command::ClearOutput { slot } => {
                     if let Some(old) = outputs.get_mut(slot).and_then(|s| s.take()) {
                         let _ = returned.push(Returned::Output(old));
+                    }
+                }
+                Command::ProcParam {
+                    node,
+                    index,
+                    value,
+                    ramp,
+                } => {
+                    if let Some(p) = plan.as_mut() {
+                        p.set_proc_param(node, index as usize, value, ramp);
+                    }
+                }
+                Command::SetLoudness { slot, meter } => {
+                    if let Some(s) = loudness.get_mut(slot) {
+                        if let Some(old) = s.replace(meter) {
+                            let _ = returned.push(Returned::Loudness(old));
+                        }
+                    }
+                }
+                Command::ClearLoudness { slot } => {
+                    if let Some(old) = loudness.get_mut(slot).and_then(|s| s.take()) {
+                        let _ = returned.push(Returned::Loudness(old));
                     }
                 }
             }
@@ -299,8 +330,14 @@ pub(super) fn run(
             }
         }
 
-        for o in outputs.iter_mut().flatten() {
+        for (slot, o) in outputs.iter_mut().enumerate() {
+            let Some(o) = o.as_mut() else {
+                continue;
+            };
             if o.next != start {
+                if o.next < start {
+                    fill_gap(o, start, &counters.outputs[slot]);
+                }
                 o.filled = 0;
             }
             o.next = start + b;
@@ -312,12 +349,14 @@ pub(super) fn run(
         }
         if let Some(p) = plan.as_mut() {
             p.process(
+                start,
                 &Inputs {
                     inputs: &inputs,
                     block,
                 },
                 &mut Outputs {
                     slots: &mut outputs,
+                    loudness: &mut loudness,
                     block,
                 },
             );
@@ -347,8 +386,15 @@ pub(super) fn run(
         let done = tai_ns();
         record_block_time(&counters, done - woke, period_ns);
         counters.blocks.fetch_add(1, Ordering::Relaxed);
-        // After a miss, continue with the first block that has not ended yet.
-        n = (n + 1).max(index_at(done) / b);
+        // After a miss, continue with the first block that has not ended yet; the
+        // skipped blocks count as missed (their outputs get silence, fill_gap).
+        let next = (n + 1).max(index_at(done) / b);
+        if next > n + 1 {
+            counters
+                .deadline_misses
+                .fetch_add(next - n - 1, Ordering::Relaxed);
+        }
+        n = next;
     }
     counters.running.store(false, Ordering::SeqCst);
     for input in &mut inputs {
@@ -363,6 +409,11 @@ pub(super) fn run(
     }
     if let Some(p) = plan.take() {
         let _ = returned.push(Returned::Plan(p));
+    }
+    for m in loudness.iter_mut() {
+        if let Some(m) = m.take() {
+            let _ = returned.push(Returned::Loudness(m));
+        }
     }
 }
 
@@ -386,6 +437,27 @@ fn fade_output(o: &mut OutputWriter, block: usize) {
         for c in 0..channels {
             o.staging[c * o.commit + o.filled + k] *= o.gain;
         }
+    }
+}
+
+/// After skipped blocks (a missed deadline): commit what was staged and write
+/// silence up to `start`. Unwritten ranges would keep the ring's samples of one
+/// buffer length earlier, which readers cannot tell from fresh ones.
+fn fill_gap(o: &mut OutputWriter, start: u64, counters: &super::OutputCounters) {
+    if o.filled > 0 {
+        let end = o.next;
+        commit(o, end, counters);
+    }
+    let len = u64::from(o.writer.buffer_length.max(1));
+    let chunk = o.commit as u64;
+    let mut from = o.next.max(start.saturating_sub(len.saturating_sub(chunk)));
+    while from < start {
+        let n = chunk.min(start - from);
+        let result = o.writer.write(from + n, n as usize, |_, _, s| s.fill(0.0));
+        if result.is_err() {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        from += n;
     }
 }
 

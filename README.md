@@ -5,12 +5,15 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Status: milestone 2** (§19). Settings, probes, metrics, the NMOS node with its
+**Status: milestone 3** (§19). Settings, probes, metrics, the NMOS node with its
 MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
-and re-created flows, arrival lag and automatic delay), plus the mix: input patch,
+and re-created flows, arrival lag and automatic delay); the mix: input patch,
 strips (trim, polarity, fader, mute, pan/balance/width), buses, a send matrix with
-width mapping, peak and RMS meters, and buses published as MXL flows with NMOS
-senders. There is no EQ or dynamics yet (milestone 3) and no UI (milestone 4).
+width mapping, and buses published as MXL flows with NMOS senders; processing
+chains (EQ, filters, dynamic EQ, compressor, limiter, expander, gate, de-esser,
+ducker, multiband, delay) with delay compensation and block-delay feedback;
+peak, peak hold, true peak, RMS, gain-reduction and loudness (BS.1770-4 / R 128)
+meters. There is no UI yet (milestone 4).
 
 ## Run
 
@@ -84,17 +87,26 @@ Kept in `MIXER_STATE_DIR/mix.json` and in the show file. Signal ids (strips and
 buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
 an id gets `strip-<n>` or `bus-<n>`.
 
-- **Strip:** patch → trim and polarity → fader and mute → panner. `patch` has one
-  entry per strip channel: `{"input": n, "channel": c}` (both from 1) or `null`. A
-  channel the input does not have is silent and shows `missing` in `patch_state`.
-  `trim_db` ±42, `fader_db` `"-inf"` … +10, `pan` −1 … +1 (mono: position; stereo:
-  balance), `width` 0 … 2 (stereo; 1 unchanged). Taps: `input`, `pre-fader`,
-  `post-fader`, `post-pan`. A mono strip is stereo after its panner.
-- **Bus:** sum of its sends → fader and mute. Taps: `pre-fader`, `post-fader`.
+- **Strip:** patch → trim and polarity → `chain` → fader and mute → panner.
+  `patch` has one entry per strip channel: `{"input": n, "channel": c}` (both from
+  1) or `null`. A channel the input does not have is silent and shows `missing` in
+  `patch_state`. `trim_db` ±42, `fader_db` `"-inf"` … +10, `pan` −1 … +1 (mono:
+  position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
+  (measure it). A mono strip is stereo after its panner.
+- **Bus:** sum of its sends → `chain` → fader and mute; `loudness`;
+  `compensate` (delay compensation, default `true`).
+- **Taps** (sends and keys): `input` (strips), `pre-eq`, `post-eq`,
+  `pre-dynamics`, `post-dynamics` (the input of the first and the output of the last
+  node of that kind; the chain's input without one), `pre-fader` (the chain's
+  output), `post-fader`, `post-pan` (strips), or `{"after": "<node id>"}`.
 - **Send** (`from` a strip or bus `to` a bus): `tap`, `gain_db` (`"-inf"` … +10),
-  `mute`, `phase`. New sends default to 0 dB from a strip's post-pan or a bus's
-  post-fader. A loop between buses is rejected (§4.4: feedback needs a block
-  delay, which comes with milestone 3).
+  `mute`, `phase`, `block_delay`. New sends default to 0 dB from a strip's post-pan
+  or a bus's post-fader. A loop is rejected unless one of its sends has
+  `block_delay: true` (it reads its source one block late, §4.4).
+- **Delay compensation** (§4.4): the sends into a bus are delayed to the largest
+  latency among them (look-ahead limiters), so parallel paths stay phase-coherent.
+  Keys and block-delay sends are not compensated. Each output reports its
+  `processing_latency_ms` and `latency_ms` (read offset + one block + processing).
 - **Output:** a bus published as an `audio/float32` MXL flow in the own domain and
   an NMOS Source, Flow and Sender (label = bus name, group hint `<name>:Audio`).
   `format` (default: the bus's) maps it to another layout; `commit_samples`
@@ -110,12 +122,52 @@ an id gets `strip-<n>` or `bus-<n>`.
   sum; mono → C (3.0 and the surround formats) or L + R with the pan law
   (stereo); channels the source lacks stay silent.
 - **Mix settings:** `pan_law_db` 0, −3 (default), −4.5, −6; `mono_sum_db` −3
-  (default) or −6.
+  (default) or −6; `loudness_target_lufs` (−23) and `loudness_tolerance_lu` (1).
 
 Parameter changes ramp over `ramp_ms` (default 10 ms). A change that rewires the
 graph fades the affected paths out and in (10 ms) around the plan swap; unrelated
-paths are not touched. Parameters are addressed by signal id and field (§12.4),
-e.g. `strips/vox/fader_db`, `sends/vox/main/gain_db`, `buses/main/mute`.
+paths are not touched, and processing nodes keep their state. Parameters are
+addressed by signal id and field (§12.4), e.g. `strips/vox/fader_db`,
+`sends/vox/main/gain_db`, `strips/vox/chain/eq-1/bands/0/gain_db`.
+
+### Processing nodes (§6)
+
+Every node has an `id` (unique in its chain; `<type>-<n>` when omitted), a `type`,
+`bypass` (crossfaded over one block; the dry path is delayed by the node's
+latency) and these parameters, all required. Numeric parameters ramp; the others
+change the node's structure. Dynamics detect on the largest level of all channels
+(linked); attack and release are time constants (63 % of a step).
+
+| `type` | Parameters |
+| --- | --- |
+| `eq` | `bands`: 1–8 of `{"type": "bell" \| "low-shelf" \| "high-shelf" \| "notch", "freq_hz", "q", "gain_db"}` (RBJ cookbook; gain ±24 dB, Q 0.1–40) |
+| `filter` | `mode` `high-pass` \| `low-pass`, `freq_hz`, `slope_db_per_oct` 12 / 24 / 36 / 48 (Butterworth) |
+| `dynamic-eq` | `bands`: 1–8 of `{freq_hz, q, gain_db, threshold_db, ratio, attack_ms, release_ms}`: a bell whose gain drops by a compressor on the band's level |
+| `compressor` | `threshold_db`, `ratio` (1–1000), `knee_db` (soft knee, 0–24), `attack_ms`, `release_ms`, `makeup_db`, `detector` `peak` \| `rms`, `sidechain_hpf_hz` (optional), `key` `{signal, tap}` (optional) |
+| `limiter` | `ceiling_db`, `release_ms`, `lookahead_ms` (0.1–20, the node's latency), `true_peak` (detect on 4× oversampled peaks) |
+| `expander` | `threshold_db`, `ratio`, `range_db`, `attack_ms`, `release_ms` |
+| `gate` | `threshold_db`, `hysteresis_db` (closes that far below), `attack_ms`, `hold_ms`, `release_ms`, `range_db` |
+| `de-esser` | `mode` `split-band` (reduces the band above `freq_hz`) \| `wide-band` (reduces everything), `freq_hz` 2000–12000, `threshold_db`, `range_db`, `attack_ms`, `release_ms`, `listen` (output the band) |
+| `ducker` | `key` `{signal, tap}`, `threshold_db`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms` |
+| `multiband` | `crossovers_hz` (2–4, rising; Linkwitz-Riley 24 dB/oct, sum flat), `bands` (one more: `{threshold_db, ratio, attack_ms, release_ms, makeup_db}`) |
+| `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
+
+Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
+±24 dB, a chain at most 32 nodes. A key is another signal's tap; its signal is
+processed first.
+
+### Loudness and meters (§7)
+
+`loudness: true` on a strip or bus measures it post-fader (ITU-R BS.1770-4): momentary
+(400 ms), short-term (3 s), integrated (gated, from the start of the measurement)
+and loudness range (EBU Tech 3342), with the largest true peak. The measurement
+runs from when it is switched on; it can be stopped, reset and started again. It
+continues over changes of the mix.
+
+`GET /api/v1/meters` gives, per strip and bus (post-fader) and channel: sample peak
+(since the last 40 ms update), peak hold (until cleared), true peak (4×
+oversampling) and RMS (300 ms); per processing node: gain reduction and the peaks at
+its input and output.
 
 ## Ports and exit codes
 
@@ -152,7 +204,12 @@ e.g. `strips/vox/fader_db`, `sends/vox/main/gain_db`, `buses/main/mute`.
 | `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
 | `GET /api/v1/outputs`, `GET /api/v1/outputs/<bus>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
 | `PUT`, `DELETE /api/v1/outputs/<bus>` | publish (`{"format": …, "commit_samples": …}`, both optional) or unpublish |
-| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared) and `rms_dbfs` (300 ms) |
+| `GET`, `POST /api/v1/{strips,buses}/<id>/chain` | the chain; add a node (its JSON, `id` optional, `position` optional) |
+| `GET`, `PATCH`, `DELETE /api/v1/{strips,buses}/<id>/chain/<node>` | a node; change it with a JSON merge patch (RFC 7396) plus `ramp_ms` |
+| `POST /api/v1/{strips,buses}/<id>/chain/<node>/move` | `{"position": n}` |
+| `GET /api/v1/loudness` | per measured signal: `momentary_lufs`, `short_term_lufs`, `integrated_lufs`, `range_lu`, `max_true_peak_dbtp`, `running`, `in_tolerance` |
+| `POST /api/v1/loudness/<id>/{start,stop,reset}` | control the integration |
+| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs` |
 | `POST /api/v1/meters/clear`, `POST /api/v1/meters/<id>/clear` | clear every peak hold, or one signal's |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
@@ -164,7 +221,9 @@ e.g. `strips/vox/fader_db`, `sends/vox/main/gain_db`, `buses/main/mute`.
 `dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`,
 `plan_swaps_total`, `plan_compile_seconds` (last compile), `signals`,
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
-`output_commit_lag_ms{output}`, `timing_trusted`, and per input: `input_state`,
+`output_commit_lag_ms{output}`, `loudness_lufs{signal,window}` (window
+`momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,
+`timing_trusted`, and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
 `input_effective_delay_ms`, `input_late_samples_total`,
 `input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
@@ -178,7 +237,10 @@ exit 143, deregistered, own domain removed; connections survive a restart),
 re-created writers, a writer 30 ms late), `tests/integration/mix.sh` (the mix
 end to end: sample-exact output checks with `mxl-mixer-probe`, plan swaps that
 leave other paths untouched, meters, the NMOS sender, a restart with a downstream
-reader, unpublish, loop rejection), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
+reader, unpublish, loop rejection), `tests/integration/processing.sh` (EQ
+sample-exact, ramped parameters without a plan swap, bypass, high-pass, compressor
+gain reduction, limiter ceiling and latency, loudness and its controls),
+`ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
 the maintainers are in `tests/hw/`.
 

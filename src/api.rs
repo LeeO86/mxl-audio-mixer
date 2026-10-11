@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::control::{fade_wait, Staged};
+use crate::mix::chain::Proc;
 use crate::mix::model::{
     Bus, Db, Kind, MixSettings, Output, PatchPoint, Send, Strip, Tap, DEFAULT_RAMP_MS, MAX_RAMP_MS,
 };
@@ -43,6 +44,37 @@ pub fn routes() -> Router<App> {
             "/api/v1/outputs/{signal}",
             get(output).put(put_output).delete(delete_output),
         )
+        .route(
+            "/api/v1/strips/{id}/chain",
+            get(|s, p| chain_list(s, p, Kind::Strip))
+                .post(|s, p, b| chain_add(s, p, b, Kind::Strip)),
+        )
+        .route(
+            "/api/v1/strips/{id}/chain/{node}",
+            get(|s, p| chain_get(s, p, Kind::Strip))
+                .patch(|s, p, b| chain_patch(s, p, b, Kind::Strip))
+                .delete(|s, p| chain_delete(s, p, Kind::Strip)),
+        )
+        .route(
+            "/api/v1/strips/{id}/chain/{node}/move",
+            post(|s, p, b| chain_move(s, p, b, Kind::Strip)),
+        )
+        .route(
+            "/api/v1/buses/{id}/chain",
+            get(|s, p| chain_list(s, p, Kind::Bus)).post(|s, p, b| chain_add(s, p, b, Kind::Bus)),
+        )
+        .route(
+            "/api/v1/buses/{id}/chain/{node}",
+            get(|s, p| chain_get(s, p, Kind::Bus))
+                .patch(|s, p, b| chain_patch(s, p, b, Kind::Bus))
+                .delete(|s, p| chain_delete(s, p, Kind::Bus)),
+        )
+        .route(
+            "/api/v1/buses/{id}/chain/{node}/move",
+            post(|s, p, b| chain_move(s, p, b, Kind::Bus)),
+        )
+        .route("/api/v1/loudness", get(loudness))
+        .route("/api/v1/loudness/{signal}/{action}", post(loudness_control))
         .route("/api/v1/meters", get(meters))
         .route("/api/v1/meters/clear", post(clear_holds))
         .route("/api/v1/meters/{signal}/clear", post(clear_hold))
@@ -123,6 +155,8 @@ async fn settings(State(app): State<App>) -> Json<Value> {
 struct SettingsBody {
     pan_law_db: Option<crate::mix::format::PanLaw>,
     mono_sum_db: Option<crate::mix::format::MonoSum>,
+    loudness_target_lufs: Option<f64>,
+    loudness_tolerance_lu: Option<f64>,
 }
 
 async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
@@ -134,6 +168,18 @@ async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Res
             }
             if let Some(sum) = b.mono_sum_db {
                 m.settings.mono_sum_db = sum;
+            }
+            if let Some(t) = b.loudness_target_lufs {
+                if !(-60.0..=0.0).contains(&t) {
+                    return Err(bad("loudness_target_lufs must be -60 to 0"));
+                }
+                m.settings.loudness_target_lufs = t;
+            }
+            if let Some(t) = b.loudness_tolerance_lu {
+                if !(0.0..=10.0).contains(&t) {
+                    return Err(bad("loudness_tolerance_lu must be 0 to 10"));
+                }
+                m.settings.loudness_tolerance_lu = t;
             }
             Ok(())
         })
@@ -186,6 +232,8 @@ struct StripBody {
     mute: Option<bool>,
     pan: Option<f64>,
     width: Option<f64>,
+    chain: Option<Vec<Proc>>,
+    loudness: Option<bool>,
     ramp_ms: Option<f64>,
 }
 
@@ -221,6 +269,12 @@ impl StripBody {
         if let Some(v) = self.width {
             s.width = v;
         }
+        if let Some(v) = self.chain {
+            s.chain = v;
+        }
+        if let Some(v) = self.loudness {
+            s.loudness = v;
+        }
     }
 }
 
@@ -244,6 +298,8 @@ async fn create_strip(State(app): State<App>, bytes: axum::body::Bytes) -> Respo
             mute: false,
             pan: 0.0,
             width: 1.0,
+            chain: Vec::new(),
+            loudness: false,
         };
         b.apply(&mut s);
         let errors = apply(&app, 0, |m| {
@@ -327,11 +383,23 @@ struct BusBody {
     format: Option<Format>,
     fader_db: Option<Db>,
     mute: Option<bool>,
+    chain: Option<Vec<Proc>>,
+    loudness: Option<bool>,
+    compensate: Option<bool>,
     ramp_ms: Option<f64>,
 }
 
 impl BusBody {
     fn apply(self, b: &mut Bus) {
+        if let Some(v) = self.chain {
+            b.chain = v;
+        }
+        if let Some(v) = self.loudness {
+            b.loudness = v;
+        }
+        if let Some(v) = self.compensate {
+            b.compensate = v;
+        }
         if let Some(v) = self.name {
             b.name = v;
         }
@@ -361,6 +429,9 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             format,
             fader_db: Db(0.0),
             mute: false,
+            chain: Vec::new(),
+            loudness: false,
+            compensate: true,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {
@@ -423,6 +494,7 @@ struct SendBody {
     tap: Option<Tap>,
     gain_db: Option<Db>,
     mute: Option<bool>,
+    block_delay: Option<bool>,
     phase: Option<bool>,
     ramp_ms: Option<f64>,
 }
@@ -458,6 +530,7 @@ async fn put_send(
                     gain_db: Db(0.0),
                     mute: false,
                     phase: false,
+                    block_delay: false,
                 });
             }
             let s = m
@@ -476,6 +549,9 @@ async fn put_send(
             }
             if let Some(v) = b.phase {
                 s.phase = v;
+            }
+            if let Some(v) = b.block_delay {
+                s.block_delay = v;
             }
             Ok(())
         })
@@ -508,12 +584,11 @@ async fn delete_send(State(app): State<App>, Path((from, to)): Path<(String, Str
 
 async fn outputs(State(app): State<App>) -> Json<Value> {
     let control = app.control();
-    Json(json!(control.outputs.status(&control.engine, &app.node)))
+    Json(json!(control.output_status()))
 }
 
 async fn output(State(app): State<App>, Path(signal): Path<String>) -> Response {
-    let control = app.control();
-    let status = control.outputs.status(&control.engine, &app.node);
+    let status = app.control().output_status();
     match status.into_iter().find(|o| o.signal == signal) {
         Some(o) => Json(json!(o)).into_response(),
         None => *not_found(format!("{signal} is not published")),
@@ -557,8 +632,7 @@ async fn put_output(
         if !errors.is_empty() {
             return Err(internal(errors.join("; ")));
         }
-        let control = app.control();
-        let status = control.outputs.status(&control.engine, &app.node);
+        let status = app.control().output_status();
         let o = status.into_iter().find(|o| o.signal == signal);
         Ok::<_, Box<Response>>(Json(json!(o)).into_response())
     };
@@ -582,6 +656,214 @@ async fn delete_output(State(app): State<App>, Path(signal): Path<String>) -> Re
 
 async fn meters(State(app): State<App>) -> Json<Value> {
     Json(json!(app.control().meters.values()))
+}
+
+async fn loudness(State(app): State<App>) -> Json<Value> {
+    let control = app.control();
+    Json(json!(control.loudness.values(&control.mix.settings)))
+}
+
+/// `start`, `stop` or `reset` a signal's loudness integration (§7).
+async fn loudness_control(
+    State(app): State<App>,
+    Path((signal, action)): Path<(String, String)>,
+) -> Response {
+    let result = app.control().loudness.control(&signal, &action);
+    match result {
+        Ok(()) => {
+            let control = app.control();
+            let values = control.loudness.values(&control.mix.settings);
+            Json(json!(values.get(&signal))).into_response()
+        }
+        Err(e) if e.starts_with("unknown action") => *bad(e),
+        Err(e) => *not_found(e),
+    }
+}
+
+fn chain_mut<'a>(m: &'a mut Mix, kind: Kind, id: &str) -> ApiResult<&'a mut Vec<Proc>> {
+    let found = match kind {
+        Kind::Strip => m
+            .strips
+            .iter_mut()
+            .find(|s| s.id == id)
+            .map(|s| &mut s.chain),
+        Kind::Bus => m
+            .buses
+            .iter_mut()
+            .find(|b| b.id == id)
+            .map(|b| &mut b.chain),
+    };
+    found.ok_or_else(|| not_found(format!("{id} does not exist")))
+}
+
+fn chain_of(app: &App, kind: Kind, id: &str) -> ApiResult<Vec<Proc>> {
+    let mut mix = app.control().mix.clone();
+    chain_mut(&mut mix, kind, id).map(|c| c.clone())
+}
+
+async fn chain_list(State(app): State<App>, Path(id): Path<String>, kind: Kind) -> Response {
+    match chain_of(&app, kind, &id) {
+        Ok(c) => Json(json!(c)).into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn chain_get(
+    State(app): State<App>,
+    Path((id, node)): Path<(String, String)>,
+    kind: Kind,
+) -> Response {
+    match chain_of(&app, kind, &id) {
+        Ok(c) => match c.into_iter().find(|p| p.id == node) {
+            Some(p) => Json(json!(p)).into_response(),
+            None => *not_found(format!("{id} has no node {node}")),
+        },
+        Err(r) => *r,
+    }
+}
+
+/// Take `key` out of a JSON object body.
+fn take(body: &mut Value, key: &str) -> Option<Value> {
+    body.as_object_mut().and_then(|o| o.remove(key))
+}
+
+/// Add a node: the node's JSON (`id` optional), plus `position` (default: last).
+async fn chain_add(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    bytes: axum::body::Bytes,
+    kind: Kind,
+) -> Response {
+    let run = async {
+        let mut v: Value = body(&bytes)?;
+        let position = take(&mut v, "position").and_then(|p| p.as_u64());
+        let given = take(&mut v, "id").and_then(|i| i.as_str().map(str::to_string));
+        if let Some(o) = v.as_object_mut() {
+            o.insert("id".into(), json!("new"));
+        }
+        let mut node: Proc = serde_json::from_value(v).map_err(|e| bad(e.to_string()))?;
+        let node_id = {
+            let chain = chain_of(&app, kind, &id)?;
+            given.unwrap_or_else(|| crate::mix::chain::next_id(&chain, &node.kind))
+        };
+        node.id = node_id.clone();
+        let errors = apply(&app, crate::engine::FADE_SAMPLES, |m| {
+            let chain = chain_mut(m, kind, &id)?;
+            let at = position.map_or(chain.len(), |p| (p as usize).min(chain.len()));
+            chain.insert(at, node);
+            Ok(())
+        })
+        .await?;
+        let chain = chain_of(&app, kind, &id)?;
+        let p = chain.into_iter().find(|p| p.id == node_id);
+        Ok::<_, Box<Response>>(
+            (StatusCode::CREATED, Json(with_errors(json!(p), errors))).into_response(),
+        )
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+/// RFC 7396 merge patch.
+fn merge(target: &mut Value, patch: Value) {
+    match patch {
+        Value::Object(p) => {
+            if !target.is_object() {
+                *target = json!({});
+            }
+            let t = target.as_object_mut().expect("object");
+            for (k, v) in p {
+                if v.is_null() {
+                    t.remove(&k);
+                } else {
+                    merge(t.entry(k).or_insert(Value::Null), v);
+                }
+            }
+        }
+        other => *target = other,
+    }
+}
+
+/// Change a node with a JSON merge patch of its parameters; `ramp_ms` ramps the
+/// numeric ones (default 10 ms).
+async fn chain_patch(
+    State(app): State<App>,
+    Path((id, node)): Path<(String, String)>,
+    bytes: axum::body::Bytes,
+    kind: Kind,
+) -> Response {
+    let run = async {
+        let mut patch: Value = body(&bytes)?;
+        let ramp = ramp(take(&mut patch, "ramp_ms").and_then(|v| v.as_f64()))?;
+        if take(&mut patch, "id").is_some_and(|v| v.as_str() != Some(node.as_str())) {
+            return Err(bad("a node id cannot be changed"));
+        }
+        let errors = apply(&app, ramp, |m| {
+            let chain = chain_mut(m, kind, &id)?;
+            let p = chain
+                .iter_mut()
+                .find(|p| p.id == node)
+                .ok_or_else(|| not_found(format!("{id} has no node {node}")))?;
+            let mut v = json!(p);
+            merge(&mut v, patch);
+            *p = serde_json::from_value(v).map_err(|e| bad(e.to_string()))?;
+            Ok(())
+        })
+        .await?;
+        let chain = chain_of(&app, kind, &id)?;
+        let p = chain.into_iter().find(|p| p.id == node);
+        Ok::<_, Box<Response>>(Json(with_errors(json!(p), errors)).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn chain_delete(
+    State(app): State<App>,
+    Path((id, node)): Path<(String, String)>,
+    kind: Kind,
+) -> Response {
+    let run = async {
+        apply(&app, crate::engine::FADE_SAMPLES, |m| {
+            let chain = chain_mut(m, kind, &id)?;
+            let before = chain.len();
+            chain.retain(|p| p.id != node);
+            if chain.len() == before {
+                return Err(not_found(format!("{id} has no node {node}")));
+            }
+            Ok(())
+        })
+        .await?;
+        Ok::<_, Box<Response>>(StatusCode::NO_CONTENT.into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+/// Move a node to `{"position": n}` (0 = first).
+async fn chain_move(
+    State(app): State<App>,
+    Path((id, node)): Path<(String, String)>,
+    bytes: axum::body::Bytes,
+    kind: Kind,
+) -> Response {
+    let run = async {
+        let mut v: Value = body(&bytes)?;
+        let position = take(&mut v, "position")
+            .and_then(|p| p.as_u64())
+            .ok_or_else(|| bad("position is required"))? as usize;
+        apply(&app, crate::engine::FADE_SAMPLES, |m| {
+            let chain = chain_mut(m, kind, &id)?;
+            let from = chain
+                .iter()
+                .position(|p| p.id == node)
+                .ok_or_else(|| not_found(format!("{id} has no node {node}")))?;
+            let p = chain.remove(from);
+            chain.insert(position.min(chain.len()), p);
+            Ok(())
+        })
+        .await?;
+        let chain = chain_of(&app, kind, &id)?;
+        Ok::<_, Box<Response>>(Json(json!(chain)).into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
 }
 
 /// Clear every peak hold.

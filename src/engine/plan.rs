@@ -10,6 +10,8 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+pub use super::proc::{NodeMeter, Processor, MAX_CH};
+
 /// Values per node: the widest format's channels, or a 2 × 2 panner.
 pub const MAX_NODE_VALUES: usize = 12;
 
@@ -135,10 +137,24 @@ pub enum Step {
         dst: Span,
         coefficients: Span,
     },
-    /// Peak and energy of `src` into meter channels `slot …`.
-    Meter { src: Span, slot: u32 },
+    /// Peak, true peak (processor `proc`) and energy of `src` into meter channels
+    /// `slot …`.
+    Meter { src: Span, slot: u32, proc: u32 },
     /// `src` to output slot `slot`.
     Output { src: Span, slot: u32 },
+    /// `dst` ← processor `proc` applied to `src`, keyed by `key` (empty: none).
+    Process {
+        proc: u32,
+        src: Span,
+        dst: Span,
+        key: Span,
+    },
+    /// `dst` ← the block processor `proc` (a hold) took last time.
+    HoldOut { proc: u32, dst: Span },
+    /// Processor `proc` (a hold) takes `src` for the next block.
+    HoldIn { proc: u32, src: Span },
+    /// `src` to loudness meter `slot`.
+    Loudness { src: Span, slot: u32 },
 }
 
 impl Step {
@@ -151,6 +167,9 @@ impl Step {
             Step::Send { .. } => "send",
             Step::Meter { .. } => "meter",
             Step::Output { .. } => "output",
+            Step::Process { .. } => "process",
+            Step::HoldOut { .. } | Step::HoldIn { .. } => "hold",
+            Step::Loudness { .. } => "loudness",
         }
     }
 }
@@ -163,6 +182,8 @@ pub struct MeterChannel {
     /// Running sum of squares (f64 bits) and its sample count.
     pub energy: AtomicU64,
     pub samples: AtomicU64,
+    /// Largest true peak since the control side last took it (f32 bits).
+    pub true_peak: AtomicU32,
 }
 
 pub struct MeterBank {
@@ -190,6 +211,12 @@ pub struct Plan {
     /// `(new node, old node)`: values carried over from the previous plan.
     pub carry: Vec<(u32, u32)>,
     pub meters: Arc<MeterBank>,
+    pub procs: Vec<Processor>,
+    /// `(id, processor index)` sorted by id.
+    proc_lookup: Vec<(NodeId, u32)>,
+    /// `(new processor, old processor)`: state carried over from the previous plan.
+    pub proc_carry: Vec<(u32, u32)>,
+    pub node_meters: Arc<[NodeMeter]>,
 }
 
 /// Builds a plan on the control side.
@@ -197,6 +224,7 @@ pub struct PlanBuilder {
     plan: Plan,
     buffers: u32,
     meters: u32,
+    node_meters: usize,
 }
 
 impl PlanBuilder {
@@ -212,10 +240,31 @@ impl PlanBuilder {
                 lookup: Vec::new(),
                 carry: Vec::new(),
                 meters: Arc::new(MeterBank::new(0)),
+                procs: Vec::new(),
+                proc_lookup: Vec::new(),
+                proc_carry: Vec::new(),
+                node_meters: Arc::new([]),
             },
             buffers: 0,
             meters: 0,
+            node_meters: 0,
         }
+    }
+
+    /// Add a processor; returns its index.
+    pub fn processor(&mut self, p: Processor) -> u32 {
+        self.plan.procs.push(p);
+        (self.plan.procs.len() - 1) as u32
+    }
+
+    /// A node meter slot.
+    pub fn node_meter(&mut self) -> usize {
+        self.node_meters += 1;
+        self.node_meters - 1
+    }
+
+    pub fn block(&self) -> usize {
+        self.plan.block
     }
 
     /// `n` new buffers.
@@ -281,6 +330,17 @@ impl PlanBuilder {
             .map(|(i, n)| (n.id, i as u32))
             .collect();
         self.plan.lookup.sort_unstable();
+        self.plan.proc_lookup = self
+            .plan
+            .procs
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id, i as u32))
+            .collect();
+        self.plan.proc_lookup.sort_unstable();
+        self.plan.node_meters = (0..self.node_meters)
+            .map(|_| NodeMeter::default())
+            .collect();
         self.plan
     }
 }
@@ -291,10 +351,16 @@ pub trait InputSource {
     fn channel(&self, input: usize, channel: usize) -> Option<&[f32]>;
 }
 
-/// Where the executor writes outputs.
+/// Where the executor writes outputs and loudness meters.
 pub trait OutputSink {
     /// Channel `channel` of `channels` for output slot `slot`.
     fn write(&mut self, slot: usize, channel: usize, channels: usize, samples: &[f32]);
+
+    /// Channel `channel` of the block starting at sample `start` for loudness
+    /// meter `slot`.
+    fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
+        let _ = (slot, start, channel, samples);
+    }
 }
 
 impl Plan {
@@ -316,9 +382,30 @@ impl Plan {
         }
     }
 
-    /// Take over the current values of the nodes listed in `carry` from `old`;
-    /// they then ramp to this plan's targets over `ramp` samples.
-    pub fn adopt(&mut self, old: &Plan, ramp: u32) {
+    /// Apply a processor parameter message; `false` when there is no such node.
+    pub fn set_proc_param(&mut self, id: NodeId, index: usize, value: f32, ramp: u32) -> bool {
+        match self.proc_lookup.binary_search_by_key(&id, |(i, _)| *i) {
+            Ok(k) => {
+                let i = self.proc_lookup[k].1 as usize;
+                self.procs[i].set_param(index, value, ramp);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Take over the current values of the nodes listed in `carry` and the state
+    /// of the processors in `proc_carry` from `old`; values then ramp to this
+    /// plan's targets over `ramp` samples.
+    pub fn adopt(&mut self, old: &mut Plan, ramp: u32) {
+        for &(new, prev) in &self.proc_carry {
+            if let (Some(n), Some(o)) = (
+                self.procs.get_mut(new as usize),
+                old.procs.get_mut(prev as usize),
+            ) {
+                n.adopt(o, ramp);
+            }
+        }
         for &(new, prev) in &self.carry {
             let (Some(n), Some(o)) = (
                 self.nodes.get_mut(new as usize),
@@ -355,7 +442,7 @@ impl Plan {
     }
 
     /// Run every step for one block. Never allocates.
-    pub fn process(&mut self, inputs: &dyn InputSource, outputs: &mut dyn OutputSink) {
+    pub fn process(&mut self, start: u64, inputs: &dyn InputSource, outputs: &mut dyn OutputSink) {
         let block = self.block;
         for i in 0..self.steps.len() {
             match self.steps[i] {
@@ -467,17 +554,22 @@ impl Plan {
                     }
                     self.nodes[node as usize].finish_block(block);
                 }
-                Step::Meter { src, slot } => {
+                Step::Meter { src, slot, proc } => {
                     for c in 0..src.len as usize {
                         let range = self.buf(self.indices[src.start as usize + c]);
                         let mut peak = 0f32;
                         let mut energy = 0f64;
-                        for &x in &self.buffers[range] {
+                        for &x in &self.buffers[range.clone()] {
                             peak = peak.max(x.abs());
                             energy += f64::from(x) * f64::from(x);
                         }
+                        let tp = match self.procs.get_mut(proc as usize) {
+                            Some(p) => p.measure_true_peak(c, &self.buffers[range]),
+                            None => peak,
+                        };
                         if let Some(m) = self.meters.channels.get(slot as usize + c) {
                             m.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
+                            m.true_peak.fetch_max(tp.to_bits(), Ordering::Relaxed);
                             let total = f64::from_bits(m.energy.load(Ordering::Relaxed)) + energy;
                             m.energy.store(total.to_bits(), Ordering::Relaxed);
                             m.samples.fetch_add(block as u64, Ordering::Relaxed);
@@ -489,6 +581,66 @@ impl Plan {
                     for c in 0..channels {
                         let range = self.buf(self.indices[src.start as usize + c]);
                         outputs.write(slot as usize, c, channels, &self.buffers[range]);
+                    }
+                }
+                Step::Loudness { src, slot } => {
+                    for c in 0..src.len as usize {
+                        let range = self.buf(self.indices[src.start as usize + c]);
+                        outputs.loudness(slot as usize, start, c, &self.buffers[range]);
+                    }
+                }
+                Step::Process {
+                    proc,
+                    src,
+                    dst,
+                    key,
+                } => {
+                    let n = (dst.len.min(src.len) as usize).min(MAX_CH);
+                    for c in 0..n {
+                        let (s, d) = (
+                            self.indices[src.start as usize + c],
+                            self.indices[dst.start as usize + c],
+                        );
+                        let (s, d) = self.pair(s, d);
+                        d.copy_from_slice(s);
+                    }
+                    let base = self.buffers.as_mut_ptr();
+                    let mut io: [&mut [f32]; MAX_CH] =
+                        std::array::from_fn(|_| <&mut [f32]>::default());
+                    for (c, slot) in io.iter_mut().enumerate().take(n) {
+                        let b = self.indices[dst.start as usize + c] as usize;
+                        // SAFETY: the compiler gives every channel of a node its own
+                        // buffer, distinct from the key's; all lie inside `buffers`.
+                        *slot =
+                            unsafe { std::slice::from_raw_parts_mut(base.add(b * block), block) };
+                    }
+                    let kn = (key.len as usize).min(MAX_CH);
+                    let mut keys: [&[f32]; MAX_CH] = [&[]; MAX_CH];
+                    for (c, slot) in keys.iter_mut().enumerate().take(kn) {
+                        let b = self.indices[key.start as usize + c] as usize;
+                        // SAFETY: as above; the key buffers are only read.
+                        *slot = unsafe { std::slice::from_raw_parts(base.add(b * block), block) };
+                    }
+                    let meters = &self.node_meters;
+                    if let Some(p) = self.procs.get_mut(proc as usize) {
+                        p.process(&mut io[..n], &keys[..kn], block, meters);
+                    }
+                }
+                Step::HoldOut { proc, dst } => {
+                    for c in 0..dst.len as usize {
+                        let range = self.buf(self.indices[dst.start as usize + c]);
+                        match self.procs.get(proc as usize) {
+                            Some(p) => p.held(c, &mut self.buffers[range]),
+                            None => self.buffers[range].fill(0.0),
+                        }
+                    }
+                }
+                Step::HoldIn { proc, src } => {
+                    for c in 0..src.len as usize {
+                        let range = self.buf(self.indices[src.start as usize + c]);
+                        if let Some(p) = self.procs.get_mut(proc as usize) {
+                            p.hold(c, &self.buffers[range]);
+                        }
                     }
                 }
             }
@@ -560,9 +712,9 @@ mod tests {
     fn new_nodes_ramp_in_from_zero() {
         let mut plan = simple(4, 1.0, 8);
         let mut out = TestOutputs::default();
-        plan.process(&ones(4), &mut out);
-        plan.process(&ones(4), &mut out);
-        plan.process(&ones(4), &mut out);
+        plan.process(0, &ones(4), &mut out);
+        plan.process(0, &ones(4), &mut out);
+        plan.process(0, &ones(4), &mut out);
         let left = &out.0[0][0];
         // gain ramp k/8 times matrix ramp 0.5·k/8.
         let expected: Vec<f32> = (1..=12)
@@ -581,11 +733,11 @@ mod tests {
     fn parameter_ramps_are_linear_and_continuous() {
         let mut plan = simple(48, 1.0, 0);
         let mut out = TestOutputs::default();
-        plan.process(&ones(48), &mut out);
+        plan.process(0, &ones(48), &mut out);
         assert!(plan.set_param(1, &[0.0], 480));
         assert!(!plan.set_param(99, &[0.0], 480));
         for _ in 0..12 {
-            plan.process(&ones(48), &mut out);
+            plan.process(0, &ones(48), &mut out);
         }
         let left = &out.0[0][0];
         assert!(left[..48].iter().all(|x| (*x - 0.5).abs() < 1e-6));
@@ -613,7 +765,7 @@ mod tests {
             plan.set_param(1, &[to], ramp);
             let blocks = ramp as usize / block + 2;
             for _ in 0..blocks {
-                plan.process(&ones(block), &mut out);
+                plan.process(0, &ones(block), &mut out);
             }
             let (lo, hi) = (from.min(to) * 0.5, from.max(to) * 0.5);
             let left = &out.0[0][0];
@@ -631,7 +783,7 @@ mod tests {
         let block = 16;
         let mut old = simple(block, 1.0, 0);
         let mut out = TestOutputs::default();
-        old.process(&ones(block), &mut out);
+        old.process(0, &ones(block), &mut out);
         // A new plan with the same nodes (now carried) plus an unrelated one.
         let mut b = PlanBuilder::new(block);
         let input = b.buffers(1);
@@ -665,8 +817,8 @@ mod tests {
         b.step(Step::Output { src: pan, slot: 0 });
         let mut new = b.finish();
         new.carry = vec![(0, 0), (1, 1)];
-        new.adopt(&old, 480);
-        new.process(&ones(block), &mut out);
+        new.adopt(&mut old, 480);
+        new.process(0, &ones(block), &mut out);
         let left = &out.0[0][0];
         // No discontinuity across the swap: every sample stays at 0.5.
         assert!(left.iter().all(|x| (*x - 0.5).abs() < 1e-6), "{left:?}");
@@ -717,11 +869,12 @@ mod tests {
         b.step(Step::Meter {
             src: bus,
             slot: meter,
+            proc: u32::MAX,
         });
         let mut plan = b.finish();
         let inputs = TestInputs(vec![vec![vec![0.25; block]], vec![vec![0.5; block]]]);
         let mut out = TestOutputs::default();
-        plan.process(&inputs, &mut out);
+        plan.process(0, &inputs, &mut out);
         // L = 0.25·0.5 − 0.5·0.5 = −0.125; R = −0.25.
         assert!(out.0[0][0].iter().all(|x| (*x + 0.125).abs() < 1e-7));
         assert!(out.0[0][1].iter().all(|x| (*x + 0.25).abs() < 1e-7));
@@ -737,10 +890,10 @@ mod tests {
         let block = 8;
         let mut plan = simple(block, 1.0, 0);
         let mut out = TestOutputs::default();
-        plan.process(&TestInputs(vec![]), &mut out);
+        plan.process(0, &TestInputs(vec![]), &mut out);
         assert!(out.0[0][0].iter().all(|x| *x == 0.0));
         let tiny = TestInputs(vec![vec![vec![f32::MIN_POSITIVE / 4.0; block]]]);
-        plan.process(&tiny, &mut out);
+        plan.process(0, &tiny, &mut out);
         assert!(out.0[0][0].iter().all(|x| x.is_finite() && x.abs() < 1e-37));
     }
 }

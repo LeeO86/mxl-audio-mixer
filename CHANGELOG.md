@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Milestone 3: EQ, filters, dynamics, delay, delay compensation, loudness
+
+- Processing chains on strips and buses: EQ (8 bands), Butterworth filters
+  (12–48 dB/oct), dynamic EQ, compressor (soft knee, peak/RMS, sidechain filter,
+  key), look-ahead limiter (optional true peak), expander, gate, de-esser
+  (split-band, wide-band, listen), ducker, multiband (3–5 bands), delay; bypass;
+  per-node gain reduction and in/out peaks. API under `/api/v1/{strips,buses}/<id>/chain`.
+- Taps pre/post-EQ, pre/post-dynamics and after any node; keys from other signals.
+- Delay compensation per bus (`compensate`), latency per output; loops through
+  block-delay sends.
+- True peak (4× oversampling) on every meter; loudness (BS.1770-4, EBU R 128,
+  Tech 3341/3342) per signal with start/stop/reset; metrics `loudness_lufs` and
+  `true_peak_dbtp`.
+- After a missed deadline the skipped output blocks get silence instead of stale
+  ring data. `mxl-mixer-tone` catches up instead of skipping.
+
 ### Milestone 2: plan compiler and DSP core
 
 - The mix: strips with input patch, trim, polarity, fader, mute and panner

@@ -1,7 +1,7 @@
 //! Test reader: reads an MXL audio flow on the TAI clock and reports what it got.
 //!
 //! ```sh
-//! mxl-mixer-probe --domain DIR --flow UUID [--seconds 2] [--behind-ms 20] [--expect CH:SRC:GAIN ...]
+//! mxl-mixer-probe --domain DIR --flow UUID [--seconds 2] [--behind-ms 20] [--expect CH:SRC:GAIN ...] [--dump FILE]
 //! ```
 //!
 //! Reads `--behind-ms` behind the TAI now (more for mirrored flows, which arrive
@@ -108,6 +108,15 @@ fn main() {
         }
     }
     let first = first_index.unwrap_or(0);
+    if let (Some(path), Some(ch)) = (arg("--dump"), data.first()) {
+        // Channel 1 as text: "<index> <sample>" per line.
+        let text: String = ch
+            .iter()
+            .enumerate()
+            .map(|(k, v)| format!("{} {v}\n", first + k as u64))
+            .collect();
+        let _ = std::fs::write(path, text);
+    }
     let level = |x: &[f32]| -> (f64, f64) {
         let valid: Vec<f64> = x
             .iter()
@@ -132,9 +141,11 @@ fn main() {
             let x = data.get(ch).cloned().unwrap_or_default();
             // Skip the first 100 ms (fades) and compare the rest.
             let skip = 4800.min(x.len());
+            // The alignment with the fewest samples off by more than 1e-5 (a gap
+            // anywhere makes every alignment's largest error the same).
             let best = (0..48u64)
                 .map(|shift| {
-                    let err = x[skip..]
+                    let (count, err) = x[skip..]
                         .iter()
                         .enumerate()
                         .filter(|(_, v)| !v.is_nan())
@@ -142,14 +153,31 @@ fn main() {
                             let index = first + (skip + k) as u64 + shift;
                             (v - gain * tone(src, index)).abs()
                         })
-                        .fold(0.0f32, f32::max);
-                    (shift, err)
+                        .fold((0usize, 0.0f32), |(n, m), e| {
+                            (n + usize::from(e > 1e-5), m.max(e))
+                        });
+                    (shift, err, count)
                 })
-                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .min_by_key(|(_, _, count)| *count)
+                .map(|(shift, err, _)| (shift, err))
                 .unwrap_or((0, f32::INFINITY));
+            // Where the samples differ at the best alignment.
+            let bad: Vec<(u64, f32)> = x[skip..]
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_nan())
+                .filter_map(|(k, v)| {
+                    let index = first + (skip + k) as u64;
+                    let expected = gain * tone(src, index + best.0);
+                    ((v - expected).abs() > 1e-5).then_some((index, *v))
+                })
+                .collect();
             serde_json::json!({
                 "channel": ch + 1, "tone": src + 1, "gain": gain,
                 "max_error": best.1, "shift_mod_48": best.0,
+                "bad_samples": bad.len(),
+                "first_bad": bad.first().map(|(i, v)| serde_json::json!({"index": i, "value": v})),
+                "last_bad": bad.last().map(|(i, v)| serde_json::json!({"index": i, "value": v})),
             })
         })
         .collect();
