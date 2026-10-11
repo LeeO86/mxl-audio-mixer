@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Milestone 2: plan compiler and DSP core
+
+- The mix: strips with input patch, trim, polarity, fader, mute and panner
+  (pan law, balance, width); buses; a send matrix with taps, gain, mute and phase;
+  width mapping between mono, stereo, 3.0, 5.1, 7.1, 5.1.4 and 7.1.4 (BS.775
+  down-mix). Kept in `mix.json` and in the show file; the mix API under
+  `/api/v1/{mix,strips,buses,sends,outputs,meters}`.
+- The plan compiler: mix → execution plan; buses in dependency order, loops
+  rejected. Parameter changes ramp (10 ms default); a rewiring fades the affected
+  paths out and in around the swap; unchanged nodes keep their state.
+- Published buses: MXL flows in the own domain with stable flow ids (UUIDv5 of
+  `NMOS_SEED` and the bus id), commit staging (`MIXER_OUTPUT_COMMIT_SAMPLES`, per
+  output overridable), fades on publish and on SIGTERM; NMOS Source, Flow and
+  Sender per output.
+- Peak and RMS meters per strip and bus.
+- Metrics `plan_swaps_total`, `plan_compile_seconds`, `signals`, `nodes{type}`,
+  `output_commit_lag_ms{output}`.
+- `mxl-mixer-probe`, a test reader.
+
 ### Milestone 1: skeleton
 
 - Settings from the environment, `MIXER_CONFIG_FILE` and defaults; invalid values
