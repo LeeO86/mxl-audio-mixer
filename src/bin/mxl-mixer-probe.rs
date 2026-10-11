@@ -147,9 +147,23 @@ fn main() {
                 })
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .unwrap_or((0, f32::INFINITY));
+            // Where the samples differ at the best alignment.
+            let bad: Vec<(u64, f32)> = x[skip..]
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_nan())
+                .filter_map(|(k, v)| {
+                    let index = first + (skip + k) as u64;
+                    let expected = gain * tone(src, index + best.0);
+                    ((v - expected).abs() > 1e-5).then_some((index, *v))
+                })
+                .collect();
             serde_json::json!({
                 "channel": ch + 1, "tone": src + 1, "gain": gain,
                 "max_error": best.1, "shift_mod_48": best.0,
+                "bad_samples": bad.len(),
+                "first_bad": bad.first().map(|(i, v)| serde_json::json!({"index": i, "value": v})),
+                "last_bad": bad.last().map(|(i, v)| serde_json::json!({"index": i, "value": v})),
             })
         })
         .collect();

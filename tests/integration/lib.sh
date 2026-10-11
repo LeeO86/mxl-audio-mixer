@@ -96,4 +96,47 @@ route() { # <input n> <domain id> <flow id> [master_enable]
     [[ "$code" == 200 ]] || fail "IS-05 activation of input $1 answered $code"
 }
 
+PROBE_BIN="${PROBE_BIN:-$ROOT/target/debug/mxl-mixer-probe}"
+
+api() { # <method> <path> [body] ; prints the response, fails on HTTP errors
+    curl -fsS -X "$1" -H 'content-type: application/json' "$WEB$2" ${3:+-d "$3"}
+}
+
+glitches() { # input 1 missing samples + DSP deadline misses
+    local missing misses
+    missing=$(input 1 missing_samples)
+    misses=$(curl -fsS "$WEB/metrics" | sed -n 's/^mxl_audio_mixer_dsp_deadline_misses_total \(.*\)/\1/p')
+    echo $((missing + misses))
+}
+
+# probe <seconds> <CH:TONE:GAIN...>: read $OUT_FLOW in $OWN with mxl-mixer-probe;
+# fails unless every check is within 1e-5. The probe's JSON is left in $PROBED.
+export PROBED=""
+probe() {
+    local secs=$1 out args=() before attempt
+    shift
+    for e in "$@"; do args+=(--expect "$e"); done
+    for attempt in 1 2; do
+        before=$(glitches)
+        out=$("$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds "$secs" "${args[@]}")
+        echo "$out" >>"$IT_OUT/$(basename "$0" .sh)-probe.log"
+        if python3 - "$out" <<'EOF'; then
+import json, sys
+d = json.loads(sys.argv[1])
+assert d["samples"] > 0 and d["failed_reads"] == 0, d
+for c in d["checks"]:
+    assert c["max_error"] < 1e-5, c
+EOF
+            PROBED="$out"
+            return 0
+        fi
+        # A late input block (missing samples, faded) or a missed DSP deadline on
+        # this shared machine is not a mixing error: measure once more.
+        if ((attempt == 2)) || [[ "$(glitches)" == "$before" ]]; then
+            fail "probe: $out"
+        fi
+        log "the input was late or the DSP missed a deadline during the probe; measuring again"
+    done
+}
+
 mkdir -p "$WORK/mxl" "$WORK/state"

@@ -6,7 +6,6 @@
 # receives again; unpublishing removes the flow and the sender.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
-PROBE_BIN="${PROBE_BIN:-$ROOT/target/debug/mxl-mixer-probe}"
 
 FLOW=66666666-6666-4666-8666-666666666666
 DOMAIN=77777777-7777-4777-8777-777777777777
@@ -15,25 +14,6 @@ wait_until 10 "tone flow" test -d "$WORK/mxl/tones/$FLOW.mxl-flow"
 start_mixer NMOS_SEED=it-mix
 route 1 "$DOMAIN" "$FLOW"
 wait_until 5 "input 1 running" is_state 1 running
-
-api() { # <method> <path> [body] ; prints the response, fails on HTTP errors
-    curl -fsS -X "$1" -H 'content-type: application/json' "$WEB$2" ${3:+-d "$3"}
-}
-
-probe() { # <seconds> <CH:TONE:GAIN...> ; fails unless every check is within 1e-5
-    local secs=$1 out args=()
-    shift
-    for e in "$@"; do args+=(--expect "$e"); done
-    out=$("$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds "$secs" "${args[@]}")
-    echo "$out" >>"$IT_OUT/mix-probe.log"
-    python3 - "$out" <<'EOF' || fail "probe: $out"
-import json, sys
-d = json.loads(sys.argv[1])
-assert d["samples"] > 0 and d["failed_reads"] == 0, d
-for c in d["checks"]:
-    assert c["max_error"] < 1e-5, c
-EOF
-}
 
 api POST /api/v1/strips '{"id": "vox", "name": "Vox", "format": "mono", "patch": [{"input": 1, "channel": 1}]}' >/dev/null
 api POST /api/v1/strips '{"id": "music", "format": "stereo", "patch": [{"input": 1, "channel": 1}, {"input": 1, "channel": 2}]}' >/dev/null
