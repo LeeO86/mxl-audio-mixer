@@ -14,9 +14,13 @@ pub mod proc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::dsp::loudness::SegmentMeter;
 use crate::mxlio::writer::SamplesWriter;
 use crate::mxlio::SamplesReader;
 pub use plan::{NodeId, Plan, MAX_NODE_VALUES};
+
+/// Loudness meter slots of the DSP thread.
+pub const MAX_LOUDNESS: usize = MAX_OUTPUTS;
 
 /// Largest channel count of an input flow (§4.2).
 pub const MAX_CHANNELS: usize = 64;
@@ -34,9 +38,14 @@ pub enum Command {
         channels: usize,
     },
     /// Stop reading input `index` (master_enable false, unrouted, flow gone).
-    ClearInput { index: usize },
+    ClearInput {
+        index: usize,
+    },
     /// Change input `index`'s extra delay, fading out and in.
-    SetDelay { index: usize, samples: u32 },
+    SetDelay {
+        index: usize,
+        samples: u32,
+    },
     /// Run this plan from the next block on.
     SetPlan(Box<Plan>),
     /// Ramp node `node` to `values[..len]` over `ramp` samples (§2).
@@ -52,7 +61,24 @@ pub enum Command {
         output: Box<OutputWriter>,
     },
     /// Stop writing output slot `slot`; the writer comes back to be released.
-    ClearOutput { slot: usize },
+    ClearOutput {
+        slot: usize,
+    },
+    /// Ramp parameter `index` of processor `node` to `value` over `ramp` samples.
+    ProcParam {
+        node: NodeId,
+        index: u16,
+        value: f32,
+        ramp: u32,
+    },
+    /// Feed loudness meter slot `slot` with this meter from the next block on.
+    SetLoudness {
+        slot: usize,
+        meter: Box<SegmentMeter>,
+    },
+    ClearLoudness {
+        slot: usize,
+    },
 }
 
 /// A message from the DSP thread back: things it must not free itself.
@@ -60,6 +86,7 @@ pub enum Returned {
     Reader(Box<SamplesReader>),
     Plan(Box<Plan>),
     Output(Box<OutputWriter>),
+    Loudness(Box<SegmentMeter>),
 }
 
 /// An output's writer with its commit staging (§4.3: the commit size is separate
@@ -242,6 +269,16 @@ impl Engine {
             node,
             values: v,
             len: len as u8,
+            ramp,
+        });
+    }
+
+    /// Ramp parameter `index` of processor `node` to `value` over `ramp` samples.
+    pub fn proc_param(&mut self, node: NodeId, index: usize, value: f32, ramp: u32) {
+        self.send(Command::ProcParam {
+            node,
+            index: index as u16,
+            value,
             ramp,
         });
     }

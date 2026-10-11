@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::chain::{Category, Proc};
 use super::format::{Format, Laws, MonoSum, PanLaw};
 
 /// Largest fader and send gain (§5: −∞ … +10 dB).
@@ -89,9 +90,19 @@ pub struct Strip {
     pub pan: f64,
     /// Stereo width, 0 (mono) … 1 (unchanged) … 2. Other formats: unused.
     pub width: f64,
+    /// Processing between the trim and the fader (§6).
+    #[serde(default)]
+    pub chain: Vec<Proc>,
+    /// Measure loudness (§7) at the post-fader point.
+    #[serde(default)]
+    pub loudness: bool,
 }
 
-/// A summing bus: the sum of its sends → fader and mute.
+fn yes() -> bool {
+    true
+}
+
+/// A summing bus: the sum of its sends → processing → fader and mute.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bus {
@@ -100,16 +111,82 @@ pub struct Bus {
     pub format: Format,
     pub fader_db: Db,
     pub mute: bool,
+    #[serde(default)]
+    pub chain: Vec<Proc>,
+    #[serde(default)]
+    pub loudness: bool,
+    /// Delay compensation (§4.4): sends with less latency are delayed to the
+    /// largest. Off for minimum-latency paths (talkback, IFB).
+    #[serde(default = "yes")]
+    pub compensate: bool,
 }
 
-/// Where a send taps its source (§5). Buses have `pre-fader` and `post-fader`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// Where a send or key taps its source (§5). Pre/post-EQ and pre/post-dynamics
+/// are the input of the first and the output of the last node of that kind in the
+/// chain (the chain's input when it has none). Buses have no `input` or
+/// `post-pan`. `{"after": "<node id>"}` taps after any node.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Tap {
     Input,
+    PreEq,
+    PostEq,
+    PreDynamics,
+    PostDynamics,
     PreFader,
     PostFader,
     PostPan,
+    After(String),
+}
+
+const TAP_NAMES: [(&str, Tap); 8] = [
+    ("input", Tap::Input),
+    ("pre-eq", Tap::PreEq),
+    ("post-eq", Tap::PostEq),
+    ("pre-dynamics", Tap::PreDynamics),
+    ("post-dynamics", Tap::PostDynamics),
+    ("pre-fader", Tap::PreFader),
+    ("post-fader", Tap::PostFader),
+    ("post-pan", Tap::PostPan),
+];
+
+impl Serialize for Tap {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Tap::After(id) => {
+                use serde::ser::SerializeMap;
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("after", id)?;
+                m.end()
+            }
+            named => {
+                let name = TAP_NAMES
+                    .iter()
+                    .find(|(_, t)| t == named)
+                    .map(|(n, _)| *n)
+                    .unwrap_or_default();
+                s.serialize_str(name)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Tap {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Name(String),
+            After { after: String },
+        }
+        match Raw::deserialize(d)? {
+            Raw::Name(n) => TAP_NAMES
+                .iter()
+                .find(|(name, _)| *name == n)
+                .map(|(_, t)| t.clone())
+                .ok_or_else(|| serde::de::Error::custom(format!("unknown tap {n}"))),
+            Raw::After { after } => Ok(Tap::After(after)),
+        }
+    }
 }
 
 /// A matrix point: signal `from` into bus `to`.
@@ -123,6 +200,10 @@ pub struct Send {
     pub mute: bool,
     /// Polarity inversion of the send.
     pub phase: bool,
+    /// Read the source one block late: the explicit block delay that lets a
+    /// routing loop close through this send (§4.4).
+    #[serde(default)]
+    pub block_delay: bool,
 }
 
 /// A signal published as an MXL flow and an NMOS sender (§4.3).
@@ -138,14 +219,39 @@ pub struct Output {
     pub commit_samples: Option<u32>,
 }
 
-/// Mix-wide laws.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+/// Mix-wide laws and the loudness target.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MixSettings {
     #[serde(default)]
     pub pan_law_db: PanLaw,
     #[serde(default)]
     pub mono_sum_db: MonoSum,
+    /// EBU R 128 target (§7).
+    #[serde(default = "default_target")]
+    pub loudness_target_lufs: f64,
+    /// Integrated loudness within ± this of the target is in tolerance.
+    #[serde(default = "default_tolerance")]
+    pub loudness_tolerance_lu: f64,
+}
+
+fn default_target() -> f64 {
+    -23.0
+}
+
+fn default_tolerance() -> f64 {
+    1.0
+}
+
+impl Default for MixSettings {
+    fn default() -> Self {
+        Self {
+            pan_law_db: PanLaw::default(),
+            mono_sum_db: MonoSum::default(),
+            loudness_target_lufs: default_target(),
+            loudness_tolerance_lu: default_tolerance(),
+        }
+    }
 }
 
 impl MixSettings {
@@ -215,7 +321,7 @@ impl Mix {
     }
 
     /// The width of `id` at `tap`: a mono strip is stereo after its panner.
-    pub fn tap_format(&self, id: &str, tap: Tap) -> Option<Format> {
+    pub fn tap_format(&self, id: &str, tap: &Tap) -> Option<Format> {
         let (_, format) = self.signal(id)?;
         Some(match (self.kind(id)?, tap, format) {
             (Kind::Strip, Tap::PostPan, Format::Mono) => Format::Stereo,
@@ -300,21 +406,17 @@ impl Mix {
         }
         let mut pairs = BTreeSet::new();
         for send in &self.sends {
-            let Some(kind) = self.kind(&send.from) else {
+            if self.kind(&send.from).is_none() {
                 return Err(format!("send source {} does not exist", send.from));
-            };
+            }
             if self.kind(&send.to) != Some(Kind::Bus) {
                 return Err(format!("send destination {} is not a bus", send.to));
             }
             if send.from == send.to {
                 return Err(format!("bus {} cannot send to itself", send.to));
             }
-            if kind == Kind::Bus && matches!(send.tap, Tap::Input | Tap::PostPan) {
-                return Err(format!(
-                    "send {} → {}: a bus has the taps pre-fader and post-fader",
-                    send.from, send.to
-                ));
-            }
+            self.check_tap(&send.from, &send.tap)
+                .map_err(|e| format!("send {} → {}: {e}", send.from, send.to))?;
             check_gain(
                 &format!("send {} → {}: gain_db", send.from, send.to),
                 send.gain_db,
@@ -323,7 +425,29 @@ impl Mix {
                 return Err(format!("send {} → {} exists twice", send.from, send.to));
             }
         }
-        self.bus_order()?;
+        for (id, chain) in self.chains() {
+            super::chain::validate(chain).map_err(|e| format!("{id}: {e}"))?;
+            for p in chain {
+                let Some(key) = p.kind.key() else {
+                    continue;
+                };
+                if key.signal == id {
+                    return Err(format!(
+                        "{id}: node {} cannot be keyed by its own signal",
+                        p.id
+                    ));
+                }
+                if self.kind(&key.signal).is_none() {
+                    return Err(format!(
+                        "{id}: the key {} of node {} does not exist",
+                        key.signal, p.id
+                    ));
+                }
+                self.check_tap(&key.signal, &key.tap)
+                    .map_err(|e| format!("{id}: node {} key: {e}", p.id))?;
+            }
+        }
+        self.signal_order()?;
         let mut published = BTreeSet::new();
         if self.outputs.len() > MAX_OUTPUTS {
             return Err(format!("at most {MAX_OUTPUTS} outputs"));
@@ -347,17 +471,67 @@ impl Mix {
         Ok(())
     }
 
-    /// Buses in processing order: a bus comes after every bus that sends to it.
-    /// A cycle is an error (§4.4: feedback needs an explicit block delay, which
-    /// the mix does not have yet).
-    pub fn bus_order(&self) -> Result<Vec<&Bus>, String> {
+    /// Every signal's chain.
+    pub fn chains(&self) -> impl Iterator<Item = (&str, &[Proc])> {
+        self.strips
+            .iter()
+            .map(|s| (s.id.as_str(), s.chain.as_slice()))
+            .chain(
+                self.buses
+                    .iter()
+                    .map(|b| (b.id.as_str(), b.chain.as_slice())),
+            )
+    }
+
+    pub fn chain(&self, id: &str) -> Option<&[Proc]> {
+        self.chains().find(|(s, _)| *s == id).map(|(_, c)| c)
+    }
+
+    /// Whether `id` has `tap`.
+    pub fn check_tap(&self, id: &str, tap: &Tap) -> Result<(), String> {
+        match (self.kind(id), tap) {
+            (None, _) => Err(format!("signal {id} does not exist")),
+            (Some(Kind::Bus), Tap::Input | Tap::PostPan) => {
+                Err(format!("bus {id} has no input or post-pan tap"))
+            }
+            (Some(_), Tap::After(node)) => {
+                if self
+                    .chain(id)
+                    .is_some_and(|c| c.iter().any(|p| &p.id == node))
+                {
+                    Ok(())
+                } else {
+                    Err(format!("{id} has no node {node}"))
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The chain positions of a named tap: the index of the first node of
+    /// `category` and one past the last (both 0 without such a node).
+    pub fn category_span(chain: &[Proc], category: Category) -> (usize, usize) {
+        let first = chain.iter().position(|p| p.kind.category() == category);
+        let last = chain.iter().rposition(|p| p.kind.category() == category);
+        match (first, last) {
+            (Some(f), Some(l)) => (f, l + 1),
+            _ => (0, 0),
+        }
+    }
+
+    /// Signals in processing order: a signal comes after every signal it reads
+    /// (sends without a block delay, keys). A loop is an error (§4.4).
+    pub fn signal_order(&self) -> Result<Vec<&str>, String> {
         let mut feeds: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for s in &self.sends {
-            if self.kind(&s.from) == Some(Kind::Bus) {
-                feeds
-                    .entry(s.to.as_str())
-                    .or_default()
-                    .push(s.from.as_str());
+        for s in self.sends.iter().filter(|s| !s.block_delay) {
+            feeds
+                .entry(s.to.as_str())
+                .or_default()
+                .push(s.from.as_str());
+        }
+        for (id, chain) in self.chains() {
+            for key in chain.iter().filter_map(|p| p.kind.key()) {
+                feeds.entry(id).or_default().push(key.signal.as_str());
             }
         }
         let mut order = Vec::new();
@@ -393,10 +567,16 @@ impl Mix {
             order.push(id);
             Ok(())
         }
-        for b in &self.buses {
-            visit(&b.id, &feeds, &mut state, &mut order, &mut Vec::new())?;
+        let ids: Vec<&str> = self
+            .strips
+            .iter()
+            .map(|s| s.id.as_str())
+            .chain(self.buses.iter().map(|b| b.id.as_str()))
+            .collect();
+        for id in ids {
+            visit(id, &feeds, &mut state, &mut order, &mut Vec::new())?;
         }
-        Ok(order.into_iter().filter_map(|id| self.bus(id)).collect())
+        Ok(order)
     }
 
     /// Remove a signal with its sends and its output.
@@ -457,6 +637,8 @@ mod tests {
             mute: false,
             pan: 0.0,
             width: 1.0,
+            chain: Vec::new(),
+            loudness: false,
         }
     }
 
@@ -467,6 +649,9 @@ mod tests {
             format,
             fader_db: Db(0.0),
             mute: false,
+            chain: Vec::new(),
+            loudness: false,
+            compensate: true,
         }
     }
 
@@ -478,6 +663,7 @@ mod tests {
             gain_db: Db(0.0),
             mute: false,
             phase: false,
+            block_delay: false,
         }
     }
 
@@ -544,18 +730,64 @@ mod tests {
         }
         mix.sends.push(send("a", "b"));
         mix.sends.push(send("b", "c"));
-        let order: Vec<&str> = mix
-            .bus_order()
-            .unwrap()
-            .iter()
-            .map(|b| b.id.as_str())
-            .collect();
-        assert_eq!(order, ["a", "b", "c"]);
+        assert_eq!(mix.signal_order().unwrap(), ["a", "b", "c"]);
         mix.sends.push(send("c", "a"));
         let err = mix.validate(1, 96).unwrap_err();
         assert!(
             err.contains("feedback loop") && err.contains("a → b → c → a"),
             "{err}"
+        );
+        // An explicit block delay on one send of the loop makes it valid.
+        mix.sends.last_mut().unwrap().block_delay = true;
+        assert_eq!(mix.validate(1, 96), Ok(()));
+    }
+
+    #[test]
+    fn taps_and_keys() {
+        let mut mix = Mix::default();
+        mix.strips.push(strip("vox", Format::Mono));
+        mix.strips.push(strip("music", Format::Stereo));
+        mix.buses.push(bus("main", Format::Stereo));
+        mix.strips[0].chain = serde_json::from_str(
+            r#"[{"id": "eq", "type": "eq", "bands": [{"type": "bell", "freq_hz": 1000, "q": 1, "gain_db": 3}]}]"#,
+        )
+        .unwrap();
+        let mut s = send("vox", "main");
+        s.tap = Tap::After("eq".into());
+        mix.sends.push(s.clone());
+        assert_eq!(mix.validate(2, 96), Ok(()));
+        let mut bad = mix.clone();
+        bad.sends[0].tap = Tap::After("nope".into());
+        assert!(bad.validate(2, 96).unwrap_err().contains("no node nope"));
+        let mut bad = mix.clone();
+        bad.sends.push(Send {
+            from: "main".into(),
+            to: "main".into(),
+            ..s
+        });
+        assert!(bad.validate(2, 96).is_err());
+        // Music ducked under vox: vox comes first in the order.
+        mix.strips[1].chain = serde_json::from_str(
+            r#"[{"id": "duck", "type": "ducker", "key": {"signal": "vox", "tap": "post-fader"}, "threshold_db": -40, "depth_db": 10, "attack_ms": 5, "hold_ms": 100, "release_ms": 300}]"#,
+        )
+        .unwrap();
+        mix.strips.swap(0, 1);
+        assert_eq!(mix.validate(2, 96), Ok(()));
+        let order = mix.signal_order().unwrap();
+        assert!(order.iter().position(|s| *s == "vox") < order.iter().position(|s| *s == "music"));
+        let mut bad = mix.clone();
+        bad.strips[0].chain[0] = serde_json::from_str(
+            r#"{"id": "duck", "type": "ducker", "key": {"signal": "music", "tap": "post-fader"}, "threshold_db": -40, "depth_db": 10, "attack_ms": 5, "hold_ms": 100, "release_ms": 300}"#,
+        )
+        .unwrap();
+        assert!(bad.validate(2, 96).unwrap_err().contains("own signal"));
+        assert_eq!(
+            serde_json::to_value(Tap::After("eq".into())).unwrap(),
+            serde_json::json!({"after": "eq"})
+        );
+        assert_eq!(
+            serde_json::from_str::<Tap>("\"pre-eq\"").unwrap(),
+            Tap::PreEq
         );
     }
 
@@ -565,15 +797,15 @@ mod tests {
         mix.strips.push(strip("strip-1", Format::Mono));
         mix.buses.push(bus("bus-1", Format::Surround51));
         assert_eq!(
-            mix.tap_format("strip-1", Tap::PostFader),
+            mix.tap_format("strip-1", &Tap::PostFader),
             Some(Format::Mono)
         );
         assert_eq!(
-            mix.tap_format("strip-1", Tap::PostPan),
+            mix.tap_format("strip-1", &Tap::PostPan),
             Some(Format::Stereo)
         );
         assert_eq!(
-            mix.tap_format("bus-1", Tap::PostFader),
+            mix.tap_format("bus-1", &Tap::PostFader),
             Some(Format::Surround51)
         );
         assert_eq!(mix.next_id("strip"), "strip-2");

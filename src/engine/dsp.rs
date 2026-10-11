@@ -10,8 +10,9 @@ use mxl::Error as MxlError;
 use super::plan::{InputSource, OutputSink};
 use super::{
     Command, EngineConfig, EngineCounters, OutputWriter, Plan, Returned, BLOCK_BUCKETS_US,
-    FADE_SAMPLES, MAX_CHANNELS, MAX_OUTPUTS,
+    FADE_SAMPLES, MAX_CHANNELS, MAX_LOUDNESS, MAX_OUTPUTS,
 };
+use crate::dsp::loudness::SegmentMeter;
 use crate::mxlio::SamplesReader;
 use crate::timing::{index_at, sleep_until_tai, tai_ns, time_of};
 
@@ -75,10 +76,17 @@ impl InputSource for Inputs<'_> {
 
 struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
+    loudness: &'a mut [Option<Box<SegmentMeter>>],
     block: usize,
 }
 
 impl OutputSink for Outputs<'_> {
+    fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
+        if let Some(Some(m)) = self.loudness.get_mut(slot) {
+            m.feed(start, channel, samples);
+        }
+    }
+
     fn write(&mut self, slot: usize, channel: usize, _channels: usize, samples: &[f32]) {
         let Some(Some(o)) = self.slots.get_mut(slot) else {
             return;
@@ -128,6 +136,7 @@ pub(super) fn run(
     let read_wait = Duration::from_nanos(period_ns / 4);
     let mut inputs: Vec<Input> = (0..config.inputs).map(|_| Input::new(block)).collect();
     let mut outputs: Vec<Option<Box<OutputWriter>>> = (0..MAX_OUTPUTS).map(|_| None).collect();
+    let mut loudness: Vec<Option<Box<SegmentMeter>>> = (0..MAX_LOUDNESS).map(|_| None).collect();
     let mut plan: Option<Box<Plan>> = None;
     let mut stopping = false;
     // The fade-out takes FADE_SAMPLES; a few blocks more cover a full commit.
@@ -203,8 +212,8 @@ pub(super) fn run(
                     }
                 }
                 Command::SetPlan(mut next) => {
-                    if let Some(old) = plan.take() {
-                        next.adopt(&old, FADE_SAMPLES);
+                    if let Some(mut old) = plan.take() {
+                        next.adopt(&mut old, FADE_SAMPLES);
                         let _ = returned.push(Returned::Plan(old));
                     }
                     plan = Some(next);
@@ -231,6 +240,28 @@ pub(super) fn run(
                 Command::ClearOutput { slot } => {
                     if let Some(old) = outputs.get_mut(slot).and_then(|s| s.take()) {
                         let _ = returned.push(Returned::Output(old));
+                    }
+                }
+                Command::ProcParam {
+                    node,
+                    index,
+                    value,
+                    ramp,
+                } => {
+                    if let Some(p) = plan.as_mut() {
+                        p.set_proc_param(node, index as usize, value, ramp);
+                    }
+                }
+                Command::SetLoudness { slot, meter } => {
+                    if let Some(s) = loudness.get_mut(slot) {
+                        if let Some(old) = s.replace(meter) {
+                            let _ = returned.push(Returned::Loudness(old));
+                        }
+                    }
+                }
+                Command::ClearLoudness { slot } => {
+                    if let Some(old) = loudness.get_mut(slot).and_then(|s| s.take()) {
+                        let _ = returned.push(Returned::Loudness(old));
                     }
                 }
             }
@@ -312,12 +343,14 @@ pub(super) fn run(
         }
         if let Some(p) = plan.as_mut() {
             p.process(
+                start,
                 &Inputs {
                     inputs: &inputs,
                     block,
                 },
                 &mut Outputs {
                     slots: &mut outputs,
+                    loudness: &mut loudness,
                     block,
                 },
             );
@@ -363,6 +396,11 @@ pub(super) fn run(
     }
     if let Some(p) = plan.take() {
         let _ = returned.push(Returned::Plan(p));
+    }
+    for m in loudness.iter_mut() {
+        if let Some(m) = m.take() {
+            let _ = returned.push(Returned::Loudness(m));
+        }
     }
 }
 

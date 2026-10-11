@@ -205,6 +205,8 @@ pub enum Kind {
         taps: Box<[[f32; TAPS]; PHASES]>,
         channels: Vec<TruePeak>,
     },
+    /// One block of a signal, kept for the next block (a feedback send's block delay).
+    Hold(Vec<f32>),
 }
 
 /// A processing node in a plan.
@@ -376,6 +378,34 @@ impl Processor {
         }
     }
 
+    /// A one-block hold for `channels` channels.
+    pub fn hold_block(id: NodeId, channels: usize, block: usize) -> Self {
+        let mut p = Self::true_peak(id, 0);
+        p.channels = channels;
+        p.kind = Kind::Hold(vec![0.0; channels * block]);
+        p
+    }
+
+    /// Copy the held block of channel `ch` into `out`.
+    pub fn held(&self, ch: usize, out: &mut [f32]) {
+        match &self.kind {
+            Kind::Hold(data) if (ch + 1) * out.len() <= data.len() => {
+                out.copy_from_slice(&data[ch * out.len()..(ch + 1) * out.len()])
+            }
+            _ => out.fill(0.0),
+        }
+    }
+
+    /// Keep `samples` as channel `ch`'s block for next time.
+    pub fn hold(&mut self, ch: usize, samples: &[f32]) {
+        if let Kind::Hold(data) = &mut self.kind {
+            let n = samples.len();
+            if (ch + 1) * n <= data.len() {
+                data[ch * n..(ch + 1) * n].copy_from_slice(samples);
+            }
+        }
+    }
+
     /// The oversampled peak of `samples` on channel `ch` (true-peak meters).
     pub fn measure_true_peak(&mut self, ch: usize, samples: &[f32]) -> f32 {
         match &mut self.kind {
@@ -507,7 +537,7 @@ impl Processor {
                     *ballistic = Ballistics::new(p(o + 2), p(o + 3));
                 }
             }
-            Kind::Delay(_) | Kind::TruePeak { .. } => {}
+            Kind::Delay(_) | Kind::TruePeak { .. } | Kind::Hold(_) => {}
         }
     }
 
@@ -928,7 +958,7 @@ impl Processor {
                 d.run(io);
                 0.0
             }
-            Kind::TruePeak { .. } => 0.0,
+            Kind::TruePeak { .. } | Kind::Hold(_) => 0.0,
         }
     }
 }
