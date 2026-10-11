@@ -77,10 +77,36 @@ impl InputSource for Inputs<'_> {
 struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
     loudness: &'a mut [Option<Box<SegmentMeter>>],
+    analysis: &'a mut rtrb::Producer<f32>,
+    /// The analyser ring has room for this block (checked at channel 1).
+    analysis_room: bool,
     block: usize,
 }
 
+impl Outputs<'_> {
+    fn push_analysis(&mut self, samples: &[f32]) {
+        if let Ok(chunk) = self.analysis.write_chunk_uninit(samples.len()) {
+            chunk.fill_from_iter(samples.iter().copied());
+        }
+    }
+}
+
 impl OutputSink for Outputs<'_> {
+    fn analyse(&mut self, channel: usize, channels: usize, samples: &[f32]) {
+        let samples = &samples[..self.block];
+        if channel == 0 {
+            // Both channels of a block or neither: the reader stays aligned.
+            self.analysis_room = self.analysis.slots() >= 2 * self.block;
+        }
+        if !self.analysis_room {
+            return;
+        }
+        self.push_analysis(samples);
+        if channels == 1 {
+            self.push_analysis(samples);
+        }
+    }
+
     fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
         if let Some(Some(m)) = self.loudness.get_mut(slot) {
             m.feed(start, channel, samples);
@@ -122,6 +148,7 @@ pub(super) fn run(
     mut commands: rtrb::Consumer<Command>,
     mut returned: rtrb::Producer<Returned>,
     mut lags: Vec<rtrb::Producer<u32>>,
+    mut analysis: rtrb::Producer<f32>,
     scheduling: Arc<std::sync::Mutex<String>>,
 ) {
     let notes = crate::timing::set_up_dsp_thread(config.rt_priority, config.cpu);
@@ -357,6 +384,8 @@ pub(super) fn run(
                 &mut Outputs {
                     slots: &mut outputs,
                     loudness: &mut loudness,
+                    analysis: &mut analysis,
+                    analysis_room: false,
                     block,
                 },
             );

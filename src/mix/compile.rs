@@ -47,6 +47,8 @@ pub struct Compiled {
 #[derive(Default)]
 pub struct Compiler {
     ids: HashMap<String, NodeId>,
+    /// The signal and tap the analyser (spectrum, goniometer) reads, if any.
+    pub analysis: Option<(String, Tap)>,
 }
 
 /// A signal's tap points and their latencies.
@@ -601,6 +603,15 @@ impl Compiler {
             c.b.step(Step::HoldIn { proc: *proc, src });
         }
 
+        if let Some((signal, tap)) = c.compiler.analysis.clone() {
+            if let Some(t) = taps.get(&signal) {
+                let span = t.get(&tap).0;
+                let src = c.b.first(span, 2);
+                c.b.step(Step::Analyse { src });
+                (signal, &tap).hash(&mut c.structure);
+            }
+        }
+
         let structure = c.structure.finish();
         Compiled {
             plan: c.b.finish(),
@@ -660,6 +671,8 @@ mod tests {
             width: 1.0,
             chain: Vec::new(),
             loudness: false,
+            colour: None,
+            recall_safe: false,
         }
     }
 
@@ -673,6 +686,8 @@ mod tests {
             chain: Vec::new(),
             loudness: false,
             compensate: true,
+            colour: None,
+            recall_safe: false,
         }
     }
 

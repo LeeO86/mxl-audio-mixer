@@ -22,11 +22,16 @@ pub const RMS_WINDOW: Duration = Duration::from_millis(300);
 #[derive(Default, Clone)]
 struct Channel {
     energy: f64,
+    cross: f64,
     samples: u64,
-    window: VecDeque<(f64, u64)>,
+    /// Per tick: energy, samples and (first channel) cross sum.
+    window: VecDeque<(f64, u64, f64)>,
     peak: f32,
     true_peak: f32,
+    ppm: [f32; 2],
     rms: f64,
+    /// Window sums of energy and cross.
+    sums: (f64, f64),
 }
 
 /// One processing node's meters: gain reduction (dB, ≥ 0) and the peaks at its
@@ -45,6 +50,14 @@ pub struct MeterValues {
     pub peak_hold_dbfs: Vec<Db>,
     pub true_peak_dbtp: Vec<Db>,
     pub rms_dbfs: Vec<Db>,
+    /// Quasi-peak readings (IEC 60268-10 Type I and Type II) in dBFS; a steady
+    /// 1 kHz tone reads its peak.
+    pub ppm_type1_dbfs: Vec<Db>,
+    pub ppm_type2_dbfs: Vec<Db>,
+    /// Phase correlation of the first two channels over the RMS window (−1 to
+    /// +1); none for mono or silence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<f64>,
     pub nodes: BTreeMap<String, NodeValues>,
 }
 
@@ -143,15 +156,23 @@ impl Meters {
             let c = &mut self.channels[i];
             c.peak = f32::from_bits(m.peak.swap(0, Ordering::Relaxed));
             c.true_peak = f32::from_bits(m.true_peak.swap(0, Ordering::Relaxed));
+            for (k, b) in self.bank.ppm.iter().enumerate() {
+                c.ppm[k] = f32::from_bits(m.ppm_max[k].swap(0, Ordering::Relaxed)) * b.gain;
+            }
             let energy = f64::from_bits(m.energy.load(Ordering::Relaxed));
+            let cross = f64::from_bits(m.cross.load(Ordering::Relaxed));
             let samples = m.samples.load(Ordering::Relaxed);
-            c.window
-                .push_back((energy - c.energy, samples.saturating_sub(c.samples)));
+            c.window.push_back((
+                energy - c.energy,
+                samples.saturating_sub(c.samples),
+                cross - c.cross,
+            ));
             c.energy = energy;
+            c.cross = cross;
             c.samples = samples;
             let mut total = 0;
             let mut keep = 0;
-            for (k, (_, n)) in c.window.iter().enumerate().rev() {
+            for (k, (_, n, _)) in c.window.iter().enumerate().rev() {
                 total += n;
                 keep = c.window.len() - k;
                 if total >= window {
@@ -161,10 +182,13 @@ impl Meters {
             while c.window.len() > keep {
                 c.window.pop_front();
             }
-            let (e, n) = c
+            let (e, n, x) = c
                 .window
                 .iter()
-                .fold((0.0, 0u64), |(e, n), (de, dn)| (e + de, n + dn));
+                .fold((0.0, 0u64, 0.0), |(e, n, x), (de, dn, dx)| {
+                    (e + de, n + dn, x + dx)
+                });
+            c.sums = (e.max(0.0), x);
             c.rms = if n > 0 {
                 (e.max(0.0) / n as f64).sqrt()
             } else {
@@ -211,6 +235,15 @@ impl Meters {
                             .map(|c| dbfs(f64::from(c.true_peak)))
                             .collect(),
                         rms_dbfs: chans.iter().map(|c| dbfs(c.rms)).collect(),
+                        ppm_type1_dbfs: chans.iter().map(|c| dbfs(f64::from(c.ppm[0]))).collect(),
+                        ppm_type2_dbfs: chans.iter().map(|c| dbfs(f64::from(c.ppm[1]))).collect(),
+                        correlation: match chans {
+                            [a, b, ..] => {
+                                let d = (a.sums.0 * b.sums.0).sqrt();
+                                (d > 1e-12).then(|| (a.sums.1 / d).clamp(-1.0, 1.0))
+                            }
+                            _ => None,
+                        },
                         nodes: self
                             .nodes
                             .iter()
@@ -279,5 +312,38 @@ mod tests {
         assert!(!meters.clear_hold(Some("gone")));
         assert!(meters.clear_hold(Some("main")));
         assert_eq!(meters.values()["main"].peak_hold_dbfs[0], Db::MINUS_INF);
+    }
+
+    #[test]
+    fn correlation_of_two_channels() {
+        let bank = Arc::new(MeterBank::new(2));
+        let mut meters = Meters::default();
+        meters.set_plan(bank.clone(), vec![("st".into(), 0, 2)]);
+        let add = |a: &std::sync::atomic::AtomicU64, v: f64| {
+            a.store(
+                (f64::from_bits(a.load(Ordering::Relaxed)) + v).to_bits(),
+                Ordering::Relaxed,
+            );
+        };
+        // L = R (in phase), then L = −R (inverted): 1920 samples of ±0.5 each tick.
+        for sign in [1.0, -1.0] {
+            for _ in 0..10 {
+                for c in &bank.channels {
+                    add(&c.energy, 0.25 * 1920.0);
+                    c.samples.fetch_add(1920, Ordering::Relaxed);
+                }
+                add(&bank.channels[0].cross, sign * 0.25 * 1920.0);
+                meters.tick();
+            }
+            let r = meters.values()["st"].correlation.unwrap();
+            assert!((r - sign).abs() < 1e-9, "{r}");
+        }
+        for _ in 0..10 {
+            for c in &bank.channels {
+                c.samples.fetch_add(1920, Ordering::Relaxed);
+            }
+            meters.tick();
+        }
+        assert_eq!(meters.values()["st"].correlation, None);
     }
 }

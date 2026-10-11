@@ -155,6 +155,8 @@ pub enum Step {
     HoldIn { proc: u32, src: Span },
     /// `src` to loudness meter `slot`.
     Loudness { src: Span, slot: u32 },
+    /// The first two channels of `src` to the analyser (spectrum, goniometer).
+    Analyse { src: Span },
 }
 
 impl Step {
@@ -170,6 +172,7 @@ impl Step {
             Step::Process { .. } => "process",
             Step::HoldOut { .. } | Step::HoldIn { .. } => "hold",
             Step::Loudness { .. } => "loudness",
+            Step::Analyse { .. } => "analyse",
         }
     }
 }
@@ -184,16 +187,26 @@ pub struct MeterChannel {
     pub samples: AtomicU64,
     /// Largest true peak since the control side last took it (f32 bits).
     pub true_peak: AtomicU32,
+    /// First channel of a signal with two or more: running sum of channel 1 ×
+    /// channel 2 (f64 bits), for the phase correlation.
+    pub cross: AtomicU64,
+    /// PPM detectors (Type I, Type II): their level (f32 bits, the DSP thread's
+    /// state) and the largest level since the control side last took it.
+    pub ppm: [AtomicU32; 2],
+    pub ppm_max: [AtomicU32; 2],
 }
 
 pub struct MeterBank {
     pub channels: Vec<MeterChannel>,
+    pub ppm: [crate::dsp::ppm::Ballistics; 2],
 }
 
 impl MeterBank {
     pub fn new(channels: usize) -> Self {
+        use crate::dsp::ppm::Ballistics;
         Self {
             channels: (0..channels).map(|_| MeterChannel::default()).collect(),
+            ppm: [Ballistics::type_i(), Ballistics::type_ii()],
         }
     }
 }
@@ -360,6 +373,11 @@ pub trait OutputSink {
     /// meter `slot`.
     fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
         let _ = (slot, start, channel, samples);
+    }
+
+    /// Channel `channel` (0 or 1) of `channels` (1 or 2) for the analyser.
+    fn analyse(&mut self, channel: usize, channels: usize, samples: &[f32]) {
+        let _ = (channel, channels, samples);
     }
 }
 
@@ -573,6 +591,26 @@ impl Plan {
                             let total = f64::from_bits(m.energy.load(Ordering::Relaxed)) + energy;
                             m.energy.store(total.to_bits(), Ordering::Relaxed);
                             m.samples.fetch_add(block as u64, Ordering::Relaxed);
+                            let range = self.buf(self.indices[src.start as usize + c]);
+                            for (k, b) in self.meters.ppm.iter().enumerate() {
+                                let level = f32::from_bits(m.ppm[k].load(Ordering::Relaxed));
+                                let (level, max) = b.run(level, &self.buffers[range.clone()]);
+                                m.ppm[k].store(level.to_bits(), Ordering::Relaxed);
+                                m.ppm_max[k].fetch_max(max.to_bits(), Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    if src.len >= 2 {
+                        let a = self.buf(self.indices[src.start as usize]);
+                        let b = self.buf(self.indices[src.start as usize + 1]);
+                        let cross: f64 = self.buffers[a]
+                            .iter()
+                            .zip(&self.buffers[b])
+                            .map(|(x, y)| f64::from(*x) * f64::from(*y))
+                            .sum();
+                        if let Some(m) = self.meters.channels.get(slot as usize) {
+                            let total = f64::from_bits(m.cross.load(Ordering::Relaxed)) + cross;
+                            m.cross.store(total.to_bits(), Ordering::Relaxed);
                         }
                     }
                 }
@@ -587,6 +625,13 @@ impl Plan {
                     for c in 0..src.len as usize {
                         let range = self.buf(self.indices[src.start as usize + c]);
                         outputs.loudness(slot as usize, start, c, &self.buffers[range]);
+                    }
+                }
+                Step::Analyse { src } => {
+                    let n = (src.len as usize).min(2);
+                    for c in 0..n {
+                        let range = self.buf(self.indices[src.start as usize + c]);
+                        outputs.analyse(c, n, &self.buffers[range]);
                     }
                 }
                 Step::Process {

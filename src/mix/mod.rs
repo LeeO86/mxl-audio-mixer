@@ -4,6 +4,7 @@ pub mod chain;
 pub mod compile;
 pub mod format;
 pub mod model;
+pub mod show;
 
 pub use format::Format;
 pub use model::Mix;

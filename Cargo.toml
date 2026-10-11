@@ -11,7 +11,7 @@ publish = false
 default-run = "mxl-audio-mixer"
 
 [dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query", "ws"] }
 libc = "0.2"
 # Official MXL Rust bindings at the platform pin (release/v1.1 218ddaa). libmxl itself is
 # built with -DMXL_ENABLE_FABRICS_OFI=OFF (scripts/build-mxl.sh) and loaded at run time.
