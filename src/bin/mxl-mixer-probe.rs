@@ -1,10 +1,11 @@
 //! Test reader: reads an MXL audio flow on the TAI clock and reports what it got.
 //!
 //! ```sh
-//! mxl-mixer-probe --domain DIR --flow UUID [--seconds 2] [--expect CH:SRC:GAIN ...]
+//! mxl-mixer-probe --domain DIR --flow UUID [--seconds 2] [--behind-ms 20] [--expect CH:SRC:GAIN ...]
 //! ```
 //!
-//! Prints one JSON line: samples read, failed reads, and per channel the peak and
+//! Reads `--behind-ms` behind the TAI now (more for mirrored flows, which arrive
+//! late). Prints one JSON line: samples read, failed reads, and per channel the peak and
 //! RMS level. `--expect 1:2:0.5` checks that channel 1 carries 0.5 × the
 //! `mxl-mixer-tone` signal of tone channel 2; the tone repeats every 48 samples,
 //! so the probe finds the best of the 48 alignments and reports the largest error.
@@ -32,7 +33,7 @@ fn main() {
             .and_then(|i| args.get(i + 1).cloned())
     };
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--expect CH:SRC:GAIN ...]");
+        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--behind-ms MS] [--expect CH:SRC:GAIN ...]");
         std::process::exit(2)
     };
     let domain = PathBuf::from(arg("--domain").unwrap_or_else(|| usage()));
@@ -40,6 +41,10 @@ fn main() {
         .and_then(|f| f.parse().ok())
         .unwrap_or_else(|| usage());
     let seconds: f64 = arg("--seconds").and_then(|s| s.parse().ok()).unwrap_or(2.0);
+    let behind: u64 = arg("--behind-ms")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(20)
+        * 48;
     let expects: Vec<(usize, usize, f32)> = args
         .windows(2)
         .filter(|w| w[0] == "--expect")
@@ -73,12 +78,12 @@ fn main() {
     let mut first_index = None;
     let mut failed = 0u64;
     let blocks = (seconds * 48_000.0 / BLOCK as f64).ceil() as u64;
-    // Read 20 ms behind the TAI now, one block at a time.
-    let mut head = index_at(tai_ns()) - 960;
+    // One block at a time, `behind` samples behind the TAI now.
+    let mut head = index_at(tai_ns()) - behind;
     head -= head % BLOCK as u64;
     for _ in 0..blocks {
         head += BLOCK as u64;
-        sleep_until_tai(time_of(head + 960));
+        sleep_until_tai(time_of(head + behind));
         match reader.get_samples(head, BLOCK, Duration::from_millis(5)) {
             Ok(slice) => {
                 first_index.get_or_insert(head - BLOCK as u64);
