@@ -82,7 +82,7 @@ impl SegmentMeter {
         if channel == 0 && self.next != Some(start) {
             // A (re)start or a gap: the segment counts only from its first sample.
             self.acc = [0.0; MAX_CHANNELS];
-            self.current = (start % SEGMENT == 0).then_some(seg);
+            self.current = start.is_multiple_of(SEGMENT).then_some(seg);
         }
         let boundary = ((seg + 1) * SEGMENT - start) as usize;
         let [shelf, hp] = &mut self.filters[channel];

@@ -252,8 +252,9 @@ mod tests {
         assert!((db(bell(1000.0, 1.0, 6.0).magnitude(1000.0)) - 6.0).abs() < 1e-9);
         assert!((db(bell(1000.0, 1.0, -9.0).magnitude(1000.0)) + 9.0).abs() < 1e-9);
         assert!(db(notch(2000.0, 4.0).magnitude(2000.0)) < -100.0);
-        assert!((db(low_shelf(200.0, 0.7071, 6.0).magnitude(10.0)) - 6.0).abs() < 0.05);
-        assert!((db(high_shelf(5000.0, 0.7071, -6.0).magnitude(22000.0)) + 6.0).abs() < 0.05);
+        let q = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((db(low_shelf(200.0, q, 6.0).magnitude(10.0)) - 6.0).abs() < 0.05);
+        assert!((db(high_shelf(5000.0, q, -6.0).magnitude(22000.0)) + 6.0).abs() < 0.05);
         assert!((db(band_pass(3000.0, 2.0).magnitude(3000.0))).abs() < 1e-9);
     }
 
