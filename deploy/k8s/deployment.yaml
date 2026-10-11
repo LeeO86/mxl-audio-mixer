@@ -1,0 +1,134 @@
+# G12 example: the pod network, the standard environment names, probes, the MXL
+# root hostPath and a writable /config. Pin the image by a tag that exists (and by
+# digest on the platform). Guaranteed QoS with whole CPUs is the supported way to
+# run the DSP thread (§18); SYS_NICE only when MIXER_RT_PRIORITY is set.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mxl-audio-mixer
+  labels:
+    app: mxl-audio-mixer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mxl-audio-mixer
+  template:
+    metadata:
+      labels:
+        app: mxl-audio-mixer
+        io.dmf.mxl.revision: "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7"
+    spec:
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        supplementalGroups: [1000]
+      containers:
+        - name: mixer
+          image: ghcr.io/leeo86/mxl-audio-mixer:nightly-dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: web
+              containerPort: 8160
+            - name: nmos
+              containerPort: 3312
+          env:
+            - name: HOST_ID
+              value: production-mix1
+            - name: NMOS_SEED
+              value: production-mix1
+            - name: NMOS_LABEL
+              value: production-mix1
+            - name: NMOS_TAGS
+              value: '{"urn:x-example:production":["production"],"urn:x-example:function":["mix1"]}'
+            - name: NMOS_HOST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NMOS_REGISTRY_ADDRESS
+              value: "192.0.2.20"
+            - name: NMOS_REGISTRY_PORT
+              value: "3210"
+            - name: NMOS_DNS_SD
+              value: "false"
+            - name: WEB_PORT
+              value: "8160"
+            - name: NMOS_PORT
+              value: "3312"
+            - name: MXL_DOMAIN_SCAN_PATH
+              value: /Volumes/mxl
+            - name: MXL_OUTPUT_DOMAIN_DIR
+              value: /Volumes/mxl/production-mix1
+            - name: MXL_CLEANUP_ON_EXIT
+              value: "true"
+            - name: MIXER_STATE_DIR
+              value: /config
+            - name: MIXER_INPUT_FLOWS
+              value: "16"
+            - name: SHUTDOWN_TIMEOUT_S
+              value: "10"
+            # SCHED_FIFO for the DSP thread (needs the SYS_NICE capability below).
+            # - name: MIXER_RT_PRIORITY
+            #   value: "49"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: web
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: web
+          resources:
+            requests:
+              cpu: "4"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # add: ["SYS_NICE"]
+          volumeMounts:
+            - name: mxl
+              mountPath: /Volumes/mxl
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: mxl
+          hostPath:
+            path: /Volumes/mxl
+            type: Directory
+        - name: config
+          persistentVolumeClaim:
+            claimName: mxl-audio-mixer-config
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mxl-audio-mixer-config
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mxl-audio-mixer
+spec:
+  selector:
+    app: mxl-audio-mixer
+  ports:
+    - name: web
+      port: 8160
+      targetPort: web
+    - name: nmos
+      port: 3312
+      targetPort: nmos

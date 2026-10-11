@@ -7,32 +7,131 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.97.1"
+  MXL_REF: 218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
+  # AMWA nmos-testing from source and the nmos-cpp registry through mirror.gcr.io: no Docker Hub.
+  NMOS_TESTING_REF: 90018513758e6fbc096c26d7ef001f700b28b510
 
 jobs:
-  spike-m0:
-    name: Milestone 0 spike
+  lint:
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: spikes/m0
     steps:
       - uses: actions/checkout@v4
       - name: LF line endings
-        working-directory: .
         run: |
           if git ls-files -z | xargs -0 grep -lI $'\r' ; then
             echo "::error::files with CRLF line endings"; exit 1
           fi
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: spikes/m0
-      - name: libclang (bindgen in mxl-sys)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
+          workspaces: |
+            .
+            spikes/m0
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev shellcheck
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo fmt --check && cargo clippy --all-targets -- -D warnings
+        working-directory: spikes/m0
+      - run: shellcheck -x tests/integration/*.sh tests/hw/*/run.sh scripts/build-mxl.sh ci/amwa.sh
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev
       - run: cargo test
-      - run: cargo build --release
+
+  integration:
+    name: Integration (libmxl, nmos-cpp registry, AMWA)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev ninja-build uuid-dev
+      - name: Cache libmxl
+        id: mxl-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/mxl
+          key: libmxl-${{ env.MXL_REF }}-${{ hashFiles('scripts/build-mxl.sh') }}
+      - name: Build libmxl ${{ env.MXL_REF }}
+        if: steps.mxl-cache.outputs.cache-hit != 'true'
+        run: scripts/build-mxl.sh /opt/mxl
+      - run: cargo build --bins
+      - name: Kernel TAI offset (CLOCK_TAI = UTC + 37 s)
+        run: sudo scripts/set-tai-offset.py 37
+      - name: tests/integration/lifecycle.sh
+        run: tests/integration/lifecycle.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/inputs.sh
+        run: tests/integration/inputs.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: nmos-testing ${{ env.NMOS_TESTING_REF }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/nmos-testing"
+          curl -fsSL "https://codeload.github.com/AMWA-TV/nmos-testing/tar.gz/$NMOS_TESTING_REF" |
+            tar xz -C "$RUNNER_TEMP/nmos-testing" --strip-components=1
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --disable-pip-version-check -r "$RUNNER_TEMP/nmos-testing/requirements.txt"
+      - name: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 against the mixer
+        run: ci/amwa.sh off target/debug/mxl-audio-mixer
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          NMOS_TESTING_DIR: ${{ runner.temp }}/nmos-testing
+          NMOS_TESTING_PYTHON: ${{ runner.temp }}/venv/bin/python
+          AMWA_OUT: ${{ runner.temp }}/amwa
+      - name: Summary
+        if: always()
+        run: cat "$RUNNER_TEMP/amwa/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration
+          path: |
+            ${{ runner.temp }}/it
+            ${{ runner.temp }}/amwa
+
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: mxl-audio-mixer:ci
+          build-args: VERSION=ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (uid 1000, libmxl, /livez, exit 143)
+        run: |
+          set -eu
+          [ "$(docker inspect -f '{{.Config.User}}' mxl-audio-mixer:ci)" = 1000 ]
+          docker inspect -f '{{json .Config.Labels}}' mxl-audio-mixer:ci
+          docker run -d --name smoke --network host -e HOST_ID=smoke -e NMOS_HOST_ADDRESS=192.0.2.10 \
+            -e MXL_DOMAIN_SCAN_PATH=/tmp mxl-audio-mixer:ci
+          for _ in $(seq 1 50); do curl -fs http://127.0.0.1:8160/livez && break; sleep 0.2; done
+          curl -fs http://127.0.0.1:8160/readyz
+          docker stop -t 15 smoke
+          [ "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 143 ]
+          docker logs smoke 2>&1 | tail -5
