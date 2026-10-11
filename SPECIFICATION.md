@@ -344,6 +344,7 @@ across multichannel signals, parameter smoothing.
   **speech offset** (e.g. +2 LU) while speech is active; attack/release and max gain
   range; freeze when no signal. Implemented as a control algorithm that drives a gain
   node, not as hard-coded DSP.
+  - also integrate the following function from this repo: https://github.com/andyweiss/Com-IS-Assist
 
 ### 8.3 Automatic mixing
 
