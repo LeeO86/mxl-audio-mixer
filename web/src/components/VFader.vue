@@ -2,7 +2,7 @@
 // A channel fader (§12.1): drag the cap (mouse, touch, pen), − / + for 0.5 dB steps (held: repeated),
 // arrow keys (shift: 0.1 dB), Home for 0 dB, End for −∞, double-click for 0 dB. While dragged, it shows
 // its own value so pushes from the server do not make it jump.
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { FADER_MARKS, dbToPos, posToDb } from "../dsp.js";
 import { dbValue, fmtDb } from "../api.js";
 
@@ -15,9 +15,25 @@ const emit = defineEmits(["change"]);
 
 const track = ref(null);
 const drag = ref(null);
-const db = computed(() => drag.value ?? dbValue(props.value));
+// The last value sent, until the server's value catches up (or 500 ms): quick steps add up.
+const pending = ref(null);
+let pendingTimer = 0;
+watch(
+  () => props.value,
+  (v) => {
+    if (pending.value !== null && dbValue(v) === pending.value) pending.value = null;
+  },
+);
+const db = computed(() => drag.value ?? pending.value ?? dbValue(props.value));
 const pos = computed(() => dbToPos(db.value));
+const toDb = (d) => (Number.isFinite(d) ? Math.round(d * 10) / 10 : -Infinity);
 const out = (d) => (Number.isFinite(d) ? Math.round(d * 10) / 10 : "-inf");
+function send(d) {
+  pending.value = toDb(d);
+  clearTimeout(pendingTimer);
+  pendingTimer = setTimeout(() => (pending.value = null), 500);
+  emit("change", out(d));
+}
 
 let startY = 0;
 let startPos = 0;
@@ -41,14 +57,14 @@ function move(ev) {
   emit("change", out(drag.value));
 }
 function up() {
-  if (drag.value !== null) emit("change", out(drag.value));
+  if (drag.value !== null) send(drag.value);
   drag.value = null;
 }
 
 function stepDb(dir, size = 0.5) {
   const cur = Number.isFinite(db.value) ? db.value : -80;
   const next = Math.min(10, cur + dir * size);
-  emit("change", out(next < -80 ? -Infinity : Math.round(next * 10) / 10));
+  send(next < -80 ? -Infinity : Math.round(next * 10) / 10);
 }
 let hold = 0;
 function press(dir, ev) {
@@ -67,12 +83,15 @@ function key(ev) {
   const size = ev.shiftKey ? 0.1 : 0.5;
   if (ev.key === "ArrowUp" || ev.key === "ArrowRight") stepDb(1, size);
   else if (ev.key === "ArrowDown" || ev.key === "ArrowLeft") stepDb(-1, size);
-  else if (ev.key === "Home") emit("change", 0);
-  else if (ev.key === "End") emit("change", "-inf");
+  else if (ev.key === "Home") send(0);
+  else if (ev.key === "End") send(-Infinity);
   else return;
   ev.preventDefault();
 }
-onUnmounted(release);
+onUnmounted(() => {
+  release();
+  clearTimeout(pendingTimer);
+});
 </script>
 
 <template>
@@ -92,7 +111,7 @@ onUnmounted(release);
       @pointermove="move"
       @pointerup="up"
       @pointercancel="up"
-      @dblclick="emit('change', 0)"
+      @dblclick="send(0)"
       @keydown="key"
     >
       <span v-for="m in FADER_MARKS" :key="m" class="mark" :class="{ zero: m === 0 }" :style="{ bottom: `${dbToPos(m) * 100}%` }">{{ m > 0 ? `+${m}` : m }}</span>

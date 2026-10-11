@@ -48,16 +48,22 @@ function onType(event) {
   if (event.target.value !== "" && Number.isFinite(v)) emit("change", round(v));
 }
 
+// Steps within 500 ms of the last continue from it, not from the server's value (which lags).
 let target = 0;
+let lastStep = 0;
 let hold = 0;
+function from() {
+  return performance.now() - lastStep < 500 ? target : props.value;
+}
 function step(dir) {
   target = round(props.log ? target * Math.pow(1 + props.fine, dir) : target + dir * props.fine);
+  lastStep = performance.now();
   emit("change", target);
 }
 function press(dir, event) {
   if (event.button !== 0 || props.disabled) return;
   event.currentTarget.setPointerCapture?.(event.pointerId);
-  target = props.value;
+  target = from();
   step(dir);
   hold = setTimeout(function again() {
     step(dir);
@@ -70,7 +76,7 @@ function release() {
 }
 function key(dir, event) {
   if (event.detail !== 0) return; // a pointer press was handled by press()
-  target = props.value;
+  target = from();
   step(dir);
 }
 onUnmounted(release);
