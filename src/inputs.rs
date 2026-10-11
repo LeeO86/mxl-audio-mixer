@@ -15,11 +15,9 @@ use crate::config::{Config, SAMPLE_RATE};
 use crate::engine::{Command, Engine, EngineCounters, Returned};
 use crate::mxlio::{self, Api, MxlInstance};
 
-/// Length of the sliding window of arrival lags. TODO_ provisional (§4.2 names no
-/// value): please confirm.
+/// Length of the sliding window of arrival lags.
 pub const LAG_WINDOW: Duration = Duration::from_secs(10);
-/// Margin added to the 99.9th percentile, and the hysteresis of a change. TODO_
-/// provisional (§4.2 names no value): please confirm.
+/// Margin added to the 99.9th percentile, and the hysteresis of a change (1 ms).
 pub const DELAY_MARGIN_SAMPLES: u32 = 48;
 /// Lag samples needed before the first automatic setting: one second of blocks.
 const MIN_LAG_SECONDS: u64 = 1;

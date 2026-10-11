@@ -50,7 +50,7 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
             - name: NMOS_REGISTRY_ADDRESS
-              value: "192.0.2.20"
+              value: nmos-registry
             - name: NMOS_REGISTRY_PORT
               value: "3210"
             - name: NMOS_DNS_SD

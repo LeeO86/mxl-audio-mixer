@@ -166,12 +166,16 @@ SCHED_FIFO on exclusive CPUs; the real-time run is `tests/hw/m0-block-clock`.
   Manual 1. Every sender test is Could Not Test until M2 publishes outputs; all of
   them are listed in `ci/amwa-expected-off.json`.
 
-### Open values (TODO_)
+### Answers (maintainer, 2026-10-11)
 
-- `MIXER_INPUT_DELAY_MAX_MS` default (provisional 150 ms; must stay below the MXL
-  history of 200 ms minus the read offset).
-- The automatic delay's margin/hysteresis (provisional 1 ms) and lag window
-  (provisional 10 s) (`src/inputs.rs`).
+- Automatic delay: `MIXER_INPUT_DELAY_MAX_MS` default 150 ms, margin/hysteresis
+  1 ms, lag window 10 s — accepted.
+- Defaults "Input N", "<label> Audio Mixer", seed `<HOST_ID>-mixer`, output domain
+  `<scan>/mixer-<8 hex>` — accepted.
+- `NMOS_REGISTRY_ADDRESS` / `NMOS_QUERY_ADDRESS` accept DNS names (a Service name on
+  the platform); announced addresses stay IPv4 literals (G5). The same change goes
+  into `mxl-nmos` `Settings::apply_env` (0.1.1).
+- M0 and M1 merged with the maintainer's approval.
 
 ## tests/hw scripts for the maintainers
 

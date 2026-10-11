@@ -46,9 +46,9 @@ origin. No setting is a secret.
 | `NMOS_LABEL` | <HOST_ID> | Node label; the Device is "<label> Audio Mixer". |
 | `NMOS_TAGS` | {} | JSON object of tag name to string arrays, on the Node and the Device. |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | IPv4 literal announced in NMOS (the pod IP on the platform). |
-| `NMOS_REGISTRY_ADDRESS` | unset | IPv4 address of the IS-04 Registration API. Unset: no registration. |
+| `NMOS_REGISTRY_ADDRESS` | unset | IPv4 address or DNS name of the IS-04 Registration API. Unset: no registration. |
 | `NMOS_REGISTRY_PORT` | unset | Port of the Registration API (set together with the address). |
-| `NMOS_QUERY_ADDRESS` | registry address | Query API address, used for readiness. |
+| `NMOS_QUERY_ADDRESS` | registry address | IPv4 address or DNS name of the Query API, used for readiness. |
 | `NMOS_QUERY_PORT` | registration port + 1 | Query API port. |
 | `NMOS_DNS_SD` | false | mDNS/DNS-SD browsing and advertisement (needs a build with the dns-sd feature). |
 | `MXL_DOMAIN_SCAN_PATH` | /Volumes/mxl | Parent of the MXL domain directories; input domains (mirrors included) are found below it. |
@@ -66,17 +66,14 @@ origin. No setting is a secret.
 | `MIXER_OUTPUT_COMMIT_SAMPLES` | one block | Samples per MXL commit of an output (a multiple of the block size). |
 | `MIXER_RT_PRIORITY` | off | SCHED_FIFO priority of the DSP thread, 1–49 (needs CAP_SYS_NICE). |
 | `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move for this long is stalled and re-opened. |
-| `MIXER_INPUT_DELAY_MAX_MS` | TODO_ (provisional 150) | Upper limit of an input's automatic extra delay. |
+| `MIXER_INPUT_DELAY_MAX_MS` | 150 | Upper limit of an input's automatic extra delay. |
 | `MIXER_INPUT_DELAY_CONFIRM` | false | true: an automatic delay change waits for operator confirmation instead of applying with a fade. |
-
-`TODO_` marks a default the specification does not give; it is provisional until
-confirmed.
 
 Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
 group hint, default `Input <n>`) and `extra_delay` (`"auto"`, the default, or ms).
 `auto` measures the arrival lag (TAI now minus the flow's head index, sliding window)
-and sets the extra delay to its 99.9th percentile plus a margin, minus the read
-offset, within `MIXER_INPUT_DELAY_MAX_MS`; a change is applied with a fade, or waits
+over the last 10 s and sets the extra delay to its 99.9th percentile plus 1 ms,
+minus the read offset, within `MIXER_INPUT_DELAY_MAX_MS`; a change is applied with a fade, or waits
 for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true`.
 
 ## Ports and exit codes

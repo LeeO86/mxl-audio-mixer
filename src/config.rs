@@ -28,9 +28,9 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "NMOS_LABEL", default: "<HOST_ID>", description: "Node label; the Device is \"<label> Audio Mixer\"." },
     Setting { name: "NMOS_TAGS", default: "{}", description: "JSON object of tag name to string arrays, on the Node and the Device." },
     Setting { name: "NMOS_HOST_ADDRESS", default: "first non-loopback IPv4", description: "IPv4 literal announced in NMOS (the pod IP on the platform)." },
-    Setting { name: "NMOS_REGISTRY_ADDRESS", default: "unset", description: "IPv4 address of the IS-04 Registration API. Unset: no registration." },
+    Setting { name: "NMOS_REGISTRY_ADDRESS", default: "unset", description: "IPv4 address or DNS name of the IS-04 Registration API. Unset: no registration." },
     Setting { name: "NMOS_REGISTRY_PORT", default: "unset", description: "Port of the Registration API (set together with the address)." },
-    Setting { name: "NMOS_QUERY_ADDRESS", default: "registry address", description: "Query API address, used for readiness." },
+    Setting { name: "NMOS_QUERY_ADDRESS", default: "registry address", description: "IPv4 address or DNS name of the Query API, used for readiness." },
     Setting { name: "NMOS_QUERY_PORT", default: "registration port + 1", description: "Query API port." },
     Setting { name: "NMOS_DNS_SD", default: "false", description: "mDNS/DNS-SD browsing and advertisement (needs a build with the dns-sd feature)." },
     Setting { name: "MXL_DOMAIN_SCAN_PATH", default: "/Volumes/mxl", description: "Parent of the MXL domain directories; input domains (mirrors included) are found below it." },
@@ -48,7 +48,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MIXER_OUTPUT_COMMIT_SAMPLES", default: "one block", description: "Samples per MXL commit of an output (a multiple of the block size)." },
     Setting { name: "MIXER_RT_PRIORITY", default: "off", description: "SCHED_FIFO priority of the DSP thread, 1–49 (needs CAP_SYS_NICE)." },
     Setting { name: "MIXER_INPUT_STALL_S", default: "2", description: "An input whose head index does not move for this long is stalled and re-opened." },
-    Setting { name: "MIXER_INPUT_DELAY_MAX_MS", default: "TODO_ (provisional 150)", description: "Upper limit of an input's automatic extra delay." },
+    Setting { name: "MIXER_INPUT_DELAY_MAX_MS", default: "150", description: "Upper limit of an input's automatic extra delay." },
     Setting { name: "MIXER_INPUT_DELAY_CONFIRM", default: "false", description: "true: an automatic delay change waits for operator confirmation instead of applying with a fade." },
 ];
 
@@ -88,8 +88,10 @@ pub struct Config {
     pub nmos_label: String,
     pub nmos_tags: BTreeMap<String, Vec<String>>,
     pub nmos_host_address: Option<Ipv4Addr>,
-    pub nmos_registry: Option<(Ipv4Addr, u16)>,
-    pub nmos_query: Option<(Ipv4Addr, u16)>,
+    /// Registration API host (IPv4 literal or DNS name) and port.
+    pub nmos_registry: Option<(String, u16)>,
+    /// Query API host and port.
+    pub nmos_query: Option<(String, u16)>,
     pub nmos_dns_sd: bool,
     pub scan_path: PathBuf,
     pub output_domain_dir: PathBuf,
@@ -238,13 +240,15 @@ impl Parser<'_> {
         }
     }
 
-    fn ipv4(&self, name: &str) -> Result<Option<Ipv4Addr>, ConfigError> {
+    /// An IPv4 literal or a DNS name (RFC 1123), for addresses the mixer connects
+    /// to. Addresses it announces stay IPv4 literals (G5).
+    fn host(&self, name: &str) -> Result<Option<String>, ConfigError> {
         match self.get(name) {
             None => Ok(None),
-            Some((raw, _)) => raw
-                .parse()
-                .map(Some)
-                .map_err(|_| ConfigError(format!("{name} must be an IPv4 address, got {raw}"))),
+            Some((raw, _)) if is_host(&raw) => Ok(Some(raw.to_ascii_lowercase())),
+            Some((raw, _)) => err(format!(
+                "{name} must be an IPv4 address or a DNS name, got {raw}"
+            )),
         }
     }
 
@@ -278,7 +282,7 @@ impl Parser<'_> {
                     .map_err(|e| ConfigError(e.to_string()))?,
             ),
         };
-        let registry_address = self.ipv4("NMOS_REGISTRY_ADDRESS")?;
+        let registry_address = self.host("NMOS_REGISTRY_ADDRESS")?;
         let registry_port: Option<u16> = match self.get("NMOS_REGISTRY_PORT") {
             None => None,
             Some(_) => Some(self.int("NMOS_REGISTRY_PORT", 0, 1, 65535)?),
@@ -288,12 +292,12 @@ impl Parser<'_> {
             (None, None) => None,
             _ => return err("NMOS_REGISTRY_ADDRESS and NMOS_REGISTRY_PORT must be set together"),
         };
-        let query_address = self.ipv4("NMOS_QUERY_ADDRESS")?;
+        let query_address = self.host("NMOS_QUERY_ADDRESS")?;
         let query_port: Option<u16> = match self.get("NMOS_QUERY_PORT") {
             None => None,
             Some(_) => Some(self.int("NMOS_QUERY_PORT", 0, 1, 65535)?),
         };
-        let nmos_query = match (nmos_registry, query_address, query_port) {
+        let nmos_query = match (nmos_registry.clone(), query_address, query_port) {
             (_, Some(a), Some(p)) => Some((a, p)),
             (Some((ra, rp)), a, p) => Some((a.unwrap_or(ra), p.unwrap_or(rp.saturating_add(1)))),
             (None, None, None) => None,
@@ -426,10 +430,10 @@ impl Config {
             "NMOS_LABEL" => self.nmos_label.clone(),
             "NMOS_TAGS" => serde_json::to_string(&self.nmos_tags).unwrap_or_default(),
             "NMOS_HOST_ADDRESS" => opt(self.nmos_host_address.map(|a| a.to_string())),
-            "NMOS_REGISTRY_ADDRESS" => opt(self.nmos_registry.map(|(a, _)| a.to_string())),
-            "NMOS_REGISTRY_PORT" => opt(self.nmos_registry.map(|(_, p)| p.to_string())),
-            "NMOS_QUERY_ADDRESS" => opt(self.nmos_query.map(|(a, _)| a.to_string())),
-            "NMOS_QUERY_PORT" => opt(self.nmos_query.map(|(_, p)| p.to_string())),
+            "NMOS_REGISTRY_ADDRESS" => opt(self.nmos_registry.as_ref().map(|(a, _)| a.clone())),
+            "NMOS_REGISTRY_PORT" => opt(self.nmos_registry.as_ref().map(|(_, p)| p.to_string())),
+            "NMOS_QUERY_ADDRESS" => opt(self.nmos_query.as_ref().map(|(a, _)| a.clone())),
+            "NMOS_QUERY_PORT" => opt(self.nmos_query.as_ref().map(|(_, p)| p.to_string())),
             "NMOS_DNS_SD" => self.nmos_dns_sd.to_string(),
             "MXL_DOMAIN_SCAN_PATH" => self.scan_path.display().to_string(),
             "MXL_OUTPUT_DOMAIN_DIR" => self.output_domain_dir.display().to_string(),
@@ -465,8 +469,14 @@ impl Config {
         s.seed = Some(self.nmos_seed.clone());
         s.tags = self.nmos_tags.clone();
         s.host = self.nmos_host_address;
-        s.registry = self.nmos_registry.map(|(a, p)| format!("http://{a}:{p}"));
-        s.query = self.nmos_query.map(|(a, p)| format!("http://{a}:{p}"));
+        s.registry = self
+            .nmos_registry
+            .as_ref()
+            .map(|(a, p)| format!("http://{a}:{p}"));
+        s.query = self
+            .nmos_query
+            .as_ref()
+            .map(|(a, p)| format!("http://{a}:{p}"));
         s.dns_sd = self.nmos_dns_sd;
         s.service_name_prefix = "mxl-audio-mixer".into();
         s
@@ -475,6 +485,25 @@ impl Config {
     pub fn block_period(&self) -> Duration {
         Duration::from_nanos(u64::from(self.block_samples) * 1_000_000_000 / u64::from(SAMPLE_RATE))
     }
+}
+
+/// An IPv4 literal or an RFC 1123 host name (letters, digits, hyphens, dots).
+fn is_host(text: &str) -> bool {
+    if text.parse::<Ipv4Addr>().is_ok() {
+        return true;
+    }
+    let labels: Vec<&str> = text.trim_end_matches('.').split('.').collect();
+    !text.is_empty()
+        && text.len() <= 253
+        && labels.iter().all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        // All-numeric dotted text that is not a valid IPv4 address is a typo.
+        && !labels.iter().all(|l| l.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn hostname() -> Option<String> {
@@ -569,11 +598,43 @@ mod tests {
             ("NMOS_REGISTRY_PORT", "3210"),
         ])
         .unwrap();
-        assert_eq!(c.nmos_registry, Some(("10.0.0.5".parse().unwrap(), 3210)));
-        assert_eq!(c.nmos_query, Some(("10.0.0.5".parse().unwrap(), 3211)));
+        assert_eq!(c.nmos_registry, Some(("10.0.0.5".into(), 3210)));
+        assert_eq!(c.nmos_query, Some(("10.0.0.5".into(), 3211)));
         let s = c.nmos_settings();
         assert_eq!(s.registry.as_deref(), Some("http://10.0.0.5:3210"));
         assert_eq!(s.query.as_deref(), Some("http://10.0.0.5:3211"));
+    }
+
+    #[test]
+    fn registry_and_query_accept_dns_names() {
+        let c = load_vars(&[
+            (
+                "NMOS_REGISTRY_ADDRESS",
+                "nmos-registry.platform.svc.cluster.local",
+            ),
+            ("NMOS_REGISTRY_PORT", "3210"),
+        ])
+        .unwrap();
+        let s = c.nmos_settings();
+        assert_eq!(
+            s.registry.as_deref(),
+            Some("http://nmos-registry.platform.svc.cluster.local:3210")
+        );
+        assert_eq!(
+            s.query.as_deref(),
+            Some("http://nmos-registry.platform.svc.cluster.local:3211")
+        );
+        let c = load_vars(&[
+            ("NMOS_REGISTRY_ADDRESS", "Registry"),
+            ("NMOS_REGISTRY_PORT", "3210"),
+            ("NMOS_QUERY_ADDRESS", "query"),
+        ])
+        .unwrap();
+        assert_eq!(c.nmos_query, Some(("query".into(), 3211)));
+        assert!(
+            load_vars(&[("NMOS_HOST_ADDRESS", "mixer.platform.svc")]).is_err(),
+            "announced addresses stay IPv4 (G5)"
+        );
     }
 
     #[test]
@@ -593,8 +654,20 @@ mod tests {
             vec![("NMOS_HOST_ADDRESS", "mixer.local")],
             vec![("NMOS_REGISTRY_ADDRESS", "10.0.0.5")],
             vec![
-                ("NMOS_REGISTRY_ADDRESS", "registry"),
+                ("NMOS_REGISTRY_ADDRESS", "nmos registry"),
                 ("NMOS_REGISTRY_PORT", "3210"),
+            ],
+            vec![
+                ("NMOS_REGISTRY_ADDRESS", "10.0.0.500"),
+                ("NMOS_REGISTRY_PORT", "3210"),
+            ],
+            vec![
+                ("NMOS_REGISTRY_ADDRESS", "-bad.example"),
+                ("NMOS_REGISTRY_PORT", "3210"),
+            ],
+            vec![
+                ("NMOS_QUERY_ADDRESS", "http://q"),
+                ("NMOS_QUERY_PORT", "3211"),
             ],
             vec![("MXL_OUTPUT_DOMAIN_ID", "x")],
             vec![("MXL_CLEANUP_ON_EXIT", "maybe")],
