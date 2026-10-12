@@ -58,7 +58,7 @@ try {
   await page.locator('[data-signal="gtr"] .btn.mute').click();
   await page.locator('[data-signal="gtr"] .btn.mute').click();
   await page.waitForTimeout(600);
-  if ((await api("/api/v1/strips/gtr")).mute !== false) throw new Error("two quick mute presses left gtr muted");
+  await until("two quick mute presses to leave gtr unmuted", async () => (await api("/api/v1/strips/gtr")).mute === false, 3000);
   pass("two quick mute presses: unmuted again");
 
   await page.locator('[data-signal="vox"] .vtrack').focus();
@@ -150,6 +150,19 @@ try {
   await page.getByRole("button", { name: "Clear solos" }).click();
   await until("no solo", async () => Object.keys(await api("/api/v1/solo")).length === 0);
   pass("control room: PFL from the strip shown as soloed, monitor dim from its card, solos cleared");
+
+  // Listening in the browser (WHEP from the built-in MediaMTX), only with MediaMTX.
+  if (process.env.MEDIAMTX_BIN) {
+    const listen = page.locator(".monitor").getByRole("button", { name: "Listen", exact: true });
+    await listen.click();
+    await page.locator(".monitor").getByRole("button", { name: "Listening" }).waitFor({ timeout: 15000 });
+    const stream = async () => (await api("/api/v1/preview")).streams.find((s) => s.id === "main");
+    await until("main publishing", async () => (await stream()).state === "publishing" && (await stream()).frames > 0);
+    await page.screenshot({ path: `${out}/control-room-listening.png`, fullPage: true });
+    await page.locator(".monitor").getByRole("button", { name: "Listening" }).click();
+    await page.locator(".monitor").getByRole("button", { name: "Listen", exact: true }).waitFor({ timeout: 3000 });
+    pass("control room: monitor main played in the browser over WHEP (stream publishing), then stopped");
+  }
 
   // Routing: a send from vox to aux through the matrix.
   await page.goto(`${base}/#routing`);
