@@ -13,7 +13,6 @@ pub mod rtsp;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -47,16 +46,14 @@ pub struct StreamState {
 struct Active {
     slot: usize,
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
     state: Arc<StreamState>,
 }
 
+/// The encoder thread ends by itself (within a connect timeout); it is not
+/// joined, as this runs under the control lock.
 impl Drop for Active {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
     }
 }
 
@@ -134,19 +131,12 @@ impl Streams {
         let state = Arc::new(StreamState::default());
         let url = format!("{}/{}", self.publish_base, self.path(id));
         let (block, s, st) = (self.block, stop.clone(), state.clone());
-        let thread = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name(format!("stream-{id}"))
             .spawn(move || encode(consumer, block, &url, &s, &st))
             .map_err(|e| e.to_string())?;
-        self.active.insert(
-            id.to_string(),
-            Active {
-                slot,
-                stop,
-                thread: Some(thread),
-                state,
-            },
-        );
+        self.active
+            .insert(id.to_string(), Active { slot, stop, state });
         tracing::info!(stream = %id, slot, "stream started");
         Ok(true)
     }
