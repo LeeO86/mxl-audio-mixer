@@ -18,7 +18,7 @@ try {
   };
   const widgets = [
     ["strip", "strip=vox&theme=dark"],
-    ["fader-bank", "bank=1&size=3&theme=light"],
+    ["fader-bank", "layout=Show&page=Talent&theme=light"],
     ["loudness", "signal=main&theme=dark"],
   ];
   for (const [id, query] of widgets) {

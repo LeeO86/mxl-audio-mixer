@@ -23,7 +23,7 @@ function saveName() {
   if (name.value.trim() && name.value !== s.value.name) set({ name: name.value.trim() });
 }
 
-// Proposed defaults when AFV is first switched on (IMPLEMENTATION_PLAN.md, widgets and tally, question 3).
+// The defaults when AFV is first switched on (IMPLEMENTATION_PLAN.md, widgets and tally, D57).
 const AFV_DEFAULTS = { enabled: true, depth_db: "-inf", fade_in_ms: 100, fade_out_ms: 500 };
 const afv = computed(() => s.value.afv || null);
 function setAfv(change) {

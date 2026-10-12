@@ -22,10 +22,21 @@ use serde_json::{json, Value};
 use crate::mix::Mix;
 use crate::ops::{error, App, UI, VERSION};
 
-/// Most strips of a fader bank.
+/// Most strips of a fader bank given as a list.
 pub const MAX_BANK: usize = 32;
-/// Strips per bank unless `size` says otherwise.
-pub const DEFAULT_BANK: usize = 8;
+
+/// The page of `layout` that `page` names: its 1-based number or its name.
+pub fn layout_page<'a>(
+    mix: &'a Mix,
+    layout: &str,
+    page: &str,
+) -> Option<&'a crate::mix::show::Page> {
+    let l = mix.layouts.iter().find(|l| l.name == layout)?;
+    match page.parse::<usize>() {
+        Ok(n) if n >= 1 => l.pages.get(n - 1),
+        _ => l.pages.iter().find(|p| p.name == page),
+    }
+}
 
 pub fn routes() -> Router<App> {
     Router::new()
@@ -63,6 +74,12 @@ fn catalogue(mix: &Mix) -> Value {
         .chain(mix.buses.iter().map(|b| b.id.as_str()))
         .collect();
     let signal = |title: &str| json!({"type": "string", "title": title, "enum": signals});
+    let layouts: Vec<&str> = mix.layouts.iter().map(|l| l.name.as_str()).collect();
+    let pages: Vec<String> = mix
+        .layouts
+        .iter()
+        .flat_map(|l| l.pages.iter().map(|p| p.name.clone()))
+        .collect();
     let item = |id: &str, title: &str, params: Value, w: u32, h: u32| json!({"id": id, "title": title, "params": params, "min_size": {"w": w, "h": h}, "version": VERSION});
     json!([
         item(
@@ -78,11 +95,11 @@ fn catalogue(mix: &Mix) -> Value {
             json!({
                 "type": "object",
                 "properties": {
-                    "bank": {"type": "integer", "minimum": 1, "title": "Bank (strips in mix order)"},
-                    "size": {"type": "integer", "minimum": 1, "maximum": MAX_BANK, "default": DEFAULT_BANK, "title": "Strips per bank"},
-                    "strips": {"type": "string", "title": "Strips and buses, comma-separated (instead of a bank)"}
+                    "layout": {"type": "string", "title": "Layout", "enum": layouts},
+                    "page": {"type": "string", "title": "Page of the layout (its name or 1-based number)", "examples": pages},
+                    "strips": {"type": "string", "title": "Strips and buses, comma-separated (instead of a layout page)"}
                 },
-                "oneOf": [{"required": ["bank"]}, {"required": ["strips"]}]
+                "oneOf": [{"required": ["layout", "page"]}, {"required": ["strips"]}]
             }),
             480,
             480
@@ -151,18 +168,10 @@ pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (St
                 }
                 return Ok(());
             }
-            let size = match q.get("size") {
-                None => DEFAULT_BANK,
-                Some(s) => match s.parse::<usize>() {
-                    Ok(n) if (1..=MAX_BANK).contains(&n) => n,
-                    _ => return bad(format!("size must be 1 to {MAX_BANK}")),
-                },
-            };
-            let banks = mix.strips.len().div_ceil(size).max(1);
-            match q.get("bank").map(|b| b.parse::<usize>()) {
-                Some(Ok(b)) if (1..=banks).contains(&b) => Ok(()),
-                Some(_) => bad(format!("bank must be 1 to {banks}")),
-                None => bad("bank or strips is required".into()),
+            match (q.get("layout"), q.get("page")) {
+                (Some(l), Some(p)) if layout_page(mix, l, p).is_some() => Ok(()),
+                (Some(l), Some(p)) => bad(format!("layout {l} has no page {p}")),
+                _ => bad("layout and page, or strips, are required".into()),
             }
         }
         _ => Err((StatusCode::NOT_FOUND, format!("widget {id} does not exist"))),
@@ -216,6 +225,19 @@ mod tests {
                 crate::mix::Format::Mono,
             ));
         }
+        mix.layouts.push(crate::mix::show::Layout {
+            name: "Show".into(),
+            pages: vec![
+                crate::mix::show::Page {
+                    name: "Talent".into(),
+                    signals: vec!["s1".into(), "s2".into()],
+                },
+                crate::mix::show::Page {
+                    name: "Band".into(),
+                    signals: vec!["s3".into()],
+                },
+            ],
+        });
         let q = |pairs: &[(&str, &str)]| {
             pairs
                 .iter()
@@ -235,9 +257,27 @@ mod tests {
             status("loudness", &[("signal", "s2"), ("theme", "transparent")]),
             None
         );
-        assert_eq!(status("fader-bank", &[("bank", "2")]), None);
-        assert_eq!(status("fader-bank", &[("bank", "3")]), Some(400));
-        assert_eq!(status("fader-bank", &[("bank", "3"), ("size", "4")]), None);
+        assert_eq!(
+            status("fader-bank", &[("layout", "Show"), ("page", "2")]),
+            None
+        );
+        assert_eq!(
+            status("fader-bank", &[("layout", "Show"), ("page", "Talent")]),
+            None
+        );
+        assert_eq!(
+            status("fader-bank", &[("layout", "Show"), ("page", "3")]),
+            Some(400)
+        );
+        assert_eq!(
+            status("fader-bank", &[("layout", "Nope"), ("page", "1")]),
+            Some(400)
+        );
+        assert_eq!(status("fader-bank", &[("layout", "Show")]), Some(400));
+        assert_eq!(
+            layout_page(&mix, "Show", "Band").map(|p| p.signals.len()),
+            Some(1)
+        );
         assert_eq!(status("fader-bank", &[("strips", "s1, s3")]), None);
         assert_eq!(status("fader-bank", &[("strips", "s1,x")]), Some(400));
         assert_eq!(status("fader-bank", &[]), Some(400));

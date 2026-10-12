@@ -1,13 +1,14 @@
 <script setup>
-// Operator-screen widgets (§12.6, Appendix B.2): /widget/strip?strip=<id>, /widget/fader-bank?bank=<n>[&size=8]
-// or ?strips=<id,id,…>, /widget/loudness?signal=<id>, each with [&theme=dark|light|transparent], without the
-// app around them, on this mixer's own API (same origin). The page posts {type: "widget-ready"} and
+// Operator-screen widgets (§12.6, Appendix B.2): /widget/strip?strip=<id>,
+// /widget/fader-bank?layout=<name>&page=<name or 1-based number> or ?strips=<id,id,…>,
+// /widget/loudness?signal=<id>, each with [&theme=dark|light|transparent], without the app around them,
+// on this mixer's own API (same origin). The page posts {type: "widget-ready"} and
 // {type: "widget-size", w, h} to the page that frames it.
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Pill from "./Pill.vue";
 import Strip from "./Strip.vue";
 import { api } from "../api.js";
-import { act, isBus, live, signalOf, startLive, stopLive, stored, strips, wantMeters } from "../store.js";
+import { act, isBus, live, signalOf, startLive, stopLive, stored, wantMeters } from "../store.js";
 
 const query = location.search;
 const params = new URLSearchParams(query);
@@ -29,9 +30,11 @@ const shown = computed(() => {
       .map((s) => signalOf(s.trim()))
       .filter(Boolean);
   }
-  const size = Number(params.get("size")) || 8;
-  const bank = Number(params.get("bank")) || 1;
-  return strips.value.slice((bank - 1) * size, bank * size);
+  const layout = (live.mix?.layouts || []).find((l) => l.name === params.get("layout"));
+  const page = params.get("page") || "";
+  const n = /^\d+$/.test(page) ? Number(page) : 0;
+  const p = n >= 1 ? layout?.pages[n - 1] : layout?.pages.find((x) => x.name === page);
+  return (p?.signals || []).map(signalOf).filter(Boolean);
 });
 const ids = computed(() => shown.value.map((s) => s.id));
 watch(ids, (list) => wantMeters(list.length ? list : null), { immediate: true });

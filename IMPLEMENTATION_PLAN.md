@@ -548,7 +548,7 @@ with the control room (M5), `vca` with M6, PFL in the strip widget with M5.
 
 | # | Decision | Reason |
 | --- | --- | --- |
-| D53 | The widget pages are the embedded UI page; it shows the widget its path names. `strip` takes a strip or bus id; `fader-bank` takes `bank` (1-based, strips in mix order, `size` 1–32, default 8) or `strips` (1–32 ids); `loudness` takes a signal id. Bad parameters (unknown ids, a bank beyond the strips, a wrong theme) are 400. The params schema lists the current ids as an enum. | Appendix B.2 and the siblings (`mxl-color-corrector`: one page, the widget from the URL). The designer can offer the ids as a choice. `bank` needs a definition; question 4. |
+| D53 | The widget pages are the embedded UI page; it shows the widget its path names. `strip` takes a strip or bus id; `fader-bank` takes a layout page (`layout` by name, `page` by name or 1-based number) or `strips` (1–32 ids); `loudness` takes a signal id. Bad parameters (unknown ids, layouts or pages, a wrong theme) are 400. The params schema lists the current ids and layout names as enums. | Appendix B.2 and the siblings (`mxl-color-corrector`: one page, the widget from the URL). The designer can offer the ids as a choice. A bank is a layout page (maintainer, question 4). |
 | D54 | `/widgets` CORS and the page CSP as in the siblings: an origin is listed when a source of `WIDGET_FRAME_ANCESTORS` equals it (case and a trailing slash ignored) or is `*`; no API CORS on these routes; `;`, `,` and control characters in the setting exit with 78. | Appendix B.2 ("two Access-Control-Allow-Origin values make browsers refuse it"). |
 | D55 | The TSL receiver is the one of mxl-webrtc-monitor ported: DLE/STX framing (DLE DLE, DLE/ETX accepted, a packet complete at PBC + 2), bare or wrapped UDP datagrams, UTF-16 labels, at most 8 TCP senders, `TSL_SCREEN`. Default ports 8910/8911 as §10.3 says. | §10.3 "as in mxl-multiviewer and mxl-webrtc-monitor". The monitor moved its defaults to 8912/8913 because it runs with host networking next to a multiviewer; the mixer runs on the pod network (question 1). |
 | D56 | `TSL_MAP` maps a TSL display index to a tally index (`display:index`; empty: the same number; with a map, unmapped displays are ignored). Strips carry their `tally_index` in the show. | The siblings map displays to their own channels; the mixer's strips are show data, so the deployment maps displays and the show maps strips. |
@@ -577,17 +577,15 @@ with the control room (M5), `vca` with M6, PFL in the strip widget with M5.
   lists the lamp.
 - All other integration tests pass.
 
-### Questions
+### Answers (maintainer, 2026-10-12)
 
-1. TSL default ports 8910 (UDP) and 8911 (TCP), as §10.3 says, or other defaults
-   (mxl-webrtc-monitor uses 8912/8913 to stay off a multiviewer's ports on host
-   networking)?
-2. AFV defaults the UI proposes: depth −∞, fade in 100 ms, fade out 500 ms?
-3. An AFV strip is closed before any tally arrived (§10.3 literally); when packets
-   stop, the last state stays (no timeout). Both right?
-4. `fader-bank`: `bank` as banks of `size` strips in mix order, or a layout page
-   (`layout` and `page`)?
-5. Merge PR 7?
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | TSL default ports 8910/8911 (§10.3) | Accepted. |
+| 2 | AFV defaults in the UI: depth −∞, fade in 100 ms, fade out 500 ms | Accepted. |
+| 3 | AFV closed before any tally; the last state stays when packets stop | Accepted, both. |
+| 4 | `fader-bank`: banks in mix order, or a layout page | A layout page: `layout` and `page` (name or 1-based number) replace `bank` and `size` (D53). |
+| 5 | Merge PR 7 | Merged. |
 
 ## tests/hw scripts for the maintainers
 

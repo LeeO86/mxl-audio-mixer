@@ -53,7 +53,7 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 | id | Params | Shows and controls | min_size |
 | --- | --- | --- | --- |
 | `strip` | `strip` (a strip or bus id) | name, tally, gain reduction per dynamics node, mute, fader, meter | 120×480 |
-| `fader-bank` | `bank` (1-based, strips in mix order) with `size` (1–32, default 8), or `strips` (ids, comma-separated, 1–32) | those strips side by side | 480×480 |
+| `fader-bank` | `layout` (a layout's name) and `page` (its name or 1-based number), or `strips` (ids, comma-separated, 1–32) | the strips and buses of that page, side by side | 480×480 |
 | `loudness` | `signal` (a strip or bus id) | momentary, short-term, integrated LUFS, LRA, max true peak, the tolerance; start, stop, reset | 320×200 |
 
 `monitor` and `talkback` come with the control room (milestone 5), `vca` with

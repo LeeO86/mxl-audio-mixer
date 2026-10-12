@@ -25,6 +25,7 @@ done
 api POST /api/v1/buses '{"id": "main", "name": "Main", "format": "stereo", "loudness": true}' >/dev/null
 api PUT /api/v1/sends/vox/main >/dev/null
 api PUT /api/v1/sends/gtr/main >/dev/null
+api PUT /api/v1/layouts '[{"name": "Show", "pages": [{"name": "Talent", "signals": ["vox", "gtr", "keys"]}, {"name": "Main", "signals": ["main"]}]}]' >/dev/null
 api POST /api/v1/strips/vox/chain '{"id": "comp", "type": "compressor", "threshold_db": -30, "ratio": 4, "knee_db": 0, "attack_ms": 1, "release_ms": 200, "makeup_db": 0, "detector": "peak"}' >/dev/null
 
 headers() { curl -s -o /dev/null -D - "$@" | tr -d '\r'; }
@@ -48,8 +49,9 @@ grep -q "^HTTP/1.1 200" <<<"$h" || fail "widget page: $h"
 grep -qi "^content-security-policy: frame-ancestors 'self' $ALLOWED$" <<<"$h" || fail "CSP: $h"
 ! grep -qi "^x-frame-options" <<<"$h" || fail "X-Frame-Options on a widget page"
 status() { curl -s -o /dev/null -w '%{http_code}' "$WEB/widget/$1"; }
-for case in "strip?strip=nope:400" "strip:400" "strip?strip=vox&theme=pink:400" "fader-bank?bank=2:400" \
-    "fader-bank?strips=vox,gtr:200" "fader-bank?bank=1:200" "loudness?signal=main:200" "vca?vca=1:404" "nope:404"; do
+for case in "strip?strip=nope:400" "strip:400" "strip?strip=vox&theme=pink:400" "fader-bank?layout=Show&page=3:400" \
+    "fader-bank?layout=Nope&page=1:400" "fader-bank?layout=Show:400" "fader-bank?strips=vox,gtr:200" \
+    "fader-bank?layout=Show&page=2:200" "fader-bank?layout=Show&page=Talent:200" "loudness?signal=main:200" "vca?vca=1:404" "nope:404"; do
     [[ "$(status "${case%:*}")" == "${case##*:}" ]] || fail "/widget/${case%:*}: $(status "${case%:*}"), not ${case##*:}"
 done
 pass "widget pages: CSP frame-ancestors, no X-Frame-Options; 400 for bad parameters, 404 for unknown widgets"
