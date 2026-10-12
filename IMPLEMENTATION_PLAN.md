@@ -999,6 +999,10 @@ In two parts, each a PR:
 - **Finding (again):** with the demo mixer running on the dev VM, the probes see
   late inputs even on other CPUs; the tests ran with the demo stopped (as noted in
   `docs/development.md`).
+- **Finding (CI):** `processing.sh` failed once on its compressor check (peak
+  −27.2 dBFS, ±0.3 around −27.5). The peak checks had no retry: a late input block
+  fades the input and resets the envelope, a transient gets through. They now
+  measure again when an input was late during the probe, like the sample checks.
 
 ### M6a: questions
 
