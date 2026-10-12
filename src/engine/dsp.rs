@@ -8,6 +8,7 @@ use std::time::Duration;
 use mxl::Error as MxlError;
 
 use super::plan::{InputSource, OutputSink};
+use super::talk::{TalkIn, MAX_TALK};
 use super::{
     Command, EngineConfig, EngineCounters, OutputWriter, Plan, Returned, BLOCK_BUCKETS_US,
     FADE_SAMPLES, MAX_CHANNELS, MAX_LOUDNESS, MAX_OUTPUTS, MAX_STREAMS,
@@ -61,11 +62,16 @@ impl Input {
 
 struct Inputs<'a> {
     inputs: &'a [Input],
+    talks: &'a [TalkIn],
     block: usize,
 }
 
 impl InputSource for Inputs<'_> {
     fn channel(&self, input: usize, channel: usize) -> Option<&[f32]> {
+        if input >= self.inputs.len() {
+            let t = self.talks.get(input - self.inputs.len())?;
+            return (channel == 0 && t.ring.is_some()).then_some(&t.buffer[..self.block]);
+        }
         let i = self.inputs.get(input)?;
         if i.silent() || channel >= i.channels {
             return None;
@@ -185,6 +191,7 @@ pub(super) fn run(
     let mut loudness: Vec<Option<Box<SegmentMeter>>> = (0..MAX_LOUDNESS).map(|_| None).collect();
     let mut streams: Vec<Option<Box<rtrb::Producer<f32>>>> =
         (0..MAX_STREAMS).map(|_| None).collect();
+    let mut talks: Vec<TalkIn> = (0..MAX_TALK).map(|_| TalkIn::new(block)).collect();
     let mut plan: Option<Box<Plan>> = None;
     let mut stopping = false;
     // The fade-out takes FADE_SAMPLES; a few blocks more cover a full commit.
@@ -324,6 +331,22 @@ pub(super) fn run(
                         let _ = returned.push(Returned::Stream(old));
                     }
                 }
+                Command::SetTalk { slot, ring } => {
+                    if let Some(t) = talks.get_mut(slot) {
+                        if let Some(old) = t.ring.replace(ring) {
+                            let _ = returned.push(Returned::Talk(old));
+                        }
+                        t.reset();
+                    }
+                }
+                Command::ClearTalk { slot } => {
+                    if let Some(t) = talks.get_mut(slot) {
+                        if let Some(old) = t.ring.take() {
+                            let _ = returned.push(Returned::Talk(old));
+                        }
+                        t.reset();
+                    }
+                }
             }
         }
 
@@ -407,11 +430,15 @@ pub(super) fn run(
                 o.staging[at..at + block].fill(0.0);
             }
         }
+        for (t, c) in talks.iter_mut().zip(&counters.talk) {
+            t.read(block, c);
+        }
         if let Some(p) = plan.as_mut() {
             p.process(
                 start,
                 &Inputs {
                     inputs: &inputs,
+                    talks: &talks,
                     block,
                 },
                 &mut Outputs {
@@ -477,6 +504,11 @@ pub(super) fn run(
     for m in loudness.iter_mut() {
         if let Some(m) = m.take() {
             let _ = returned.push(Returned::Loudness(m));
+        }
+    }
+    for t in talks.iter_mut() {
+        if let Some(r) = t.ring.take() {
+            let _ = returned.push(Returned::Talk(r));
         }
     }
 }
