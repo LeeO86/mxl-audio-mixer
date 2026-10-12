@@ -353,7 +353,8 @@ mod tests {
         let mut m = monitor("main");
         m.level_db = -10.0;
         m.dim = true;
-        assert!((monitor_gain(&m) - 0.031_622_78).abs() < 1e-6);
+        // −10 dB level and the default −21 dB dim.
+        assert!((monitor_gain(&m) - 0.028_183_83).abs() < 1e-6);
         m.cut = true;
         assert_eq!(monitor_gain(&m), 0.0);
     }
