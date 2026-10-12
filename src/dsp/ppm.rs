@@ -119,7 +119,11 @@ mod tests {
     #[test]
     fn a_pair_matches_two_runs() {
         let b = [Ballistics::type_i(), Ballistics::type_ii()];
-        let x: Vec<f32> = tone(3000.0, 0.05).iter().enumerate().map(|(i, v)| v * (i % 7) as f32 / 7.0).collect();
+        let x: Vec<f32> = tone(3000.0, 0.05)
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v * (i % 7) as f32 / 7.0)
+            .collect();
         let (l, m) = run_pair(&b, [0.3, 0.1], &x);
         for k in 0..2 {
             assert_eq!((l[k], m[k]), b[k].run([0.3, 0.1][k], &x));

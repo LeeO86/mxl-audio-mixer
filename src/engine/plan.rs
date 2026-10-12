@@ -592,9 +592,13 @@ impl Plan {
                             m.energy.store(total.to_bits(), Ordering::Relaxed);
                             m.samples.fetch_add(block as u64, Ordering::Relaxed);
                             let range = self.buf(self.indices[src.start as usize + c]);
-                            let level = [0, 1].map(|k| f32::from_bits(m.ppm[k].load(Ordering::Relaxed)));
-                            let (level, max) =
-                                crate::dsp::ppm::run_pair(&self.meters.ppm, level, &self.buffers[range]);
+                            let level =
+                                [0, 1].map(|k| f32::from_bits(m.ppm[k].load(Ordering::Relaxed)));
+                            let (level, max) = crate::dsp::ppm::run_pair(
+                                &self.meters.ppm,
+                                level,
+                                &self.buffers[range],
+                            );
                             for k in 0..2 {
                                 m.ppm[k].store(level[k].to_bits(), Ordering::Relaxed);
                                 m.ppm_max[k].fetch_max(max[k].to_bits(), Ordering::Relaxed);
