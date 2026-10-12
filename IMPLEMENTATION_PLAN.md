@@ -1088,3 +1088,13 @@ frames a `fader-bank` with a VCA.
 | 3 | Link: the first strip's processing and fader, the union of the sends at the first one's level; unlink only for stereo. | As implemented. |
 | 4 | Defaults: group stereo, N-1 the bus's format or mono, ids `group-<n>`, `n1-<strip>`, `minus-<n>`, `link-<n>`, `<id>-l`/`<id>-r`. | As implemented. |
 | 5 | Merge M6b? Milestone 6 is then done; 1.0.0 is milestones 0–6 (§19): prepare it (release notes B.3, image digest, the maintainers' hardware tests)? | Yes, and prepare 1.0.0. |
+
+### M6b: answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | N-1 from a bus and from the selection | Yes, both. |
+| 2 | A group that would break a mix-minus is refused | OK; the maintainer tests it by hand (in the 1.0.0 checklist). |
+| 3 | Link and unlink as implemented | Yes. |
+| 4 | Defaults (formats, ids) | Yes. |
+| 5 | Merge M6b, then prepare 1.0.0 | Yes. |
