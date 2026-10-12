@@ -47,7 +47,7 @@ on() { api PUT "/api/v1/talkback/talk/$1/$2" "${3:-}" >/dev/null; sleep 0.2; }
 off() { curl -fsS -o /dev/null -X DELETE "$WEB/api/v1/talkback/talk/$1/$2"; sleep 0.2; }
 
 OUT_FLOW=$IFB
-sleep 0.3
+settled 1
 probe 1 1:1:1
 pass "IFB without talk: the programme"
 on dir ifb
