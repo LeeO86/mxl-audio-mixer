@@ -1,0 +1,246 @@
+//! Widgets for operator screens (§12.6, Appendix B.2), as in the sibling media
+//! functions:
+//! - `GET /widgets`: the widgets with a JSON schema of their query; CORS only for
+//!   the origins listed in `WIDGET_FRAME_ANCESTORS` (`Vary: Origin`), no other CORS;
+//! - `GET /widget/<id>?<params>[&theme=dark|light|transparent]`: the UI page, which
+//!   shows the widget alone; `Content-Security-Policy: frame-ancestors
+//!   <WIDGET_FRAME_ANCESTORS>`, no `X-Frame-Options`. A bad parameter is 400, an
+//!   unknown id 404, another method than GET 405.
+//!
+//! Widgets now: `strip`, `fader-bank`, `loudness`. `monitor` and `talkback` come
+//! with the control room (M5), `vca` with the VCAs (M6).
+
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::any;
+use axum::{Json, Router};
+use serde_json::{json, Value};
+
+use crate::mix::Mix;
+use crate::ops::{error, App, UI, VERSION};
+
+/// Most strips of a fader bank.
+pub const MAX_BANK: usize = 32;
+/// Strips per bank unless `size` says otherwise.
+pub const DEFAULT_BANK: usize = 8;
+
+pub fn routes() -> Router<App> {
+    Router::new()
+        .route("/widgets", any(list))
+        .route("/widget/{id}", any(page))
+        .route("/widget/{id}/", any(page))
+}
+
+fn not_get(method: &Method) -> Option<Response> {
+    (method != Method::GET).then(|| {
+        let mut r = error(StatusCode::METHOD_NOT_ALLOWED, "widgets answer GET only");
+        r.headers_mut()
+            .insert(header::ALLOW, header::HeaderValue::from_static("GET"));
+        r
+    })
+}
+
+/// True when the CSP source list names `origin` (or holds `*`).
+pub fn listed_origin(sources: &str, origin: &str) -> bool {
+    let normal = |t: &str| t.trim_end_matches('/').to_ascii_lowercase();
+    let origin = normal(origin);
+    if origin.is_empty() || origin == "null" {
+        return false;
+    }
+    sources
+        .split_whitespace()
+        .any(|t| t == "*" || normal(t) == origin)
+}
+
+fn catalogue(mix: &Mix) -> Value {
+    let signals: Vec<&str> = mix
+        .strips
+        .iter()
+        .map(|s| s.id.as_str())
+        .chain(mix.buses.iter().map(|b| b.id.as_str()))
+        .collect();
+    let signal = |title: &str| json!({"type": "string", "title": title, "enum": signals});
+    let item = |id: &str, title: &str, params: Value, w: u32, h: u32| json!({"id": id, "title": title, "params": params, "min_size": {"w": w, "h": h}, "version": VERSION});
+    json!([
+        item(
+            "strip",
+            "Channel strip",
+            json!({"type": "object", "properties": {"strip": signal("Strip or bus")}, "required": ["strip"]}),
+            120,
+            480
+        ),
+        item(
+            "fader-bank",
+            "Fader bank",
+            json!({
+                "type": "object",
+                "properties": {
+                    "bank": {"type": "integer", "minimum": 1, "title": "Bank (strips in mix order)"},
+                    "size": {"type": "integer", "minimum": 1, "maximum": MAX_BANK, "default": DEFAULT_BANK, "title": "Strips per bank"},
+                    "strips": {"type": "string", "title": "Strips and buses, comma-separated (instead of a bank)"}
+                },
+                "oneOf": [{"required": ["bank"]}, {"required": ["strips"]}]
+            }),
+            480,
+            480
+        ),
+        item(
+            "loudness",
+            "Loudness",
+            json!({"type": "object", "properties": {"signal": signal("Strip or bus")}, "required": ["signal"]}),
+            320,
+            200
+        ),
+    ])
+}
+
+async fn list(State(app): State<App>, method: Method, headers: HeaderMap) -> Response {
+    if let Some(r) = not_get(&method) {
+        return r;
+    }
+    let body = catalogue(&app.control().mix);
+    let mut r = Json(body).into_response();
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if listed_origin(&app.config.widget_frame_ancestors, origin) {
+        if let Ok(v) = header::HeaderValue::from_str(origin) {
+            r.headers_mut()
+                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+        }
+    }
+    r.headers_mut()
+        .insert(header::VARY, header::HeaderValue::from_static("Origin"));
+    r
+}
+
+/// Check a widget's query against the mix.
+pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (StatusCode, String)> {
+    let bad = |m: String| Err((StatusCode::BAD_REQUEST, m));
+    if let Some(t) = q.get("theme") {
+        if !["dark", "light", "transparent"].contains(&t.as_str()) {
+            return bad("theme must be dark, light or transparent".into());
+        }
+    }
+    let signal = |key: &str| -> Result<(), (StatusCode, String)> {
+        match q.get(key) {
+            Some(s) if mix.kind(s).is_some() => Ok(()),
+            Some(s) => bad(format!("{key} {s} is not a strip or bus")),
+            None => bad(format!("{key} is required")),
+        }
+    };
+    match id {
+        "strip" => signal("strip"),
+        "loudness" => signal("signal"),
+        "fader-bank" => {
+            if let Some(list) = q.get("strips") {
+                let ids: Vec<&str> = list
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if ids.is_empty() || ids.len() > MAX_BANK {
+                    return bad(format!("strips lists 1 to {MAX_BANK} strips or buses"));
+                }
+                if let Some(s) = ids.iter().find(|s| mix.kind(s).is_none()) {
+                    return bad(format!("{s} is not a strip or bus"));
+                }
+                return Ok(());
+            }
+            let size = match q.get("size") {
+                None => DEFAULT_BANK,
+                Some(s) => match s.parse::<usize>() {
+                    Ok(n) if (1..=MAX_BANK).contains(&n) => n,
+                    _ => return bad(format!("size must be 1 to {MAX_BANK}")),
+                },
+            };
+            let banks = mix.strips.len().div_ceil(size).max(1);
+            match q.get("bank").map(|b| b.parse::<usize>()) {
+                Some(Ok(b)) if (1..=banks).contains(&b) => Ok(()),
+                Some(_) => bad(format!("bank must be 1 to {banks}")),
+                None => bad("bank or strips is required".into()),
+            }
+        }
+        _ => Err((StatusCode::NOT_FOUND, format!("widget {id} does not exist"))),
+    }
+}
+
+async fn page(
+    State(app): State<App>,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(r) = not_get(&method) {
+        return r;
+    }
+    if let Err((status, message)) = check(&app.control().mix, &id, &q) {
+        return error(status, message);
+    }
+    let csp = format!("frame-ancestors {}", app.config.widget_frame_ancestors);
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::CONTENT_SECURITY_POLICY, csp),
+        ],
+        UI,
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origins() {
+        let s = "'self' https://designer.example";
+        assert!(listed_origin(s, "https://designer.example"));
+        assert!(listed_origin(s, "https://Designer.example/"));
+        assert!(!listed_origin(s, "https://evil.example"));
+        assert!(!listed_origin(s, "null") && !listed_origin(s, ""));
+        assert!(listed_origin("*", "https://any.example"));
+    }
+
+    #[test]
+    fn params() {
+        let mut mix = Mix::default();
+        for i in 0..10 {
+            mix.strips.push(crate::mix::model::tests::strip(
+                &format!("s{i}"),
+                crate::mix::Format::Mono,
+            ));
+        }
+        let q = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let status =
+            |id: &str, p: &[(&str, &str)]| check(&mix, id, &q(p)).err().map(|e| e.0.as_u16());
+        assert_eq!(status("strip", &[("strip", "s1")]), None);
+        assert_eq!(status("strip", &[("strip", "nope")]), Some(400));
+        assert_eq!(status("strip", &[]), Some(400));
+        assert_eq!(
+            status("strip", &[("strip", "s1"), ("theme", "pink")]),
+            Some(400)
+        );
+        assert_eq!(
+            status("loudness", &[("signal", "s2"), ("theme", "transparent")]),
+            None
+        );
+        assert_eq!(status("fader-bank", &[("bank", "2")]), None);
+        assert_eq!(status("fader-bank", &[("bank", "3")]), Some(400));
+        assert_eq!(status("fader-bank", &[("bank", "3"), ("size", "4")]), None);
+        assert_eq!(status("fader-bank", &[("strips", "s1, s3")]), None);
+        assert_eq!(status("fader-bank", &[("strips", "s1,x")]), Some(400));
+        assert_eq!(status("fader-bank", &[]), Some(400));
+        assert_eq!(status("vca", &[]), Some(404));
+    }
+}
