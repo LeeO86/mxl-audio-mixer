@@ -388,6 +388,7 @@ mod tests {
             recall_safe: false,
             solo_safe: false,
             mute_safe: false,
+            minus: None,
         });
         for from in ["a", "b"] {
             m.sends.push(Send {

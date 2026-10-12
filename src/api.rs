@@ -567,6 +567,7 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             recall_safe: false,
             solo_safe: false,
             mute_safe: false,
+            minus: None,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {

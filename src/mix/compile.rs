@@ -468,9 +468,11 @@ impl Compiler {
         let grouped = mix.group_muted();
         let soloed_signals = expand_solo(mix, &c.compiler.solo);
 
+        // Every send, the mix-minus buses' mirrored ones too (§5).
+        let all_sends = mix.all_sends();
         // Block-delay sends read last block's source, held across the block.
         let mut held: HashMap<(String, String), (u32, Span)> = HashMap::new();
-        for s in mix.sends.iter().filter(|s| s.block_delay) {
+        for s in all_sends.iter().filter(|s| s.block_delay) {
             let Some(f) = mix.tap_format(&s.from, &s.tap) else {
                 continue;
             };
@@ -626,7 +628,7 @@ impl Compiler {
                     let n = bus.format.channels();
                     let sum = c.b.buffers(n);
                     c.b.step(Step::Clear { dst: sum });
-                    let into: Vec<_> = mix.sends.iter().filter(|s| s.to == bus.id).collect();
+                    let into: Vec<_> = all_sends.iter().filter(|s| s.to == bus.id).collect();
                     let source = |s: &super::model::Send| -> Option<(Span, usize, u64)> {
                         if s.block_delay {
                             return held
@@ -1076,7 +1078,7 @@ impl Compiler {
             });
         }
 
-        for s in mix.sends.iter().filter(|s| s.block_delay) {
+        for s in all_sends.iter().filter(|s| s.block_delay) {
             let (Some((proc, _)), Some(t)) =
                 (held.get(&(s.from.clone(), s.to.clone())), taps.get(&s.from))
             else {
@@ -1180,6 +1182,7 @@ mod tests {
             recall_safe: false,
             solo_safe: false,
             mute_safe: false,
+            minus: None,
         }
     }
 
