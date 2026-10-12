@@ -74,6 +74,10 @@ api POST /api/v1/talkback/mics '{"id": "director", "name": "Director", "input": 
 api POST /api/v1/talkback/destinations '{"id": "ifb", "name": "IFB 1", "bus": "aux-1", "mode": "interrupt", "return": {"input": 1}}'
 api POST /api/v1/talkback/destinations '{"id": "studio", "name": "Studio", "bus": "aux-2"}'
 api PATCH /api/v1/control-room '{"sources": [{"signal": "main"}, {"signal": "aux-1"}, {"signal": "aux-2"}, {"signal": "osc"}, {"input": 1}]}'
+# VCAs for the layout's pages, and a mute group for the playout.
+api POST /api/v1/vcas '{"id": "talent", "name": "Talent", "members": ["host", "guest", "phone"], "colour": "#4da3ff"}'
+api POST /api/v1/vcas '{"id": "playout", "name": "Playout", "members": ["music-l", "music-r", "sfx", "amb"], "colour": "#3fb968"}'
+api POST /api/v1/mute-groups '{"id": "playout", "name": "Playout", "members": ["music-l", "music-r", "sfx", "amb"]}'
 api PUT /api/v1/layouts '[{"name": "Show", "pages": [{"name": "Talent", "signals": ["host", "guest", "phone"]}, {"name": "Playout", "signals": ["music-l", "music-r", "sfx", "amb"]}]}]'
 api POST /api/v1/snapshots '{"name": "Top of show"}'
 
