@@ -519,7 +519,9 @@ impl Control {
     pub fn stage(&mut self, next: Mix, ramp: u32) -> Result<Staged, String> {
         next.validate(self.input_count, self.block)?;
         self.compiler.afv = self.afv_targets(&next);
-        self.compiler.solo.retain(|s, _| next.kind(s).is_some());
+        self.compiler
+            .solo
+            .retain(|s, _| next.kind(s).is_some() || next.vca(s).is_some());
         self.compiler.streams = self.streams.slots();
         self.compiler.browser_mics = self.talkers.slots();
         let mics: Vec<String> = next
@@ -549,7 +551,8 @@ impl Control {
             }
         }
         for p in &mut self.compiler.personal {
-            p.solo.retain(|s, _| next.kind(s).is_some());
+            p.solo
+                .retain(|s, _| next.kind(s).is_some() || next.vca(s).is_some());
             if let Some(crate::mix::room::Source::Signal(id)) = &p.monitor.source {
                 if next.kind(id).is_none() {
                     p.monitor.source = None;

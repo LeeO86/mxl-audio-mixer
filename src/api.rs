@@ -307,6 +307,7 @@ struct StripBody {
     colour: Option<String>,
     recall_safe: Option<bool>,
     solo_safe: Option<bool>,
+    mute_safe: Option<bool>,
     /// `null` clears it.
     #[serde(default, deserialize_with = "present")]
     tally_index: Option<Option<u16>>,
@@ -343,6 +344,9 @@ impl StripBody {
         }
         if let Some(v) = self.solo_safe {
             s.solo_safe = v;
+        }
+        if let Some(v) = self.mute_safe {
+            s.mute_safe = v;
         }
         if let Some(format) = self.format {
             let n = format.channels();
@@ -408,6 +412,7 @@ async fn create_strip(State(app): State<App>, bytes: axum::body::Bytes) -> Respo
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
             tally_index: None,
             afv: None,
         };
@@ -499,6 +504,7 @@ struct BusBody {
     colour: Option<String>,
     recall_safe: Option<bool>,
     solo_safe: Option<bool>,
+    mute_safe: Option<bool>,
     ramp_ms: Option<f64>,
 }
 
@@ -512,6 +518,9 @@ impl BusBody {
         }
         if let Some(v) = self.solo_safe {
             b.solo_safe = v;
+        }
+        if let Some(v) = self.mute_safe {
+            b.mute_safe = v;
         }
         if let Some(v) = self.chain {
             b.chain = v;
@@ -557,6 +566,7 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {

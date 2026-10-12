@@ -136,6 +136,9 @@ pub struct Strip {
     /// Solo-in-place never mutes this signal (§10.1).
     #[serde(default)]
     pub solo_safe: bool,
+    /// Mute groups never mute this signal (§9 isolate).
+    #[serde(default)]
+    pub mute_safe: bool,
     /// The tally index (§10.3) this strip follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tally_index: Option<u16>,
@@ -184,6 +187,8 @@ pub struct Bus {
     pub recall_safe: bool,
     #[serde(default)]
     pub solo_safe: bool,
+    #[serde(default)]
+    pub mute_safe: bool,
 }
 
 /// Where a send or key taps its source (§5). Pre/post-EQ and pre/post-dynamics
@@ -348,6 +353,11 @@ pub struct Mix {
     pub snapshots: Vec<super::show::Snapshot>,
     #[serde(default)]
     pub control_room: super::room::ControlRoom,
+    /// VCA (DCA) groups (§9).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcas: Vec<super::vca::Vca>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mute_groups: Vec<super::vca::MuteGroup>,
 }
 
 /// What a signal id names.
@@ -446,6 +456,7 @@ impl Mix {
         }
         super::show::validate(self)?;
         super::room::validate(self, inputs)?;
+        super::vca::validate(self)?;
         for s in &self.strips {
             check_name(&s.name)?;
             if let Some(a) = &s.afv {
@@ -707,6 +718,12 @@ impl Mix {
             .talkback
             .destinations
             .retain(|d| d.bus != id);
+        for v in &mut self.vcas {
+            v.members.retain(|m| m != id);
+        }
+        for g in &mut self.mute_groups {
+            g.members.retain(|m| m != id);
+        }
     }
 }
 
@@ -764,6 +781,7 @@ pub(crate) mod tests {
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
             tally_index: None,
             afv: None,
         }
@@ -782,6 +800,7 @@ pub(crate) mod tests {
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
         }
     }
 

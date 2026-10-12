@@ -126,6 +126,7 @@ fn build_solo_bus(
     if soloed.is_empty() {
         return None;
     }
+    let soloed = &expand_solo(mix, soloed);
     let laws = mix.settings.laws();
     let bus = c.b.buffers(2);
     c.b.step(Step::Clear { dst: bus });
@@ -162,6 +163,24 @@ fn build_solo_bus(
         });
     }
     Some(bus)
+}
+
+/// Solos with every soloed VCA replaced by its members (a member's own solo wins).
+fn expand_solo(
+    mix: &Mix,
+    soloed: &std::collections::BTreeMap<String, SoloKind>,
+) -> std::collections::BTreeMap<String, SoloKind> {
+    let mut out: std::collections::BTreeMap<String, SoloKind> = soloed
+        .iter()
+        .filter(|(id, _)| mix.vca(id).is_none())
+        .map(|(id, k)| (id.clone(), *k))
+        .collect();
+    for (id, kind) in soloed.iter().filter(|(id, _)| mix.vca(id).is_some()) {
+        for m in mix.vca_members(id) {
+            out.entry(m).or_insert(*kind);
+        }
+    }
+    out
 }
 
 impl Compiler {
@@ -444,6 +463,10 @@ impl Compiler {
             mic_bufs.insert(m.info.id.clone(), dst);
         }
         let mic_infos: Vec<MicInfo> = mics.iter().map(|m| m.info.clone()).collect();
+        // VCAs and mute groups (§9) act on the fader nodes' values only.
+        let vca_effects = mix.vca_effects();
+        let grouped = mix.group_muted();
+        let soloed_signals = expand_solo(mix, &c.compiler.solo);
 
         // Block-delay sends read last block's source, held across the block.
         let mut held: HashMap<(String, String), (u32, Span)> = HashMap::new();
@@ -520,13 +543,13 @@ impl Compiler {
                     let chain_sig = chain_hash(&s.chain);
                     let (after, named, pre) = c.chain(&s.id, &s.chain, chain_in, n, &taps);
                     let sip_muted = mix.control_room.solo.sip
-                        && !c.compiler.solo.is_empty()
-                        && !c.compiler.solo.contains_key(&s.id)
+                        && !soloed_signals.is_empty()
+                        && !soloed_signals.contains_key(&s.id)
                         && !s.solo_safe;
-                    let fader = if s.mute || sip_muted {
+                    let fader = if sip_muted {
                         0.0
                     } else {
-                        s.fader_db.gain() as f32
+                        mix.fader_gain(&s.id, s.fader_db, s.mute, &vca_effects, &grouped)
                     };
                     let node = c.node(
                         format!("strip/{}/fader", s.id),
@@ -689,11 +712,8 @@ impl Compiler {
                     let (after, named, pre) = c.chain(&bus.id, &bus.chain, sum, n, &taps);
                     let pre = (pre.0, pre.1 + most);
                     let shift = |(s, l): (Span, usize)| (s, l + most);
-                    let fader = if bus.mute {
-                        0.0
-                    } else {
-                        bus.fader_db.gain() as f32
-                    };
+                    let fader =
+                        mix.fader_gain(&bus.id, bus.fader_db, bus.mute, &vca_effects, &grouped);
                     let node = c.node(
                         format!("bus/{}/fader", bus.id),
                         (format_name(bus.format), chain_sig),
@@ -1140,6 +1160,7 @@ mod tests {
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
             tally_index: None,
             afv: None,
         }
@@ -1158,6 +1179,7 @@ mod tests {
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
         }
     }
 
@@ -1318,6 +1340,53 @@ mod tests {
             (sum - 1.0).abs() < 1e-6,
             "mix: programme and both mics: {sum}"
         );
+    }
+
+    #[test]
+    fn vcas_and_mute_groups_change_values_not_the_plan() {
+        let mut compiler = Compiler::default();
+        let base = mix();
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let mut level = |m: &Mix| {
+            let mut c = compile(&mut compiler, m, 48);
+            let out = run(&mut c, &inputs, 1);
+            (out.0[&3][0][0], c.structure)
+        };
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let (plain, structure) = level(&base);
+        assert!((plain - (0.5 * h + 0.1)).abs() < 1e-6);
+        let mut with = base.clone();
+        with.vcas.push(crate::mix::vca::Vca {
+            id: "talent".into(),
+            name: "Talent".into(),
+            fader_db: Db(-6.0),
+            mute: false,
+            members: vec!["vox".into()],
+            colour: None,
+            recall_safe: false,
+        });
+        let (vca, s) = level(&with);
+        assert!((vca - (0.5 * h * 0.501_187_2 + 0.1)).abs() < 1e-6, "{vca}");
+        assert_eq!(s, structure, "a VCA is a value change");
+        with.vcas[0].mute = true;
+        let (muted, _) = level(&with);
+        assert!((muted - 0.1).abs() < 1e-6);
+        with.vcas[0].mute = false;
+        with.mute_groups.push(crate::mix::vca::MuteGroup {
+            id: "playout".into(),
+            name: "Playout".into(),
+            active: true,
+            members: vec!["music".into()],
+        });
+        let (grouped, s) = level(&with);
+        assert!((grouped - 0.5 * h * 0.501_187_2).abs() < 1e-6);
+        assert_eq!(s, structure);
+        with.strips[1].mute_safe = true;
+        let (safe, _) = level(&with);
+        assert!((safe - vca).abs() < 1e-6, "mute-safe");
     }
 
     #[test]
