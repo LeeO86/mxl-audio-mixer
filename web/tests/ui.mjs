@@ -180,6 +180,11 @@ try {
     const stream = async () => (await api("/api/v1/preview")).streams.find((s) => s.id === "main");
     await until("main publishing", async () => (await stream()).state === "publishing" && (await stream()).frames > 0);
     await page.screenshot({ path: `${out}/control-room-listening.png`, fullPage: true });
+    await page.goto(`${base}/#status`);
+    await page.locator('[data-stream="main"] .pill', { hasText: "publishing" }).waitFor({ timeout: 5000 });
+    await page.locator(".preview-status .pill", { hasText: /^running, pid/ }).waitFor({ timeout: 5000 });
+    await page.screenshot({ path: `${out}/status-preview.png`, fullPage: true });
+    await page.goto(`${base}/#control-room`);
     await page.locator(".monitor").getByRole("button", { name: "Listening" }).click();
     await page.locator(".monitor").getByRole("button", { name: "Listen", exact: true }).waitFor({ timeout: 3000 });
     pass("control room: monitor main played in the browser over WHEP (stream publishing), then stopped");
