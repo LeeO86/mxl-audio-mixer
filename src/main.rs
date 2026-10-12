@@ -310,13 +310,13 @@ async fn run(config: Config) -> ExitCode {
             .await
     });
     let nmos_task = tokio::spawn(nmos_server.run());
-    if own_mediamtx {
+    let mediamtx_task = own_mediamtx.then(|| {
         tokio::spawn(mxl_audio_mixer::preview::mediamtx::supervise(
             config.clone(),
             mediamtx.clone(),
             stop_rx.clone(),
-        ));
-    }
+        ))
+    });
     tokio::spawn(preview_task(app_for_preview, stop_rx.clone()));
     node.start_registration();
     tracing::info!(
@@ -350,6 +350,10 @@ async fn run(config: Config) -> ExitCode {
             }
         }
         let _ = stop_tx.send(true);
+        // The child is killed and reaped before the exit: its ports are free for the next start.
+        if let Some(t) = mediamtx_task {
+            let _ = t.await;
+        }
         let _ = web.await;
         let _ = nmos_task.await;
     };
