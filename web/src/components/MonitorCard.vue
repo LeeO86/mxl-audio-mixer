@@ -20,6 +20,12 @@ const set = (body) => patchMonitor(m.value.id, body);
 const key = computed(() => `monitor:${m.value.id}`);
 const channels = computed(() => ({ mono: 1, stereo: 2, "3.0": 3, "5.1": 6, "7.1": 8, "5.1.4": 10, "7.1.4": 12 })[m.value.format] || 2);
 const soloActive = computed(() => Object.keys(soloed.value).length > 0);
+// A control-room talkback mic talks: the monitor is at its talkback dim.
+const talkDim = computed(() => {
+  const talking = live.status?.talkback?.talking || {};
+  return (room.value.talkback?.mics || []).some((x) => x.dims_control_room && (talking[x.id] || []).length);
+});
+const listenBack = computed(() => live.status?.talkback?.listen_back);
 
 const sourceKey = (s) => (s ? ("signal" in s ? `s:${s.signal}` : `i:${s.input}`) : "");
 const sourceName = (s) => (!s ? "–" : "signal" in s ? signalOf(s.signal)?.name || s.signal : `Input ${s.input}`);
@@ -56,6 +62,8 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
     <h3>
       {{ m.name }} <span class="muted" style="text-transform: none; letter-spacing: 0">{{ m.kind }} · {{ m.format }}</span>
       <span v-if="soloActive && m.follows_solo" class="state-tag" style="background: #e0c23a; color: #20180a">solo</span>
+      <span v-if="talkDim && !compact" class="state-tag" style="background: var(--bad); color: #fff" :title="`dimmed by ${m.talkback_dim_db} dB while a control-room mic talks`">talkback</span>
+      <span v-if="listenBack && m.follows_solo" class="state-tag" style="background: var(--warn); color: #20180a" :title="`plays ${sourceName(listenBack)}`">listen-back</span>
       <span class="spacer"></span>
       <span v-if="!compact && published" class="pill ok" :title="`MXL flow ${published.mxl_flow_id}`">MXL out</span>
       <button class="btn small" :class="listening[m.id] ? '' : 'secondary'" :aria-pressed="!!listening[m.id]" :title="listening[m.id] || 'listen in this browser (WebRTC)'" @click="toggleListen(m.id)">
@@ -96,6 +104,7 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
           <details>
             <summary class="muted small" style="cursor: pointer; margin-top: 0.4rem">Dim depth, alignment, output</summary>
             <Pot label="Dim depth" unit="dB" :value="m.dim_db" :min="-60" :max="0" :def="-21" :fine="1" @change="(v) => set({ dim_db: v })" />
+            <Pot label="Talkback dim" unit="dB" :value="m.talkback_dim_db ?? -21" :min="-60" :max="0" :def="-21" :fine="1" @change="(v) => set({ talkback_dim_db: v })" />
             <Pot label="Trim" unit="dB" :value="m.trim_db" :min="-24" :max="24" :def="0" :fine="0.5" @change="(v) => set({ trim_db: v })" />
             <Pot label="Delay" unit="ms" :value="m.delay_ms" :min="0" :max="2000" :def="0" :fine="0.1" :digits="2" @change="(v) => set({ delay_ms: v })" />
             <label>Calibration: dB SPL at a level of 0 dB (for the presets)</label>

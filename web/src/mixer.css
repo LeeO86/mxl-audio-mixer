@@ -204,3 +204,17 @@ button.btn.on-bad[aria-pressed="true"], button.btn.on-bad[aria-pressed="true"]:h
 button.btn.pfl:hover:not(:disabled) { background: #e0c23a; }
 .widget-monitor .monitor { flex: 1; overflow: auto; }
 .monitor .bass { margin-top: .5rem; }
+
+/* Talkback (§10.2) */
+.talkback .tbrow { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.talkback .tbrow select { width: auto; }
+.talkback .tbmeter .meter .bars { min-height: 48px; }
+.talkback .tbmeter .meter .bar { width: 10px; }
+.tbbuttons { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .5rem 0; }
+button.btn.talk { min-width: 5.6rem; padding: .85rem .8rem; background: var(--chip); color: var(--text); touch-action: none; user-select: none; }
+button.btn.talk:hover:not(:disabled) { filter: none; background: var(--border); }
+button.btn.talk.others { box-shadow: inset 0 0 0 2px var(--warn); }
+button.btn.talk.on, button.btn.talk.on:hover:not(:disabled) { background: var(--bad); color: #fff; }
+.tbsettings { margin-top: .6rem; }
+.tbsettings table input:not([type="checkbox"]) { width: 100%; }
+.talkback.compact { padding: .5rem; }

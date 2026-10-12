@@ -1,10 +1,11 @@
 <script setup>
-// The control room (§10.1, §10.2): who is soloed and the solo settings, the monitor paths, the source
-// buttons, and the oscillator for line-up.
+// The control room (§10.1, §10.2): who is soloed and the solo settings, the monitor paths, talkback, the
+// source buttons, and the oscillator for line-up.
 import { computed, ref } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import MonitorCard from "./MonitorCard.vue";
 import PersonalCard from "./PersonalCard.vue";
+import TalkbackPanel from "./TalkbackPanel.vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
 import { api, dbValue } from "../api.js";
@@ -113,6 +114,8 @@ const setOsc = (body) => act(() => api.patch(`/api/v1/buses/${oscillator.value.b
     <PersonalCard />
   </div>
   <div v-if="!room.monitors.length" class="empty">No monitors yet: add the speakers and headphones of the control room.</div>
+
+  <TalkbackPanel style="margin-top: 0.9rem" />
 
   <div class="grid two" style="margin-top: 0.9rem">
     <div class="panel">

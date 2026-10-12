@@ -39,17 +39,29 @@ function open() {
 
 const inputs = computed(() => live.status?.inputs || []);
 function patchValue(p) {
-  return p ? `${p.input}:${p.channel}` : "";
+  if (!p) return "";
+  return "talkback" in p ? `t:${p.talkback}` : `${p.input}:${p.channel}`;
 }
 function setPatch(ch, value) {
   const patch = [...s.value.patch];
   if (!value) patch[ch] = null;
+  else if (value.startsWith("t:")) patch[ch] = { talkback: value.slice(2) };
   else {
     const [input, channel] = value.split(":").map(Number);
     patch[ch] = { input, channel };
   }
   patchSignal(s.value.id, { patch });
 }
+// Talkback mics (§10.2): the show's and the browsers' that are on, and any a strip already uses.
+const talkOptions = computed(() => {
+  const ids = new Set([
+    ...(live.mix?.control_room?.talkback?.mics || []).map((m) => m.id),
+    ...(live.status?.talkback?.browser_mics || []),
+    ...s.value.patch.filter((p) => p && "talkback" in p).map((p) => p.talkback),
+  ]);
+  const name = (id) => live.mix?.control_room?.talkback?.mics?.find((m) => m.id === id)?.name || id;
+  return [...ids].map((id) => ({ value: `t:${id}`, text: `TB ${name(id)}` }));
+});
 const patchOptions = computed(() =>
   inputs.value.flatMap((i) =>
     Array.from({ length: Math.max(i.channels || 0, 2) }, (_, c) => ({ value: `${i.input}:${c + 1}`, text: `${i.input}·${c + 1}`, dim: !i.channels || c >= i.channels })),
@@ -107,6 +119,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       >
         <option value="">—</option>
         <option v-for="o in patchOptions" :key="o.value" :value="o.value">{{ o.text }}</option>
+        <option v-for="o in talkOptions" :key="o.value" :value="o.value">{{ o.text }}</option>
       </select>
     </div>
 
