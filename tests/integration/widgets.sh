@@ -26,11 +26,12 @@ api POST /api/v1/buses '{"id": "main", "name": "Main", "format": "stereo", "loud
 api PUT /api/v1/sends/vox/main >/dev/null
 api PUT /api/v1/sends/gtr/main >/dev/null
 api PUT /api/v1/layouts '[{"name": "Show", "pages": [{"name": "Talent", "signals": ["vox", "gtr", "keys"]}, {"name": "Main", "signals": ["main"]}]}]' >/dev/null
+api POST /api/v1/monitors '{"id": "main", "name": "Main", "format": "stereo", "source": {"signal": "main"}}' >/dev/null
 api POST /api/v1/strips/vox/chain '{"id": "comp", "type": "compressor", "threshold_db": -30, "ratio": 4, "knee_db": 0, "attack_ms": 1, "release_ms": 200, "makeup_db": 0, "detector": "peak"}' >/dev/null
 
 headers() { curl -s -o /dev/null -D - "$@" | tr -d '\r'; }
 ids=$(json "$WEB/widgets" "','.join(w['id'] for w in d)")
-[[ "$ids" == strip,fader-bank,loudness ]] || fail "widgets $ids"
+[[ "$ids" == strip,fader-bank,loudness,monitor ]] || fail "widgets $ids"
 [[ "$(json "$WEB/widgets" "d[0]['params']['properties']['strip']['enum']")" == "['vox', 'gtr', 'keys', 'main']" ]] || fail "strip params"
 h=$(headers -H "Origin: $ALLOWED" "$WEB/widgets")
 grep -qi "^access-control-allow-origin: $ALLOWED$" <<<"$h" || fail "no CORS for the listed origin: $h"
@@ -42,7 +43,7 @@ h=$(headers -X POST "$WEB/widgets")
 if [[ "$code" != 405 ]] || ! grep -qi "^allow: GET" <<<"$h"; then
     fail "POST /widgets: $code"
 fi
-pass "/widgets: strip, fader-bank, loudness; CORS for the listed origin only, Vary: Origin; 405 with Allow: GET"
+pass "/widgets: strip, fader-bank, loudness, monitor; CORS for the listed origin only, Vary: Origin; 405 with Allow: GET"
 
 h=$(headers "$WEB/widget/strip?strip=vox&theme=transparent")
 grep -q "^HTTP/1.1 200" <<<"$h" || fail "widget page: $h"
@@ -51,7 +52,7 @@ grep -qi "^content-security-policy: frame-ancestors 'self' $ALLOWED$" <<<"$h" ||
 status() { curl -s -o /dev/null -w '%{http_code}' "$WEB/widget/$1"; }
 for case in "strip?strip=nope:400" "strip:400" "strip?strip=vox&theme=pink:400" "fader-bank?layout=Show&page=3:400" \
     "fader-bank?layout=Nope&page=1:400" "fader-bank?layout=Show:400" "fader-bank?strips=vox,gtr:200" \
-    "fader-bank?layout=Show&page=2:200" "fader-bank?layout=Show&page=Talent:200" "loudness?signal=main:200" "vca?vca=1:404" "nope:404"; do
+    "fader-bank?layout=Show&page=2:200" "fader-bank?layout=Show&page=Talent:200" "loudness?signal=main:200" "monitor?monitor=main:200" "monitor?monitor=nope:400" "vca?vca=1:404" "nope:404"; do
     [[ "$(status "${case%:*}")" == "${case##*:}" ]] || fail "/widget/${case%:*}: $(status "${case%:*}"), not ${case##*:}"
 done
 pass "widget pages: CSP frame-ancestors, no X-Frame-Options; 400 for bad parameters, 404 for unknown widgets"
