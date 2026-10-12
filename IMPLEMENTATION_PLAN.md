@@ -449,7 +449,7 @@ None.
 | --- | --- | --- |
 | D41 | The UI is Vue 3 built by Vite into one `index.html` with everything inlined, embedded in the binary at build time (`build.rs`; without a build the binary serves a note, so Rust builds and tests need no Node). Base styles and components (`style.css`, pill, segmented control, pot) are copied from the sibling media functions. | §12.0: embedded, no CDN, the family look "copied, not redesigned". The siblings build the same way (vite-plugin-singlefile). |
 | D42 | One WebSocket `/api/v1/events`: the status five times a second, the whole mix within 40 ms of a change of its revision, meters (and loudness) every 40 ms with a per-client subscription (signals, rate), the analyser on request. Every change goes through the REST API, rate-limited in the UI to 30 PATCHes a second per path with merged bodies. | §7 "decimated per client subscription"; §12.4 "the API covers every operator action": the UI uses nothing else. A whole mix per change is simpler than diffs and small (tens of kB for §16). |
-| D43 | Multi-client sync: the mix comes back to every client after a change. A control being dragged shows its own value; after a step it keeps the value it sent for 500 ms or until the server has it. | §12.1 multi-client sync without controls jumping under the operator's finger. Found in testing (below): quick steps were lost otherwise. |
+| D43 | Multi-client sync: the mix comes back to every client after a change. The changing client applies its change to its copy at once (the next mix replaces it; a refused change reloads the mix). A control being dragged shows its own value; after a step it keeps the value it sent for 500 ms or until the server has it. | §12.1 multi-client sync without controls jumping under the operator's finger. Found in testing (below): quick steps and quick toggles were lost otherwise. |
 | D44 | Snapshots hold parameters only: trim and polarity, fader, mute, pan and width, every chain node as JSON, sends' gain, mute and phase. They are part of the show. A recall matches by signal, node id and node type, skips what no longer exists, never touches recall-safe signals, and can be limited to signals, sections (strips, buses) and classes (trim, fader, mute, pan, chain, sends). `crossfade_ms` is the ramp of every value it changes. | §12.5. Structure (signals, sends, nodes) belongs to the show, not to a snapshot. A node's structural parameters (band types, slopes) are part of its JSON, so recalling them swaps the plan with the D38 fades. |
 | D45 | Show history in `MIXER_STATE_DIR/history/`: an automatic version at most every 60 s after a change (written by the control tick when the change came earlier), the newest 100 automatic versions kept, named versions kept until deleted; restore and import keep the current show as a version first. | §12.5 "auto-save, versioned history". The interval and the count are mine (question 1). |
 | D46 | Layouts: named pages of signal ids, part of the show; the console shows one page, or all strips in banks of 8–64 (a browser setting). | §12.1 "custom layouts (user-defined strip order and pages)", "layers/banks". |
@@ -505,6 +505,10 @@ None.
   tick now writes it.
 - **Quick steps were lost.** Four arrow-key steps before the server's answer landed
   as one, because each step started from the server's value (D43).
+- **A quick second toggle was lost.** CI caught a mute pressed twice within the
+  200 ms the mix took to come back: the second press sent "mute" again. The mix now
+  goes out within one meter tick (40 ms) and the client applies its own changes at
+  once (D43); the UI test presses mute twice quickly.
 - **`inputs.sh` on a busy runner.** A writer 30 ms late gets an automatic delay of
   its p99.9 lag + 1 ms; one CI run lost a block when the writer was later than that
   once. The automatic delay then rises, as designed. Its missing-sample windows
