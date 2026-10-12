@@ -295,7 +295,7 @@ None.
 | 5 | Meters | Peak per 40 ms update and RMS over 300 ms, post-fader, accepted; plus a peak hold that is cleared manually (`POST /api/v1/meters[/<id>]/clear`). |
 | 6 | Mono into 3.0 and surround | Into C (changed from the proposed front L/R pair). |
 | 7 | Published outputs | At most 128. Accepted. |
-| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. (2026-10-12: the mixer stays MIT for now, see M5b answers.) |
+| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. (2026-10-12: settled, the mixer is GPL-3.0-or-later; see “Licence” at the end.) |
 
 ## M3: EQ, filters, dynamics, delay; delay compensation; true peak and loudness
 
@@ -777,3 +777,54 @@ blocker for the release that contains it) still holds.
 | 2 | Names for block size, libmxl path, read timeout | Follow the sibling repos. They prefix function settings and put the unit in the name (`MV_INPUT_OFFSET_GRAINS`, `REPLAY_INPUT_STALL_S`), and none has a library path or read-timeout setting (they load libmxl from the system library path). So: `MIXER_BLOCK_SAMPLES` (default 96); no libmxl path setting (`libmxl.so.1` through the dynamic linker; the image installs it in the linker path); the read timeout is internal, bounded by the block period. |
 | 3 | Tag `mxl-nmos` v0.1.0 | Merged PRs 1–3 and released v0.1.0 with the B.3 notes. |
 | 4 | Strom PR | Delivered as patches in `mxl-nmos` `contrib/strom-switch/` (PR 4). |
+
+## Licence: GPL-3.0-or-later (maintainer, 2026-10-12)
+
+The maintainer decided with others: the mixer is open source and every fork
+shall stay so. It is licensed under the GNU General Public License, version 3 or
+any later version, instead of MIT. Code can no longer go from this repository into
+the MIT sibling repositories (only the author's own code, by the author); MIT code
+from them can still come in. No release was made under MIT.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D84 | `GPL-3.0-or-later`: the GPLv3 text as `LICENSE`, the `license` field of the crates (`Cargo.toml`, `spikes/m0`), the image's `org.opencontainers.image.licenses`, README, CHANGELOG, §3 of the spec. No per-file headers: the licence is the repository's (question 2). | The maintainer's decision. "Or later", as the FSF recommends and as PodcastPlugins is licensed, keeps later GPL versions open; GPLv3-only code (master_me, Com-IS-Assist say "GPLv3") can still be combined, the combination is then distributed under v3 (question 1). |
+
+**Dependencies checked** (`cargo metadata`, all crates in the build): MIT,
+Apache-2.0, BSD-2/3-Clause, ISC, Zlib, BSL-1.0, Unicode-3.0, CC0/MIT-0,
+CDLA-Permissive-2.0 (not in the binary): all compatible with GPLv3. aws-lc (crypto
+of `mxl-nmos`'s HTTP client, in the binary) has OpenSSL- and SSLeay-derived code;
+its licence file puts it under Apache-2.0, which GPLv3 accepts. libopus is
+BSD-3-Clause; MediaMTX (MIT) is a separate executable in the image; the UI's
+packages are MIT.
+
+**What it opens up:**
+- **Com-IS-Assist** (Andy Weiss, GPLv3, Rust): §8.2 can take its code (the core
+  crate: automix, loudness, voice activity) in milestone 7. Copied files keep
+  its copyright notices, say where they come from and that they were changed
+  (GPLv3 §5a); its LGPL Reaper JSFX reference stays out. Answer 8 of M2 is
+  settled.
+- **master_me** (Klaus Scheuermann, GPLv3, Faust): automatic mastering for live
+  streams: gate, EQ, a leveler (gain to a loudness target with a brake), knee
+  compressor, an 8-band multiband compressor, limiter, LUFS metering, no latency.
+- **PodcastPlugins** (the same author, GPLv3+, Faust): speech enhancement, a
+  `Track` chain (level, EQ, dynamics per speaker) and a `Master` chain.
+
+  Both compare to §6 (processing nodes: EQ, compressor, multiband, limiter
+  exist since M3) and §8.2 (speech-aware auto-level, M7). Proposal: compare them
+  in M7 against the existing nodes and the auto-level plan; take over what the
+  mixer lacks (the leveler with its brake as the auto-level controller, the
+  track/master chains as presets of existing nodes). The DSP is Faust: either port
+  it by hand to Rust nodes, or generate Rust with the Faust compiler
+  (`faust -lang rust`) and wrap it as a node (a build-time tool; question 3).
+  Their results can be reference tests for ours.
+
+### Licence: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | GPL-3.0-**or-later** or GPL-3.0-**only**? | Or-later (implemented). |
+| 2 | An SPDX line (`// SPDX-License-Identifier: GPL-3.0-or-later`) at the top of every source file? | Not now: the repository's `LICENSE` and the crate's `license` field cover it; add them when code from elsewhere comes in, so copied files are marked. |
+| 3 | master_me and PodcastPlugins: port the Faust DSP by hand, or generate Rust from it with the Faust compiler in the build? | Compare in M7 first; decide per module. |
+| 4 | The MIT notice of the UI's base styles and components from the sibling repositories (same author): keep it in a NOTICE file? | Not needed while the author is the same; a `NOTICE` file once others' MIT code comes in. |
+
