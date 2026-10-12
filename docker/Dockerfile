@@ -65,7 +65,7 @@ USER 1000
 # Web/API, NMOS, the built-in MediaMTX's WHEP (TCP) and ICE (UDP).
 EXPOSE 8160 3312 8599 8199/udp
 LABEL org.opencontainers.image.source="https://github.com/LeeO86/mxl-audio-mixer" \
-      org.opencontainers.image.licenses="GPL-3.0-or-later" \
+      org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \
       io.dmf.mxl.revision="${MXL_REF}"
 ENTRYPOINT ["/usr/local/bin/mxl-audio-mixer"]
