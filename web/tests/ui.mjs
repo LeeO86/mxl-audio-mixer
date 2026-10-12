@@ -190,6 +190,35 @@ try {
     pass("control room: monitor main played in the browser over WHEP (stream publishing), then stopped");
   }
 
+  // Talkback: a short press latches, again releases; a long press talks while held.
+  const post = (path, body) => api(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  await post("/api/v1/talkback/mics", { id: "dir", name: "Director", input: 1, channel: 1, priority: 5 });
+  await post("/api/v1/talkback/destinations", { id: "aux", name: "Aux talk", bus: "aux", mode: "interrupt", return: { input: 1 } });
+  await page.goto(`${base}/#control-room`);
+  const talkAux = page.locator(".talkback .tbbuttons").first().getByRole("button", { name: "Aux talk", exact: true });
+  const listenAux = page.locator(".talkback .tbbuttons").last().getByRole("button", { name: "Aux talk", exact: true });
+  await talkAux.waitFor({ timeout: 5000 });
+  const talks = async () => ((await api("/api/v1/talkback")).talking.dir || []).includes("aux");
+  await talkAux.click();
+  await until("aux latched", talks);
+  await page.locator(".monitor .state-tag", { hasText: "talkback" }).waitFor({ timeout: 3000 });
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: `${out}/talkback.png`, fullPage: true });
+  await talkAux.click();
+  await until("aux released", async () => !(await talks()));
+  await talkAux.hover();
+  await page.mouse.down();
+  await page.waitForTimeout(900);
+  if (!(await talks())) throw new Error("a held talk button does not talk");
+  await page.mouse.up();
+  await until("held talk released", async () => !(await talks()));
+  await listenAux.click();
+  await until("listen-back on", async () => (await api("/api/v1/listen-back"))?.input === 1);
+  await page.locator(".monitor .state-tag", { hasText: "listen-back" }).waitFor({ timeout: 3000 });
+  await listenAux.click();
+  await until("listen-back off", async () => (await api("/api/v1/listen-back")) === null);
+  pass("talkback: latched by a short press (the monitor's talkback dim shown), released; held talks only while held; listen-back of the return");
+
   // Routing: a send from vox to aux through the matrix.
   await page.goto(`${base}/#routing`);
   await page.getByRole("button", { name: "Vox to Aux" }).click();
