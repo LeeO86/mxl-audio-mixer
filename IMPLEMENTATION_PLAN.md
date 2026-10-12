@@ -587,6 +587,10 @@ with the control room (M5), `vca` with M6, PFL in the strip widget with M5.
 | 4 | `fader-bank`: banks in mix order, or a layout page | A layout page: `layout` and `page` (name or 1-based number) replace `bank` and `size` (D53). |
 | 5 | Merge PR 7 | Merged. |
 
+After the merge, `main` CI failed once in `show.sh`: the correlation read 0.9969
+0.5 s after the pan change, because a late meter tick kept the pan ramp in the
+300 ms window. The test now waits up to 3 s for the steady value.
+
 ## tests/hw scripts for the maintainers
 
 | Script | What |
