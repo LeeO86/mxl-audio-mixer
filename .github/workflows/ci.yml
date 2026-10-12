@@ -36,7 +36,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check && cargo clippy --all-targets -- -D warnings
         working-directory: spikes/m0
-      - run: shellcheck -x tests/integration/*.sh tests/hw/*/run.sh scripts/build-mxl.sh scripts/demo.sh ci/amwa.sh
+      - run: shellcheck -x tests/integration/*.sh tests/hw/*/run.sh tests/perf/*.sh scripts/build-mxl.sh scripts/demo.sh ci/amwa.sh
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

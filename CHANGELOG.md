@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Milestone 4: console UI, processing editor, routing matrix, snapshots, show files
+
+- Web UI (Vue 3, one page embedded in the binary, the family look): console with
+  banks and layouts, processing chain editor (palette, drag, curves with handles),
+  routing matrix and published outputs, snapshots, layouts and show history,
+  metering (bridge on dBFS, true peak and PPM scales, loudness, spectrum,
+  goniometer), NMOS, status, settings; light, dark or system theme.
+- `/api/v1/events` WebSocket: status, the mix on every change, meters at 25 Hz with
+  per-client subscriptions, the analyser.
+- Snapshots (`/api/v1/snapshots`): recall filtered by signal, section and parameter
+  class, recall-safe signals, crossfade. Layouts (`/api/v1/layouts`), strip and bus
+  colours. Show history (`/api/v1/shows/history`): automatic and named versions,
+  restore; an import keeps the show before it.
+- Meters: PPM (IEC 60268-10 Type I and II) and phase correlation; the analyser
+  (`/api/v1/analysis`): 1/6-octave spectrum and goniometer of any tap.
+- Loudness: blocks the DSP thread missed count as silence instead of restarting
+  momentary and short-term.
+- `scripts/demo.sh`, `tests/integration/show.sh`, `tests/integration/ui.sh`
+  (headless Chrome), `tests/perf/section16.sh`.
+
 ### EBU test set
 
 - Loudness checked on the EBU loudness test set v5 in CI: Tech 3341 cases 1–23,

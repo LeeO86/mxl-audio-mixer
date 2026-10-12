@@ -5,20 +5,44 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Status: milestone 3** (§19). Settings, probes, metrics, the NMOS node with its
+**Status: milestone 4** (§19). Settings, probes, metrics, the NMOS node with its
 MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
 and re-created flows, arrival lag and automatic delay); the mix: input patch,
 strips (trim, polarity, fader, mute, pan/balance/width), buses, a send matrix with
 width mapping, and buses published as MXL flows with NMOS senders; processing
 chains (EQ, filters, dynamic EQ, compressor, limiter, expander, gate, de-esser,
 ducker, multiband, delay) with delay compensation and block-delay feedback;
-peak, peak hold, true peak, RMS, gain-reduction and loudness (BS.1770-4 / R 128)
-meters. There is no UI yet (milestone 4).
+peak, peak hold, true peak, RMS, PPM, correlation, gain-reduction and loudness
+(BS.1770-4 / R 128) meters and an analyser; snapshots, layouts and the show
+history; the web UI (console, processing editor, routing matrix, snapshots,
+metering) with live updates over a WebSocket.
+
+## Web UI
+
+`http://<host>:8160/`: one page built into the binary (no CDN, no other files). Tabs
+(the URL hash addresses them): **Console** (strips in banks or in a layout's pages:
+patch, trim, polarity, the chain overview with its response and gain reduction,
+sends, pan and width, mute, fader, meter; the buses beside them), **Processing**
+(the chain of a strip or bus: drag node types in from the palette, drag nodes to
+reorder, bypass, delete; EQ curve with band handles, filter, dynamics transfer
+curves with the live level, de-esser listen, keys), **Routing** (the send matrix,
+a send's tap, gain, mute, phase and block delay; publishing outputs),
+**Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
+history), **Meters** (the bridge on dBFS, true peak or PPM EBU, BBC, Nordic, DIN at
+an alignment level, phase correlation; loudness; spectrum and goniometer of any
+tap), **NMOS**, **Status**, **Settings** (mix settings, configuration, show export
+and import). Every client follows every change. Faders and pots take touch: drag,
+− and + (held: repeated), double-click resets; destructive actions want a second
+press within 3 s. The theme follows the system or is set light or dark (kept in
+the browser).
+
+`scripts/demo.sh` starts a tone flow, the mixer and a small show to try it.
 
 ## Run
 
 ```sh
 scripts/build-mxl.sh                               # libmxl at the pin, into /opt/mxl
+(cd web && npm ci && npm run build)                # the web UI (Node 22); without it the binary serves a note
 cargo build --release
 LD_LIBRARY_PATH=/opt/mxl/lib NMOS_HOST_ADDRESS=192.0.2.10 MXL_DOMAIN_SCAN_PATH=/dev/shm/mxl \
     MIXER_STATE_DIR=/tmp/mixer target/release/mxl-audio-mixer
@@ -123,6 +147,18 @@ an id gets `strip-<n>` or `bus-<n>`.
   (stereo); channels the source lacks stay silent.
 - **Mix settings:** `pan_law_db` 0, −3 (default), −4.5, −6; `mono_sum_db` −3
   (default) or −6; `loudness_target_lufs` (−23) and `loudness_tolerance_lu` (1).
+- **Console:** `colour` (`#rrggbb`) and `recall_safe` on strips and buses;
+  `layouts`: `[{"name", "pages": [{"name", "signals": [ids]}]}]`.
+- **Snapshots** (§12.5): parameter states of every strip, bus and send (trim,
+  polarity, fader, mute, pan, width, every chain node's parameters and bypass,
+  send gain, mute and phase). A recall takes `signals`, `sections` (`strips`,
+  `buses`) and `classes` (`trim`, `fader`, `mute`, `pan`, `chain`, `sends`), all
+  optional (everything), and `crossfade_ms` (the ramp of every value); it never
+  touches recall-safe signals, nor signals, sends and nodes that no longer exist
+  (or whose node type changed). Snapshots and layouts are part of the show.
+- **Show history:** `MIXER_STATE_DIR/history/`: an automatic version at most once a
+  minute after a change (the newest 100 kept), named versions on request (kept
+  until deleted). A restore or an import keeps the current show as a version first.
 
 Parameter changes ramp over `ramp_ms` (default 10 ms). A change that rewires the
 graph fades the affected paths out and in (10 ms) around the plan swap; unrelated
@@ -159,21 +195,32 @@ processed first.
 ### Loudness and meters (§7)
 
 `loudness: true` on a strip or bus measures it post-fader (ITU-R BS.1770-4): momentary
-(400 ms), short-term (3 s), integrated (gated, from the start of the measurement)
-and loudness range (EBU Tech 3342), with the largest true peak. The measurement
-runs from when it is switched on; it can be stopped, reset and started again. It
-continues over changes of the mix.
+(400 ms), short-term (3 s), both updated every 10 ms, integrated (gated, from the
+start of the measurement) and loudness range (EBU Tech 3342), with the largest true
+peak. The measurement runs from when it is switched on; it can be stopped, reset and
+started again. It continues over changes of the mix; blocks the DSP thread missed
+count as silence.
 
 `GET /api/v1/meters` gives, per strip and bus (post-fader) and channel: sample peak
 (since the last 40 ms update), peak hold (until cleared), true peak (4×
-oversampling) and RMS (300 ms); per processing node: gain reduction and the peaks at
-its input and output.
+oversampling), RMS (300 ms) and the PPM readings (IEC 60268-10 Type I: 5 ms
+integration, 20 dB in 1.7 s; Type II: 10 ms, 24 dB in 2.8 s; a steady 1 kHz tone
+reads its peak); the phase correlation of the first two channels (300 ms); per
+processing node: gain reduction and the peaks at its input and output. The UI draws
+the PPM scales (EBU, BBC, Nordic, DIN) at an alignment level (−18 dBFS, EBU R 68,
+or −20 dBFS).
+
+The **analyser** reads one tap point at a time (`PUT /api/v1/analysis`): a
+4096-point spectrum (Hann) in 1/6-octave bands from 20 Hz to 20 kHz (the mean power
+of the first two channels; a full-scale sine reads 0 dB), their correlation and
+256 sample pairs for the goniometer, every 40 ms. Changing it swaps the plan
+without touching the audio.
 
 ## Ports and exit codes
 
 | Port | Default | |
 | --- | --- | --- |
-| `WEB_PORT` | 8160 | API, probes, metrics (the UI from milestone 4) |
+| `WEB_PORT` | 8160 | web UI, API, events WebSocket, probes, metrics |
 | `NMOS_PORT` | 3312 | IS-04 Node API, IS-05 Connection API |
 
 | Exit code | Meaning |
@@ -187,6 +234,8 @@ its input and output.
 
 | Method and path | |
 | --- | --- |
+| `GET /` | the web UI |
+| `GET /api/v1/events` (WebSocket) | live updates, below |
 | `GET /livez` | 200 while the process runs; never depends on the registry |
 | `GET /readyz` | 200 when the engine runs and, with a registry, the node is registered and listed by the Query API; JSON details incl. `timing_trusted` |
 | `GET /metrics` | Prometheus text, prefix `mxl_audio_mixer_` |
@@ -199,7 +248,7 @@ its input and output.
 | `GET`, `POST /api/v1/strips` | list (with `patch_state`), create (`format` required) |
 | `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field, `ramp_ms`; delete removes its sends |
 | `GET`, `POST /api/v1/buses` | list, create (`format` required) |
-| `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format`, `fader_db`, `mute`, `ramp_ms`; delete removes its sends and output |
+| `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format`, `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `ramp_ms`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
 | `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
 | `GET /api/v1/outputs`, `GET /api/v1/outputs/<bus>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
@@ -209,12 +258,29 @@ its input and output.
 | `POST /api/v1/{strips,buses}/<id>/chain/<node>/move` | `{"position": n}` |
 | `GET /api/v1/loudness` | per measured signal: `momentary_lufs`, `short_term_lufs`, `integrated_lufs`, `range_lu`, `max_true_peak_dbtp`, `running`, `in_tolerance` |
 | `POST /api/v1/loudness/<id>/{start,stop,reset}` | control the integration |
-| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs` |
+| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms), `ppm_type1_dbfs`, `ppm_type2_dbfs`; `correlation` (two or more channels); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs` |
 | `POST /api/v1/meters/clear`, `POST /api/v1/meters/<id>/clear` | clear every peak hold, or one signal's |
+| `GET`, `PUT`, `DELETE /api/v1/analysis` | the analyser: `{"signal", "tap"}` (tap default `post-fader`); GET gives `target` and `values` (`bands_hz`, `spectrum_db`, `correlation`, `xy`) |
+| `GET`, `POST /api/v1/snapshots` | list; take one (`{"id"?, "name"?}`) |
+| `GET`, `PUT`, `PATCH`, `DELETE /api/v1/snapshots/<id>` | one snapshot; PUT takes it again from the current mix; PATCH `{"name"}` |
+| `POST /api/v1/snapshots/<id>/recall` | `{"signals"?, "sections"?, "classes"?, "crossfade_ms"?}` |
+| `GET`, `PUT /api/v1/layouts` | the console layouts (the whole list) |
+| `GET`, `POST /api/v1/shows/history` | versions, newest first (`id`, `time_ms`, `name`, sizes); keep the current show as a named version (`{"name"}`) |
+| `GET`, `DELETE /api/v1/shows/history/<id>`, `POST …/<id>/restore` | a version's mix; delete; restore it as the show |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
 | `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |
 | `/x-nmos/…` on `NMOS_PORT` | IS-04 v1.3, IS-05 v1.2, BCP-007-03 ([mxl-nmos](https://github.com/LeeO86/mxl-nmos) v0.1.1) |
+
+### Live updates
+
+`/api/v1/events` sends JSON messages: `{"type": "status", "status": …}` five times a
+second (as `GET /api/v1/status`); `{"type": "mix", "revision", "mix", "latency_ms"}`
+on connect and after every change of the mix, from any client; `{"type": "meters",
+"meters", "loudness"}` every 40 ms; and `{"type": "analysis", …}` for clients that
+asked. A client may send `{"type": "subscribe", "meters": [ids] | null, "meter_hz":
+25, "analysis": false}` to receive only some signals' meters, less often, or the
+analyser. Changes go through the REST API.
 
 ## Metrics
 
@@ -242,7 +308,11 @@ leave other paths untouched, meters, the NMOS sender, a restart with a downstrea
 reader, unpublish, loop rejection), `tests/integration/processing.sh` (EQ
 sample-exact, ramped parameters without a plan swap, bypass, high-pass, compressor
 gain reduction, limiter ceiling and latency, loudness and its controls),
-`ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
+`tests/integration/show.sh` (snapshots with filters, recall-safe and crossfade,
+layouts, show history, PPM, correlation, the analyser, the events WebSocket),
+`tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
+checked on the API and on the other client), `tests/perf/section16.sh` (the
+§16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
 the maintainers are in `tests/hw/`.
 
@@ -252,4 +322,6 @@ a flow against the tone) are in the image too.
 ## Licence
 
 MIT. Dependencies: `mxl` / `mxl-sys` (Apache-2.0, dmf-mxl), `mxl-nmos`
-(MIT OR Apache-2.0), and MIT or Apache-2.0 crates.
+(MIT OR Apache-2.0), and MIT or Apache-2.0 crates. The UI: Vue (MIT), built with
+Vite (MIT); its base styles and components come from the sibling media functions
+(MIT, same author).

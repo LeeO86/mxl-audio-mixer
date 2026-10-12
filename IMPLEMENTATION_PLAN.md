@@ -428,6 +428,102 @@ None.
   - true peak (15–23), +0.2 / −0.4 dB;
   - loudness range (3342 1–6), ±1 LU.
 
+## M4: console UI, processing chain editor, routing matrix; snapshots and show files
+
+### What exists
+
+- `web/`: the UI (Vue 3, Vite, one self-contained `index.html`), embedded by
+  `build.rs` (a short note without a build). Tabs Console, Processing, Routing,
+  Snapshots, Meters, NMOS, Status, Settings.
+- `src/events.rs`: the WebSocket `/api/v1/events`.
+- `src/mix/show.rs`, `src/show_api.rs`: layouts, snapshots (capture, filtered
+  recall); `src/history.rs`: the show history.
+- `src/dsp/ppm.rs` (PPM detectors), `src/dsp/fft.rs` (FFT, fractional-octave
+  bands), `src/analysis.rs` (the analyser); correlation in the meter step.
+- `scripts/demo.sh`, `tests/integration/show.sh`, `tests/integration/ui.sh` with
+  `web/tests/ui.mjs`, `tests/perf/section16.sh`.
+
+### Decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D41 | The UI is Vue 3 built by Vite into one `index.html` with everything inlined, embedded in the binary at build time (`build.rs`; without a build the binary serves a note, so Rust builds and tests need no Node). Base styles and components (`style.css`, pill, segmented control, pot) are copied from the sibling media functions. | §12.0: embedded, no CDN, the family look "copied, not redesigned". The siblings build the same way (vite-plugin-singlefile). |
+| D42 | One WebSocket `/api/v1/events`: the status five times a second, the whole mix whenever its revision changes, meters (and loudness) every 40 ms with a per-client subscription (signals, rate), the analyser on request. Every change goes through the REST API, rate-limited in the UI to 30 PATCHes a second per path with merged bodies. | §7 "decimated per client subscription"; §12.4 "the API covers every operator action": the UI uses nothing else. A whole mix per change is simpler than diffs and small (tens of kB for §16). |
+| D43 | Multi-client sync: the mix comes back to every client after a change. A control being dragged shows its own value; after a step it keeps the value it sent for 500 ms or until the server has it. | §12.1 multi-client sync without controls jumping under the operator's finger. Found in testing (below): quick steps were lost otherwise. |
+| D44 | Snapshots hold parameters only: trim and polarity, fader, mute, pan and width, every chain node as JSON, sends' gain, mute and phase. They are part of the show. A recall matches by signal, node id and node type, skips what no longer exists, never touches recall-safe signals, and can be limited to signals, sections (strips, buses) and classes (trim, fader, mute, pan, chain, sends). `crossfade_ms` is the ramp of every value it changes. | §12.5. Structure (signals, sends, nodes) belongs to the show, not to a snapshot. A node's structural parameters (band types, slopes) are part of its JSON, so recalling them swaps the plan with the D38 fades. |
+| D45 | Show history in `MIXER_STATE_DIR/history/`: an automatic version at most every 60 s after a change (written by the control tick when the change came earlier), the newest 100 automatic versions kept, named versions kept until deleted; restore and import keep the current show as a version first. | §12.5 "auto-save, versioned history". The interval and the count are mine (question 1). |
+| D46 | Layouts: named pages of signal ids, part of the show; the console shows one page, or all strips in banks of 8–64 (a browser setting). | §12.1 "custom layouts (user-defined strip order and pages)", "layers/banks". |
+| D47 | PPM: two IEC 60268-10 detectors (Type I: 5 ms integration, 20 dB in 1.7 s; Type II: 10 ms, 24 dB in 2.8 s) on every meter channel in the DSP thread, calibrated so that a steady 1 kHz tone reads its peak (the detector settles 0.2 dB below it). The UI draws the EBU, BBC, Nordic and DIN scales relative to an alignment level: EBU and Nordic TEST and BBC 4 at alignment, DIN 0 dB at alignment + 9 dB (the permitted maximum); alignment −18 dBFS (EBU R 68) by default, −20 dBFS (SMPTE RP 155) as option, a browser setting. | §7 "PPM ballistics (EBU, BBC, Nordic, DIN)". Ballistics are per type, so two detectors cover the four scales. Question 2 for the alignment. |
+| D48 | Phase correlation of the first two channels of every signal with two or more, over the RMS window (300 ms). | §7 "phase correlation". |
+| D49 | One analyser for the whole mixer: one tap point at a time, copied by the DSP thread into a ring (one second, both channels, no allocation); a 4096-point FFT (Hann) on the control side, 1/6-octave bands, correlation and 256 goniometer points every 40 ms, sent to the clients that ask. Changing the tap swaps the plan; no node changes, so nothing fades. | §7 "spectrum analyser on any tap point (computed on the control side from tapped blocks)". One shared tap keeps the DSP copy and the control CPU bounded (question 3). |
+| D50 | Missed blocks in a loudness measurement count as silence up to 3 s (the DSP thread writes silence for them, D39); a longer gap restarts momentary and short-term. | Found in testing (below): a single missed deadline blanked momentary for 400 ms and short-term for 3 s. |
+| D51 | Theme (system, light, dark), meter scale, alignment, bank size and recall options are kept in the browser (`localStorage`). | §12.0 "theme follows the system, switchable, remembered"; per operator, not per show. |
+| D52 | The UI test drives the system Chrome through `playwright-core` (no browser download), with two clients, and checks every action on the API and on the other client. | CI runners have Chrome; §17 asks for UI checks. |
+
+### Deviations
+
+| # | Spec | Deviation | Reason |
+| --- | --- | --- | --- |
+| X4 | §7 "spectrum analyser on any tap point" | Any tap, but one at a time for all clients (D49). | Question 3. |
+
+### Results (dev VM)
+
+- `cargo test`: 81 unit tests (11 new: snapshots and layouts, history, PPM bursts
+  and return times, the paired detectors, FFT against the direct DFT, band levels,
+  the analyser, correlation, loudness gaps) and the 6 EBU groups.
+- `tests/integration/show.sh`, through MXL:
+  - the UI page at `/`;
+  - a recall of strip faders only (bus mute kept); recall-safe kept at −10 dB; a
+    full recall with a 400 ms crossfade, sample-exact afterwards;
+  - snapshot rename and delete; layouts (a missing signal refused);
+  - a named history version restoring a deleted send, sample-exact;
+  - PPM Type I and II −20.0 dBFS on the −20 dBFS tone; correlation none with a
+    silent channel, 1.0 with L = R;
+  - analyser on the strip input: peak band 1000 Hz at −20.0 dBFS, correlation 1.0;
+  - events: status 5/s, only the subscribed signal's meters at 25 Hz, the analyser,
+    the mix again after another client's REST change.
+- `tests/integration/ui.sh` (headless Chrome, two clients): mute; fader by keys
+  (−2 dB) and by drag; the second client follows; EQ from the palette with its band
+  handle dragged; compressor added, bypassed and moved; a send from the matrix; a
+  snapshot; the analyser; the theme. Screenshots of every tab in the CI artifact.
+- A manual walkthrough in the desktop browser and a recorded one (all tabs,
+  crossfade recall) found no layout or update problems.
+- `mix.sh`, `processing.sh`, `inputs.sh`, `lifecycle.sh` pass; AMWA in CI as before;
+  the image serves the UI.
+- **§16-shaped load** (`tests/perf/section16.sh`, release, SCHED_OTHER on the shared
+  4-vCPU VM, back to back): M3 (`main`) mean block 694 µs; M4 790–874 µs
+  (`dsp_load_ratio` 0.40–0.44, target < 0.5), all blocks ≤ 1.5–3 ms. The difference
+  is PPM and correlation on all 120 meters; running both detectors in one pass
+  halved their part (115 → 54 µs a block).
+
+### Findings
+
+- **A missed deadline blanked loudness.** A gap in the 10 ms segments restarted the
+  windows. Now gaps count as silence (D50).
+- **The history missed changes.** A change less than a minute after the last
+  automatic version was never written unless another change came later; the control
+  tick now writes it.
+- **Quick steps were lost.** Four arrow-key steps before the server's answer landed
+  as one, because each step started from the server's value (D43).
+- **PPM calibration.** With the return running between peaks, the charge time
+  constants that make the integration-time bursts read −2 dB are 1.355 ms (Type I)
+  and 2.763 ms (Type II), and a steady tone reads 0.2 dB low without the calibration
+  gain.
+
+### Questions
+
+1. Show history: an automatic version at most every 60 s, the newest 100 kept
+   (named versions kept until deleted). Other values?
+2. PPM alignment: −18 dBFS (EBU R 68) by default, −20 dBFS as option; DIN 0 dB at
+   alignment + 9 dB. Right, or another reference for DIN (or a free alignment
+   value)?
+3. The analyser: one tap at a time shared by every client (X4), or one per client?
+4. Snapshot crossfade: every changed value ramps over it (D44), not only faders.
+   Fine?
+5. Widgets (§12.6) and tally/AFV are in the 1.0.0 set. Next, before the control room
+   (M5), or after M6?
+6. Merge PR 5 (EBU test set, CI green) and PR 6 (this milestone)?
+
 ## tests/hw scripts for the maintainers
 
 | Script | What |
