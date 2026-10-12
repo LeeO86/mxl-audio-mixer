@@ -21,6 +21,8 @@ pub use plan::{NodeId, Plan, MAX_NODE_VALUES};
 
 /// Loudness meter slots of the DSP thread.
 pub const MAX_LOUDNESS: usize = MAX_OUTPUTS;
+/// Monitors and personal monitors that can stream at once.
+pub const MAX_STREAMS: usize = 96;
 
 /// Largest channel count of an input flow (§4.2).
 pub const MAX_CHANNELS: usize = 64;
@@ -79,6 +81,15 @@ pub enum Command {
     ClearLoudness {
         slot: usize,
     },
+    /// Copy stream slot `slot` (a monitor's stereo, per block channel 1 then
+    /// channel 2) into this ring from the next block on.
+    SetStream {
+        slot: usize,
+        ring: Box<rtrb::Producer<f32>>,
+    },
+    ClearStream {
+        slot: usize,
+    },
 }
 
 /// A message from the DSP thread back: things it must not free itself.
@@ -87,6 +98,7 @@ pub enum Returned {
     Plan(Box<Plan>),
     Output(Box<OutputWriter>),
     Loudness(Box<SegmentMeter>),
+    Stream(Box<rtrb::Producer<f32>>),
 }
 
 /// An output's writer with its commit staging (§4.3: the commit size is separate

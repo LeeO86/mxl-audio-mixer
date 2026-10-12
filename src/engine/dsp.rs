@@ -10,7 +10,7 @@ use mxl::Error as MxlError;
 use super::plan::{InputSource, OutputSink};
 use super::{
     Command, EngineConfig, EngineCounters, OutputWriter, Plan, Returned, BLOCK_BUCKETS_US,
-    FADE_SAMPLES, MAX_CHANNELS, MAX_LOUDNESS, MAX_OUTPUTS,
+    FADE_SAMPLES, MAX_CHANNELS, MAX_LOUDNESS, MAX_OUTPUTS, MAX_STREAMS,
 };
 use crate::dsp::loudness::SegmentMeter;
 use crate::mxlio::SamplesReader;
@@ -78,6 +78,9 @@ struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
     loudness: &'a mut [Option<Box<SegmentMeter>>],
     analysis: &'a mut rtrb::Producer<f32>,
+    streams: &'a mut [Option<Box<rtrb::Producer<f32>>>],
+    /// The stream ring has room for this block (checked at channel 1).
+    stream_room: bool,
     /// The analyser ring has room for this block (checked at channel 1).
     analysis_room: bool,
     block: usize,
@@ -92,6 +95,22 @@ impl Outputs<'_> {
 }
 
 impl OutputSink for Outputs<'_> {
+    fn stream(&mut self, slot: usize, channel: usize, samples: &[f32]) {
+        let block = self.block;
+        let Some(Some(ring)) = self.streams.get_mut(slot) else {
+            return;
+        };
+        if channel == 0 {
+            self.stream_room = ring.slots() >= 2 * block;
+        }
+        if !self.stream_room {
+            return;
+        }
+        if let Ok(chunk) = ring.write_chunk_uninit(block) {
+            chunk.fill_from_iter(samples[..block].iter().copied());
+        }
+    }
+
     fn analyse(&mut self, channel: usize, channels: usize, samples: &[f32]) {
         let samples = &samples[..self.block];
         if channel == 0 {
@@ -164,6 +183,8 @@ pub(super) fn run(
     let mut inputs: Vec<Input> = (0..config.inputs).map(|_| Input::new(block)).collect();
     let mut outputs: Vec<Option<Box<OutputWriter>>> = (0..MAX_OUTPUTS).map(|_| None).collect();
     let mut loudness: Vec<Option<Box<SegmentMeter>>> = (0..MAX_LOUDNESS).map(|_| None).collect();
+    let mut streams: Vec<Option<Box<rtrb::Producer<f32>>>> =
+        (0..MAX_STREAMS).map(|_| None).collect();
     let mut plan: Option<Box<Plan>> = None;
     let mut stopping = false;
     // The fade-out takes FADE_SAMPLES; a few blocks more cover a full commit.
@@ -291,6 +312,18 @@ pub(super) fn run(
                         let _ = returned.push(Returned::Loudness(old));
                     }
                 }
+                Command::SetStream { slot, ring } => {
+                    if let Some(s) = streams.get_mut(slot) {
+                        if let Some(old) = s.replace(ring) {
+                            let _ = returned.push(Returned::Stream(old));
+                        }
+                    }
+                }
+                Command::ClearStream { slot } => {
+                    if let Some(old) = streams.get_mut(slot).and_then(|s| s.take()) {
+                        let _ = returned.push(Returned::Stream(old));
+                    }
+                }
             }
         }
 
@@ -386,6 +419,8 @@ pub(super) fn run(
                     loudness: &mut loudness,
                     analysis: &mut analysis,
                     analysis_room: false,
+                    streams: &mut streams,
+                    stream_room: false,
                     block,
                 },
             );
