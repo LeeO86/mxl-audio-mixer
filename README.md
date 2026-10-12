@@ -5,7 +5,7 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Status: milestone 4** (§19). Settings, probes, metrics, the NMOS node with its
+**Status: milestone 5 in progress** (§19). Settings, probes, metrics, the NMOS node with its
 MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
 and re-created flows, arrival lag and automatic delay); the mix: input patch,
 strips (trim, polarity, fader, mute, pan/balance/width), buses, a send matrix with
@@ -16,7 +16,9 @@ peak, peak hold, true peak, RMS, PPM, correlation, gain-reduction and loudness
 (BS.1770-4 / R 128) meters and an analyser; snapshots, layouts and the show
 history; the web UI (console, processing editor, routing matrix, snapshots,
 metering) with live updates over a WebSocket; widgets for operator screens
-(`strip`, `fader-bank`, `loudness`); tally (TSL UMD 5.0) and audio-follows-video.
+(`strip`, `fader-bank`, `loudness`, `monitor`); tally (TSL UMD 5.0) and
+audio-follows-video; the control room (monitors, PFL/AFL, solo-in-place, MXL
+monitor outputs, oscillator).
 
 ## Web UI
 
@@ -52,12 +54,13 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 
 | id | Params | Shows and controls | min_size |
 | --- | --- | --- | --- |
-| `strip` | `strip` (a strip or bus id) | name, tally, gain reduction per dynamics node, mute, fader, meter | 120×480 |
+| `strip` | `strip` (a strip or bus id) | name, tally, gain reduction per dynamics node, PFL, mute, fader, meter | 120×480 |
 | `fader-bank` | `layout` (a layout's name) and `page` (its name or 1-based number), or `strips` (ids, comma-separated, 1–32) | the strips and buses of that page, side by side | 480×480 |
 | `loudness` | `signal` (a strip or bus id) | momentary, short-term, integrated LUFS, LRA, max true peak, the tolerance; start, stop, reset | 320×200 |
+| `monitor` | `monitor` (a monitor id) | source buttons, level, dim, cut, mono, the meter | 360×200 |
 
-`monitor` and `talkback` come with the control room (milestone 5), `vca` with
-the VCAs (milestone 6); the strip widget gets PFL then.
+`talkback` comes with talkback (milestone 5), `vca` with the VCAs (milestone 6).
+The strip widget has PFL.
 
 ## Tally and audio-follows-video
 
@@ -75,6 +78,32 @@ arrived: a gain after its fader (post-fader sends and the outputs follow it,
 pre-fader sends do not), fading in and out without a plan swap. The UI proposes
 −∞, 100 ms and 500 ms when AFV is switched on. The console lights a strip red on
 air and green on preview. `GET /api/v1/tally` lists the lamps and the strips.
+
+## Control room
+
+The control room (§10.1) is part of the show (`control_room`); who is soloed is not
+(it starts empty).
+
+- **Monitors** (speakers or headphones, any format): a source (a strip at its
+  post-pan, a bus post-fader, or `{"input": n}`: an input's channels 1 and 2),
+  `level_db` (−80 … +12), `dim` with `dim_db` (default −20), `cut`, a `check` of L
+  and R (`stereo`, `mono` and `difference` with the stereo-to-mono sum, `swap`,
+  `left` or `right` on both sides), `follows_solo`, room alignment (`trim_db`,
+  `delay_ms`, a `chain` of processing nodes for EQ and bass management), a
+  `calibration_spl` (dB SPL at 0 dB) for the SPL presets `reference_spl` (79, 82,
+  85), and `publish`: an MXL flow with an NMOS sender "Monitor <name>" for physical
+  speakers. Every control ramps; at most 16 monitors.
+- **Solo:** PFL (pre-fader) and AFL (strips post-pan, buses post-fader) on any strip
+  or bus, summed to stereo (PFL with `pfl_trim_db`); `additive` or `interlock`.
+  While anything is soloed, a monitor that follows solo plays the solo bus with its
+  programme at `programme_db` (default −20 dB; `-inf`: solo replaces it).
+  Solo-in-place (`sip`, off by default, destructive) mutes every other strip in
+  the mix that is not `solo_safe`.
+- **Source buttons** (`sources`): the buttons every monitor shows.
+- **Oscillator** (§10.2): a bus with an `oscillator` node; it goes anywhere a bus
+  goes (sends, monitors, outputs).
+
+The UI's Control room tab has all of it; PFL and AFL are on the strips.
 
 ## Run
 
@@ -233,6 +262,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `ducker` | `key` `{signal, tap}`, `threshold_db`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms` |
 | `multiband` | `crossovers_hz` (2–4, rising; Linkwitz-Riley 24 dB/oct, sum flat), `bands` (one more: `{threshold_db, ratio, attack_ms, release_ms, makeup_db}`) |
 | `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
+| `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s), `freq_hz`, `level_dbfs` (−100 … 0); replaces the signal (bypass: the input again) |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
 ±24 dB, a chain at most 32 nodes. A key is another signal's tap; its signal is
@@ -316,6 +346,9 @@ without touching the audio.
 | `GET`, `PUT /api/v1/layouts` | the console layouts (the whole list) |
 | `GET`, `POST /api/v1/shows/history` | versions, newest first (`id`, `time_ms`, `name`, sizes); keep the current show as a named version (`{"name"}`) |
 | `GET`, `DELETE /api/v1/shows/history/<id>`, `POST …/<id>/restore` | a version's mix; delete; restore it as the show |
+| `GET`, `PATCH /api/v1/control-room` | the control room (with `soloed`); change `sources`, `solo` (`mode`, `pfl_trim_db`, `programme_db`, `sip`), `reference_spl` |
+| `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
+| `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
 | `GET /api/v1/tally` | the TSL settings, packets, every tally index's lamps (screen, display, LH, RH, label, age) and the strips that follow one (on air, preview, AFV open) |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
@@ -362,7 +395,9 @@ gain reduction, limiter ceiling and latency, loudness and its controls),
 layouts, show history, PPM, correlation, the analyser, the events WebSocket),
 `tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
 checked on the API and on the other client; tally and AFV),
-`tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
+`tests/integration/room.sh` (a published monitor sample-exact with level, dim,
+cut and checks; PFL, AFL, interlock, solo-in-place; an input source; the
+oscillator), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
 closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contract
 and a framing check in headless Chrome from an allowed and a refused origin),
 `tests/perf/section16.sh` (the
