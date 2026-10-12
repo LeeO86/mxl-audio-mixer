@@ -27,6 +27,8 @@ export const live = reactive({
   latency: {}, // signal -> post-fader processing latency in ms
   meters: {}, // GET /api/v1/meters
   loudness: {}, // GET /api/v1/loudness
+  vad: {}, // analysed signal -> { active, probability } (§8.1)
+  autoDb: {}, // signal -> its auto node's gain in dB, null for −∞ (auto-mix × ducking, §8)
   analysis: null, // the analyser's values while a view wants them
   config: null, // GET /api/v1/config
   connected: false,
@@ -220,6 +222,27 @@ export const groupMuted = (s) => !s.mute_safe && muteGroups.value.some((g) => g.
 /** The console shows only these signals (a VCA's spill), or everything with null. */
 export const spill = reactive({ vca: null });
 
+// ---- VAD, auto-mixes and ducks (§8) ------------------------------------------------------
+export const automixes = computed(() => live.mix?.automixes || []);
+export const ducks = computed(() => live.mix?.ducks || []);
+export const automixOf = (id) => automixes.value.find((a) => a.members.some((m) => m.signal === id)) || null;
+export const patchAutomix = (id, body) =>
+  changeLocally(() => automixes.value.find((a) => a.id === id), `/api/v1/automixes/${encodeURIComponent(id)}`, body);
+export const patchDuck = (id, body) => changeLocally(() => ducks.value.find((d) => d.id === id), `/api/v1/ducks/${encodeURIComponent(id)}`, body);
+/** Every analysed signal: its own VAD settings, auto-mix members, duck keys. */
+export const vadSignals = computed(() => {
+  const ids = new Set((live.mix?.vad || []).map((v) => v.signal));
+  for (const a of automixes.value) for (const m of a.members) ids.add(m.signal);
+  for (const d of ducks.value) for (const k of d.keys) ids.add(k);
+  return [...ids];
+});
+/** A signal's auto node gain in dB (−Infinity for −∞), or undefined without one. */
+export function autoGain(id) {
+  if (!(id in live.autoDb)) return undefined;
+  const v = live.autoDb[id];
+  return v === null ? -Infinity : v;
+}
+
 /** The tally of a strip: { index, on_air, preview, afv, afv_open }, or null. */
 export const tallyOf = (id) => live.status?.tally?.state?.strips?.[id] || null;
 
@@ -261,6 +284,8 @@ function onMessage(m) {
   } else if (m.type === "meters") {
     live.meters = m.meters;
     live.loudness = m.loudness;
+    live.vad = m.vad || {};
+    live.autoDb = m.auto_db || {};
   } else if (m.type === "analysis") live.analysis = m;
 }
 

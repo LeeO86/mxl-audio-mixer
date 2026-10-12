@@ -3,6 +3,7 @@
 // mute groups in the toolbar. A strip's name or chain opens its processing; a VCA's spill shows only its
 // members.
 import { computed, ref, watch } from "vue";
+import AutomationPanel from "./AutomationPanel.vue";
 import GroupsPanel from "./GroupsPanel.vue";
 import OperationsPanel from "./OperationsPanel.vue";
 import Segmented from "./Segmented.vue";
@@ -67,6 +68,7 @@ async function add() {
 const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
 const editingGroups = ref(false);
 const operating = ref(false);
+const automating = ref(false);
 </script>
 
 <template>
@@ -94,6 +96,7 @@ const operating = ref(false);
       <button class="btn secondary" @click="startAdd('bus')">+ Bus</button>
       <button class="btn secondary" :aria-pressed="editingGroups" @click="editingGroups = !editingGroups">VCAs &amp; groups</button>
       <button class="btn secondary" :aria-pressed="operating" title="group, N-1, link, mix-minus" @click="operating = !operating">Operations</button>
+      <button class="btn secondary" :aria-pressed="automating" title="auto-mix, ducking, voice detection" @click="automating = !automating">Auto</button>
     </div>
   </div>
   <div v-if="muteGroups.length" class="toolbar mutegroups">
@@ -112,6 +115,7 @@ const operating = ref(false);
   </div>
   <GroupsPanel v-if="editingGroups" @close="editingGroups = false" />
   <OperationsPanel v-if="operating" @close="operating = false" />
+  <AutomationPanel v-if="automating" @close="automating = false" />
   <div v-if="spilled" class="banner info spillbanner">
     Spill: VCA <strong>{{ spilled.name }}</strong>, {{ shown.length }} members
     <button class="btn small secondary" @click="spill.vca = null">Show all</button>

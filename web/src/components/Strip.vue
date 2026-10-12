@@ -11,7 +11,7 @@ import MiniPot from "./MiniPot.vue";
 import VFader from "./VFader.vue";
 import { dbValue, fmtPan, fmtSigned } from "../api.js";
 import { DYNAMICS } from "../nodes.js";
-import { groupMuted, live, patchSend, patchSignal, select, sends, signalOf, soloed, tallyOf, toggleSolo, vcaMuted, vcasAbove } from "../store.js";
+import { autoGain, automixOf, groupMuted, live, patchSend, patchSignal, select, sends, signalOf, soloed, tallyOf, toggleSolo, vcaMuted, vcasAbove } from "../store.js";
 
 const props = defineProps({
   signal: { type: Object, required: true },
@@ -33,6 +33,13 @@ const tally = computed(() => tallyOf(s.value.id));
 const myVcas = computed(() => vcasAbove(s.value.id));
 const otherMute = computed(() => (vcaMuted(s.value.id) ? "VCA" : groupMuted(s.value) ? "group" : ""));
 const dynamics = computed(() => s.value.chain.filter((n) => DYNAMICS.has(n.type)));
+const vad = computed(() => live.vad[s.value.id] || null);
+const auto = computed(() => autoGain(s.value.id));
+const autoTitle = computed(() => {
+  const am = automixOf(s.value.id);
+  const g = Number.isFinite(auto.value) ? `${auto.value.toFixed(1)} dB` : "−∞";
+  return `auto gain ${g} (${am ? `auto-mix ${am.name}` : "ducking"}), after the fader`;
+});
 function open() {
   if (props.compact) return;
   select(s.value.id);
@@ -98,7 +105,8 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       <span class="nm">{{ s.name }}</span>
       <span class="fmt"
         >{{ s.format }}<span v-if="bus && s.minus" class="minus" :title="`mix-minus: ${busName(s.minus.of)} without ${s.minus.without.map((w) => signalOf(w)?.name || w).join(', ')}`"> −{{ busName(s.minus.of) }}</span><span v-if="s.recall_safe" class="safe" title="recall-safe"> S</span
-        ><span v-if="tally?.afv" class="afv" :class="{ open: tally.afv_open }" :title="`audio follows video: tally ${tally.index}, ${tally.afv_open ? 'open' : 'closed'}`"> AFV</span></span
+        ><span v-if="tally?.afv" class="afv" :class="{ open: tally.afv_open }" :title="`audio follows video: tally ${tally.index}, ${tally.afv_open ? 'open' : 'closed'}`"> AFV</span
+        ><span v-if="vad" class="vad" :class="{ on: vad.active }" :title="`voice activity: ${vad.active ? 'speech' : 'no speech'}, probability ${vad.probability.toFixed(2)}`" :data-vad="vad.active ? 'speech' : 'quiet'"> ●</span></span
       >
     </button>
 
@@ -166,6 +174,10 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       <button v-if="!compact" class="btn small" :class="soloed[s.id] === 'afl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'afl'" :aria-label="`AFL ${s.name}`" title="after-fader listen" @click="toggleSolo(s.id, 'afl')">AFL</button>
     </div>
     <button class="btn mute" :class="[s.mute ? 'danger' : 'secondary', { othermute: !s.mute && otherMute }]" :aria-pressed="s.mute" :title="otherMute ? `muted by a ${otherMute === 'VCA' ? 'VCA' : 'mute group'}` : ''" @click="patchSignal(s.id, { mute: !s.mute })">Mute</button>
+    <div v-if="auto !== undefined" class="autogain small" :title="autoTitle" :data-auto="Number.isFinite(auto) ? auto.toFixed(1) : '-inf'">
+      <span class="gr"><span :style="{ width: `${Math.min(100, (-Math.max(auto, -30) / 30) * 100)}%` }"></span></span>
+      <span>{{ Number.isFinite(auto) ? fmtSigned(auto) : "−∞" }}</span>
+    </div>
     <div v-if="myVcas.length && !compact" class="vcachips muted small" :title="`VCAs: ${myVcas.map((v) => v.name).join(', ')}`">
       <span v-for="v in myVcas" :key="v.id" class="vcachip" :style="{ borderColor: v.colour || 'var(--border)' }">{{ v.name }}</span>
     </div>
