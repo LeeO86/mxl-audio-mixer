@@ -27,18 +27,26 @@
 //! within 10 dB: across an onset or an end any sound looks periodic.
 //!
 //! The frame's probability is energy × modulation × (0.3 + 0.7 × voicing), 0 for
-//! a tone or below the minimum level; unvoiced sounds (fricatives) thus count
-//! less than vowels and are carried by the hold. Each of the counts is a
-//! smoothstep between its two values.
+//! a tone; unvoiced sounds (fricatives) thus count less than vowels and are
+//! carried by the hold. Each of the counts is a smoothstep between its two
+//! values.
+//!
+//! **The gate** (as Com-IS-Assist's guard band): while the signal's momentary
+//! loudness (K-weighted, 400 ms) is below `gate_lufs`, a frame counts as no
+//! speech. A detector hears crosstalk of other talkers into a microphone as
+//! speech, rightly; it is quieter than the microphone's own talker.
 //!
 //! **Detection latency:** a frame is analysed when its 10 ms are complete; the
 //! voicing window adds about half its 40 ms; the probability rises with a time
-//! constant of 14 ms. A voiced onset is detected about 30–50 ms after it starts
-//! (unit tests below; the delivery to the control side adds up to one 10 ms tick).
+//! constant of 14 ms; after silence the momentary loudness needs
+//! 400 ms × 10^((gate − level)/10) to reach the gate (60 ms for a talker 8 dB
+//! above it). A voiced onset is detected about 50–70 ms after it starts (unit
+//! tests below; the delivery to the control side adds up to one 10 ms tick).
 
 use std::collections::VecDeque;
 
 use crate::dsp::biquad::{self, Coefficients, State};
+use crate::dsp::loudness::{K_HIGH_PASS, K_SHELF};
 
 /// 10 ms at 48 kHz.
 pub const FRAME: usize = 480;
@@ -53,6 +61,8 @@ const FLOOR_WINDOW: usize = 25;
 const FLOOR_WINDOWS: usize = 8;
 /// Frames of the modulation measure (400 ms).
 const MODULATION_FRAMES: usize = 40;
+/// The gate's momentary loudness: 400 ms.
+const MOMENTARY_FRAMES: usize = 40;
 /// Below this the band power counts as this (dB).
 const SILENCE_DB: f64 = -120.0;
 
@@ -83,7 +93,7 @@ pub struct Frame {
 
 /// Turns 10 ms frames into speech probabilities.
 pub trait Detector: Send {
-    fn frame(&mut self, x: &[f32], min_level_dbfs: f64) -> Frame;
+    fn frame(&mut self, x: &[f32]) -> Frame;
     fn reset(&mut self);
 }
 
@@ -205,7 +215,7 @@ impl FeatureDetector {
 }
 
 impl Detector for FeatureDetector {
-    fn frame(&mut self, x: &[f32], min_level_dbfs: f64) -> Frame {
+    fn frame(&mut self, x: &[f32]) -> Frame {
         let mut band = 0f64;
         let mut full = 0f64;
         for &s in x {
@@ -232,7 +242,7 @@ impl Detector for FeatureDetector {
         let modulation = self.modulation(e);
         let (voiced, anti) = self.voicing();
         let tone = anti < -0.93;
-        let probability = if level_dbfs < min_level_dbfs || tone {
+        let probability = if tone {
             0.0
         } else {
             smoothstep(e - floor, 4.0, 14.0)
@@ -260,6 +270,10 @@ pub struct VadState {
     pub speech_level_dbfs: Option<f64>,
     /// The last frame's RMS level, dBFS.
     pub level_dbfs: f64,
+    /// The momentary loudness (400 ms, K-weighted), LUFS, and whether it is
+    /// below the gate (nothing is speech then).
+    pub momentary_lufs: f64,
+    pub gated: bool,
     /// Onsets and offsets so far.
     pub speech_onsets: u64,
     pub speech_offsets: u64,
@@ -295,6 +309,10 @@ pub struct Vad {
     hold: u32,
     speech_power: Option<f64>,
     buffer: Vec<f32>,
+    /// K-weighting (BS.1770) and the K-weighted mean square of the last 40
+    /// frames: the momentary loudness of the gate.
+    k: [State; 2],
+    loudness: VecDeque<f64>,
 }
 
 impl Default for Vad {
@@ -314,6 +332,8 @@ impl Vad {
             hold: 0,
             speech_power: None,
             buffer: Vec::with_capacity(FRAME),
+            k: Default::default(),
+            loudness: VecDeque::with_capacity(MOMENTARY_FRAMES),
         }
     }
 
@@ -322,6 +342,8 @@ impl Vad {
         self.hold = 0;
         self.buffer.clear();
         self.speech_power = None;
+        self.k = Default::default();
+        self.loudness.clear();
         self.state = VadState {
             level_dbfs: SILENCE_DB,
             speech_onsets: self.state.speech_onsets,
@@ -332,11 +354,31 @@ impl Vad {
 
     /// Analyse one complete frame with `settings`.
     pub fn frame(&mut self, x: &[f32], settings: &crate::mix::auto::VadSettings) {
-        let f = self.detector.frame(x, settings.min_level_dbfs);
+        let f = self.detector.frame(x);
+        let mut energy = 0.0;
+        for &v in x {
+            let y = self.k[0].tick(&K_SHELF, f64::from(v));
+            let y = self.k[1].tick(&K_HIGH_PASS, y);
+            energy += y * y;
+        }
+        if self.loudness.len() == MOMENTARY_FRAMES {
+            self.loudness.pop_front();
+        }
+        self.loudness.push_back(energy / x.len().max(1) as f64);
+        let mean = self.loudness.iter().sum::<f64>() / MOMENTARY_FRAMES as f64;
+        let momentary = if mean > 0.0 {
+            (-0.691 + 10.0 * mean.log10()).max(SILENCE_DB)
+        } else {
+            SILENCE_DB
+        };
+        let gated = momentary < settings.gate_lufs;
+        let probability = if gated { 0.0 } else { f.probability };
         let s = &mut self.state;
+        s.momentary_lufs = (momentary * 10.0).round() / 10.0;
+        s.gated = gated;
         let p = s.speech_probability;
-        let a = if f.probability > p { 0.5 } else { 0.2 };
-        s.speech_probability = p + a * (f.probability - p);
+        let a = if probability > p { 0.5 } else { 0.2 };
+        s.speech_probability = p + a * (probability - p);
         s.level_dbfs = f.level_dbfs;
         s.features = f.features.into();
         let on = settings.threshold;
@@ -559,7 +601,7 @@ pub(crate) mod tests {
     fn evaluate() {
         let show = |what: &str, x: &[f32]| {
             let mut d = FeatureDetector::default();
-            let frames: Vec<Frame> = x.chunks_exact(FRAME).map(|c| d.frame(c, -60.0)).collect();
+            let frames: Vec<Frame> = x.chunks_exact(FRAME).map(|c| d.frame(c)).collect();
             let q = |i: usize| {
                 let mut v: Vec<f64> = frames.iter().skip(50).map(|f| f.features[i]).collect();
                 v.sort_by(|a, b| a.total_cmp(b));
@@ -708,7 +750,7 @@ pub(crate) mod tests {
         let (lat, on, off) = score(&x, &spans, &s);
         assert_eq!(lat.len(), spans.len(), "every word detected");
         let worst = lat.iter().max().copied().unwrap_or(0);
-        assert!(worst <= 6, "detection latency {lat:?} frames of 10 ms");
+        assert!(worst <= 8, "detection latency {lat:?} frames of 10 ms");
         assert!(on > 0.95, "speech frames detected: {on:.3}");
         assert!(off > 0.99, "pause frames free: {off:.3}");
     }
@@ -742,17 +784,22 @@ pub(crate) mod tests {
         let mut states = Vec::new();
         vad.push(&sig, &s, |st| states.push(*st));
         let last = states.iter().rposition(|st| st.speech_active).unwrap();
-        // Off after the hold (30 frames) and the fall of the probability.
+        // Off after the hold (80 frames) and the fall of the probability.
         assert!(
-            last > end + 25 && last < end + 45,
+            last > end + 75 && last < end + 95,
             "last speech frame {last}, end {end}"
         );
         let st = states.last().unwrap();
         assert_eq!((st.speech_onsets, st.speech_offsets), (1, 1));
         let level = st.speech_level_dbfs.unwrap();
         assert!((level + 26.0).abs() < 3.0, "speech level {level}");
-        // Below the minimum level nothing is speech.
-        s.min_level_dbfs = -20.0;
+        assert!(
+            (states[end - 5].momentary_lufs + 25.0).abs() < 4.0,
+            "{:?}",
+            states[end - 5]
+        );
+        // Below the gate nothing is speech (crosstalk is quieter than the talker).
+        s.gate_lufs = -10.0;
         assert!(run(&sig, &s).iter().all(|f| !f.0));
     }
 }

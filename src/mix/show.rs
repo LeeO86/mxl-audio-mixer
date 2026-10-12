@@ -62,6 +62,21 @@ pub struct Snapshot {
     pub time: u64,
     pub signals: BTreeMap<String, SignalState>,
     pub sends: Vec<SendState>,
+    /// VAD settings, auto-mixes and ducks (§8), as a whole; absent in snapshots
+    /// taken before they existed (a recall leaves them then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<AutoState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoState {
+    #[serde(default)]
+    pub vad: Vec<super::auto::VadSettings>,
+    #[serde(default)]
+    pub automixes: Vec<super::auto::Automix>,
+    #[serde(default)]
+    pub ducks: Vec<super::auto::Duck>,
 }
 
 /// Parameter classes a recall can be limited to.
@@ -77,6 +92,8 @@ pub enum Class {
     /// The parameters (and bypass) of chain nodes.
     Chain,
     Sends,
+    /// VAD settings, auto-mixes and ducks.
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +103,9 @@ pub enum Section {
     Buses,
     /// VCA faders and mutes (§9).
     Vcas,
+    /// VAD settings, auto-mixes and ducks (§8), as a whole; a signal filter does
+    /// not narrow them.
+    Auto,
 }
 
 /// What a recall touches; empty fields mean everything.
@@ -172,7 +192,64 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
         time,
         signals,
         sends,
+        auto: Some(AutoState {
+            vad: mix.vad.clone(),
+            automixes: mix.automixes.clone(),
+            ducks: mix.ducks.clone(),
+        }),
     }
+}
+
+/// The snapshot's auto-mixes and ducks instead of the mix's, except recall-safe
+/// ones (they stay, and keep their strips); references to signals that are gone
+/// are dropped.
+fn recall_auto(mix: &mut Mix, saved: &AutoState) {
+    let exists = |m: &Mix, id: &str| m.kind(id).is_some();
+    let safe_mixes: Vec<_> = mix
+        .automixes
+        .iter()
+        .filter(|a| a.recall_safe)
+        .cloned()
+        .collect();
+    let safe_ducks: Vec<_> = mix
+        .ducks
+        .iter()
+        .filter(|d| d.recall_safe)
+        .cloned()
+        .collect();
+    let taken: std::collections::BTreeSet<String> = safe_mixes
+        .iter()
+        .flat_map(|a| a.members.iter().map(|m| m.signal.clone()))
+        .collect();
+    let mut automixes = safe_mixes.clone();
+    for a in &saved.automixes {
+        if automixes.iter().any(|x| x.id == a.id) {
+            continue;
+        }
+        let mut a = a.clone();
+        a.members
+            .retain(|m| exists(mix, &m.signal) && !taken.contains(&m.signal));
+        automixes.push(a);
+    }
+    let mut ducks = safe_ducks.clone();
+    for d in &saved.ducks {
+        if ducks.iter().any(|x| x.id == d.id) {
+            continue;
+        }
+        let mut d = d.clone();
+        d.keys.retain(|k| exists(mix, k));
+        d.targets.retain(|t| exists(mix, t));
+        ducks.push(d);
+    }
+    let vad = saved
+        .vad
+        .iter()
+        .filter(|v| exists(mix, &v.signal))
+        .cloned()
+        .collect();
+    mix.vad = vad;
+    mix.automixes = automixes;
+    mix.ducks = ducks;
 }
 
 /// Apply `snap` to `mix` within `filter`, leaving recall-safe signals alone. Only
@@ -272,6 +349,14 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
             v.mute = st.mute;
         }
         touched.push(v.id.clone());
+    }
+    let auto_wanted = filter
+        .sections
+        .as_ref()
+        .is_none_or(|ss| ss.contains(&Section::Auto))
+        && filter.class(Class::Auto);
+    if let (Some(saved), true) = (&snap.auto, auto_wanted) {
+        recall_auto(mix, saved);
     }
     if filter.class(Class::Sends) {
         for s in &mut mix.sends {
@@ -498,5 +583,66 @@ mod tests {
         m.vcas[0].recall_safe = true;
         recall(&mut m, &snap, &Filter::default());
         assert_eq!(m.vcas[0].fader_db, Db(3.0), "recall-safe");
+    }
+
+    #[test]
+    fn auto_mixes_and_ducks_in_snapshots() {
+        use crate::mix::auto::{Automix, AutomixMember, Duck};
+        let mut m = mix();
+        let (a, b, bus) = (
+            m.strips[0].id.clone(),
+            m.strips[1].id.clone(),
+            m.buses[0].id.clone(),
+        );
+        // Moderation: a ducks the bus; no auto-mix.
+        let mut d = Duck::new("bed");
+        d.keys = vec![a.clone()];
+        d.targets = vec![bus.clone()];
+        m.ducks.push(d);
+        let moderation = capture(&m, "s1".into(), "Moderation".into(), 1);
+        // Panel discussion: an auto-mix of both, no duck.
+        m.ducks.clear();
+        m.automixes.push(Automix {
+            id: "panel".into(),
+            name: "Panel".into(),
+            enabled: true,
+            last_mic_hold: true,
+            vad_weighting: false,
+            members: vec![AutomixMember::new(&a), AutomixMember::new(&b)],
+            recall_safe: false,
+        });
+        let panel = capture(&m, "s2".into(), "Panel".into(), 2);
+        recall(&mut m, &moderation, &Filter::default());
+        assert!(m.automixes.is_empty() && m.ducks[0].id == "bed");
+        recall(&mut m, &panel, &Filter::default());
+        assert!(m.ducks.is_empty() && m.automixes[0].members.len() == 2);
+        assert_eq!(m.validate(0, 48), Ok(()));
+        // Strips only: the auto setup stays.
+        recall(
+            &mut m,
+            &moderation,
+            &Filter {
+                sections: Some(vec![Section::Strips]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(m.automixes.len(), 1);
+        // A recall-safe duck stays; a deleted strip leaves the recalled auto-mix.
+        m.ducks.push(Duck {
+            recall_safe: true,
+            ..Duck::new("safe")
+        });
+        m.remove_signal(&b);
+        recall(&mut m, &panel, &Filter::default());
+        assert_eq!(
+            m.ducks.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            ["safe"]
+        );
+        assert_eq!(m.automixes[0].members.len(), 1);
+        // A snapshot from before: the setup stays.
+        let mut old = moderation.clone();
+        old.auto = None;
+        recall(&mut m, &old, &Filter::default());
+        assert_eq!(m.automixes.len(), 1);
     }
 }

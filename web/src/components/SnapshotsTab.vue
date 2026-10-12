@@ -25,9 +25,10 @@ const CLASSES = [
   ["pan", "Pan and width"],
   ["chain", "Processing"],
   ["sends", "Sends"],
+  ["auto", "Auto-mix, ducking, voice detection"],
 ];
 const classes = ref(JSON.parse(stored("recall.classes", JSON.stringify(CLASSES.map((c) => c[0])))));
-const sections = ref(JSON.parse(stored("recall.sections", '["strips","buses","vcas"]')));
+const sections = ref(JSON.parse(stored("recall.sections", '["strips","buses","vcas","auto"]')));
 const only = ref([]); // empty: every signal
 const crossfade = ref(Number(stored("recall.crossfade", 0)));
 watch(classes, (v) => store("recall.classes", JSON.stringify(v)), { deep: true });
@@ -150,6 +151,7 @@ async function downloadVersion(v) {
         <label class="check"><input v-model="sections" type="checkbox" value="strips" /> Strips</label>
         <label class="check"><input v-model="sections" type="checkbox" value="buses" /> Buses</label>
         <label class="check"><input v-model="sections" type="checkbox" value="vcas" /> VCAs</label>
+        <label class="check" title="auto-mixes, ducks and voice detection, as a whole"><input v-model="sections" type="checkbox" value="auto" /> Auto</label>
       </div>
       <div class="group-caption">Parameters</div>
       <div class="checks">

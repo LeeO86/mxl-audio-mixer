@@ -225,6 +225,10 @@ pub enum ProcKind {
         lfe_gain_db: f64,
         lfe: usize,
     },
+    /// Where the auto gain (auto-mix × ducking, §8) acts in the chain; without
+    /// one it acts after the chain, before the fader. No parameters: the
+    /// control engine sets its gain.
+    Auto {},
     /// Delay in samples, ms or frames (at `frame_rate`).
     Delay {
         time: f64,
@@ -293,15 +297,17 @@ impl ProcKind {
             Self::Ducker { .. } => "ducker",
             Self::Multiband { .. } => "multiband",
             Self::Delay { .. } => "delay",
+            Self::Auto {} => "auto",
         }
     }
 
     pub fn category(&self) -> Category {
         match self {
             Self::Eq { .. } | Self::Filter { .. } | Self::DynamicEq { .. } => Category::Eq,
-            Self::Delay { .. } | Self::Oscillator { .. } | Self::BassManagement { .. } => {
-                Category::Other
-            }
+            Self::Delay { .. }
+            | Self::Oscillator { .. }
+            | Self::BassManagement { .. }
+            | Self::Auto {} => Category::Other,
             _ => Category::Dynamics,
         }
     }
@@ -494,6 +500,7 @@ impl ProcKind {
                     return Err(format!("a delay is at most {MAX_DELAY_MS} ms"));
                 }
             }
+            Self::Auto {} => {}
         }
         Ok(())
     }
@@ -637,7 +644,7 @@ impl ProcKind {
                 lfe_gain_db,
                 ..
             } => vec![*crossover_hz, *lfe_gain_db],
-            Self::Delay { .. } => Vec::new(),
+            Self::Delay { .. } | Self::Auto {} => Vec::new(),
         };
         v.into_iter().map(|x| x as f32).collect()
     }
@@ -681,7 +688,7 @@ impl ProcKind {
             Self::Delay { .. } => self.delay_samples().hash(&mut h),
             Self::Oscillator { waveform, .. } => waveform.hash(&mut h),
             Self::BassManagement { lfe, .. } => lfe.hash(&mut h),
-            Self::Expander { .. } | Self::Gate { .. } => {}
+            Self::Expander { .. } | Self::Gate { .. } | Self::Auto {} => {}
         }
         h.finish()
     }
@@ -721,6 +728,9 @@ pub fn validate(chain: &[Proc]) -> Result<(), String> {
         p.kind
             .validate()
             .map_err(|e| format!("node {}: {e}", p.id))?;
+    }
+    if chain.iter().filter(|p| p.kind == ProcKind::Auto {}).count() > 1 {
+        return Err("a chain has at most one auto node".into());
     }
     Ok(())
 }

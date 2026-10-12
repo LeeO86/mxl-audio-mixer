@@ -315,6 +315,7 @@ mod tests {
             last_mic_hold: true,
             vad_weighting: false,
             members: vec![AutomixMember::new("a"), AutomixMember::new("b")],
+            recall_safe: false,
         });
         let mut d = Duck::new("bed");
         d.keys = vec!["a".into()];
@@ -336,6 +337,7 @@ mod tests {
         let (speech, _) = vad::tests::speech(2.0, 0.06, 1);
         let noise = vad::tests::pink(2.0, 0.0005, 2);
         let mut last = BTreeMap::new();
+        let mut leads = 0;
         for k in 0..200 {
             let r = k * vad::FRAME..(k + 1) * vad::FRAME;
             for (sig, x) in [("a", &speech[r.clone()]), ("b", &noise[r])] {
@@ -346,11 +348,15 @@ mod tests {
             for (s, g) in auto.tick(&mut rings, &m) {
                 last.insert(s, g);
             }
+            let g = |s: &str| last.get(s).copied().unwrap_or(1.0);
+            leads += usize::from(g("a") > 10.0 * g("b"));
         }
         assert!(auto.vad_state("a").unwrap().speech_onsets >= 1);
         assert_eq!(auto.duck_status("bed").gain_db, Some(-20.0));
         assert!((last["music"] - 0.1).abs() < 1e-6);
-        assert!(last["a"] > last["b"] * 10.0, "{last:?}");
+        // The talker's share is 20 dB above the noise most of the time (in his
+        // pauses the shares move towards each other, as gain sharing does).
+        assert!(leads > 120, "{leads} of 200 ticks; {last:?}");
         // The duck removed: the music comes back to 0 dB.
         m.ducks.clear();
         let changed = auto.tick(&mut rings, &m);

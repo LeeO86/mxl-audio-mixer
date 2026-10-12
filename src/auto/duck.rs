@@ -4,8 +4,8 @@
 //! Per 10 ms frame the gain moves linearly in dB: from 0 dB to the depth in
 //! `attack_ms`, back in `release_ms`, after `hold_ms` without speech. A depth of
 //! −∞ ramps as −120 dB and is silence at its end. A target of several ducks
-//! takes the deepest. The gain goes to the target's auto node (after its
-//! fader), ramped over the 10 ms to the next frame.
+//! takes the deepest. The gain goes to the target's auto node (in its chain, by
+//! default before the fader), ramped over the 10 ms to the next frame.
 
 use crate::mix::auto::Duck;
 

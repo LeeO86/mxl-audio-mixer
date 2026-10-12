@@ -18,7 +18,7 @@ const isOpen = (id) => open.value[id] !== false;
 const meters = computed(() => live.meters[sig.value?.id]?.nodes || {});
 const groups = computed(() => {
   const out = {};
-  for (const [type, t] of Object.entries(NODE_TYPES)) (out[t.group] ||= []).push({ type, label: t.label });
+  for (const [type, t] of Object.entries(NODE_TYPES)) (out[t.group] ||= []).push({ type, label: t.label, help: t.help || "" });
   return out;
 });
 
@@ -88,7 +88,7 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
         <p class="note" style="margin-top: 0">Drag into the chain, or tap to append.</p>
         <template v-for="(items, g) in groups" :key="g">
           <div class="group-caption">{{ g }}</div>
-          <button v-for="t in items" :key="t.type" class="pchip" draggable="true" :disabled="chain.length >= 32" @dragstart="dragStart($event, `type:${t.type}`)" @click="add(t.type)">
+          <button v-for="t in items" :key="t.type" class="pchip" draggable="true" :title="t.help" :disabled="chain.length >= 32 || (t.type === 'auto' && chain.some((n) => n.type === 'auto'))" @dragstart="dragStart($event, `type:${t.type}`)" @click="add(t.type)">
             {{ t.label }} <span class="muted">+</span>
           </button>
         </template>

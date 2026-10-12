@@ -2,7 +2,7 @@
 //! JAES 23(6), 1975): each member's gain follows its share of the total level.
 //!
 //! Per 10 ms frame, a member's level L is the mean square of its frame (the VAD
-//! tap: before the fader), rising at once and falling with a time constant of
+//! tap: at the auto node's input), rising at once and falling with a time constant of
 //! 100 ms; a member takes part from its first measured frame on. With the weight w (10^(weight_db/10)) and, with VAD weighting, its
 //! speech probability p (counting p + 0.1 × (1 − p), so a member without speech
 //! weighs 10 dB less), the member's gain is
@@ -17,8 +17,9 @@
 //! stays where it was. With last-mic-hold, while no member speaks (its VAD), the
 //! gains stay where they were: the room keeps the last talker's microphone.
 //!
-//! The gains go to each member's auto node (after its fader), ramped over the
-//! 10 ms to the next frame; the operator's fader multiplies.
+//! The gains go to each member's auto node (in its chain, by default before the
+//! fader), ramped over the 10 ms to the next frame; the operator's fader
+//! multiplies.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -126,6 +127,7 @@ mod tests {
             last_mic_hold: false,
             vad_weighting: false,
             members: members.iter().map(|m| AutomixMember::new(m)).collect(),
+            recall_safe: false,
         }
     }
 

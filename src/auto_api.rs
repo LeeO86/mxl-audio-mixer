@@ -2,15 +2,16 @@
 //! - `GET /api/v1/vad`, `GET`, `PUT`, `DELETE /api/v1/vad/{signal}`: every
 //!   analysed signal with its settings (`own`: set for it, else the defaults)
 //!   and its state; `PUT` sets a signal's own settings (`threshold`, `hold_ms`,
-//!   `min_level_dbfs`) and analyses it; `DELETE` removes them;
+//!   `gate_lufs`) and analyses it; `DELETE` removes them;
 //! - `GET`, `POST /api/v1/automixes`, `GET`, `PATCH`, `DELETE
 //!   /api/v1/automixes/{id}` (`name`, `enabled`, `last_mic_hold`,
-//!   `vad_weighting`, `members`: strip ids or `{signal, weight_db, bypass}`; a
+//!   `vad_weighting`, `recall_safe`, `members`: strip ids or `{signal,
+//!   weight_db, bypass}`; a
 //!   bare id keeps that member's weight and bypass, an object sets them);
 //!   GET adds `gains_db`;
 //! - `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/{id}`
 //!   (`name`, `enabled`, `keys`, `targets`, `depth_db`, `attack_ms`, `hold_ms`,
-//!   `release_ms`); GET adds `active` and `gain_db`.
+//!   `release_ms`, `recall_safe`); GET adds `active` and `gain_db`.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -77,7 +78,7 @@ async fn vad(State(app): State<App>, Path(signal): Path<String>) -> Response {
 struct VadBody {
     threshold: Option<f64>,
     hold_ms: Option<f64>,
-    min_level_dbfs: Option<f64>,
+    gate_lufs: Option<f64>,
 }
 
 async fn put_vad(
@@ -104,7 +105,7 @@ async fn put_vad(
                 signal: signal.clone(),
                 threshold: b.threshold.unwrap_or(current.threshold),
                 hold_ms: b.hold_ms.unwrap_or(current.hold_ms),
-                min_level_dbfs: b.min_level_dbfs.unwrap_or(current.min_level_dbfs),
+                gate_lufs: b.gate_lufs.unwrap_or(current.gate_lufs),
             };
             match mix.vad.iter_mut().find(|x| x.signal == signal) {
                 Some(x) => *x = v,
@@ -190,6 +191,7 @@ struct AutomixBody {
     last_mic_hold: Option<bool>,
     vad_weighting: Option<bool>,
     members: Option<Vec<MemberBody>>,
+    recall_safe: Option<bool>,
 }
 
 impl AutomixBody {
@@ -197,7 +199,7 @@ impl AutomixBody {
         macro_rules! set {
             ($($f:ident),*) => { $(if let Some(x) = self.$f { a.$f = x; })* };
         }
-        set!(name, enabled, last_mic_hold, vad_weighting);
+        set!(name, enabled, last_mic_hold, vad_weighting, recall_safe);
         if let Some(members) = self.members {
             a.members = members
                 .into_iter()
@@ -328,6 +330,7 @@ struct DuckBody {
     attack_ms: Option<f64>,
     hold_ms: Option<f64>,
     release_ms: Option<f64>,
+    recall_safe: Option<bool>,
 }
 
 impl DuckBody {
@@ -335,7 +338,17 @@ impl DuckBody {
         macro_rules! set {
             ($($f:ident),*) => { $(if let Some(x) = self.$f { d.$f = x; })* };
         }
-        set!(name, enabled, keys, targets, depth_db, attack_ms, hold_ms, release_ms);
+        set!(
+            name,
+            enabled,
+            keys,
+            targets,
+            depth_db,
+            attack_ms,
+            hold_ms,
+            release_ms,
+            recall_safe
+        );
     }
 }
 

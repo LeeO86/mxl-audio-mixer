@@ -1,8 +1,8 @@
 //! Voice activity detection, automatic mixing and ducking (§8.1, §8.3, §8.4): the
 //! settings in the mix. The detectors and controllers run on the control side
-//! (`crate::auto`) and drive one gain node per strip or bus, after its fader
-//! (`strip/<id>/auto`, `bus/<id>/auto`): the operator's fader and the controllers'
-//! gain multiply.
+//! (`crate::auto`) and drive one gain node per strip or bus (`strip/<id>/auto`,
+//! `bus/<id>/auto`): where its chain has an `auto` node, else after the chain,
+//! before the fader; the operator's fader and the controllers' gain multiply.
 //!
 //! A signal is analysed (VAD) when it has VAD settings, is a member of an
 //! auto-mix or a key of a duck; without settings of its own it uses the defaults.
@@ -33,19 +33,21 @@ pub struct VadSettings {
     /// How long speech lasts after the probability fell below the threshold.
     #[serde(default = "default_vad_hold")]
     pub hold_ms: f64,
-    /// Below this level (dBFS, the frame's RMS) nothing is speech.
-    #[serde(default = "default_min_level")]
-    pub min_level_dbfs: f64,
+    /// While the signal's momentary loudness (400 ms) is below this, nothing is
+    /// speech: crosstalk of other talkers into a microphone is speech too, but
+    /// quieter (the guard band of Com-IS-Assist).
+    #[serde(default = "default_gate")]
+    pub gate_lufs: f64,
 }
 
 fn default_threshold() -> f64 {
     0.5
 }
 fn default_vad_hold() -> f64 {
-    300.0
+    800.0
 }
-fn default_min_level() -> f64 {
-    -60.0
+fn default_gate() -> f64 {
+    -32.0
 }
 
 impl VadSettings {
@@ -54,7 +56,7 @@ impl VadSettings {
             signal: signal.to_string(),
             threshold: default_threshold(),
             hold_ms: default_vad_hold(),
-            min_level_dbfs: default_min_level(),
+            gate_lufs: default_gate(),
         }
     }
 }
@@ -75,6 +77,9 @@ pub struct Automix {
     pub vad_weighting: bool,
     #[serde(default)]
     pub members: Vec<AutomixMember>,
+    /// A snapshot's recall leaves it.
+    #[serde(default)]
+    pub recall_safe: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -124,6 +129,9 @@ pub struct Duck {
     /// Time from the depth back to 0 dB.
     #[serde(default = "default_release")]
     pub release_ms: f64,
+    /// A snapshot's recall leaves it.
+    #[serde(default)]
+    pub recall_safe: bool,
 }
 
 fn yes() -> bool {
@@ -136,7 +144,7 @@ fn default_attack() -> f64 {
     50.0
 }
 fn default_duck_hold() -> f64 {
-    500.0
+    800.0
 }
 fn default_release() -> f64 {
     1000.0
@@ -154,6 +162,7 @@ impl Duck {
             attack_ms: default_attack(),
             hold_ms: default_duck_hold(),
             release_ms: default_release(),
+            recall_safe: false,
         }
     }
 }
@@ -302,8 +311,8 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
             return Err(format!("vad {}: threshold must be 0.05 to 0.95", v.signal));
         }
         check_time(&format!("vad {}: hold_ms", v.signal), v.hold_ms)?;
-        if !(-90.0..=0.0).contains(&v.min_level_dbfs) {
-            return Err(format!("vad {}: min_level_dbfs must be -90 to 0", v.signal));
+        if !(-70.0..=0.0).contains(&v.gate_lufs) {
+            return Err(format!("vad {}: gate_lufs must be -70 to 0", v.signal));
         }
     }
     if mix.automixes.len() > MAX_AUTOMIXES {
@@ -390,6 +399,7 @@ mod tests {
             last_mic_hold: true,
             vad_weighting: false,
             members: members.iter().map(|m| AutomixMember::new(m)).collect(),
+            recall_safe: false,
         }
     }
 

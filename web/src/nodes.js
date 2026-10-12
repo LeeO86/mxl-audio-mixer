@@ -142,6 +142,13 @@ export const NODE_TYPES = {
       { key: "level_dbfs", label: "Level", min: -60, max: 0, def: -18, fine: 0.5, unit: "dBFS (noise: RMS)" },
     ],
   },
+  auto: {
+    label: "Auto gain",
+    group: "Other",
+    help: "Where the auto-mix and ducking gain acts (one per chain). Without it, after the chain, before the fader; the voice detection reads at its input.",
+    make: () => ({ type: "auto" }),
+    fields: [],
+  },
   delay: {
     label: "Delay",
     group: "Other",
