@@ -58,8 +58,29 @@ try {
   await page.locator('[data-signal="gtr"] .btn.mute').click();
   await page.locator('[data-signal="gtr"] .btn.mute').click();
   await page.waitForTimeout(600);
-  if ((await api("/api/v1/strips/gtr")).mute !== false) throw new Error("two quick mute presses left gtr muted");
+  await until("two quick mute presses to leave gtr unmuted", async () => (await api("/api/v1/strips/gtr")).mute === false, 3000);
   pass("two quick mute presses: unmuted again");
+  // The same with the mixes pushed to this client 1 s late: the mix after another change (vox) arrives
+  // between the two presses, before the server has the first one, and must not undo it.
+  const slow = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
+  await slow.routeWebSocket(/\/api\/v1\/events/, (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((m) => (JSON.parse(String(m)).type === "mix" ? setTimeout(() => ws.send(m), 1000) : ws.send(m)));
+    ws.onMessage((m) => server.send(m));
+  });
+  await slow.goto(`${base}/#console`);
+  await slow.locator('[data-signal="gtr"]').waitFor();
+  await slow.waitForTimeout(1500);
+  await api("/api/v1/strips/vox", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: true }) });
+  await slow.waitForTimeout(300);
+  await slow.locator('[data-signal="gtr"] .btn.mute').click();
+  await slow.waitForTimeout(850);
+  await slow.locator('[data-signal="gtr"] .btn.mute').click();
+  await slow.waitForTimeout(1500);
+  await until("gtr unmuted after two presses around a late mix", async () => (await api("/api/v1/strips/gtr")).mute === false, 2000);
+  await api("/api/v1/strips/vox", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
+  await slow.context().close();
+  pass("two mute presses with a late mix in between: unmuted again");
 
   await page.locator('[data-signal="vox"] .vtrack').focus();
   for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowDown");
@@ -150,6 +171,24 @@ try {
   await page.getByRole("button", { name: "Clear solos" }).click();
   await until("no solo", async () => Object.keys(await api("/api/v1/solo")).length === 0);
   pass("control room: PFL from the strip shown as soloed, monitor dim from its card, solos cleared");
+
+  // Listening in the browser (WHEP from the built-in MediaMTX), only with MediaMTX.
+  if (process.env.MEDIAMTX_BIN) {
+    const listen = page.locator(".monitor").getByRole("button", { name: "Listen", exact: true });
+    await listen.click();
+    await page.locator(".monitor").getByRole("button", { name: "Listening" }).waitFor({ timeout: 15000 });
+    const stream = async () => (await api("/api/v1/preview")).streams.find((s) => s.id === "main");
+    await until("main publishing", async () => (await stream()).state === "publishing" && (await stream()).frames > 0);
+    await page.screenshot({ path: `${out}/control-room-listening.png`, fullPage: true });
+    await page.goto(`${base}/#status`);
+    await page.locator('[data-stream="main"] .pill', { hasText: "publishing" }).waitFor({ timeout: 5000 });
+    await page.locator(".preview-status .pill", { hasText: /^running, pid/ }).waitFor({ timeout: 5000 });
+    await page.screenshot({ path: `${out}/status-preview.png`, fullPage: true });
+    await page.goto(`${base}/#control-room`);
+    await page.locator(".monitor").getByRole("button", { name: "Listening" }).click();
+    await page.locator(".monitor").getByRole("button", { name: "Listen", exact: true }).waitFor({ timeout: 3000 });
+    pass("control room: monitor main played in the browser over WHEP (stream publishing), then stopped");
+  }
 
   // Routing: a send from vox to aux through the matrix.
   await page.goto(`${base}/#routing`);

@@ -41,6 +41,14 @@ spec:
               protocol: UDP
             - name: tsl-tcp
               containerPort: 8911
+            # Only for the built-in MediaMTX (PREVIEW_PUBLISH_URL unset): WHEP, and
+            # ICE on the node's address (§18).
+            # - name: whep
+            #   containerPort: 8599
+            # - name: ice
+            #   containerPort: 8199
+            #   hostPort: 8199
+            #   protocol: UDP
           env:
             - name: HOST_ID
               value: production-mix1
@@ -86,6 +94,16 @@ spec:
               value: "8910"
             - name: TSL_TCP_PORT
               value: "8911"
+            # Monitors in the browser through the platform's MediaMTX (Appendix B.1).
+            # Unset PREVIEW_PUBLISH_URL: the built-in MediaMTX (ports above).
+            - name: PREVIEW_PUBLISH_URL
+              value: rtsp://mediamtx:8554
+            - name: PREVIEW_PATH_PREFIX
+              value: production/mix1
+            - name: PREVIEW_WHEP_URL
+              value: https://preview.example
+            - name: MEDIAMTX_API_URL
+              value: http://mediamtx:9997
             # SCHED_FIFO for the DSP thread (needs the SYS_NICE capability below).
             # - name: MIXER_RT_PRIORITY
             #   value: "49"

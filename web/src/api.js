@@ -1,6 +1,11 @@
 // REST client for the mixer API (README "API") and display helpers.
 
-async function request(path, { method = "GET", body, text = false } = {}) {
+async function request(path, options) {
+  return (await exchange(path, options)).data;
+}
+
+/** The answer and the mix revision after a change (`x-mix-revision`). */
+export async function exchange(path, { method = "GET", body, text = false } = {}) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const resp = await fetch(path, {
@@ -22,7 +27,8 @@ async function request(path, { method = "GET", body, text = false } = {}) {
     const reason = data && typeof data === "object" ? data.error : String(data || "").slice(0, 200);
     throw new Error(reason || `HTTP ${resp.status}`);
   }
-  return data;
+  const revision = resp.headers.get("x-mix-revision");
+  return { data, revision: revision === null ? null : Number(revision) };
 }
 
 export const api = {

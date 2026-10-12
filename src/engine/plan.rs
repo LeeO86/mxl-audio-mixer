@@ -157,6 +157,8 @@ pub enum Step {
     Loudness { src: Span, slot: u32 },
     /// The first two channels of `src` to the analyser (spectrum, goniometer).
     Analyse { src: Span },
+    /// A stereo `src` to stream slot `slot` (a monitor heard in the browser).
+    Stream { src: Span, slot: u32 },
 }
 
 impl Step {
@@ -173,6 +175,7 @@ impl Step {
             Step::HoldOut { .. } | Step::HoldIn { .. } => "hold",
             Step::Loudness { .. } => "loudness",
             Step::Analyse { .. } => "analyse",
+            Step::Stream { .. } => "stream",
         }
     }
 }
@@ -378,6 +381,11 @@ pub trait OutputSink {
     /// Channel `channel` (0 or 1) of `channels` (1 or 2) for the analyser.
     fn analyse(&mut self, channel: usize, channels: usize, samples: &[f32]) {
         let _ = (channel, channels, samples);
+    }
+
+    /// Channel `channel` (0 or 1) of stream slot `slot`.
+    fn stream(&mut self, slot: usize, channel: usize, samples: &[f32]) {
+        let _ = (slot, channel, samples);
     }
 }
 
@@ -632,6 +640,12 @@ impl Plan {
                         outputs.loudness(slot as usize, start, c, &self.buffers[range]);
                     }
                 }
+                Step::Stream { src, slot } => {
+                    for c in 0..(src.len as usize).min(2) {
+                        let range = self.buf(self.indices[src.start as usize + c]);
+                        outputs.stream(slot as usize, c, &self.buffers[range]);
+                    }
+                }
                 Step::Analyse { src } => {
                     let n = (src.len as usize).min(2);
                     for c in 0..n {
@@ -673,6 +687,7 @@ impl Plan {
                     }
                     let meters = &self.node_meters;
                     if let Some(p) = self.procs.get_mut(proc as usize) {
+                        p.start = start;
                         p.process(&mut io[..n], &keys[..kn], block, meters);
                     }
                 }

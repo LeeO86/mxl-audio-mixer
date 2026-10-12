@@ -110,6 +110,33 @@ The control room (§10.1) is part of the show (`control_room`); who is soloed is
 
 The UI's Control room tab has all of it; PFL and AFL are on the strips.
 
+## Listening in the browser
+
+Every monitor can be heard in the browser (§10.1, the preview contract of
+Appendix B.1): the mixer encodes it as Opus (stereo, 10 ms frames, 128 kbit/s;
+other formats downmixed) and publishes it over RTSP to MediaMTX as
+`<PREVIEW_PATH_PREFIX>/<monitor id>`; the browser plays it by WHEP.
+
+- **MediaMTX:** without `PREVIEW_PUBLISH_URL` the mixer runs its own as a child
+  process (`MEDIAMTX_BIN`; in the image), restarted with backoff (1 s, doubling to
+  30 s) when it ends: RTSP on 127.0.0.1:`MEDIAMTX_RTSP_PORT`, WHEP on
+  `MEDIAMTX_WHEP_PORT`, ICE on UDP `MEDIAMTX_ICE_UDP_PORT`, `NMOS_HOST_ADDRESS` as
+  the ICE address; no API, HLS, RTMP, SRT or MoQ; only the mixer's paths;
+  publishing only from this host. Its configuration is written to
+  `MIXER_STATE_DIR/mediamtx.yml`. With `PREVIEW_PUBLISH_URL` the streams go to the
+  platform's MediaMTX and `PREVIEW_WHEP_URL` is the browser's base.
+- **On demand:** a stream is encoded only while someone listens: the UI repeats
+  `POST /api/v1/preview/<id>/listen` every 5 s while playing; with
+  `MEDIAMTX_API_URL`, readers on MediaMTX count too. 10 s after the last, it stops.
+- **Personal monitors:** each browser can make its own (`MIXER_MAX_WEB_MONITORS`,
+  default 8): "My headphones" in the Control room tab, with its own source, level,
+  dim, cut, check and solo, not part of the show. Unheard for 10 minutes, it is
+  removed.
+- **Latency:** from the media time of a sample to the browser's audio output,
+  79–99 ms (median per run; single pulses 75–104 ms) measured in headless Chrome
+  on the development machine (target ≤ 150 ms; `tests/integration/preview.sh`
+  with the `second-pulse` oscillator).
+
 ## Run
 
 ```sh
@@ -175,6 +202,16 @@ origin. No setting is a secret.
 | `TSL_TCP_PORT` | 8911 | TSL UMD 5.0 over TCP (DLE/STX framing). |
 | `TSL_SCREEN` | -1 | Only this TSL screen; -1 is every screen. |
 | `TSL_MAP` | empty | display:index pairs, e.g. 0:1,1:2: the tally index a TSL display index drives; empty: the same number. |
+| `PREVIEW_PUBLISH_URL` | unset | RTSP base URL of the shared MediaMTX. Unset: start a built-in MediaMTX and publish there. |
+| `PREVIEW_PATH_PREFIX` | mxl-audio-mixer | Path prefix of every stream: <prefix>/<monitor id>. |
+| `PREVIEW_WHEP_URL` | unset | Public base URL of WHEP and WHIP for the browser. Unset with the built-in MediaMTX: the page's host and MEDIAMTX_WHEP_PORT. |
+| `PREVIEW_HLS_URL` | unset | Public base URL of HLS (listed for the platform; the mixer plays by WHEP). |
+| `MEDIAMTX_API_URL` | unset | API of the shared MediaMTX, for reader counts. |
+| `MEDIAMTX_RTSP_PORT` | 8954 | RTSP port of the built-in MediaMTX (127.0.0.1). |
+| `MEDIAMTX_WHEP_PORT` | 8599 | WHEP and WHIP port of the built-in MediaMTX. |
+| `MEDIAMTX_ICE_UDP_PORT` | 8199 | WebRTC ICE UDP port of the built-in MediaMTX. |
+| `MEDIAMTX_BIN` | mediamtx | The built-in MediaMTX executable (the image has it). |
+| `MIXER_MAX_WEB_MONITORS` | 8 | Most personal monitor paths of browser clients at once. |
 
 Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
 group hint, default `Input <n>`) and `extra_delay` (`"auto"`, the default, or ms).
@@ -305,11 +342,14 @@ without touching the audio.
 | `NMOS_PORT` | 3312 | IS-04 Node API, IS-05 Connection API |
 | `TSL_UDP_PORT` (udp) | 8910 | TSL UMD 5.0 tally, only with `TSL_ENABLE=true` |
 | `TSL_TCP_PORT` (tcp) | 8911 | TSL UMD 5.0 tally (DLE/STX framing), only with `TSL_ENABLE=true` |
+| `MEDIAMTX_RTSP_PORT` | 8954 | the built-in MediaMTX's RTSP, on 127.0.0.1 (without `PREVIEW_PUBLISH_URL`) |
+| `MEDIAMTX_WHEP_PORT` | 8599 | the built-in MediaMTX's WHEP (without `PREVIEW_PUBLISH_URL`) |
+| `MEDIAMTX_ICE_UDP_PORT` (udp) | 8199 | the built-in MediaMTX's WebRTC media (without `PREVIEW_PUBLISH_URL`) |
 
 | Exit code | Meaning |
 | --- | --- |
 | 0 | stopped by Ctrl-C |
-| 75 | a port cannot be bound (TSL ports with `TSL_ENABLE=true`), or the DSP thread cannot start |
+| 75 | a port cannot be bound (TSL ports with `TSL_ENABLE=true`, the built-in MediaMTX's ports without `PREVIEW_PUBLISH_URL`), or the DSP thread cannot start |
 | 78 | invalid configuration, libmxl missing, output domain id clash |
 | 143 | SIGTERM: media stopped, MXL released, node deregistered, own domain removed with `MXL_CLEANUP_ON_EXIT=true`, within `SHUTDOWN_TIMEOUT_S` |
 
@@ -354,6 +394,11 @@ without touching the audio.
 | `GET`, `PATCH /api/v1/control-room` | the control room (with `soloed`); change `sources`, `solo` (`mode`, `pfl_trim_db`, `programme_db`, `sip`), `reference_spl` |
 | `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
 | `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
+| `GET /api/v1/preview` | the preview: `mode` (`own`, `shared`), the built-in MediaMTX (`child`: running, pid, restarts, last exit), `whep_url` or `whep_port`, every stream (path, state, frames, connects, error, readers, last listen) |
+| `POST /api/v1/preview/<id>/listen` | someone listens to monitor `<id>` (repeat it at least every 10 s); answers `{"path", "whep_url", "whep_port"}` |
+| `GET`, `POST /api/v1/personal` | personal monitors; create one (`{"source"?}`; 409 above `MIXER_MAX_WEB_MONITORS`) |
+| `GET`, `PATCH`, `DELETE /api/v1/personal/<id>` | one: `source`, `level_db`, `dim`, `cut`, `check` |
+| `PUT`, `DELETE /api/v1/personal/<id>/solo/<signal>` | its own solo (`{"kind"}`) |
 | `GET /api/v1/tally` | the TSL settings, packets, every tally index's lamps (screen, display, LH, RH, label, age) and the strips that follow one (on air, preview, AFV open) |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
@@ -368,7 +413,8 @@ on connect and within 40 ms of every change of the mix, from any client; `{"type
 "meters", "loudness"}` every 40 ms; and `{"type": "analysis", …}` for clients that
 asked. A client may send `{"type": "subscribe", "meters": [ids] | null, "meter_hz":
 25, "analysis": false}` to receive only some signals' meters, less often, or the
-analyser. Changes go through the REST API.
+analyser. Changes go through the REST API; every change answers with
+`x-mix-revision`, the mix's revision after it.
 
 ## Metrics
 
@@ -377,7 +423,9 @@ analyser. Changes go through the REST API.
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}`, `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,
-`timing_trusted`, `tally_packets_total`, and per input: `input_state`,
+`timing_trusted`, `tally_packets_total`, `preview_state{path}` (0 idle, 1
+connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,
+and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
 `input_effective_delay_ms`, `input_late_samples_total`,
 `input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
@@ -399,12 +447,16 @@ gain reduction, limiter ceiling and latency, loudness and its controls),
 `tests/integration/show.sh` (snapshots with filters, recall-safe and crossfade,
 layouts, show history, PPM, correlation, the analyser, the events WebSocket),
 `tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
-checked on the API and on the other client; tally and AFV),
+checked on the API and on the other client; tally and AFV; a toggle pressed twice
+around a late mix; listening to a monitor with `MEDIAMTX_BIN`),
 `tests/integration/room.sh` (a published monitor sample-exact with level, dim,
 cut and checks; PFL, AFL, interlock, solo-in-place; an input source; the
 oscillator), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
 closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contract
 and a framing check in headless Chrome from an allowed and a refused origin),
+`tests/integration/preview.sh` (MediaMTX built in and shared, monitors played over
+WHEP in headless Chrome, the latency, on-demand streams, the child restarted,
+personal monitors),
 `tests/perf/section16.sh` (the
 §16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
@@ -416,6 +468,9 @@ a flow against the tone) are in the image too.
 ## Licence
 
 MIT. Dependencies: `mxl` / `mxl-sys` (Apache-2.0, dmf-mxl), `mxl-nmos`
-(MIT OR Apache-2.0), and MIT or Apache-2.0 crates. The UI: Vue (MIT), built with
+(MIT OR Apache-2.0), libopus (BSD-3-Clause, linked statically through
+`opusic-sys`; its notice is in the image under `/usr/share/doc/libopus`), and MIT
+or Apache-2.0 crates. The image also has MediaMTX (MIT, a separate executable,
+`/usr/share/doc/mediamtx`). The UI: Vue (MIT), built with
 Vite (MIT); its base styles and components come from the sibling media functions
 (MIT, same author).

@@ -16,6 +16,8 @@ pub mod mxlio;
 pub mod nmos;
 pub mod ops;
 pub mod outputs;
+pub mod preview;
+pub mod preview_api;
 pub mod room_api;
 pub mod show_api;
 pub mod state;

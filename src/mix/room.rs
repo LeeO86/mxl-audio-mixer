@@ -230,6 +230,12 @@ pub fn validate(mix: &Mix, inputs: usize) -> Result<(), String> {
         if !ids.insert(m.id.as_str()) {
             return Err(format!("monitor id {} is used twice", m.id));
         }
+        if m.id.starts_with("personal-") {
+            return Err(format!(
+                "monitor id {}: personal-… is kept for personal monitors",
+                m.id
+            ));
+        }
         if m.name.trim().is_empty() || m.name.chars().count() > 64 {
             return Err(format!("monitor {}: a name has 1 to 64 characters", m.id));
         }

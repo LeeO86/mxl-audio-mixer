@@ -8,6 +8,7 @@ import Meter from "./Meter.vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
 import { api } from "../api.js";
+import { listening, toggleListen } from "../whep.js";
 import { act, buses, live, patchMonitor, room, signalOf, signals, soloed } from "../store.js";
 
 const props = defineProps({
@@ -57,6 +58,9 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
       <span v-if="soloActive && m.follows_solo" class="state-tag" style="background: #e0c23a; color: #20180a">solo</span>
       <span class="spacer"></span>
       <span v-if="!compact && published" class="pill ok" :title="`MXL flow ${published.mxl_flow_id}`">MXL out</span>
+      <button class="btn small" :class="listening[m.id] ? '' : 'secondary'" :aria-pressed="!!listening[m.id]" :title="listening[m.id] || 'listen in this browser (WebRTC)'" @click="toggleListen(m.id)">
+        {{ listening[m.id] === "playing" ? "Listening" : listening[m.id] ? "Connecting…" : "Listen" }}
+      </button>
     </h3>
     <div class="mbody">
       <div>

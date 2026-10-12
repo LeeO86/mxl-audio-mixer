@@ -109,7 +109,26 @@ with `tests/integration/tsl_send.py` to ports `TSL_TEST_UDP`/`TSL_TEST_TCP` (892
 (`SECONDS`) on ports 8180/3332 and prints the mean block time, the load ratio, the
 slowest histogram bucket and deadline misses.
 
-## Added in later milestones
+## MediaMTX and libopus
 
-MediaMTX (preview contract, milestone 5) is added to this file and to CI with the
-milestone that needs it.
+The preview (milestone 5) needs `cmake` for the bundled libopus (`opusic-sys`
+builds it) and a MediaMTX executable for the built-in instance. The pinned
+release, as in CI and the image:
+
+```sh
+curl -fsSL -o /tmp/mediamtx.tgz https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1_linux_amd64.tar.gz
+echo "81b143f55a5d23d4a8c028d52869c14ea4a59919900528698fcc97a747fd69c6  /tmp/mediamtx.tgz" | sha256sum -c
+mkdir -p ~/mediamtx && tar xzf /tmp/mediamtx.tgz -C ~/mediamtx mediamtx
+export MEDIAMTX_BIN=~/mediamtx/mediamtx
+```
+
+Without `MEDIAMTX_BIN` (and no `mediamtx` in `PATH`) the mixer runs and only logs
+that it cannot start MediaMTX; `tests/integration/preview.sh` needs it, `ui.sh`
+checks listening only with it. The integration tests give the built-in MediaMTX
+ports 8964, 8609 and 8209 (UDP), so they do not collide with a mixer on the
+defaults; `preview.sh` runs a shared MediaMTX on 8974 (RTSP), 8619 (WHEP), 8219
+(ICE) and 8977 (API).
+
+Every mixer pins its DSP thread to the last CPU it may use: a second mixer on the
+same machine (a demo) shares that core and its inputs come late, which fails the
+sample-exact probes. Stop it, or start the tests with `taskset` on other CPUs.

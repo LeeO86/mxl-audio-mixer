@@ -34,6 +34,8 @@ pub struct App {
     pub tai_offset_s: i64,
     pub timing_trusted: bool,
     pub started: std::time::Instant,
+    /// The built-in MediaMTX child (unused with a shared one).
+    pub mediamtx: Arc<crate::preview::mediamtx::Child>,
 }
 
 impl App {
@@ -82,8 +84,33 @@ pub fn router(app: App) -> Router {
         .merge(crate::api::routes())
         .merge(crate::show_api::routes())
         .merge(crate::room_api::routes())
+        .merge(crate::preview_api::routes())
         .merge(crate::widgets::routes())
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            mix_revision,
+        ))
         .with_state(app)
+}
+
+/// Every change answers with `x-mix-revision`, the mix revision after it: a client
+/// keeps its own change over pushed mixes older than that (`web/src/store.js`).
+async fn mix_revision(
+    State(app): State<App>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let change = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    );
+    let mut resp = next.run(req).await;
+    if change {
+        let revision = app.control().revision;
+        resp.headers_mut()
+            .insert("x-mix-revision", axum::http::HeaderValue::from(revision));
+    }
+    resp
 }
 
 /// The web UI: one self-contained page embedded at build time (`build.rs`).
@@ -169,6 +196,11 @@ pub fn status_json(app: &App) -> Value {
             "state": control.tally_status(),
         },
         "solo": control.solo(),
+        "preview": {
+            "mode": if app.config.preview_publish_url.is_none() { "own" } else { "shared" },
+            "child_running": app.mediamtx.running.load(Ordering::Relaxed),
+            "streams": control.streams.status(&control.stream_ids()).iter().filter(|s| s.state != "idle").count(),
+        },
     })
 }
 
@@ -410,6 +442,41 @@ async fn metrics(State(app): State<App>) -> Response {
         "counter",
         "Execution plans swapped in by the DSP thread.",
         vec![format!(" {}", c.plan_swaps.load(Ordering::Relaxed))],
+    );
+    let streams = control.streams.status(&control.stream_ids());
+    metric(
+        "preview_state",
+        "gauge",
+        "Per stream: 0 idle, 1 connecting, 2 publishing.",
+        streams
+            .iter()
+            .map(|s| {
+                let v = match s.state {
+                    "publishing" => 2,
+                    "connecting" => 1,
+                    _ => 0,
+                };
+                format!("{{path=\"{}\"}} {v}", s.path)
+            })
+            .collect(),
+    );
+    metric(
+        "preview_readers",
+        "gauge",
+        "Per stream: readers on MediaMTX (with MEDIAMTX_API_URL).",
+        streams
+            .iter()
+            .filter_map(|s| s.readers.map(|n| format!("{{path=\"{}\"}} {n}", s.path)))
+            .collect(),
+    );
+    metric(
+        "preview_child_restarts_total",
+        "counter",
+        "Restarts of the built-in MediaMTX.",
+        vec![format!(
+            " {}",
+            app.mediamtx.restarts.load(Ordering::Relaxed)
+        )],
     );
     metric(
         "tally_packets_total",

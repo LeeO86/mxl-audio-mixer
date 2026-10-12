@@ -56,6 +56,16 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "TSL_TCP_PORT", default: "8911", description: "TSL UMD 5.0 over TCP (DLE/STX framing)." },
     Setting { name: "TSL_SCREEN", default: "-1", description: "Only this TSL screen; -1 is every screen." },
     Setting { name: "TSL_MAP", default: "empty", description: "display:index pairs, e.g. 0:1,1:2: the tally index a TSL display index drives; empty: the same number." },
+    Setting { name: "PREVIEW_PUBLISH_URL", default: "unset", description: "RTSP base URL of the shared MediaMTX. Unset: start a built-in MediaMTX and publish there." },
+    Setting { name: "PREVIEW_PATH_PREFIX", default: "mxl-audio-mixer", description: "Path prefix of every stream: <prefix>/<monitor id>." },
+    Setting { name: "PREVIEW_WHEP_URL", default: "unset", description: "Public base URL of WHEP and WHIP for the browser. Unset with the built-in MediaMTX: the page's host and MEDIAMTX_WHEP_PORT." },
+    Setting { name: "PREVIEW_HLS_URL", default: "unset", description: "Public base URL of HLS (listed for the platform; the mixer plays by WHEP)." },
+    Setting { name: "MEDIAMTX_API_URL", default: "unset", description: "API of the shared MediaMTX, for reader counts." },
+    Setting { name: "MEDIAMTX_RTSP_PORT", default: "8954", description: "RTSP port of the built-in MediaMTX (127.0.0.1)." },
+    Setting { name: "MEDIAMTX_WHEP_PORT", default: "8599", description: "WHEP and WHIP port of the built-in MediaMTX." },
+    Setting { name: "MEDIAMTX_ICE_UDP_PORT", default: "8199", description: "WebRTC ICE UDP port of the built-in MediaMTX." },
+    Setting { name: "MEDIAMTX_BIN", default: "mediamtx", description: "The built-in MediaMTX executable (the image has it)." },
+    Setting { name: "MIXER_MAX_WEB_MONITORS", default: "8", description: "Most personal monitor paths of browser clients at once." },
 ];
 
 pub const ALLOWED_BLOCKS: [u32; 4] = [48, 96, 144, 240];
@@ -125,6 +135,17 @@ pub struct Config {
     pub tsl_screen: Option<u16>,
     /// TSL display index → tally index; empty: the same number.
     pub tsl_map: BTreeMap<u16, u16>,
+    /// RTSP base of the shared MediaMTX; `None`: the built-in one.
+    pub preview_publish_url: Option<String>,
+    pub preview_path_prefix: String,
+    pub preview_whep_url: Option<String>,
+    pub preview_hls_url: Option<String>,
+    pub mediamtx_api_url: Option<String>,
+    pub mediamtx_rtsp_port: u16,
+    pub mediamtx_whep_port: u16,
+    pub mediamtx_ice_udp_port: u16,
+    pub mediamtx_bin: String,
+    pub max_web_monitors: usize,
     /// Every setting's value as text and its origin, for `GET /api/v1/config`.
     pub values: Vec<(&'static str, String, Origin)>,
 }
@@ -425,6 +446,57 @@ impl Parser<'_> {
             Some((raw, _)) => parse_tsl_map(&raw)?,
         };
 
+        let url = |name: &str, schemes: &[&str]| -> Result<Option<String>, ConfigError> {
+            match self.get(name) {
+                None => Ok(None),
+                Some((raw, _)) => {
+                    let ok = schemes
+                        .iter()
+                        .any(|s| raw.starts_with(&format!("{s}://")) && raw.len() > s.len() + 3);
+                    if ok && !raw.contains(char::is_whitespace) {
+                        Ok(Some(raw.trim_end_matches('/').to_string()))
+                    } else {
+                        err(format!(
+                            "{name} must be a {} URL, got {raw}",
+                            schemes.join(" or ")
+                        ))
+                    }
+                }
+            }
+        };
+        let preview_publish_url = url("PREVIEW_PUBLISH_URL", &["rtsp"])?;
+        let preview_whep_url = url("PREVIEW_WHEP_URL", &["http", "https"])?;
+        let preview_hls_url = url("PREVIEW_HLS_URL", &["http", "https"])?;
+        let mediamtx_api_url = url("MEDIAMTX_API_URL", &["http", "https"])?;
+        let preview_path_prefix = self
+            .get("PREVIEW_PATH_PREFIX")
+            .map(|(v, _)| v.trim_matches('/').to_string())
+            .unwrap_or_else(|| "mxl-audio-mixer".into());
+        if preview_path_prefix.is_empty()
+            || !preview_path_prefix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
+            || preview_path_prefix.contains("//")
+        {
+            return err("PREVIEW_PATH_PREFIX must be path segments of a-z, A-Z, 0-9, '-', '_', '.' separated by '/'");
+        }
+        let mediamtx_rtsp_port: u16 = self.int("MEDIAMTX_RTSP_PORT", 8954, 1, 65535)?;
+        let mediamtx_whep_port: u16 = self.int("MEDIAMTX_WHEP_PORT", 8599, 1, 65535)?;
+        let mediamtx_ice_udp_port: u16 = self.int("MEDIAMTX_ICE_UDP_PORT", 8199, 1, 65535)?;
+        if preview_publish_url.is_none() {
+            let tcp = [web_port, nmos_port, mediamtx_rtsp_port, mediamtx_whep_port];
+            if (1..tcp.len()).any(|i| tcp[i..].contains(&tcp[i - 1])) {
+                return err(
+                    "WEB_PORT, NMOS_PORT, MEDIAMTX_RTSP_PORT and MEDIAMTX_WHEP_PORT must differ",
+                );
+            }
+        }
+        let mediamtx_bin = self
+            .get("MEDIAMTX_BIN")
+            .map(|(v, _)| v)
+            .unwrap_or_else(|| "mediamtx".into());
+        let max_web_monitors: usize = self.int("MIXER_MAX_WEB_MONITORS", 8, 0, 64)?;
+
         let mut config = Config {
             host_id,
             web_port,
@@ -459,6 +531,16 @@ impl Parser<'_> {
             tsl_tcp_port,
             tsl_screen,
             tsl_map,
+            preview_publish_url,
+            preview_path_prefix,
+            preview_whep_url,
+            preview_hls_url,
+            mediamtx_api_url,
+            mediamtx_rtsp_port,
+            mediamtx_whep_port,
+            mediamtx_ice_udp_port,
+            mediamtx_bin,
+            max_web_monitors,
             values: Vec::new(),
         };
         config.values = SETTINGS
@@ -519,6 +601,16 @@ impl Config {
                 .map(|(d, i)| format!("{d}:{i}"))
                 .collect::<Vec<_>>()
                 .join(","),
+            "PREVIEW_PUBLISH_URL" => opt(self.preview_publish_url.clone()),
+            "PREVIEW_PATH_PREFIX" => self.preview_path_prefix.clone(),
+            "PREVIEW_WHEP_URL" => opt(self.preview_whep_url.clone()),
+            "PREVIEW_HLS_URL" => opt(self.preview_hls_url.clone()),
+            "MEDIAMTX_API_URL" => opt(self.mediamtx_api_url.clone()),
+            "MEDIAMTX_RTSP_PORT" => self.mediamtx_rtsp_port.to_string(),
+            "MEDIAMTX_WHEP_PORT" => self.mediamtx_whep_port.to_string(),
+            "MEDIAMTX_ICE_UDP_PORT" => self.mediamtx_ice_udp_port.to_string(),
+            "MEDIAMTX_BIN" => self.mediamtx_bin.clone(),
+            "MIXER_MAX_WEB_MONITORS" => self.max_web_monitors.to_string(),
             _ => String::new(),
         }
     }
@@ -653,6 +745,42 @@ mod tests {
             (8910, 8911, None)
         );
         assert!(c.tsl_map.is_empty());
+        assert_eq!(c.preview_publish_url, None);
+        assert_eq!(c.preview_path_prefix, "mxl-audio-mixer");
+        assert_eq!(
+            (
+                c.mediamtx_rtsp_port,
+                c.mediamtx_whep_port,
+                c.mediamtx_ice_udp_port
+            ),
+            (8954, 8599, 8199)
+        );
+        assert_eq!(c.max_web_monitors, 8);
+    }
+
+    #[test]
+    fn preview() {
+        let c = load_vars(&[
+            ("PREVIEW_PUBLISH_URL", "rtsp://mediamtx.ns.svc:8554/"),
+            ("PREVIEW_PATH_PREFIX", "/prod/mix1/"),
+            ("PREVIEW_WHEP_URL", "https://media.example"),
+        ])
+        .unwrap();
+        assert_eq!(
+            c.preview_publish_url.as_deref(),
+            Some("rtsp://mediamtx.ns.svc:8554")
+        );
+        assert_eq!(c.preview_path_prefix, "prod/mix1");
+        for (k, v) in [
+            ("PREVIEW_PUBLISH_URL", "http://x"),
+            ("PREVIEW_WHEP_URL", "media.example"),
+            ("PREVIEW_PATH_PREFIX", "a b"),
+            ("PREVIEW_PATH_PREFIX", "a//b"),
+            ("MEDIAMTX_WHEP_PORT", "8160"),
+            ("MIXER_MAX_WEB_MONITORS", "65"),
+        ] {
+            assert!(load_vars(&[(k, v)]).is_err(), "{k}={v}");
+        }
     }
 
     #[test]

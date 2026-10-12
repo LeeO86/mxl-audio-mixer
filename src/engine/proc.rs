@@ -143,6 +143,18 @@ fn ident_gain(played: u64) -> f32 {
     }
 }
 
+/// The latency test signal: the tone during the first 20 ms of every second of
+/// the TAI sample index, starting at phase 0 (at 1 kHz exactly 20 cycles).
+const PULSE: u64 = 960;
+
+fn pulse_gain(index: u64) -> f32 {
+    if index % u64::from(crate::config::SAMPLE_RATE) < PULSE {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// The type-specific part: coefficients and state.
 pub enum Kind {
     Eq {
@@ -193,7 +205,7 @@ pub enum Kind {
     },
     /// Phase (cycles, 0–1) and the samples played (for the ident's period).
     Oscillator {
-        ident: bool,
+        waveform: crate::mix::chain::Waveform,
         phase: f64,
         played: u64,
     },
@@ -255,6 +267,8 @@ pub struct Processor {
     wet: f32,
     pub meter: usize,
     pub kind: Kind,
+    /// The absolute sample index (TAI) of the block being processed.
+    pub start: u64,
 }
 
 fn allpass(freq: f64) -> Coefficients {
@@ -348,7 +362,7 @@ impl Processor {
                 sum: vec![0.0; block],
             },
             ProcKind::Oscillator { waveform, .. } => Kind::Oscillator {
-                ident: *waveform == crate::mix::chain::Waveform::EbuIdent,
+                waveform: *waveform,
                 phase: 0.0,
                 played: 0,
             },
@@ -403,6 +417,7 @@ impl Processor {
             wet: values.first().copied().unwrap_or(1.0),
             meter,
             kind: k,
+            start: 0,
         }
     }
 
@@ -422,6 +437,7 @@ impl Processor {
                 taps: Box::new(truepeak::taps()),
                 channels: vec![TruePeak::default(); channels.min(MAX_CH)],
             },
+            start: 0,
         }
     }
 
@@ -660,6 +676,7 @@ impl Processor {
 
     /// The type's processing; returns the largest gain reduction in dB.
     fn run(&mut self, io: &mut [&mut [f32]], key: &[&[f32]], block: usize) -> f64 {
+        let start = self.start;
         let cur = &self.params.cur;
         let p = |i: usize| f64::from(cur[i]);
         let n = io.len();
@@ -1036,19 +1053,31 @@ impl Processor {
                 0.0
             }
             Kind::Oscillator {
-                ident,
+                waveform,
                 phase,
                 played,
             } => {
+                use crate::mix::chain::Waveform;
                 let step = p(1) / f64::from(crate::config::SAMPLE_RATE);
                 let amplitude = from_db(p(2));
                 for k in 0..block {
+                    let (left, all) = match waveform {
+                        Waveform::Sine => (1.0, 1.0),
+                        Waveform::EbuIdent => (ident_gain(*played), 1.0),
+                        Waveform::SecondPulse => {
+                            let g = pulse_gain(start + k as u64);
+                            (g, g)
+                        }
+                    };
                     let s = ((2.0 * std::f64::consts::PI * *phase).sin() * amplitude) as f32;
-                    *phase = (*phase + step).fract();
-                    let left = if *ident { ident_gain(*played) } else { 1.0 };
+                    *phase = if all == 0.0 {
+                        0.0
+                    } else {
+                        (*phase + step).fract()
+                    };
                     *played = played.wrapping_add(1);
                     for (c, ch) in io.iter_mut().enumerate() {
-                        ch[k] = if c == 0 { s * left } else { s };
+                        ch[k] = s * if c == 0 { left } else { all };
                     }
                 }
                 0.0
@@ -1167,6 +1196,32 @@ mod tests {
         assert!(peak(&out[1][..12_000]) > 0.12, "right on");
         assert!(peak(&out[0][12_200..143_000]) > 0.12, "left back");
         assert_eq!(peak(&out[0][144_000..156_000]), 0.0, "again after 3 s");
+    }
+
+    #[test]
+    fn second_pulse_follows_the_sample_index() {
+        let pulse = ProcKind::Oscillator {
+            waveform: crate::mix::chain::Waveform::SecondPulse,
+            freq_hz: 1000.0,
+            level_dbfs: -18.0,
+        };
+        let mut p = proc(pulse, 2);
+        // Start 0.5 s into a second: the first pulse is at 24 000.
+        let first = 48_000 * 1_000_000 + 24_000;
+        let mut out = vec![vec![0f32; 2 * 48_000]; 2];
+        for (b, start) in (0..out[0].len()).step_by(B).enumerate() {
+            p.start = first + (b * B) as u64;
+            let mut io: Vec<&mut [f32]> =
+                out.iter_mut().map(|c| &mut c[start..start + B]).collect();
+            p.process(&mut io, &[], B, &[]);
+        }
+        let peak = |c: &[f32]| c.iter().fold(0f32, |a, x| a.max(x.abs()));
+        assert_eq!(peak(&out[0][..24_000]), 0.0);
+        assert!(peak(&out[0][24_000..24_960]) > 0.12);
+        assert_eq!(out[0][24_000], 0.0, "starts at phase 0");
+        assert_eq!(peak(&out[0][24_960..72_000]), 0.0);
+        assert!(peak(&out[1][72_000..72_960]) > 0.12);
+        assert_eq!(out[0], out[1]);
     }
 
     fn run(p: &mut Processor, input: &[Vec<f32>], key: Option<&[Vec<f32>]>) -> Vec<Vec<f32>> {

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Helpers for the integration tests. Needs: the mixer and mxl-mixer-tone binaries
-# ($MIXER_BIN, $TONE_BIN; default target/debug), libmxl in the linker path
+# ($MIXER_BIN, $TONE_BIN; default target/debug), MediaMTX ($MEDIAMTX_BIN, for
+# the preview), libmxl in the linker path
 # (LD_LIBRARY_PATH=/opt/mxl/lib), python3, curl, docker for the registry.
 set -euo pipefail
 
@@ -59,9 +60,13 @@ start_registry() { # registration 8010, query 8011
 }
 
 MIXER_PID=""
+# The built-in MediaMTX on ports other than the defaults, so a mixer running on
+# this machine does not collide; without MEDIAMTX_BIN the mixer only logs that
+# it cannot start it.
 start_mixer() { # [VAR=value...] ; logs to $IT_OUT/<test>-mixer.log
     env HOST_ID=it NMOS_HOST_ADDRESS="$HOST_IP" MXL_DOMAIN_SCAN_PATH="$WORK/mxl" \
-        MIXER_STATE_DIR="$WORK/state" MIXER_INPUT_FLOWS=4 "$@" \
+        MIXER_STATE_DIR="$WORK/state" MIXER_INPUT_FLOWS=4 \
+        MEDIAMTX_RTSP_PORT=8964 MEDIAMTX_WHEP_PORT=8609 MEDIAMTX_ICE_UDP_PORT=8209 "$@" \
         "$MIXER_BIN" >>"$IT_OUT/$(basename "$0" .sh)-mixer.log" 2>&1 &
     MIXER_PID=$!
     PIDS+=("$MIXER_PID")

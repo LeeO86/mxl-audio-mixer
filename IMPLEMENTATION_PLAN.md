@@ -295,7 +295,7 @@ None.
 | 5 | Meters | Peak per 40 ms update and RMS over 300 ms, post-fader, accepted; plus a peak hold that is cleared manually (`POST /api/v1/meters[/<id>]/clear`). |
 | 6 | Mono into 3.0 and surround | Into C (changed from the proposed front L/R pair). |
 | 7 | Published outputs | At most 128. Accepted. |
-| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. |
+| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. (2026-10-12: the mixer stays MIT for now, see M5b answers.) |
 
 ## M3: EQ, filters, dynamics, delay; delay compensation; true peak and loudness
 
@@ -594,9 +594,9 @@ After the merge, `main` CI failed once in `show.sh`: the correlation read 0.9969
 ## M5: control room
 
 In three parts, each a PR:
-- **M5a** (this part): the monitoring engine and UI: monitors, solo, checks, MXL
+- **M5a** (merged, PR 9): the monitoring engine and UI: monitors, solo, checks, MXL
   monitor outputs, the oscillator, the `monitor` widget, PFL in the strip widget.
-- **M5b**: the preview contract (Appendix B.1): MediaMTX (own child or shared),
+- **M5b** (PR 10): the preview contract (Appendix B.1): MediaMTX (own child or shared),
   monitors as Opus over RTSP (an RTSP publisher of my own, `libopus`; no GStreamer),
   WHEP listening in the UI, personal monitors (`MIXER_MAX_WEB_MONITORS`), encoding
   only what someone listens to, and the latency measurement (§3: ≤ 150 ms
@@ -661,6 +661,106 @@ After the answers: bass management (D67), unit-tested (1 kHz stays on L, 30 Hz o
 the LFE, the crossover sums flat within 0.05 dB at 80 Hz, the LFE input at +10 dB)
 and in `room.sh` (a 5.1 monitor on the oscillator: at 30 Hz the LFE carries L + R
 at −12.1 dBFS, L below −45 dBFS; off again: 30 Hz on L).
+
+### M5b: what exists
+
+- `src/preview/`: the streams (`mod.rs`: on demand, an Opus encoder thread per
+  stream), the RTSP publisher (`rtsp.rs`), the built-in MediaMTX (`mediamtx.rs`:
+  configuration, supervisor, port check, reader counts).
+- `src/preview_api.rs`: `/api/v1/preview`, `/api/v1/preview/<id>/listen`,
+  `/api/v1/personal…`.
+- Engine: `Step::Stream` copies a monitor's stereo block into the ring of a stream
+  slot (`Command::SetStream`, `ClearStream`); the compiler adds it for every
+  monitor with an active stream and for personal monitors.
+- The `second-pulse` oscillator waveform.
+- UI: `web/src/whep.js` (the WHEP player), Listen on the monitor cards, "My
+  headphones" (`PersonalCard.vue`), the preview in the Status tab.
+- `tests/integration/preview.sh` with `web/tests/preview.mjs`; Listen and the
+  status in `ui.mjs`. CI downloads MediaMTX; the image has it.
+
+### M5b: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D68 | An RTSP publisher of the mixer's own: OPTIONS, ANNOUNCE (SDP: Opus/48000/2, PT 96), SETUP with TCP interleaving, RECORD; RTP per RFC 7587. A lost connection is reopened every 2 s. | §3 "RTSP with a small Rust client"; no GStreamer. TCP: no UDP ports to allocate, and RTSP runs on 127.0.0.1 or inside the cluster. B.1 "reopening by itself … every ~2 s". |
+| D69 | Opus through the `opus` crate (libopus 1.5, built from source by `opusic-sys` and linked statically, BSD-3-Clause): stereo, application LowDelay, 10 ms frames, 128 kbit/s. Other monitor formats are downmixed to stereo with the width matrix. | §10.1 "WHEP, Opus, stereo, low-latency settings". 128 kbit/s and 10 ms are my choice (question 1). |
+| D70 | The DSP thread copies a stream's block into an SPSC ring (2 s; dropped when full, never waits); an encoder thread per stream does the rest. At most 96 streams. A stream that starts or stops changes the plan structure, like a send. | Real-time rules: no I/O or allocation in the DSP thread. |
+| D71 | On demand: a stream runs while it is listened to (the UI repeats `POST …/listen` every 5 s) or, with `MEDIAMTX_API_URL`, has readers; 10 s after the last, it stops. | §10.1 "only paths someone listens to are encoded … stops encoding after a grace time". The built-in MediaMTX has no API (G6), so the listen requests are needed. 10 s: question 1. |
+| D72 | The built-in MediaMTX: a child process with a rendered configuration (`MIXER_STATE_DIR/mediamtx.yml`, working directory the state dir), restarted after 1 s, doubling to 30 s (back to 1 s after a minute up); its ports checked before the start (exit 75); killed and reaped at shutdown. Only what the mixer needs: RTSP on 127.0.0.1 (TCP), WebRTC with `NMOS_HOST_ADDRESS` as an ICE host; no API, metrics, HLS, RTMP, SRT or MoQ; only `<prefix>/…` paths; publishing only from 127.0.0.1/::1, reading from anywhere. | B.1, G6, §18. MediaMTX's defaults let anyone publish to any path (WHIP from the network), and v1.20 starts a MoQ server that writes certificates into the working directory. |
+| D73 | MediaMTX v1.20.1, the release tarball checked by SHA-256 (amd64, arm64), in CI and the image (`/usr/local/bin/mediamtx`, its licence under `/usr/share/doc/mediamtx`). | CI avoids Docker Hub (the AMWA job already does); the tarball is the upstream release. MIT. |
+| D74 | Personal monitors: runtime state, not in the show; ids `personal-<n>`; their own source, level, dim, cut, check and solo (their own solo bus); at most `MIXER_MAX_WEB_MONITORS` (default 8, 0–64); removed after 10 min unheard. The browser keeps its id for the tab (`sessionStorage`). | §10.1 "each logged-in UI client can have its own PFL and headphone selection without affecting the control room speakers". The mixer has no login: one per browser tab. Defaults: question 1. |
+| D75 | The latency is measured end to end: the `second-pulse` oscillator (the tone in the first 20 ms of every TAI second, from the block's sample index) on a monitor; headless Chrome plays it by WHEP, an AudioWorklet finds each onset, `AudioContext.getOutputTimestamp` maps it to the wall clock; the latency is that time modulo 1 s. | §3: "target ≤ 150 ms glass-to-ear … record the measurement". TAI and UTC seconds differ by whole seconds; the mixer and the browser share the clock. |
+| D76 | Every change answers with `x-mix-revision`; the UI keeps its own unacknowledged changes over pushed mixes older than that, and sends at most one change per path at a time. | A finding (below): a toggle pressed twice quickly could stay on. |
+
+### M5b: results (dev VM)
+
+- `cargo test`: 96 unit tests (new: the settings, the MediaMTX configuration and
+  reader counts, the RTSP SDP and RTP, the second pulse).
+- `tests/integration/preview.sh`:
+  - own mode: the child started; WHIP from the host's network address refused
+    (401), a path outside the prefix not served (400);
+  - monitor `main` in headless Chrome over WHEP: 12 s of audio, a pulse every
+    second; the stream stopped 10 s after the last listen request;
+  - the child killed (SIGKILL): restarted with a new pid, the stream published
+    again and playing;
+  - a personal monitor played, the page and WHEP on the host's address;
+  - the child ends with the mixer (exit 143);
+  - shared mode (a separate MediaMTX, `PREVIEW_PUBLISH_URL`, `PREVIEW_WHEP_URL`,
+    `MEDIAMTX_API_URL`): no child, the stream on the shared MediaMTX and playing; a
+    WHEP reader kept it for 20 s after a single listen request (its reader count
+    from the API); without it the stream stopped.
+- **Latency** (media time to the browser's audio output, Chrome's output latency 32
+  ms included), median per run over 6–12 pulses, in seven runs: 82.4–98.5 ms for
+  `main` (own mode, also after a child restart), 78.8–93.8 ms for a personal
+  monitor, 95.1 and 99.1 ms in shared mode; single pulses 75.2–104 ms. On a
+  GitHub runner: 78.6, 96.3, 96.6 (personal) and 94.7 ms (shared). Below 150 ms:
+  no in-process WebRTC stack (§3).
+- `ui.sh`: Listen on a monitor card until "Listening", the stream publishing in
+  the Status tab, stopped; two mute presses around a mix pushed 1 s late (below).
+- All integration tests pass on release binaries; the image starts the child (uid
+  1000, `/config/mediamtx.yml`) and exits 143.
+
+### M5b: findings
+
+- **A toggle pressed twice quickly could stay on.** The UI changed its copy at
+  once and the next pushed mix replaced it. A mix pushed before the server had the
+  first press (after another change) arrived between the presses, so the second
+  press toggled from the old value. Seen in `ui.sh` under load; `ui.mjs` now holds
+  the pushed mixes back by 1 s and fails without the fix (D76) every time.
+- **The next start found the child's ports taken:** the mixer exited before the
+  supervisor had killed and reaped MediaMTX; shutdown now waits for it.
+- **A demo mixer on the same machine fails the probes:** every mixer pins its DSP
+  thread to the last CPU it may use, so two share a core and the inputs come late
+  (`main` fails the same way). Documented in `docs/development.md`; CI runs one
+  mixer at a time.
+- The measuring AudioWorklet needs a secure context, which the host's address over
+  http is not; the test lets Chrome treat that origin as secure. The UI's player
+  (RTCPeerConnection, `<audio>`) does not need it.
+
+### M5b: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Defaults: Opus 128 kbit/s and 10 ms frames; 10 s grace; listen repeated every 5 s; `MIXER_MAX_WEB_MONITORS` 8; a personal monitor removed after 10 min unheard. | As implemented; none of them is in the spec. |
+| 2 | Browser talkback (M5c) is published by WHIP; the built-in MediaMTX takes publishing only from this host. | Allow publishing from anywhere only on `<prefix>/talkback/…` paths (the mixer only reads them), and only in own mode; the shared MediaMTX is the platform's. |
+| 3 | The deployment example's `PREVIEW_*` values (`rtsp://mediamtx:8554`, `production/mix1`, `https://preview.example`, `http://mediamtx:9997`) are placeholders. | Tell me the platform's names, or leave them as examples. |
+| 4 | Merge M5b (PR 10) before M5c? | Yes, as with M5a. |
+
+### M5b: answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Defaults (Opus 128 kbit/s, 10 ms; 10 s grace; listen every 5 s; 8 web monitors; personal monitors removed after 10 min) | Accepted. |
+| 2 | Browser talkback with the built-in MediaMTX | Accepted: publishing from anywhere only on the talkback paths, own mode only (M5c). The paths are §10.2's `<prefix>/talkback-<client>`. |
+| 3 | `PREVIEW_*` values in the deployment example | Kept as examples. |
+| 4 | Merge M5b before M5c | Yes. |
+
+**Licence (Com-IS-Assist, §8.2):** the mixer stays MIT. Whether Com-IS-Assist's
+core can be used under a permissive licence is an open discussion between the
+maintainer and its author. Its own licensing notes say GPLv3 comes only from the
+VST3 target (`vst3-sys`) and that the core crate could be licensed separately.
+Until it is settled, no Com-IS-Assist code is copied; answer 8 of M2 (a release
+blocker for the release that contains it) still holds.
 
 ## tests/hw scripts for the maintainers
 
