@@ -8,6 +8,7 @@
 
 pub mod automix;
 pub mod duck;
+pub mod silero;
 pub mod vad;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -145,7 +146,13 @@ impl Auto {
             let Some(s) = settings.get(signal) else {
                 continue;
             };
-            let v = self.vads.entry(signal.clone()).or_default();
+            let v = self
+                .vads
+                .entry(signal.clone())
+                .or_insert_with(|| vad::Vad::with(s.detector));
+            if v.wanted != s.detector {
+                *v = vad::Vad::with(s.detector);
+            }
             let list = frames.entry(signal.clone()).or_default();
             v.push(&self.scratch, s, |st| {
                 list.push(automix::Input {

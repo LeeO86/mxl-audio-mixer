@@ -51,7 +51,7 @@ const setDepth = (d, v) => patchDuck(d, { depth_db: Number(v) <= -120 ? "-inf" :
 
 // Voice detection.
 const own = computed(() => Object.fromEntries((live.mix?.vad || []).map((v) => [v.signal, v])));
-const DEFAULTS = { threshold: 0.5, hold_ms: 800, gate_lufs: -32 };
+const DEFAULTS = { threshold: 0.5, hold_ms: 800, gate_lufs: -32, detector: "silero" };
 const settingsOf = (id) => own.value[id] || { signal: id, ...DEFAULTS };
 const putVad = (id, body) => act(() => api.put(`/api/v1/vad/${id}`, body));
 const analysable = computed(() => [...strips.value, ...buses.value].filter((x) => !vadSignals.value.includes(x.id)));
@@ -105,12 +105,18 @@ async function addVad() {
         <div class="caption" style="margin-top: 0.8rem">Voice detection</div>
         <table v-if="vadSignals.length" class="amtable vadtable">
           <thead>
-            <tr><th>Signal</th><th>Speech</th><th title="speech starts above this probability">Threshold</th><th>Hold ms</th><th title="while the momentary loudness is below this, nothing is speech (crosstalk is quieter than the talker)">Gate LUFS</th><th></th></tr>
+            <tr><th>Signal</th><th>Speech</th><th title="Silero (a small neural network) or the feature detector">Detector</th><th title="speech starts above this probability">Threshold</th><th>Hold ms</th><th title="while the momentary loudness is below this, nothing is speech (crosstalk is quieter than the talker)">Gate LUFS</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="id in vadSignals" :key="id" :data-vad-row="id">
               <td>{{ nameOf(id) }}</td>
               <td><AutoLive kind="probability" :id="id" /></td>
+              <td>
+                <select :value="settingsOf(id).detector" :aria-label="`${nameOf(id)} detector`" @change="putVad(id, { detector: $event.target.value })">
+                  <option value="silero">Silero</option>
+                  <option value="features">Features</option>
+                </select>
+              </td>
               <td><NumberField :min="0.05" :max="0.95" :step="0.05" :value="settingsOf(id).threshold" :aria-label="`${nameOf(id)} threshold`" @change="(v) => putVad(id, { threshold: v })" /></td>
               <td><NumberField :min="0" :max="10000" :step="50" :value="settingsOf(id).hold_ms" :aria-label="`${nameOf(id)} hold`" @change="(v) => putVad(id, { hold_ms: v })" /></td>
               <td><NumberField :min="-70" :max="0" :step="1" :value="settingsOf(id).gate_lufs" :aria-label="`${nameOf(id)} gate`" @change="(v) => putVad(id, { gate_lufs: v })" /></td>

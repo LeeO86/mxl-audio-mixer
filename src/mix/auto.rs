@@ -38,6 +38,19 @@ pub struct VadSettings {
     /// quieter (the guard band of Com-IS-Assist).
     #[serde(default = "default_gate")]
     pub gate_lufs: f64,
+    #[serde(default)]
+    pub detector: VadDetector,
+}
+
+/// Which detector a VAD runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VadDetector {
+    /// Silero VAD, a small neural network (ONNX Runtime).
+    #[default]
+    Silero,
+    /// The feature detector: energy, voicing, modulation, tone rejection.
+    Features,
 }
 
 fn default_threshold() -> f64 {
@@ -57,6 +70,7 @@ impl VadSettings {
             threshold: default_threshold(),
             hold_ms: default_vad_hold(),
             gate_lufs: default_gate(),
+            detector: VadDetector::default(),
         }
     }
 }

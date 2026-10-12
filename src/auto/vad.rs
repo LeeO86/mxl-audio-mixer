@@ -277,8 +277,10 @@ pub struct VadState {
     /// Onsets and offsets so far.
     pub speech_onsets: u64,
     pub speech_offsets: u64,
-    /// The last frame's features (the detector's, for tuning).
+    /// The last frame's features (the feature detector's, for tuning).
     pub features: Features,
+    /// The detector running: `silero` or `features`.
+    pub detector: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
@@ -304,6 +306,8 @@ impl From<[f64; 4]> for Features {
 /// One signal's VAD: a detector with the smoothing, threshold, hold and outputs.
 pub struct Vad {
     detector: Box<dyn Detector>,
+    /// The detector the settings ask for (the one running, unless it fell back).
+    pub wanted: crate::mix::auto::VadDetector,
     pub state: VadState,
     /// Frames left in the hold.
     hold: u32,
@@ -322,11 +326,40 @@ impl Default for Vad {
 }
 
 impl Vad {
+    /// A VAD with the detector `kind`; Silero falls back to the feature detector
+    /// when ONNX Runtime cannot run the model.
+    pub fn with(kind: crate::mix::auto::VadDetector) -> Self {
+        use crate::mix::auto::VadDetector;
+        let mut v = match kind {
+            VadDetector::Silero => match super::silero::SileroDetector::new() {
+                Ok(d) => {
+                    let mut v = Self::new(Box::new(d));
+                    v.state.detector = "silero";
+                    v
+                }
+                Err(e) => {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        tracing::warn!(
+                            "Silero VAD unavailable ({e}); the feature detector runs instead"
+                        )
+                    });
+                    Self::default()
+                }
+            },
+            VadDetector::Features => Self::default(),
+        };
+        v.wanted = kind;
+        v
+    }
+
     pub fn new(detector: Box<dyn Detector>) -> Self {
         Self {
             detector,
+            wanted: crate::mix::auto::VadDetector::Features,
             state: VadState {
                 level_dbfs: SILENCE_DB,
+                detector: "features",
                 ..VadState::default()
             },
             hold: 0,
@@ -346,6 +379,7 @@ impl Vad {
         self.loudness.clear();
         self.state = VadState {
             level_dbfs: SILENCE_DB,
+            detector: self.state.detector,
             speech_onsets: self.state.speech_onsets,
             speech_offsets: self.state.speech_offsets + u64::from(self.state.speech_active),
             ..VadState::default()
@@ -562,7 +596,7 @@ pub(crate) mod tests {
 
     /// The VAD's (active, probability) after each frame of `x`.
     pub fn run(x: &[f32], settings: &VadSettings) -> Vec<(bool, f64)> {
-        let mut vad = Vad::default();
+        let mut vad = Vad::with(settings.detector);
         let mut out = Vec::new();
         vad.push(x, settings, |s| {
             out.push((s.speech_active, s.speech_probability))
@@ -570,8 +604,29 @@ pub(crate) mod tests {
         out
     }
 
+    /// The feature detector's settings (the tests below are about it).
     fn settings() -> VadSettings {
-        VadSettings::new("x")
+        VadSettings {
+            detector: crate::mix::auto::VadDetector::Features,
+            ..VadSettings::new("x")
+        }
+    }
+
+    /// The detector `VAD_DETECTOR` names (`silero` or `features`, default both).
+    fn evaluated() -> Vec<VadSettings> {
+        use crate::mix::auto::VadDetector;
+        let all = [VadDetector::Features, VadDetector::Silero];
+        all.into_iter()
+            .filter(|d| {
+                std::env::var("VAD_DETECTOR").map_or(true, |v| {
+                    serde_json::to_value(d).is_ok_and(|j| j == v.as_str())
+                })
+            })
+            .map(|detector| VadSettings {
+                detector,
+                ..VadSettings::new("x")
+            })
+            .collect()
     }
 
     fn db_gain(db: f64) -> f64 {
@@ -593,8 +648,10 @@ pub(crate) mod tests {
     }
 
     /// Evaluation, not a check: the features' 10/50/90 % quantiles on the test
-    /// signals and the detection latencies; with `VAD_WAV=<file.wav>` also that
-    /// recording's speech, one character per 10 ms (`#` speech):
+    /// signals; per detector (`VAD_DETECTOR=silero|features`, default both) its
+    /// cost and detection latency on synthetic words, and with
+    /// `VAD_WAV=<file.wav>` that recording's speech, one character per 10 ms
+    /// (`#` speech):
     /// `VAD_WAV=talk.wav cargo test --release --lib evaluate -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -623,39 +680,43 @@ pub(crate) mod tests {
         let noise = pink(8.1, db_gain(-39.0), 11);
         let noisy: Vec<f32> = x.iter().zip(&noise).map(|(a, b)| a + b).collect();
         show("speech+noise", &noisy);
-        let (x, _) = speech(10.0, db_gain(-24.0), 4);
-        let started = std::time::Instant::now();
-        run(&x, &settings());
-        eprintln!(
-            "cost: {:.2} % of a core per analysed signal",
-            started.elapsed().as_secs_f64() / 10.0 * 100.0
-        );
-        let mut all = Vec::new();
-        for seed in 1..=10 {
-            let (x, spans) = spaced(12.0, seed);
-            all.extend(score(&x, &spans, &settings()).0);
-        }
-        all.sort_unstable();
-        eprintln!(
-            "latency of {} words (10 ms frames): median {}, 90 % {}, max {}",
-            all.len(),
-            all[all.len() / 2],
-            all[all.len() * 9 / 10],
-            all[all.len() - 1]
-        );
-        if let Ok(path) = std::env::var("VAD_WAV") {
-            let x = crate::wav::Wav::read(std::path::Path::new(&path))
-                .unwrap()
-                .mono_48k();
-            show("wav", &x);
-            let r = run(&x, &settings());
-            let line: String = r.iter().map(|f| if f.0 { '#' } else { '.' }).collect();
-            for (k, c) in line.as_bytes().chunks(100).enumerate() {
+        for s in evaluated() {
+            eprintln!("detector {:?}", s.detector);
+            let (x, _) = speech(10.0, db_gain(-24.0), 4);
+            let started = std::time::Instant::now();
+            run(&x, &s);
+            eprintln!(
+                "  cost: {:.2} % of a core per analysed signal",
+                started.elapsed().as_secs_f64() / 10.0 * 100.0
+            );
+            let mut all = Vec::new();
+            for seed in 1..=10 {
+                let (x, spans) = spaced(12.0, seed);
+                all.extend(score(&x, &spans, &s).0);
+            }
+            all.sort_unstable();
+            if !all.is_empty() {
                 eprintln!(
-                    "{:5.1} s {}",
-                    k as f64,
-                    std::str::from_utf8(c).unwrap_or("")
+                    "  latency of {} synthetic words (10 ms frames): median {}, 90 % {}, max {}",
+                    all.len(),
+                    all[all.len() / 2],
+                    all[all.len() * 9 / 10],
+                    all[all.len() - 1]
                 );
+            }
+            if let Ok(path) = std::env::var("VAD_WAV") {
+                let x = crate::wav::Wav::read(std::path::Path::new(&path))
+                    .unwrap()
+                    .mono_48k();
+                let r = run(&x, &s);
+                let line: String = r.iter().map(|f| if f.0 { '#' } else { '.' }).collect();
+                for (k, c) in line.as_bytes().chunks(100).enumerate() {
+                    eprintln!(
+                        "{:5.1} s {}",
+                        k as f64,
+                        std::str::from_utf8(c).unwrap_or("")
+                    );
+                }
             }
         }
     }

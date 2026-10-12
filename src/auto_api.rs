@@ -2,7 +2,8 @@
 //! - `GET /api/v1/vad`, `GET`, `PUT`, `DELETE /api/v1/vad/{signal}`: every
 //!   analysed signal with its settings (`own`: set for it, else the defaults)
 //!   and its state; `PUT` sets a signal's own settings (`threshold`, `hold_ms`,
-//!   `gate_lufs`) and analyses it; `DELETE` removes them;
+//!   `gate_lufs`, `detector`: `silero` or `features`) and analyses it; `DELETE`
+//!   removes them;
 //! - `GET`, `POST /api/v1/automixes`, `GET`, `PATCH`, `DELETE
 //!   /api/v1/automixes/{id}` (`name`, `enabled`, `last_mic_hold`,
 //!   `vad_weighting`, `recall_safe`, `members`: strip ids or `{signal,
@@ -79,6 +80,7 @@ struct VadBody {
     threshold: Option<f64>,
     hold_ms: Option<f64>,
     gate_lufs: Option<f64>,
+    detector: Option<crate::mix::auto::VadDetector>,
 }
 
 async fn put_vad(
@@ -106,6 +108,7 @@ async fn put_vad(
                 threshold: b.threshold.unwrap_or(current.threshold),
                 hold_ms: b.hold_ms.unwrap_or(current.hold_ms),
                 gate_lufs: b.gate_lufs.unwrap_or(current.gate_lufs),
+                detector: b.detector.unwrap_or(current.detector),
             };
             match mix.vad.iter_mut().find(|x| x.signal == signal) {
                 Some(x) => *x = v,
