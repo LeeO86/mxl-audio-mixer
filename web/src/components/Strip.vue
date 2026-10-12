@@ -97,7 +97,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
     <button class="sname" :title="compact ? `${s.name} (${s.id})` : `${s.name} (${s.id}); open its processing`" @click="open">
       <span class="nm">{{ s.name }}</span>
       <span class="fmt"
-        >{{ s.format }}<span v-if="s.recall_safe" class="safe" title="recall-safe"> S</span
+        >{{ s.format }}<span v-if="bus && s.minus" class="minus" :title="`mix-minus: ${busName(s.minus.of)} without ${s.minus.without.map((w) => signalOf(w)?.name || w).join(', ')}`"> −{{ busName(s.minus.of) }}</span><span v-if="s.recall_safe" class="safe" title="recall-safe"> S</span
         ><span v-if="tally?.afv" class="afv" :class="{ open: tally.afv_open }" :title="`audio follows video: tally ${tally.index}, ${tally.afv_open ? 'open' : 'closed'}`"> AFV</span></span
       >
     </button>

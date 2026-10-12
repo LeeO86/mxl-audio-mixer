@@ -4,7 +4,7 @@
 import { computed, ref, watch } from "vue";
 import Pot from "./Pot.vue";
 import { dbValue } from "../api.js";
-import { isBus, live, patchSignal, tallyOf } from "../store.js";
+import { buses, isBus, live, patchSignal, signalOf, signals, tallyOf } from "../store.js";
 
 const props = defineProps({ signal: { type: Object, required: true } });
 const s = computed(() => props.signal);
@@ -19,6 +19,17 @@ watch(
   { immediate: true },
 );
 const set = (body) => patchSignal(s.value.id, body);
+// A bus as a mix-minus (§5): every send into `of` except those from `without`.
+const otherBuses = computed(() => buses.value.filter((b) => b.id !== s.value.id));
+const setMinus = (of) => set({ minus: of ? { of, without: s.value.minus?.without || [] } : null });
+const toggleWithout = (id, on) => {
+  const w = s.value.minus?.without || [];
+  set({ minus: { of: s.value.minus.of, without: on ? [...w, id] : w.filter((x) => x !== id) } });
+};
+const minusSources = computed(() => {
+  const of = s.value.minus?.of;
+  return of ? (live.mix?.sends || []).filter((x) => x.to === of).map((x) => x.from) : [];
+});
 function saveName() {
   if (name.value.trim() && name.value !== s.value.name) set({ name: name.value.trim() });
 }
@@ -56,6 +67,17 @@ const depth = computed(() => {
         <label class="check" title="solo in place never mutes it"><input type="checkbox" :checked="s.solo_safe" @change="set({ solo_safe: $event.target.checked })" /> Solo-safe</label>
         <label class="check" title="mute groups never mute it (isolate)"><input type="checkbox" :checked="s.mute_safe" @change="set({ mute_safe: $event.target.checked })" /> Mute-safe</label>
         <label class="check"><input type="checkbox" :checked="s.loudness" @change="set({ loudness: $event.target.checked })" /> Measure loudness</label>
+      </div>
+      <div v-if="bus" class="minusedit">
+        <label>Mix-minus of</label>
+        <select :value="s.minus?.of || ''" aria-label="Mix-minus of" @change="setMinus($event.target.value)">
+          <option value="">— (a plain bus)</option>
+          <option v-for="b in otherBuses" :key="b.id" :value="b.id">{{ b.name }}</option>
+        </select>
+        <template v-if="s.minus">
+          <p class="note">Takes every send into {{ signalOf(s.minus.of)?.name || s.minus.of }}, as it is, except:</p>
+          <label v-for="id in minusSources" :key="id" class="check"><input type="checkbox" :checked="s.minus.without.includes(id)" :aria-label="`without ${signalOf(id)?.name || id}`" @change="toggleWithout(id, $event.target.checked)" /> {{ signalOf(id)?.name || id }}</label>
+        </template>
       </div>
       <template v-if="!bus">
         <div>
