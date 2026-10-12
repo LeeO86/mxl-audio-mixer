@@ -279,6 +279,32 @@ try {
   await page.screenshot({ path: `${out}/meters.png`, fullPage: true });
   pass("meters: analyser spectrum and goniometer");
 
+  // Graph: drag from gtr to aux to send, click the send to edit it, Delete removes it.
+  await page.goto(`${base}/#graph`);
+  await page.locator('.vue-flow__node[data-id="gtr"]').waitFor({ timeout: 5000 });
+  await page.waitForTimeout(800);
+  const center = async (sel) => {
+    const b = await page.locator(sel).boundingBox();
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  };
+  const from = await center('.vue-flow__node[data-id="gtr"] .vue-flow__handle.source');
+  const to = await center('.vue-flow__node[data-id="aux"] .vue-flow__handle.target');
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 12 });
+  await page.mouse.up();
+  await until("send gtr → aux from the graph", async () => (await api("/api/v1/sends")).some((x) => x.from === "gtr" && x.to === "aux"));
+  const edge = page.locator('.vue-flow__edge[data-id="send:gtr:aux"]');
+  await edge.waitFor({ timeout: 3000 });
+  // A straight edge's path has no height: click its middle.
+  const box = await edge.locator(".vue-flow__edge-interaction").boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await page.locator("[data-send-edit]").waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/graph.png`, fullPage: true });
+  await page.keyboard.press("Delete");
+  await until("send gtr → aux removed by Delete", async () => !(await api("/api/v1/sends")).some((x) => x.from === "gtr" && x.to === "aux"));
+  pass("graph: a send drawn from Guitar to Aux, edited from its edge, removed with Delete");
+
   // Operations: N-1s of Main for the selection, made in the operations panel.
   await page.goto(`${base}/#console`);
   await page.getByRole("button", { name: "Operations" }).click();
