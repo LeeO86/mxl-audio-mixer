@@ -4,6 +4,7 @@
 import { computed, ref } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import MonitorCard from "./MonitorCard.vue";
+import PersonalCard from "./PersonalCard.vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
 import { api, dbValue } from "../api.js";
@@ -109,6 +110,7 @@ const setOsc = (body) => act(() => api.patch(`/api/v1/buses/${oscillator.value.b
   </div>
   <div class="monitors">
     <MonitorCard v-for="m in room.monitors" :key="m.id" :monitor="m" />
+    <PersonalCard />
   </div>
   <div v-if="!room.monitors.length" class="empty">No monitors yet: add the speakers and headphones of the control room.</div>
 
