@@ -706,14 +706,15 @@ at −12.1 dBFS, L below −45 dBFS; off again: 30 Hz on L).
   - a personal monitor played, the page and WHEP on the host's address;
   - the child ends with the mixer (exit 143);
   - shared mode (a separate MediaMTX, `PREVIEW_PUBLISH_URL`, `PREVIEW_WHEP_URL`,
-    `MEDIAMTX_API_URL`): no child, the stream on the shared MediaMTX and playing; an
-    RTSP reader on it (ffmpeg) kept the stream for 14 s without listen requests;
-    without it the stream stopped.
+    `MEDIAMTX_API_URL`): no child, the stream on the shared MediaMTX and playing; a
+    WHEP reader kept it for 20 s after a single listen request (its reader count
+    from the API); without it the stream stopped.
 - **Latency** (media time to the browser's audio output, Chrome's output latency 32
   ms included), median per run over 6–12 pulses, in seven runs: 82.4–98.5 ms for
   `main` (own mode, also after a child restart), 78.8–93.8 ms for a personal
-  monitor, 95.1 and 99.1 ms in shared mode; single pulses 75.2–104 ms. Below 150
-  ms: no in-process WebRTC stack (§3).
+  monitor, 95.1 and 99.1 ms in shared mode; single pulses 75.2–104 ms. On a
+  GitHub runner: 78.6, 96.3, 96.6 (personal) and 94.7 ms (shared). Below 150 ms:
+  no in-process WebRTC stack (§3).
 - `ui.sh`: Listen on a monitor card until "Listening", the stream publishing in
   the Status tab, stopped; two mute presses around a mix pushed 1 s late (below).
 - All integration tests pass on release binaries; the image starts the child (uid

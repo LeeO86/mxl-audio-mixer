@@ -5,11 +5,12 @@
 // (AudioContext.getOutputTimestamp), modulo one second. TAI and UTC seconds differ by whole
 // seconds, and the mixer and the browser share the clock.
 //
-// node web/tests/preview.mjs <mixer base> <monitor id (a personal one too)> <seconds>
+// node web/tests/preview.mjs <mixer base> <monitor id (a personal one too)> <seconds> [once]
+// With `once`, a single listen request: only MediaMTX's reader count can keep the stream longer.
 // Prints one JSON line: {received_s, peak, onsets, latency_ms: {min, median, max}, ice}.
 import { chromium } from "playwright-core";
 
-const [mixer, monitor, seconds] = process.argv.slice(2);
+const [mixer, monitor, seconds, once] = process.argv.slice(2);
 const browser = await chromium.launch({
   executablePath: process.env.CHROME || "/usr/bin/google-chrome",
   // The measuring AudioWorklet needs a secure context; the UI's player (RTCPeerConnection, <audio>) does not.
@@ -21,7 +22,7 @@ try {
   page.on("console", (m) => m.type() === "error" && !m.text().includes("404") && console.error(`[page] ${m.text()}`));
   await page.goto(`${mixer}/livez`);
   const result = await page.evaluate(
-    async ({ monitor, seconds }) => {
+    async ({ monitor, seconds, once }) => {
       const listenUrl = `/api/v1/preview/${monitor}/listen`;
       const listen = async () => {
         const r = await fetch(listenUrl, { method: "POST" });
@@ -29,7 +30,7 @@ try {
         return r.json();
       };
       const l = await listen();
-      const heartbeat = setInterval(() => listen().catch(() => {}), 5000);
+      const heartbeat = once ? 0 : setInterval(() => listen().catch(() => {}), 5000);
       const whep = l.whep_url || `${location.protocol}//${location.hostname}:${l.whep_port}/${l.path}/whep`;
 
       const pc = new RTCPeerConnection();
@@ -129,7 +130,7 @@ try {
         ice,
       };
     },
-    { monitor, seconds: Number(seconds) },
+    { monitor, seconds: Number(seconds), once: once === "once" },
   );
   console.log(JSON.stringify(result));
 } finally {

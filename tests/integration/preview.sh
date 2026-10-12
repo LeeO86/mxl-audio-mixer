@@ -118,13 +118,11 @@ play main 6
 [[ "$(played "d['received_s'] >= 3 and d['onsets'] >= 4")" == True ]] || fail "shared mode: $PLAYED"
 pass "shared mode: no child, monitor main published to the shared MediaMTX and playing (latency median $(played "d['latency_ms']['median']") ms)"
 
-# Readers on MediaMTX keep the stream without listen requests.
-ffmpeg -loglevel error -rtsp_transport tcp -i rtsp://127.0.0.1:8974/mxl-audio-mixer/main -f null - &
-READER=$!
-PIDS+=("$READER")
-sleep 14
-is_stream main publishing || fail "a reader on MediaMTX did not keep the stream: $(stream main state)"
-[[ "$(stream main readers)" -ge 1 ]] || fail "readers: $(stream main readers)"
-kill -TERM "$READER"
+# Readers on MediaMTX keep the stream without listen requests: one request, then
+# 20 s of playing (the grace time is 10 s).
+wait_until 15 "the stream to stop" is_stream main idle
+PLAYED=$(node "$ROOT/web/tests/preview.mjs" "$WEB" main 20 once)
+log "played main once: $PLAYED"
+[[ "$(played "d['received_s'] >= 18")" == True ]] || fail "a reader on MediaMTX did not keep the stream: $PLAYED"
 wait_until 20 "the stream to stop without readers" is_stream main idle
-pass "shared mode: a reader on MediaMTX kept the stream for 14 s; without readers it stopped"
+pass "shared mode: a WHEP reader on MediaMTX kept the stream for 20 s after a single listen request; without readers it stopped"
