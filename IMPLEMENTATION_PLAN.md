@@ -1219,15 +1219,16 @@ Milestone 7 (§19, release 1.1.0) in two parts, each a PR:
     of the sharing; disabled: 0 dB; none of it swapped the plan;
   - the VAD on espeak-ng speech: one onset per 6 s period, speech level
     −22.5 dBFS; on a 1 kHz tone: none;
-  - a tone ducked under the speech by −20 dB: 83–85 ms from the speech onset to
-    −10 dB (detection, the tick, half the 50 ms attack), 100 % of the speech at
-    −20 ± 0.5 dB, back to 0 dB 1.5 s after it;
+  - a tone ducked under the speech by −20 dB: 75–85 ms from the speech onset to
+    −10 dB (detection, the tick, half the 50 ms attack; four periods in three
+    runs), 99.5–100 % of the speech at −20 ± 0.5 dB, back to 0 dB 1.5 s after it;
   - two talkers in turns with last-mic-hold: the one speaking above −1 dB and
     the other below −20 dB in 100 % of the polls; with nobody speaking, the last
     talker held.
 - `ui.sh`: an auto-mix and a duck made in the Auto panel; the strips show the
   shares (their powers add up to 1) on both clients, a weight moves them.
-- The other 13 integration suites unchanged.
+- All 15 integration suites pass on release binaries (the demo stopped; `tally.sh`
+  once only on the second try, its input late on this VM).
 
 **Findings:**
 - A member added to an auto-mix got 0 and last-mic-hold kept it there: its tap
