@@ -1166,7 +1166,9 @@ Milestone 7 (§19, release 1.1.0) in two parts, each a PR:
   (§8.4).
 - **M7b**: the speech-aware auto-level (§8.2) with Com-IS-Assist's core (MIT, its
   notice kept), the master_me / PodcastPlugins comparison, chain presets, the
-  simple view and the loudness normaliser for outputs (D40), as planned above.
+  simple view and the loudness normaliser for outputs (D40), as planned above;
+  and a duck released by speech in its own target (Com-IS-Assist's interview
+  passthrough, answer 12).
 
 ### M7a: what exists
 
@@ -1344,3 +1346,28 @@ fader on top only in the programme), snapshots switching moderation and panel;
 | 10 | Silero VAD as the detector (default), ours kept as the fallback (and for builds without it)? It adds ONNX Runtime (Microsoft, MIT, C++, linked statically; `ort`'s build downloads its prebuilt library once per build machine, also in CI and the image build) and the 2.3 MB model (MIT, vendored as in Com-IS-Assist); 0.26 % of a core per analysed signal. | Yes: the measurements above, and the detector Com-IS-Assist was tuned with. |
 | 11 | The gate at −32 LUFS by default (Com-IS-Assist's), set per microphone 20–30 dB below its talker. | As implemented; the checklist notes the values that work. |
 | 12 | Bed speech releasing a duck (Com-IS-Assist's interview passthrough). | With M7b (Com-IS-Assist's ratio control). |
+
+### M7a: answers 10–12 (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 10 | Silero VAD as the default detector | Yes. |
+| 11 | The gate at −32 LUFS | To be tried (the 1.1.0 checklist). |
+| 12 | Bed speech releasing a duck (interview passthrough) | With M7b, as proposed. |
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D110 | Silero VAD (`assets/silero_vad.onnx`, upstream `bfdc019`, sha256 `1a153a22…`, unchanged, MIT; the file Com-IS-Assist vendors) is the default detector (`detector: "silero"`), the feature detector stays (`"features"`, and the fallback when ONNX Runtime cannot load the model: a warning, `state.detector` tells). The 48 kHz frames are decimated by 3 (a 95-tap Blackman windowed sinc at 7.2 kHz: −60 dB from 9 kHz) into 512-sample chunks with 64 samples of context and the recurrent state per signal; a frame's probability is the last chunk's; the smoothing, threshold, gate and hold are the VAD's, as for the feature detector. One ONNX Runtime session for every signal, one intra- and one inter-op thread: inference runs on the control side's thread, never as a thread pool next to the DSP thread. ONNX Runtime 1.31 through `ort` 2.0.0-rc.14 (MIT OR Apache-2.0), linked statically; `download-binaries` fetches the prebuilt library once per build machine (CI and the image build too). The image carries ONNX Runtime's licence and third-party notices (Eigen MPL-2.0 among them) and Silero's licence. | Answer 10; the comparison above. |
+
+Results (dev VM): Silero in the mixer, on the same 110 s sequence with the
+defaults (hold 0.8 s, gate −32 LUFS): speech 0.86 (features 0.85), piano 0.00
+(0.69), orchestra 0.00 (0.23), speech over piano 0.86 (0.79), the second piano
+piece 0.13 (0.46), noise, tone, silence 0.00. Cost: 0.83 % of a core per
+analysed signal (one thread; 64 signals about half a core). On the synthetic
+words of the unit tests (formant tones, not speech) it misses some and is late:
+those tests stay with the feature detector; Silero's own tests: silence, pink
+noise and tones never above 0.5, the decimator (±0.1 dB at 1 kHz, below −60 dB
+from 9 kHz). `auto.sh` with Silero as the default: the espeak speech detected
+once per period, the tone never, ducking 81–91 ms from the onset to −10 dB,
+the two talkers 98–100 %; `ui.sh` passes. The binary now needs `libstdc++`
+(installed in the image, checked with `ldd`).

@@ -382,7 +382,12 @@ change gains, never the plan (adding or removing a member or target does).
   before its fader without one; the mean of its channels) in 10 ms frames: the 250 Hz–4 kHz band's power over its noise
   floor (minimum over 2 s), voicing (a pitch of 80–400 Hz by autocorrelation),
   the modulation of syllables, and the rejection of pure tones (line-up, idents,
-  sweeps). Speech starts above `threshold` (default 0.5) and ends `hold_ms`
+  sweeps): the `features` detector. By default (`detector: "silero"`) it runs
+  Silero VAD, a small neural network (as Com-IS-Assist does), on the signal
+  decimated to 16 kHz in 32 ms chunks: it does not mistake music for speech
+  (measured: piano and orchestra 0.00 of the time, the feature detector 0.69
+  and 0.23), at about 0.8 % of a core per signal; without ONNX Runtime it falls
+  back to the feature detector. Speech starts above `threshold` (default 0.5) and ends `hold_ms`
   (800: a pause between sentences is still talking) after the probability fell
   below it (minus 0.15). While the signal's momentary loudness (K-weighted,
   400 ms) is below `gate_lufs` (−32), nothing is speech: crosstalk from other
@@ -526,7 +531,7 @@ without touching the audio.
 | `POST /api/v1/operations/{group,n-1,mix-minus,link,unlink}` | the high-level operations (above) |
 | `GET`, `POST /api/v1/vcas`, `GET`, `PATCH`, `DELETE /api/v1/vcas/<id>` | VCAs (every field, `ramp_ms`; GET adds `signals`: the strips and buses under it) |
 | `GET`, `POST /api/v1/mute-groups`, `GET`, `PATCH`, `DELETE /api/v1/mute-groups/<id>` | mute groups (`active`, `members`, `name`) |
-| `GET /api/v1/vad`, `GET`, `PUT`, `DELETE /api/v1/vad/<signal>` | every analysed signal: settings (`own`: its own, else the defaults) and `state`; PUT sets its own (`threshold`, `hold_ms`, `gate_lufs`) and analyses it; DELETE removes them |
+| `GET /api/v1/vad`, `GET`, `PUT`, `DELETE /api/v1/vad/<signal>` | every analysed signal: settings (`own`: its own, else the defaults) and `state`; PUT sets its own (`threshold`, `hold_ms`, `gate_lufs`, `detector`: `silero` or `features`) and analyses it; DELETE removes them |
 | `GET`, `POST /api/v1/automixes`, `GET`, `PATCH`, `DELETE /api/v1/automixes/<id>` | auto-mixes (`name`, `enabled`, `last_mic_hold`, `vad_weighting`, `members`: strip ids, which keep a member's settings, or `{signal, weight_db, bypass}`); GET adds `gains_db` |
 | `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/<id>` | ducks (`name`, `enabled`, `keys`, `targets`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms`); GET adds `active`, `gain_db` |
 | `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
@@ -627,6 +632,11 @@ the image too.
 MIT ([`LICENSE`](LICENSE)). Dependencies: `mxl` / `mxl-sys` (Apache-2.0,
 dmf-mxl), `mxl-nmos` (MIT OR Apache-2.0), libopus (BSD-3-Clause, linked statically
 through `opusic-sys`; its notice is in the image under `/usr/share/doc/libopus`),
+ONNX Runtime 1.31 (MIT, Microsoft, linked statically through `ort`, MIT OR
+Apache-2.0; its components' notices, among them Eigen under MPL-2.0, are in
+[`assets/onnxruntime.ThirdPartyNotices.txt`](assets/onnxruntime.ThirdPartyNotices.txt)
+and in the image under `/usr/share/doc/onnxruntime`), the Silero VAD model (MIT,
+Silero Team, in the binary; [`assets/silero_vad.LICENSE`](assets/silero_vad.LICENSE)),
 and crates under MIT, Apache-2.0, BSD, ISC, Zlib or Unicode-3.0 terms (aws-lc,
 through `mxl-nmos`'s HTTP client, is Apache-2.0 and ISC). The image also has
 MediaMTX (MIT, a separate executable, `/usr/share/doc/mediamtx`). The UI: Vue

@@ -27,6 +27,8 @@ Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
   and duck holds are 800 ms; a gate on the momentary loudness (`gate_lufs`,
   −32 LUFS) against crosstalk replaces `min_level_dbfs`.
 - `docs/release-notes/1.1.0-checklist.md`: tests on recordings of productions.
+- Silero VAD (ONNX Runtime, the model vendored, MIT) is the default detector;
+  the feature detector stays, per signal (`detector`) and as the fallback.
 
 ## 1.0.0 (not released yet)
 
