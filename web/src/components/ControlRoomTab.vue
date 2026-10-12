@@ -149,7 +149,11 @@ const setOsc = (body) => act(() => api.patch(`/api/v1/buses/${oscillator.value.b
           <button class="btn on-warn" :class="oscillator.node.bypass ? 'secondary' : ''" :aria-pressed="!oscillator.node.bypass" @click="setOsc({ bypass: !oscillator.node.bypass })">{{ oscillator.node.bypass ? "Off" : "On" }}</button>
           <span class="muted small" style="align-self: center">{{ oscLabel(oscillator.node) }}</span>
         </div>
-        <Pot label="Frequency" unit="Hz" :value="oscillator.node.freq_hz" :min="20" :max="20000" :def="1000" :fine="0.02" :digits="0" log @change="(v) => setOsc({ freq_hz: v })" />
+        <Pot v-if="!['white', 'pink'].includes(oscillator.node.waveform)" :label="oscillator.node.waveform === 'sweep' ? 'Sweep from' : 'Frequency'" unit="Hz" :value="oscillator.node.freq_hz" :min="20" :max="20000" :def="1000" :fine="0.02" :digits="0" log @change="(v) => setOsc({ freq_hz: v })" />
+        <template v-if="oscillator.node.waveform === 'sweep'">
+          <Pot label="Sweep to" unit="Hz" :value="oscillator.node.sweep_to_hz" :min="20" :max="20000" :def="20000" :fine="0.02" :digits="0" log @change="(v) => setOsc({ sweep_to_hz: v })" />
+          <Pot label="Sweep time" unit="s" :value="oscillator.node.sweep_s" :min="0.1" :max="600" :def="10" :fine="0.1" :digits="1" @change="(v) => setOsc({ sweep_s: v })" />
+        </template>
         <Pot label="Level" unit="dBFS" :value="oscillator.node.level_dbfs" :min="-60" :max="0" :def="-18" :fine="0.5" @change="(v) => setOsc({ level_dbfs: v })" />
         <ConfirmButton label="Remove the oscillator bus" small @confirm="act(() => api.del(`/api/v1/buses/${oscillator.bus.id}`))" />
       </template>
