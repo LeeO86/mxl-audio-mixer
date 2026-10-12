@@ -3,16 +3,14 @@
 // weighting), ducks (keys, targets, depth, attack, hold, release) and the voice activity detection of
 // every analysed signal, each with its live state.
 import { computed, ref } from "vue";
+import AutoLive from "./AutoLive.vue";
 import ConfirmButton from "./ConfirmButton.vue";
-import { api, dbValue, fmtSigned } from "../api.js";
-import { act, autoGain, automixOf, automixes, buses, ducks, live, patchAutomix as patchAm, patchDuck as patchDk, signalOf, strips, vadSignals } from "../store.js";
+import NumberField from "./NumberField.vue";
+import { api, dbValue } from "../api.js";
+import { act, automixOf, automixes, buses, ducks, live, patchAutomix as patchAm, patchDuck as patchDk, signalOf, strips, vadSignals } from "../store.js";
 
 const emit = defineEmits(["close"]);
 const nameOf = (id) => signalOf(id)?.name || id;
-const fmtGain = (id) => {
-  const g = autoGain(id);
-  return g === undefined ? "" : Number.isFinite(g) ? fmtSigned(g) : "−∞";
-};
 
 // Auto-mixes.
 const amForm = ref({ id: "", name: "" });
@@ -45,7 +43,6 @@ async function addDuck() {
 }
 const patchDuck = (d, body) => patchDk(d.id, body);
 const toggle = (list, id, on) => (on ? [...list, id] : list.filter((x) => x !== id));
-const duckActive = (d) => d.enabled && d.keys.some((k) => live.vad[k]?.active);
 const depthValue = (d) => {
   const v = dbValue(d.depth_db);
   return Number.isFinite(v) ? v : -120;
@@ -85,10 +82,10 @@ async function addVad() {
             </thead>
             <tbody>
               <tr v-for="m in a.members" :key="m.signal" :data-member="m.signal">
-                <td><span class="vad" :class="{ on: live.vad[m.signal]?.active }">●</span> {{ nameOf(m.signal) }}</td>
-                <td><input type="number" min="-30" max="10" step="1" :value="m.weight_db" :aria-label="`${nameOf(m.signal)} weight`" @change="setMemberField(a, m.signal, 'weight_db', Number($event.target.value))" /></td>
+                <td><AutoLive kind="dot" :id="m.signal" /> {{ nameOf(m.signal) }}</td>
+                <td><NumberField :min="-30" :max="10" :step="1" :value="m.weight_db" :aria-label="`${nameOf(m.signal)} weight`" @change="(v) => setMemberField(a, m.signal, 'weight_db', v)" /></td>
                 <td><input type="checkbox" :checked="m.bypass" :aria-label="`${nameOf(m.signal)} bypass`" @change="setMemberField(a, m.signal, 'bypass', $event.target.checked)" /></td>
-                <td class="num" :data-gain="m.signal">{{ fmtGain(m.signal) }}</td>
+                <td><AutoLive kind="gain" :id="m.signal" /></td>
               </tr>
             </tbody>
           </table>
@@ -112,14 +109,10 @@ async function addVad() {
           <tbody>
             <tr v-for="id in vadSignals" :key="id" :data-vad-row="id">
               <td>{{ nameOf(id) }}</td>
-              <td>
-                <span class="prob" :title="`probability ${(live.vad[id]?.probability ?? 0).toFixed(2)}`"
-                  ><span :class="{ on: live.vad[id]?.active }" :style="{ width: `${Math.round((live.vad[id]?.probability ?? 0) * 100)}%` }"></span
-                ></span>
-              </td>
-              <td><input type="number" min="0.05" max="0.95" step="0.05" :value="settingsOf(id).threshold" :aria-label="`${nameOf(id)} threshold`" @change="putVad(id, { threshold: Number($event.target.value) })" /></td>
-              <td><input type="number" min="0" max="10000" step="50" :value="settingsOf(id).hold_ms" :aria-label="`${nameOf(id)} hold`" @change="putVad(id, { hold_ms: Number($event.target.value) })" /></td>
-              <td><input type="number" min="-90" max="0" step="1" :value="settingsOf(id).min_level_dbfs" :aria-label="`${nameOf(id)} minimum level`" @change="putVad(id, { min_level_dbfs: Number($event.target.value) })" /></td>
+              <td><AutoLive kind="probability" :id="id" /></td>
+              <td><NumberField :min="0.05" :max="0.95" :step="0.05" :value="settingsOf(id).threshold" :aria-label="`${nameOf(id)} threshold`" @change="(v) => putVad(id, { threshold: v })" /></td>
+              <td><NumberField :min="0" :max="10000" :step="50" :value="settingsOf(id).hold_ms" :aria-label="`${nameOf(id)} hold`" @change="(v) => putVad(id, { hold_ms: v })" /></td>
+              <td><NumberField :min="-90" :max="0" :step="1" :value="settingsOf(id).min_level_dbfs" :aria-label="`${nameOf(id)} minimum level`" @change="(v) => putVad(id, { min_level_dbfs: v })" /></td>
               <td><button v-if="own[id]" class="btn small secondary" title="back to the defaults (or off, unless an auto-mix or duck needs it)" @click="act(() => api.del(`/api/v1/vad/${id}`))">Reset</button></td>
             </tr>
           </tbody>
@@ -139,14 +132,14 @@ async function addVad() {
           <div class="row">
             <input :value="d.name" aria-label="Duck name" @change="patchDuck(d, { name: $event.target.value })" />
             <label class="check"><input type="checkbox" :checked="d.enabled" @change="patchDuck(d, { enabled: $event.target.checked })" /> on</label>
-            <span class="duckstate" :class="{ on: duckActive(d) }" :data-duck-active="duckActive(d)">{{ duckActive(d) ? "speech" : "—" }}</span>
+            <AutoLive kind="duck" :duck="d" />
             <ConfirmButton label="Remove" small @confirm="act(() => api.del(`/api/v1/ducks/${d.id}`))" />
           </div>
           <div class="row duckparams">
-            <label>Depth <input type="number" min="-120" max="0" step="1" :value="depthValue(d)" :aria-label="`${d.name} depth`" @change="setDepth(d, $event.target.value)" /> dB</label>
-            <label>Attack <input type="number" min="0" max="10000" step="10" :value="d.attack_ms" :aria-label="`${d.name} attack`" @change="patchDuck(d, { attack_ms: Number($event.target.value) })" /> ms</label>
-            <label>Hold <input type="number" min="0" max="10000" step="50" :value="d.hold_ms" :aria-label="`${d.name} hold`" @change="patchDuck(d, { hold_ms: Number($event.target.value) })" /> ms</label>
-            <label>Release <input type="number" min="0" max="10000" step="50" :value="d.release_ms" :aria-label="`${d.name} release`" @change="patchDuck(d, { release_ms: Number($event.target.value) })" /> ms</label>
+            <label>Depth <NumberField :min="-120" :max="0" :step="1" :value="depthValue(d)" :aria-label="`${d.name} depth`" @change="(v) => setDepth(d, v)" /> dB</label>
+            <label>Attack <NumberField :min="0" :max="10000" :step="10" :value="d.attack_ms" :aria-label="`${d.name} attack`" @change="(v) => patchDuck(d, { attack_ms: v })" /> ms</label>
+            <label>Hold <NumberField :min="0" :max="10000" :step="50" :value="d.hold_ms" :aria-label="`${d.name} hold`" @change="(v) => patchDuck(d, { hold_ms: v })" /> ms</label>
+            <label>Release <NumberField :min="0" :max="10000" :step="50" :value="d.release_ms" :aria-label="`${d.name} release`" @change="(v) => patchDuck(d, { release_ms: v })" /> ms</label>
           </div>
           <div class="muted small">Keys (their speech ducks)</div>
           <div class="members">
@@ -158,7 +151,7 @@ async function addVad() {
           <div class="members">
             <label v-for="x in [...strips, ...buses]" :key="x.id" class="check" :class="{ muted: d.keys.includes(x.id) }"
               ><input type="checkbox" :checked="d.targets.includes(x.id)" :disabled="d.keys.includes(x.id)" :aria-label="`${x.name} ducked by ${d.name}`" @change="patchDuck(d, { targets: toggle(d.targets, x.id, $event.target.checked) })" />
-              {{ x.name }}<span v-if="d.targets.includes(x.id)" class="num muted"> {{ fmtGain(x.id) }}</span></label
+              {{ x.name }}<AutoLive v-if="d.targets.includes(x.id)" kind="gain" :id="x.id" class="muted" /></label
             >
           </div>
         </div>

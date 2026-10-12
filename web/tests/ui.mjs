@@ -346,7 +346,10 @@ try {
   // Tones are not speech: with last-mic hold the gains would stay where they are.
   await page.locator("[data-automix-edit]").getByLabel("last-mic hold").uncheck();
   await until("last-mic hold off", async () => (await api("/api/v1/automixes"))[0].last_mic_hold === false);
-  await page.getByLabel("Guitar weight").fill("-6");
+  // Typed at a person's pace: the meters (25 Hz) must not reset the field meanwhile.
+  await page.getByLabel("Guitar weight").selectText();
+  await page.getByLabel("Guitar weight").pressSequentially("-6", { delay: 150 });
+  await page.waitForTimeout(400);
   await page.getByLabel("Guitar weight").press("Enter");
   await until("Guitar weight −6", async () => (await api("/api/v1/automixes"))[0].members.find((m) => m.signal === "gtr")?.weight_db === -6);
   const after = await until("Guitar's share down", async () => {

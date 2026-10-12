@@ -1238,6 +1238,12 @@ Milestone 7 (§19, release 1.1.0) in two parts, each a PR:
   faders do).
 - With the processing of the UI test (an EQ boost near Vox's tone) Vox gets the
   larger share: the sharing reads after the chain, as intended.
+- The Auto panel read the live VAD state, so the meters (25 Hz) re-rendered it,
+  and Vue set every input back to its value: typing a weight was undone within
+  40 ms (CI failed once on it). The live readouts are a component of their own
+  (`AutoLive.vue`), and the numbers are fields that keep what is typed while
+  they have the focus (`NumberField.vue`, also against a mix pushed meanwhile);
+  `ui.mjs` types at a person's pace.
 
 ### M7a: questions
 
