@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # A demo for trying the console or developing the UI: an 8-channel tone flow, the
 # mixer on it (web UI on http://127.0.0.1:8160/) and a small show (8 strips, a
-# stereo main, two auxes, processing). Stops everything on Ctrl-C.
+# stereo main, two auxes, processing). With espeak-ng, host and guest speak in
+# turns, in an auto-mix, with the music ducked. Stops everything on Ctrl-C.
 #
 #   cargo build --release --bins && scripts/demo.sh
 #
@@ -81,6 +82,28 @@ api POST /api/v1/vcas '{"id": "talent", "name": "Talent", "members": ["host", "g
 api POST /api/v1/vcas '{"id": "playout", "name": "Playout", "members": ["music-l", "music-r", "sfx", "amb"], "colour": "#3fb968"}'
 api POST /api/v1/mute-groups '{"id": "playout", "name": "Playout", "members": ["music-l", "music-r", "sfx", "amb"]}'
 api PUT /api/v1/layouts '[{"name": "Show", "pages": [{"name": "Talent", "signals": ["host", "guest", "phone"]}, {"name": "Playout", "signals": ["music-l", "music-r", "sfx", "amb"]}]}]'
+# With espeak-ng: host and guest speak in turns (inputs 2 and 3, a 10 s period),
+# in an auto-mix, and the music ducks under their speech (§8).
+if command -v espeak-ng >/dev/null; then
+    espeak-ng -v en -s 165 -w "$WORK/host.wav" "Good evening, and welcome to the programme. Tonight we talk about the city."
+    espeak-ng -v en+f3 -s 165 -w "$WORK/guest.wav" "Thank you. It is a pleasure to be here, and there is a lot to say."
+    for who in host:2:0 guest:3:5; do
+        IFS=: read -r id input offset <<<"$who"
+        flow=$(python3 -c "import uuid; print(uuid.uuid5(uuid.UUID('$FLOW'), '$id'))")
+        "$BIN/mxl-mixer-tone" --domain "$WORK/mxl/tones" --flow "$flow" --domain-id "$DOMAIN" --channels 1 \
+            --wav "$WORK/$id.wav" --gap-s "$(python3 -c "import wave; w = wave.open('$WORK/$id.wav'); print(10 - w.getnframes() / w.getframerate())")" --offset-s "$offset" &
+        PIDS+=($!)
+        for _ in $(seq 1 50); do [[ -d "$WORK/mxl/tones/$flow.mxl-flow" ]] && break; sleep 0.1; done
+        receiver=$(curl -fsS "$NMOS/x-nmos/node/v1.3/receivers" |
+            python3 -c "import json,sys; print([r['id'] for r in json.load(sys.stdin) if r['label'] == 'Input $input'][0])")
+        curl -fsS -o /dev/null -X PATCH -H 'content-type: application/json' \
+            "$NMOS/x-nmos/connection/v1.2/single/receivers/$receiver/staged" \
+            -d "{\"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}, \"transport_params\": [{\"mxl_domain_id\": \"$DOMAIN\", \"mxl_flow_id\": \"$flow\"}]}"
+        api PATCH "/api/v1/strips/$id" "{\"patch\": [{\"input\": $input, \"channel\": 1}]}"
+    done
+    api POST /api/v1/automixes '{"id": "panel", "name": "Panel", "members": ["host", "guest"]}'
+    api POST /api/v1/ducks '{"id": "bed", "name": "Music under speech", "keys": ["host", "guest"], "targets": ["music-l", "music-r"], "depth_db": -12}'
+fi
 api POST /api/v1/snapshots '{"name": "Top of show"}'
 
 echo "demo running: $WEB/ (Ctrl-C stops)"
