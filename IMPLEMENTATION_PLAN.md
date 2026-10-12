@@ -1157,3 +1157,98 @@ patch, monitor and output edges. The check now passes edges with an id.
 | --- | --- | --- |
 | 1 | Noise: independent channels and the level as RMS. | As implemented. |
 | 2 | The UI page is 439 kB (141 kB compressed) with Vue Flow. | Fine for an embedded UI. |
+
+## M7a: voice activity detection, auto-mix, ducking
+
+Milestone 7 (§19, release 1.1.0) in two parts, each a PR:
+- **M7a** (PR 17, on the release branch until `v1.0.0` is tagged, then into
+  `main`): VAD (§8.1), the gain-sharing auto-mixer (§8.3), ducking by speech
+  (§8.4).
+- **M7b**: the speech-aware auto-level (§8.2) with Com-IS-Assist's core (MIT, its
+  notice kept), the master_me / PodcastPlugins comparison, chain presets, the
+  simple view and the loudness normaliser for outputs (D40), as planned above.
+
+### M7a: what exists
+
+- `src/mix/auto.rs`: `vad` (per-signal settings), `automixes`, `ducks` in the mix;
+  the analysed signals (own settings, auto-mix members, duck keys), the signals
+  with an auto gain (members, targets), validation; references follow deletes,
+  links and unlinks.
+- `src/engine`: 64 VAD tap slots, each a ring of 0.5 s allocated with the engine;
+  `Step::Vad` writes the mean of a signal's channels before its fader.
+- `src/mix/compile.rs`: the auto gain node (`strip/<id>/auto`, `bus/<id>/auto`)
+  after the fader (after AFV; on a bus before talkback), the VAD tap.
+- `src/auto/`: `vad.rs` (the detector, the `Detector` trait, hysteresis, hold,
+  outputs, an evaluation tool), `automix.rs`, `duck.rs`, `mod.rs` (slots, the
+  10 ms tick, the gains); `Control::auto_tick`.
+- `src/auto_api.rs`: `/api/v1/vad`, `/api/v1/automixes`, `/api/v1/ducks`; the
+  VAD state and auto gains in the meters message; `vad_active{signal}`; `auto`
+  in the status.
+- `src/wav.rs`, `mxl-mixer-tone --wav --gap-s --offset-s`.
+- UI: `AutomationPanel.vue` (console toolbar "Auto"), the voice dot and the auto
+  gain on strips.
+- `tests/integration/auto.sh`; `ui.mjs` (auto-mix and duck from the panel);
+  `scripts/demo.sh` (two synthetic voices in turns, an auto-mix, the music
+  ducked).
+
+### M7a: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D99 | The VAD runs on the control side on a tap before the fader: the DSP thread copies the mean of the signal's channels into one of 64 rings (0.5 s each, allocated with the engine, never by the DSP thread); a 10 ms tick takes the rings, runs the VADs and the controllers, and sends changed gains, ramped over 10 ms. A slot given to another signal drops what its ring holds once the DSP thread runs the new plan. | §8.1 "runs on the control side from tapped audio"; §2 real time. Before the fader, so the operator's fader and the auto gain do not change what is detected (an auto-mix would otherwise follow its own gain). The mean keeps a centred stereo talker at its level. |
+| D100 | v1's detector, per 10 ms frame: the 250 Hz–4 kHz band's power over a minimum-statistics noise floor (smoothed, eight 250 ms windows); voicing (the largest normalised autocorrelation for 80–400 Hz on that band low-passed at 1 kHz and decimated to 6 kHz, 40 ms window); modulation (standard deviation of the band power over 400 ms); pure-tone rejection (an autocorrelation reaching −0.93). Probability = energy × modulation × (0.3 + 0.7 × voicing), each a smoothstep between two values; voicing and the tone count only when the voicing window's halves are within 10 dB. Behind a `Detector` trait. | §8.1 "lightweight, CPU-cheap (spectral and energy features with hysteresis); the interface allows a model-based detector later". Tones (line-up, idents, beeps, sweeps) are a broadcast mixer's daily signals and must never be speech. 0.09 % of a core per analysed signal (64: 6 %). The feature values were set on synthetic speech, noise and tones, and checked on espeak-ng speech and LibriVox readings (question 8). |
+| D101 | Speech starts when the smoothed probability (rising 0.5, falling 0.2 per frame) reaches `threshold` and ends `hold_ms` after it fell below `threshold` − 0.15; nothing below `min_level_dbfs` is speech. Outputs: `speech_active`, `speech_probability`, `speech_level_dbfs` (power mean of the speech frames, 1 s), `level_dbfs`, onset and offset counts, the features. Detection latency, measured: a voiced onset in 30 ms (median), 40 ms (90 %), 100 ms at most (words starting with a fricative); the tick adds up to 10 ms. | §8.1 outputs and "documented detection latency". Counts for onsets and offsets so that the logic (M8) can trigger on their change. |
+| D102 | One auto gain node per signal after its fader (strip: after AFV, before the panner; bus: before talkback), present while the signal is an auto-mix member or a duck target: the auto-mix gain × the deepest duck. Changing a gain never swaps the plan; adding or removing a member or target does. | §8.3 "a controller producing gains for the matrix/fader nodes, so operator fader moves combine with it (auto-mix gain × operator gain)"; §8.2 "drives a gain node, not hard-coded DSP". As AFV does. Pre-fader sends do not get it (question 2). |
+| D103 | Gain sharing: g_i = √(w_i L_i / Σ w_j L_j); L the frame's mean square, rising at once, falling with 100 ms; w = 10^(weight_db/10), with VAD weighting × (p + 0.1 (1 − p)). NOM attenuation is the sharing itself (N equal members: −10·log10 N). Bypassed members: 0 dB, out; muted members (mute, VCA, mute group, fader at −∞): out, gain kept; a member shares from its first measured frame. Last-mic-hold: while no sharing member's VAD reports speech, the gains stay. | §8.3 "each channel's gain follows its share of the total level, with last-mic-hold, NOM attenuation, per-channel weight and bypass; optional VAD weighting". The powers add up to one open microphone, as in Dugan's design (questions 3–5). |
+| D104 | Ducking: while a key speaks (its VAD), the targets go linearly in dB to `depth_db` in `attack_ms`, stay `hold_ms` after the last speech, come back in `release_ms`; −∞ ramps as −120 dB. A target of several ducks takes the deepest; a key is never its own target. Speech priority is a duck from a presenter to the guests. | §8.4 "duck any signal under speech detected on other signals, with depth, attack, hold, release". Linear in dB over a time as AFV's fades; the DSP ducker (D29) keeps its time constants. |
+| D105 | VAD settings, auto-mixes and ducks are in the mix (show file, history), not in snapshots. In the API a bare member id keeps that member's weight and bypass, an object sets them. Limits: 64 analysed signals, 16 auto-mixes, 32 ducks. | Snapshots: question 6. Bare ids let a UI add and remove members without losing their settings. |
+| D106 | Test speech is synthesised at test time with espeak-ng (CI installs it) and played into MXL by `mxl-mixer-tone --wav`; no recording is committed. Real recordings (LibriVox, public domain) were used only locally, with the evaluation tool (`docs/development.md`). | Licence-clean and reproducible; the maintainers' own recordings are the better check (question 7). |
+
+### M7a: results (dev VM)
+
+- `cargo test`: 126 unit tests (new: the VAD on silence, pink noise, sines of
+  200 Hz, 1 kHz and 3 kHz, beeps and a 20 Hz–20 kHz sweep (never speech), on
+  synthetic speech (every word detected, ≤ 60 ms, > 95 % of the speech frames,
+  > 99 % of the pauses free) and on speech in pink noise 15 dB lower; hold,
+  threshold, level; gain sharing (NOM, a talker, weights, bypass, mutes,
+  disabled, the 100 ms fall, last-mic-hold, a new member, VAD weighting); duck
+  ballistics; slots; the compiled auto node and tap; the WAV reader; the model).
+- `tests/integration/auto.sh` through MXL:
+  - two equal tones in an auto-mix: 0.70710677 each (−3.01 dB), sample-exact; a
+    weight of +6 dB: 0.89400 and 0.44806; bypass: both 0 dB; a muted member out
+    of the sharing; disabled: 0 dB; none of it swapped the plan;
+  - the VAD on espeak-ng speech: one onset per 6 s period, speech level
+    −22.5 dBFS; on a 1 kHz tone: none;
+  - a tone ducked under the speech by −20 dB: 83–85 ms from the speech onset to
+    −10 dB (detection, the tick, half the 50 ms attack), 100 % of the speech at
+    −20 ± 0.5 dB, back to 0 dB 1.5 s after it;
+  - two talkers in turns with last-mic-hold: the one speaking above −1 dB and
+    the other below −20 dB in 100 % of the polls; with nobody speaking, the last
+    talker held.
+- `ui.sh`: an auto-mix and a duck made in the Auto panel; the strips show the
+  shares (their powers add up to 1) on both clients, a weight moves them.
+- The other 13 integration suites unchanged.
+
+**Findings:**
+- A member added to an auto-mix got 0 and last-mic-hold kept it there: its tap
+  starts with the next plan, and before it, a missing level counted as silence.
+  A member now shares from its first measured frame.
+- The UI built member lists from the last pushed mix; two quick clicks lost the
+  first. The panel's changes now go through the store's local changes (as
+  faders do).
+- With the processing of the UI test (an EQ boost near Vox's tone) Vox gets the
+  larger share: the sharing reads after the chain, as intended.
+
+### M7a: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Defaults and limits: VAD threshold 0.5, hold 300 ms, minimum level −60 dBFS; duck depth −12 dB, attack 50 ms, hold 500 ms, release 1000 ms; weights −30 … +10 dB; 64 analysed signals, 16 auto-mixes, 32 ducks. | As implemented. |
+| 2 | The auto gain sits after the fader: pre-fader sends (auxes, IFBs) are neither auto-mixed nor ducked. Before the fader (like an insert) they would be. | After the fader, as implemented: foldback stays as the operator set it. |
+| 3 | A muted member (also a fader at −∞) leaves the sharing. | As implemented. |
+| 4 | NOM attenuation is the sharing itself, no switch of its own. | As implemented. |
+| 5 | Last-mic-hold uses the members' VAD (hold while nobody speaks). | As implemented. |
+| 6 | Auto-mixes and ducks in snapshots (on/off, weights, depths)? | Not now; a section `auto` later if wanted. |
+| 7 | A 1.1.0 checklist with real microphones on the maintainers' productions (the VAD's evaluation tool on recordings, crosstalk between panel microphones, ducking music under a presenter). | Yes, with 1.1.0. |
+| 8 | Music on an analysed signal often counts as speech (voiced and modulated); v1 is meant for microphones. | A known limit of v1; a model-based detector behind the same trait later. |
+| 9 | Merge M7a into `main` after `v1.0.0` is tagged, then M7b. | Yes. |

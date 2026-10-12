@@ -364,6 +364,44 @@ High-level operations make ordinary buses and sends (editable afterwards), each
 
 The console's Operations panel runs them on a selection of strips.
 
+### Voice detection, auto-mix and ducking (§8)
+
+The control side runs them every 10 ms; they drive one gain per strip or bus
+after its fader (its *auto gain*), so the operator's fader multiplies with it.
+They are part of the mix (`vad`, `automixes`, `ducks`) and the show file; they
+change gains, never the plan (adding or removing a member or target does).
+
+- **Voice activity detection** analyses a signal before its fader (the mean of
+  its channels) in 10 ms frames: the 250 Hz–4 kHz band's power over its noise
+  floor (minimum over 2 s), voicing (a pitch of 80–400 Hz by autocorrelation),
+  the modulation of syllables, and the rejection of pure tones (line-up, idents,
+  sweeps). Speech starts above `threshold` (default 0.5) and ends `hold_ms`
+  (300) after the probability fell below it (minus 0.15); nothing below
+  `min_level_dbfs` (−60) is speech. A voiced onset is detected after about
+  30–50 ms. Its state per signal: `speech_active`, `speech_probability`,
+  `speech_level_dbfs` (the mean of the speech frames, 1 s), `level_dbfs`, onsets
+  and offsets, and the frame's features. Members of an auto-mix and keys of a
+  duck are analysed with the defaults unless they have settings of their own;
+  at most 64 signals.
+- **Auto-mix** (gain sharing after Dugan) over strips: each member's gain is
+  √(its weighted level / the sum), so one talker is at 0 dB, two equal ones at
+  −3 dB each, and N members with equal noise at −10·log10(N) dB (the NOM
+  attenuation is part of it). Levels: the frame's mean square, falling with
+  100 ms. Per member `weight_db` (−30 … +10) and `bypass` (0 dB, out of the
+  sharing); muted members (their mute, a VCA, a mute group, the fader at −∞)
+  leave the sharing. `last_mic_hold` (default on): while no member speaks, the
+  gains stay. `vad_weighting`: a member without speech counts 10 dB less. A
+  strip is in at most one auto-mix.
+- **Ducks**: `targets` (strips, buses) go down by `depth_db` (default −12, down
+  to `-inf`) while one of the `keys` speaks; linear in dB over `attack_ms` (50),
+  back over `release_ms` (1000) after `hold_ms` (500). A target of several ducks
+  takes the deepest; a key cannot be its own target. A duck from the presenter
+  to the guests is speech priority.
+
+The console's Auto panel edits them, with the live speech probability, the
+ducks' state and each member's gain; strips show a voice dot (green: speech) and
+their auto gain.
+
 ### Processing nodes (§6)
 
 Every node has an `id` (unique in its chain; `<type>-<n>` when omitted), a `type`,
@@ -476,6 +514,9 @@ without touching the audio.
 | `POST /api/v1/operations/{group,n-1,mix-minus,link,unlink}` | the high-level operations (above) |
 | `GET`, `POST /api/v1/vcas`, `GET`, `PATCH`, `DELETE /api/v1/vcas/<id>` | VCAs (every field, `ramp_ms`; GET adds `signals`: the strips and buses under it) |
 | `GET`, `POST /api/v1/mute-groups`, `GET`, `PATCH`, `DELETE /api/v1/mute-groups/<id>` | mute groups (`active`, `members`, `name`) |
+| `GET /api/v1/vad`, `GET`, `PUT`, `DELETE /api/v1/vad/<signal>` | every analysed signal: settings (`own`: its own, else the defaults) and `state`; PUT sets its own (`threshold`, `hold_ms`, `min_level_dbfs`) and analyses it; DELETE removes them |
+| `GET`, `POST /api/v1/automixes`, `GET`, `PATCH`, `DELETE /api/v1/automixes/<id>` | auto-mixes (`name`, `enabled`, `last_mic_hold`, `vad_weighting`, `members`: strip ids, which keep a member's settings, or `{signal, weight_db, bypass}`); GET adds `gains_db` |
+| `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/<id>` | ducks (`name`, `enabled`, `keys`, `targets`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms`); GET adds `active`, `gain_db` |
 | `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
 | `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
 | `GET /api/v1/preview` | the preview: `mode` (`own`, `shared`), the built-in MediaMTX (`child`: running, pid, restarts, last exit), `whep_url` or `whep_port`, every stream (path, state, frames, connects, error, readers, last listen) |
@@ -501,7 +542,8 @@ without touching the audio.
 `/api/v1/events` sends JSON messages: `{"type": "status", "status": …}` five times a
 second (as `GET /api/v1/status`); `{"type": "mix", "revision", "mix", "latency_ms"}`
 on connect and within 40 ms of every change of the mix, from any client; `{"type": "meters",
-"meters", "loudness"}` every 40 ms; and `{"type": "analysis", …}` for clients that
+"meters", "loudness", "vad", "auto_db"}` every 40 ms (`vad`: per analysed signal
+`active` and `probability`; `auto_db`: every auto gain, `null` for −∞); and `{"type": "analysis", …}` for clients that
 asked. A client may send `{"type": "subscribe", "meters": [ids] | null, "meter_hz":
 25, "analysis": false}` to receive only some signals' meters, less often, or the
 analyser. Changes go through the REST API; every change answers with
@@ -514,7 +556,7 @@ analyser. Changes go through the REST API; every change answers with
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}`, `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,
-`timing_trusted`, `tally_packets_total`, `preview_state{path}` (0 idle, 1
+`timing_trusted`, `tally_packets_total`, `vad_active{signal}`, `preview_state{path}` (0 idle, 1
 connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,
 and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
@@ -556,13 +598,17 @@ VCAs, a cycle refused, no plan swap), `tests/integration/talkback.sh` (talkback 
 sample-exact: interrupt, priority, mix, the control room's talkback dim, a
 momentary talk that ends, listen-back, a strip on a talkback mic; a browser's
 microphone by WHIP from headless Chrome into an MXL output, with its latency),
-`tests/perf/section16.sh` (the
+`tests/integration/auto.sh` (gain sharing sample-exact on two tones with a weight,
+bypass, a muted member, without a plan swap; the VAD on espeak-ng speech and not on
+a tone; a tone ducked under the speech, its depth, onset latency and release on the
+output; two talkers taking turns with last-mic-hold), `tests/perf/section16.sh` (the
 §16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
 the maintainers are in `tests/hw/`.
 
-`mxl-mixer-tone` (a test tone writer) and `mxl-mixer-probe` (a reader that checks
-a flow against the tone) are in the image too.
+`mxl-mixer-tone` (a test tone writer; `--wav` writes a recording instead, e.g.
+speech) and `mxl-mixer-probe` (a reader that checks a flow against the tone) are in
+the image too.
 
 ## Licence
 

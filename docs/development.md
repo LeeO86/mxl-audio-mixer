@@ -103,6 +103,21 @@ widget's messages and the other is refused. `tests/integration/tally.sh` sends T
 with `tests/integration/tsl_send.py` to ports `TSL_TEST_UDP`/`TSL_TEST_TCP` (8920,
 8921); `ui.sh` uses 8930/8931.
 
+## Voice detection: speech for the tests
+
+`tests/integration/auto.sh` (and the demo's talking host and guest) synthesise
+speech with espeak-ng (`sudo apt-get install espeak-ng`; CI installs it) and play
+it with `mxl-mixer-tone --wav`. To see how the VAD treats a recording (16-bit PCM
+or 32-bit float WAV, any rate), with its features on the test signals and the
+detection latency of synthetic words:
+
+```sh
+VAD_WAV=talk.wav cargo test --release --lib evaluate -- --ignored --nocapture
+```
+
+It prints one character per 10 ms (`#` speech). Real recordings were checked this
+way (a LibriVox reading, public domain); they are not in the repository.
+
 ## Load test
 
 `tests/perf/section16.sh` (release build) runs the §16-shaped load for 60 s
