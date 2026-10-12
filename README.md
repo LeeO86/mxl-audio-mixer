@@ -175,6 +175,16 @@ origin. No setting is a secret.
 | `TSL_TCP_PORT` | 8911 | TSL UMD 5.0 over TCP (DLE/STX framing). |
 | `TSL_SCREEN` | -1 | Only this TSL screen; -1 is every screen. |
 | `TSL_MAP` | empty | display:index pairs, e.g. 0:1,1:2: the tally index a TSL display index drives; empty: the same number. |
+| `PREVIEW_PUBLISH_URL` | unset | RTSP base URL of the shared MediaMTX. Unset: start a built-in MediaMTX and publish there. |
+| `PREVIEW_PATH_PREFIX` | mxl-audio-mixer | Path prefix of every stream: <prefix>/<monitor id>. |
+| `PREVIEW_WHEP_URL` | unset | Public base URL of WHEP and WHIP for the browser. Unset with the built-in MediaMTX: the page's host and MEDIAMTX_WHEP_PORT. |
+| `PREVIEW_HLS_URL` | unset | Public base URL of HLS (listed for the platform; the mixer plays by WHEP). |
+| `MEDIAMTX_API_URL` | unset | API of the shared MediaMTX, for reader counts. |
+| `MEDIAMTX_RTSP_PORT` | 8954 | RTSP port of the built-in MediaMTX (127.0.0.1). |
+| `MEDIAMTX_WHEP_PORT` | 8599 | WHEP and WHIP port of the built-in MediaMTX. |
+| `MEDIAMTX_ICE_UDP_PORT` | 8199 | WebRTC ICE UDP port of the built-in MediaMTX. |
+| `MEDIAMTX_BIN` | mediamtx | The built-in MediaMTX executable (the image has it). |
+| `MIXER_MAX_WEB_MONITORS` | 8 | Most personal monitor paths of browser clients at once. |
 
 Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
 group hint, default `Input <n>`) and `extra_delay` (`"auto"`, the default, or ms).

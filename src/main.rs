@@ -27,6 +27,49 @@ fn fail(code: u8, message: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(code)
 }
 
+/// Every second: the reader counts of a shared MediaMTX (with `MEDIAMTX_API_URL`),
+/// then stop the streams nobody listens to and drop idle personal monitors.
+async fn preview_task(app: App, mut stop: tokio::sync::watch::Receiver<bool>) {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = async { let _ = stop.wait_for(|s| *s).await; } => return,
+        }
+        if let (Some(url), Some(client)) = (&app.config.mediamtx_api_url, &client) {
+            let list = async {
+                client
+                    .get(format!("{url}/v3/paths/list"))
+                    .send()
+                    .await?
+                    .json::<serde_json::Value>()
+                    .await
+            };
+            if let Ok(v) = list.await {
+                let readers = mxl_audio_mixer::preview::mediamtx::readers_from_list(
+                    &v,
+                    &app.config.preview_path_prefix,
+                );
+                app.control().streams.set_readers(readers);
+            }
+        }
+        let changed = {
+            let mut c = app.control();
+            let personal = c.expire_personal(mxl_audio_mixer::preview::PERSONAL_IDLE);
+            c.expire_streams() || personal
+        };
+        if changed {
+            if let Err(r) = mxl_audio_mixer::api::apply(&app, 0, |_| Ok(())).await {
+                tracing::warn!("preview: re-staging the plan failed ({})", r.status());
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let config = match config::from_env() {
         Ok(c) => c,
@@ -238,7 +281,14 @@ async fn run(config: Config) -> ExitCode {
             config.tsl_tcp_port
         );
     }
+    let own_mediamtx = config.preview_publish_url.is_none();
+    if own_mediamtx {
+        if let Err(e) = mxl_audio_mixer::preview::mediamtx::check_ports(&config) {
+            return fail(EX_UNAVAILABLE, e);
+        }
+    }
     let config = Arc::new(config);
+    let mediamtx = Arc::new(mxl_audio_mixer::preview::mediamtx::Child::default());
     let app = App {
         config: config.clone(),
         node: node.clone(),
@@ -247,8 +297,10 @@ async fn run(config: Config) -> ExitCode {
         tai_offset_s,
         timing_trusted,
         started: Instant::now(),
+        mediamtx: mediamtx.clone(),
     };
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let app_for_preview = app.clone();
     let mut web_stop = stop_rx.clone();
     let web = tokio::spawn(async move {
         axum::serve(web_listener, ops::router(app))
@@ -258,6 +310,14 @@ async fn run(config: Config) -> ExitCode {
             .await
     });
     let nmos_task = tokio::spawn(nmos_server.run());
+    if own_mediamtx {
+        tokio::spawn(mxl_audio_mixer::preview::mediamtx::supervise(
+            config.clone(),
+            mediamtx.clone(),
+            stop_rx.clone(),
+        ));
+    }
+    tokio::spawn(preview_task(app_for_preview, stop_rx.clone()));
     node.start_registration();
     tracing::info!(
         "web on {web_addr}, NMOS node {} on {}:{}",

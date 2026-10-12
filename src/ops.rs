@@ -34,6 +34,8 @@ pub struct App {
     pub tai_offset_s: i64,
     pub timing_trusted: bool,
     pub started: std::time::Instant,
+    /// The built-in MediaMTX child (unused with a shared one).
+    pub mediamtx: Arc<crate::preview::mediamtx::Child>,
 }
 
 impl App {
@@ -82,6 +84,7 @@ pub fn router(app: App) -> Router {
         .merge(crate::api::routes())
         .merge(crate::show_api::routes())
         .merge(crate::room_api::routes())
+        .merge(crate::preview_api::routes())
         .merge(crate::widgets::routes())
         .with_state(app)
 }
@@ -169,6 +172,11 @@ pub fn status_json(app: &App) -> Value {
             "state": control.tally_status(),
         },
         "solo": control.solo(),
+        "preview": {
+            "mode": if app.config.preview_publish_url.is_none() { "own" } else { "shared" },
+            "child_running": app.mediamtx.running.load(Ordering::Relaxed),
+            "streams": control.streams.status(&control.stream_ids()).iter().filter(|s| s.state != "idle").count(),
+        },
     })
 }
 
@@ -410,6 +418,41 @@ async fn metrics(State(app): State<App>) -> Response {
         "counter",
         "Execution plans swapped in by the DSP thread.",
         vec![format!(" {}", c.plan_swaps.load(Ordering::Relaxed))],
+    );
+    let streams = control.streams.status(&control.stream_ids());
+    metric(
+        "preview_state",
+        "gauge",
+        "Per stream: 0 idle, 1 connecting, 2 publishing.",
+        streams
+            .iter()
+            .map(|s| {
+                let v = match s.state {
+                    "publishing" => 2,
+                    "connecting" => 1,
+                    _ => 0,
+                };
+                format!("{{path=\"{}\"}} {v}", s.path)
+            })
+            .collect(),
+    );
+    metric(
+        "preview_readers",
+        "gauge",
+        "Per stream: readers on MediaMTX (with MEDIAMTX_API_URL).",
+        streams
+            .iter()
+            .filter_map(|s| s.readers.map(|n| format!("{{path=\"{}\"}} {n}", s.path)))
+            .collect(),
+    );
+    metric(
+        "preview_child_restarts_total",
+        "counter",
+        "Restarts of the built-in MediaMTX.",
+        vec![format!(
+            " {}",
+            app.mediamtx.restarts.load(Ordering::Relaxed)
+        )],
     );
     metric(
         "tally_packets_total",
