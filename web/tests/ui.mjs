@@ -105,6 +105,37 @@ try {
   await page.screenshot({ path: `${out}/processing.png`, fullPage: true });
   pass("processing: compressor added, bypassed and moved up");
 
+  // Tally and AFV: index 5 in the strip settings, AFV on, then index 5 on air over TSL (UDP).
+  await page.getByLabel("Tally index").fill("5");
+  await page.getByLabel("Tally index").press("Tab");
+  await until("vox tally index 5", async () => (await api("/api/v1/strips/vox")).tally_index === 5);
+  await page.getByLabel("Audio follows video").check();
+  await until("vox AFV on", async () => (await api("/api/v1/strips/vox")).afv?.enabled === true);
+  const { createSocket } = await import("node:dgram");
+  // TSL 5.0: PBC, version, flags (unicode), screen; then index, control (LH red, brightness 3), label.
+  const label = Buffer.from("Cam 5", "utf16le");
+  const packet = Buffer.alloc(12 + label.length);
+  packet.writeUInt16LE(packet.length - 2, 0);
+  packet.writeUInt8(0, 2);
+  packet.writeUInt8(1, 3);
+  packet.writeUInt16LE(0, 4);
+  packet.writeUInt16LE(5, 6);
+  packet.writeUInt16LE((1 << 4) | (3 << 6), 8);
+  packet.writeUInt16LE(label.length, 10);
+  label.copy(packet, 12);
+  const udp = createSocket("udp4");
+  await new Promise((r) => udp.send(packet, Number(process.env.TSL_UDP), "127.0.0.1", r));
+  udp.close();
+  await until("vox AFV open", async () => (await api("/api/v1/tally")).strips?.vox?.afv_open === true);
+  await page.screenshot({ path: `${out}/processing-tally.png` });
+  await page.goto(`${base}/#console`);
+  await page.locator('[data-signal="vox"].onair').waitFor({ timeout: 3000 });
+  await other.locator('[data-signal="vox"].onair').waitFor({ timeout: 3000 });
+  await page.goto(`${base}/#nmos`);
+  await page.locator("td", { hasText: "Cam 5" }).waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/nmos-tally.png`, fullPage: true });
+  pass("tally: index and AFV set in the strip settings; on air over TSL: AFV open, the strip lit on both clients, the lamp listed");
+
   // Routing: a send from vox to aux through the matrix.
   await page.goto(`${base}/#routing`);
   await page.getByRole("button", { name: "Vox to Aux" }).click();
