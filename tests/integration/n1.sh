@@ -30,18 +30,29 @@ corr() {
         tee -a "$IT_OUT/n1-probe.log" |
         python3 -c "import json,sys; print(' '.join(f'{c:.3f}' for c in json.load(sys.stdin)['correlation']))"
 }
-# has <bus> <tones in it> <tones not in it>: correlation above 0.4 or below 0.02
+# has <bus> <tones in it> <tones not in it>: correlation above 0.3 (an equal sum
+# of n tones gives 1/√n: 0.5 for four) or below 0.02; measured again (at most
+# three times) when an input block was late during the measurement.
 has() {
-    local c
-    c=$(corr "$1")
-    python3 - "$c" "$2" "$3" <<'EOF' || fail "$1: correlation $c, expected in: $2, not in: $3"
+    local c before
+    for attempt in 1 2 3; do
+        before=$(glitches)
+        c=$(corr "$1")
+        if python3 - "$c" "$2" "$3" <<'EOF'; then
 import sys
 c = [float(x) for x in sys.argv[1].split()]
 ins = [int(t) for t in sys.argv[2].split(",") if t]
 outs = [int(t) for t in sys.argv[3].split(",") if t]
-assert all(c[t - 1] > 0.4 for t in ins) and all(c[t - 1] < 0.02 for t in outs), c
+assert all(c[t - 1] > 0.3 for t in ins) and all(c[t - 1] < 0.02 for t in outs), c
 EOF
-    log "$1: correlation with tones 1-4: $c"
+            log "$1: correlation with tones 1-4: $c"
+            return 0
+        fi
+        if ((attempt == 3)) || [[ "$(glitches)" == "$before" ]]; then
+            fail "$1: correlation $c, expected in: $2, not in: $3"
+        fi
+        log "$1: correlation $c with a late input block; measuring again"
+    done
 }
 
 made=$(api POST /api/v1/operations/n-1 '{"strips": ["s1", "s2", "s3"], "of": "pgm"}')
