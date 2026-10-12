@@ -191,6 +191,66 @@ pub struct Bus {
     pub solo_safe: bool,
     #[serde(default)]
     pub mute_safe: bool,
+    /// A mix-minus (§5, N-1): the bus also takes every send into `of`, as it is,
+    /// except those from `without`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minus: Option<Minus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Minus {
+    pub of: String,
+    #[serde(default)]
+    pub without: Vec<String>,
+}
+
+impl Strip {
+    /// A strip with the defaults of §5: unpatched, 0 dB, unmuted, centred.
+    pub fn new(id: &str, format: Format) -> Self {
+        let n = format.channels();
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            format,
+            patch: vec![None; n],
+            trim_db: 0.0,
+            polarity: vec![false; n],
+            fader_db: Db(0.0),
+            mute: false,
+            pan: 0.0,
+            width: 1.0,
+            chain: Vec::new(),
+            loudness: false,
+            colour: None,
+            recall_safe: false,
+            solo_safe: false,
+            mute_safe: false,
+            tally_index: None,
+            afv: None,
+        }
+    }
+}
+
+impl Bus {
+    /// A bus with the defaults of §5: 0 dB, unmuted, delay-compensated.
+    pub fn new(id: &str, format: Format) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            format,
+            fader_db: Db(0.0),
+            mute: false,
+            chain: Vec::new(),
+            loudness: false,
+            compensate: true,
+            colour: None,
+            recall_safe: false,
+            solo_safe: false,
+            mute_safe: false,
+            minus: None,
+        }
+    }
 }
 
 /// Where a send or key taps its source (§5). Pre/post-EQ and pre/post-dynamics
@@ -424,7 +484,7 @@ impl Mix {
     pub fn next_id(&self, prefix: &str) -> String {
         (1..)
             .map(|n| format!("{prefix}-{n}"))
-            .find(|id| self.kind(id).is_none())
+            .find(|id| self.kind(id).is_none() && self.vca(id).is_none())
             .expect("unbounded")
     }
 
@@ -535,6 +595,17 @@ impl Mix {
         for b in &self.buses {
             check_name(&b.name)?;
             check_fader(&format!("bus {}: fader_db", b.id), b.fader_db)?;
+            if let Some(m) = &b.minus {
+                if self.kind(&m.of) != Some(Kind::Bus) || m.of == b.id {
+                    return Err(format!(
+                        "bus {}: minus of {} is not another bus",
+                        b.id, m.of
+                    ));
+                }
+                if let Some(w) = m.without.iter().find(|w| self.kind(w).is_none()) {
+                    return Err(format!("bus {}: minus without {w}: no such signal", b.id));
+                }
+            }
         }
         let mut pairs = BTreeSet::new();
         for send in &self.sends {
@@ -653,6 +724,34 @@ impl Mix {
 
     /// Signals in processing order: a signal comes after every signal it reads
     /// (sends without a block delay, keys). A loop is an error (§4.4).
+    /// The sends a mix-minus bus mirrors: (the bus, the send into its `of`).
+    fn mirrored(&self) -> impl Iterator<Item = (&str, &Send)> {
+        self.buses.iter().flat_map(move |b| {
+            b.minus
+                .iter()
+                .flat_map(move |m| {
+                    self.sends.iter().filter(move |s| {
+                        s.to == m.of
+                            && s.from != b.id
+                            && !m.without.contains(&s.from)
+                            && !self.sends.iter().any(|o| o.from == s.from && o.to == b.id)
+                    })
+                })
+                .map(move |s| (b.id.as_str(), s))
+        })
+    }
+
+    /// Every send the plan has: the sends, and those mix-minus buses mirror (a
+    /// bus's own send from a source wins over the mirrored one).
+    pub fn all_sends(&self) -> Vec<Send> {
+        let mut all = self.sends.clone();
+        all.extend(self.mirrored().map(|(bus, s)| Send {
+            to: bus.to_string(),
+            ..s.clone()
+        }));
+        all
+    }
+
     pub fn signal_order(&self) -> Result<Vec<&str>, String> {
         let mut feeds: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for s in self.sends.iter().filter(|s| !s.block_delay) {
@@ -660,6 +759,11 @@ impl Mix {
                 .entry(s.to.as_str())
                 .or_default()
                 .push(s.from.as_str());
+        }
+        for (bus, s) in self.mirrored() {
+            if !s.block_delay {
+                feeds.entry(bus).or_default().push(s.from.as_str());
+            }
         }
         for (id, chain) in self.chains() {
             for key in chain.iter().filter_map(|p| p.kind.key()) {
@@ -721,6 +825,14 @@ impl Mix {
             .talkback
             .destinations
             .retain(|d| d.bus != id);
+        for b in &mut self.buses {
+            if b.minus.as_ref().is_some_and(|m| m.of == id) {
+                b.minus = None;
+            }
+            if let Some(m) = &mut b.minus {
+                m.without.retain(|w| w != id);
+            }
+        }
         for v in &mut self.vcas {
             v.members.retain(|m| m != id);
         }
@@ -820,6 +932,7 @@ pub(crate) mod tests {
             recall_safe: false,
             solo_safe: false,
             mute_safe: false,
+            minus: None,
         }
     }
 

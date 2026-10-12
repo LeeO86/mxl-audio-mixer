@@ -279,6 +279,21 @@ try {
   await page.screenshot({ path: `${out}/meters.png`, fullPage: true });
   pass("meters: analyser spectrum and goniometer");
 
+  // Operations: N-1s of Main for the selection, made in the operations panel.
+  await page.goto(`${base}/#console`);
+  await page.getByRole("button", { name: "Operations" }).click();
+  await page.getByLabel("Select Vox").check();
+  await page.getByLabel("Select Guitar").check();
+  await page.getByLabel("N-1 of").selectOption("main");
+  await page.getByRole("button", { name: "Create N-1" }).click();
+  await page.locator("[data-op-result]", { hasText: "n1-vox" }).waitFor({ timeout: 5000 });
+  const n1 = (await api("/api/v1/buses")).find((b) => b.id === "n1-vox");
+  if (n1?.minus?.of !== "main" || n1.minus.without.join() !== "vox") throw new Error(`n1-vox: ${JSON.stringify(n1)}`);
+  await page.locator('[data-signal="n1-vox"] .minus').waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/operations.png`, fullPage: true });
+  for (const b of ["n1-vox", "n1-gtr"]) await api(`/api/v1/buses/${b}`, { method: "DELETE" });
+  pass("operations: N-1s of Main for Vox and Guitar from the panel (mix-minus buses, shown on the console)");
+
   for (const tab of ["nmos", "status", "settings"]) {
     await page.goto(`${base}/#${tab}`);
     await page.waitForTimeout(400);

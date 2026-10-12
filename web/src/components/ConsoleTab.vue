@@ -4,6 +4,7 @@
 // members.
 import { computed, ref, watch } from "vue";
 import GroupsPanel from "./GroupsPanel.vue";
+import OperationsPanel from "./OperationsPanel.vue";
 import Segmented from "./Segmented.vue";
 import Strip from "./Strip.vue";
 import VcaStrip from "./VcaStrip.vue";
@@ -65,6 +66,7 @@ async function add() {
 }
 const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
 const editingGroups = ref(false);
+const operating = ref(false);
 </script>
 
 <template>
@@ -91,6 +93,7 @@ const editingGroups = ref(false);
       <button class="btn secondary" @click="startAdd('strip')">+ Strip</button>
       <button class="btn secondary" @click="startAdd('bus')">+ Bus</button>
       <button class="btn secondary" :aria-pressed="editingGroups" @click="editingGroups = !editingGroups">VCAs &amp; groups</button>
+      <button class="btn secondary" :aria-pressed="operating" title="group, N-1, link, mix-minus" @click="operating = !operating">Operations</button>
     </div>
   </div>
   <div v-if="muteGroups.length" class="toolbar mutegroups">
@@ -108,6 +111,7 @@ const editingGroups = ref(false);
     </button>
   </div>
   <GroupsPanel v-if="editingGroups" @close="editingGroups = false" />
+  <OperationsPanel v-if="operating" @close="operating = false" />
   <div v-if="spilled" class="banner info spillbanner">
     Spill: VCA <strong>{{ spilled.name }}</strong>, {{ shown.length }} members
     <button class="btn small secondary" @click="spill.vca = null">Show all</button>

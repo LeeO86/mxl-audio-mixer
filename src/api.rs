@@ -505,11 +505,17 @@ struct BusBody {
     recall_safe: Option<bool>,
     solo_safe: Option<bool>,
     mute_safe: Option<bool>,
+    /// A mix-minus (`null`: a plain bus again).
+    #[serde(default, deserialize_with = "present")]
+    minus: Option<Option<crate::mix::model::Minus>>,
     ramp_ms: Option<f64>,
 }
 
 impl BusBody {
     fn apply(self, b: &mut Bus) {
+        if let Some(v) = self.minus {
+            b.minus = v;
+        }
         if let Some(v) = self.colour {
             b.colour = colour(v);
         }
@@ -567,6 +573,7 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             recall_safe: false,
             solo_safe: false,
             mute_safe: false,
+            minus: None,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {

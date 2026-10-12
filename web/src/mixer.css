@@ -234,3 +234,12 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .groups .row { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
 .groups .members { display: flex; flex-wrap: wrap; gap: .2rem .7rem; margin-top: .3rem; font-size: .8rem; }
 .groups input[type="color"] { width: 2.4rem; padding: 0; }
+
+/* Operations (§5) */
+.operations .members { display: flex; flex-wrap: wrap; gap: .2rem .8rem; font-size: .82rem; }
+.operations .row { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+.operations .row select, .operations .row input { width: auto; }
+.operations .opbox { border: 1px solid var(--border); border-radius: 6px; padding: .45rem .6rem; margin-top: .5rem; }
+.operations .opbox h4 { margin: 0 0 .2rem; }
+.strip .fmt .minus { color: var(--accent); }
+.minusedit .check { display: block; }
