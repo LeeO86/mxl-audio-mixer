@@ -74,6 +74,8 @@ api POST /api/v1/talkback/mics '{"id": "director", "name": "Director", "input": 
 api POST /api/v1/talkback/destinations '{"id": "ifb", "name": "IFB 1", "bus": "aux-1", "mode": "interrupt", "return": {"input": 1}}'
 api POST /api/v1/talkback/destinations '{"id": "studio", "name": "Studio", "bus": "aux-2"}'
 api PATCH /api/v1/control-room '{"sources": [{"signal": "main"}, {"signal": "aux-1"}, {"signal": "aux-2"}, {"signal": "osc"}, {"input": 1}]}'
+# The phone guest's N-1: the main mix without the phone (it follows the main mix).
+api POST /api/v1/operations/n-1 '{"strips": ["phone"], "of": "main", "format": "mono"}'
 # VCAs for the layout's pages, and a mute group for the playout.
 api POST /api/v1/vcas '{"id": "talent", "name": "Talent", "members": ["host", "guest", "phone"], "colour": "#4da3ff"}'
 api POST /api/v1/vcas '{"id": "playout", "name": "Playout", "members": ["music-l", "music-r", "sfx", "amb"], "colour": "#3fb968"}'
