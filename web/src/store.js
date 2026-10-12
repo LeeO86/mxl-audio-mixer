@@ -68,36 +68,38 @@ export async function act(fn, notice = "") {
 // A fader or pot being moved sends at most 30 PATCHes a second per path; changes to one path merge, so
 // a fast second control does not drop the first.
 
-const pending = new Map(); // path -> body
-const timers = new Map(); // path -> timeout
-const lastSend = new Map(); // path -> time
+const pending = new Map(); // "METHOD path" -> body
+const timers = new Map(); // key -> timeout
+const lastSend = new Map(); // key -> time
 
-function flushPath(path) {
-  clearTimeout(timers.get(path));
-  timers.delete(path);
-  const body = pending.get(path);
-  pending.delete(path);
+function flushKey(key) {
+  clearTimeout(timers.get(key));
+  timers.delete(key);
+  const body = pending.get(key);
+  pending.delete(key);
   if (!body) return;
-  lastSend.set(path, performance.now());
-  act(() => api.patch(path, body));
+  lastSend.set(key, performance.now());
+  const [method, path] = key.split(" ");
+  act(() => (method === "PUT" ? api.put(path, body) : api.patch(path, body)));
 }
 
-/** PATCH `path` with `body`, rate-limited and merged per path. */
-export function patch(path, body) {
-  pending.set(path, { ...(pending.get(path) || {}), ...body });
-  const wait = 33 - (performance.now() - (lastSend.get(path) || 0));
-  if (wait <= 0) flushPath(path);
-  else if (!timers.has(path)) timers.set(path, setTimeout(() => flushPath(path), wait));
+/** PATCH (or PUT) `path` with `body`, rate-limited and merged per path. */
+export function patch(path, body, method = "PATCH") {
+  const key = `${method} ${path}`;
+  pending.set(key, { ...(pending.get(key) || {}), ...body });
+  const wait = 33 - (performance.now() - (lastSend.get(key) || 0));
+  if (wait <= 0) flushKey(key);
+  else if (!timers.has(key)) timers.set(key, setTimeout(() => flushKey(key), wait));
 }
 
 export const signalPath = (id) => `/api/v1/${isBus(id) ? "buses" : "strips"}/${encodeURIComponent(id)}`;
 export const patchSignal = (id, body) => patch(signalPath(id), body);
-export const patchSend = (from, to, body) => act(() => api.put(`/api/v1/sends/${from}/${to}`, body));
+export const patchSend = (from, to, body) => patch(`/api/v1/sends/${encodeURIComponent(from)}/${encodeURIComponent(to)}`, body, "PUT");
 export const patchNode = (id, node, body) => patch(`${signalPath(id)}/chain/${encodeURIComponent(node)}`, body);
 
 /** Send everything pending now (before an action that depends on it). */
 export function flush() {
-  for (const path of [...pending.keys()]) flushPath(path);
+  for (const key of [...pending.keys()]) flushKey(key);
 }
 
 // ---- live connection --------------------------------------------------------------

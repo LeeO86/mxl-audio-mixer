@@ -7,7 +7,7 @@ import Pot from "./Pot.vue";
 import Pill from "./Pill.vue";
 import { TAPS, tapLabel } from "../nodes.js";
 import { api, dbValue, fmtDb } from "../api.js";
-import { act, buses, live, sendOf, sends, signalOf, signals } from "../store.js";
+import { act, buses, live, patchSend, sendOf, sends, signalOf, signals } from "../store.js";
 
 const editing = ref(null); // { from, to }
 const current = computed(() => (editing.value ? sendOf(editing.value.from, editing.value.to) : null));
@@ -20,7 +20,7 @@ async function cell(from, to) {
   }
   if (await act(() => api.put(`/api/v1/sends/${from}/${to}`))) editing.value = { from, to };
 }
-const put = (body) => act(() => api.put(`/api/v1/sends/${editing.value.from}/${editing.value.to}`, body));
+const put = (body) => patchSend(editing.value.from, editing.value.to, body);
 async function remove() {
   const { from, to } = editing.value;
   if (await act(() => api.del(`/api/v1/sends/${from}/${to}`))) editing.value = null;
