@@ -1074,6 +1074,10 @@ frames a `fader-bank` with a VCA.
   - group of s1 and s2: refused while N-1s leave them out; then their programme
     sends go through the group.
 - `ui.sh`: N-1s of Main for two strips from the Operations panel.
+- **Finding (CI):** a correlation of the four-tone programme came out 0.40–0.48
+  instead of 0.50 once (late input blocks during the measurement); the correlation
+  checks now measure again when an input was late, like the sample checks, and a
+  sum's tones count from 0.3 (a missing tone stays below 0.02).
 
 ### M6b: questions
 
