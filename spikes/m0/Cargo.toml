@@ -2,7 +2,7 @@
 name = "m0-spike"
 version = "0.0.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license = "MIT"
 publish = false
 description = "Milestone 0 spike: mxl-nmos audio receiver and sender on real MXL flows, TAI block clock"
 

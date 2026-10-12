@@ -4,9 +4,8 @@
 
 ### Licence
 
-- The mixer is licensed under the GNU General Public License, version 3 or later
-  (`GPL-3.0-or-later`), instead of MIT, so that it and every fork stay open
-  source. No release was made under MIT.
+- MIT, as before. On 2026-10-12 `main` was GPL-3.0-or-later for a few hours; that
+  was taken back the same day, before any release.
 
 ### Milestone 5 (part 3): talkback
 
