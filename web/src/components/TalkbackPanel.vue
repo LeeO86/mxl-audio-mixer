@@ -51,12 +51,12 @@ function up(d) {
 }
 const talksTo = (d) => !!micId.value && isTalking(micId.value, d.id);
 const othersTalk = (d) => Object.entries(talking()).some(([m, list]) => m !== micId.value && list.includes(d.id));
-const anyTalk = computed(() => !!micId.value && (talking()[micId.value] || []).length > 0);
+const allTalk = computed(() => !!micId.value && destinations.value.length > 0 && destinations.value.every(talksTo));
 async function all() {
   if (!ready.value) return;
   const mic = encodeURIComponent(micId.value);
-  if (anyTalk.value) await act(() => api.del(`/api/v1/talkback/talk/${mic}`));
-  else for (const d of destinations.value) await act(() => api.put(`/api/v1/talkback/talk/${mic}/${encodeURIComponent(d.id)}`, {}));
+  if (allTalk.value) await act(() => api.del(`/api/v1/talkback/talk/${mic}`));
+  else for (const d of destinations.value.filter((x) => !talksTo(x))) await act(() => api.put(`/api/v1/talkback/talk/${mic}/${encodeURIComponent(d.id)}`, {}));
 }
 
 const sameSource = (a, b) => !!a && !!b && JSON.stringify(a) === JSON.stringify(b);
@@ -123,7 +123,7 @@ const interruptValue = (d) => {
       >
         {{ d.name }}
       </button>
-      <button v-if="destinations.length > 1" class="btn talk" :class="{ on: anyTalk }" :disabled="!ready" :aria-pressed="anyTalk" title="talk to every destination (latched); again to stop" @click="all">All</button>
+      <button v-if="destinations.length > 1" class="btn talk" :class="{ on: allTalk }" :disabled="!ready" :aria-pressed="allTalk" title="talk to every destination (latched); again to stop" @click="all">All</button>
     </div>
     <div v-if="!compact && destinations.some((d) => d.return)" class="tbbuttons">
       <span class="caption">Listen back</span>
