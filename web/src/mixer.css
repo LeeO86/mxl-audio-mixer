@@ -218,3 +218,19 @@ button.btn.talk.on, button.btn.talk.on:hover:not(:disabled) { background: var(--
 .tbsettings { margin-top: .6rem; }
 .tbsettings table input:not([type="checkbox"]) { width: 100%; }
 .talkback.compact { padding: .5rem; }
+
+/* VCAs and mute groups (§9) */
+.vcasec { display: flex; gap: .45rem; padding-left: .6rem; border-left: 2px solid var(--border); }
+.strip.vca .sname[aria-pressed="true"] { outline: 2px solid var(--accent); }
+.strip.vca .spill { width: 100%; }
+.strip.vca .vcamembers { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+.strip.vca .vcamembers span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vcachips { display: flex; flex-wrap: wrap; gap: 2px; justify-content: center; }
+.vcachip { border: 1px solid var(--border); border-radius: 3px; padding: 0 .25rem; font-size: .62rem; }
+button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
+.toolbar.mutegroups { margin-top: .4rem; }
+.spillbanner { display: flex; align-items: center; gap: .6rem; margin: .5rem 0; }
+.groups .groupedit { border: 1px solid var(--border); border-radius: 6px; padding: .4rem; margin: .4rem 0; }
+.groups .row { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+.groups .members { display: flex; flex-wrap: wrap; gap: .2rem .7rem; margin-top: .3rem; font-size: .8rem; }
+.groups input[type="color"] { width: 2.4rem; padding: 0; }

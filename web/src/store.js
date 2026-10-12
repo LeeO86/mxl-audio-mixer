@@ -184,6 +184,42 @@ export const patchMonitor = (id, body) => {
   changeLocally(() => room.value.monitors.find((m) => m.id === id), `/api/v1/monitors/${encodeURIComponent(id)}`, body);
 };
 
+// ---- VCAs and mute groups (§9) ----------------------------------------------------------
+export const vcas = computed(() => live.mix?.vcas || []);
+export const muteGroups = computed(() => live.mix?.mute_groups || []);
+export const vcaOf = (id) => vcas.value.find((v) => v.id === id) || null;
+export const patchVca = (id, body) => changeLocally(() => vcaOf(id), `/api/v1/vcas/${encodeURIComponent(id)}`, body);
+export const patchMuteGroup = (id, body) =>
+  changeLocally(() => muteGroups.value.find((g) => g.id === id), `/api/v1/mute-groups/${encodeURIComponent(id)}`, body);
+/** Every VCA above `id` (through nested VCAs). */
+export function vcasAbove(id) {
+  const found = new Set();
+  const todo = [id];
+  while (todo.length) {
+    const m = todo.pop();
+    for (const v of vcas.value) if (v.members.includes(m) && !found.has(v.id)) found.add(v.id), todo.push(v.id);
+  }
+  return [...found].map(vcaOf).filter(Boolean);
+}
+/** The strips and buses under VCA `id` (through nested VCAs). */
+export function vcaSignals(id) {
+  const out = new Set();
+  const seen = new Set();
+  const todo = [id];
+  while (todo.length) {
+    const v = vcaOf(todo.pop());
+    if (!v || seen.has(v.id)) continue;
+    seen.add(v.id);
+    for (const m of v.members) (vcaOf(m) ? todo.push(m) : out.add(m));
+  }
+  return [...out];
+}
+/** Muted by a VCA or an active mute group (its own mute untouched). */
+export const vcaMuted = (id) => vcasAbove(id).some((v) => v.mute);
+export const groupMuted = (s) => !s.mute_safe && muteGroups.value.some((g) => g.active && g.members.includes(s.id));
+/** The console shows only these signals (a VCA's spill), or everything with null. */
+export const spill = reactive({ vca: null });
+
 /** The tally of a strip: { index, on_air, preview, afv, afv_open }, or null. */
 export const tallyOf = (id) => live.status?.tally?.state?.strips?.[id] || null;
 

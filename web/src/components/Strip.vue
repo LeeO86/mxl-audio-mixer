@@ -11,7 +11,7 @@ import MiniPot from "./MiniPot.vue";
 import VFader from "./VFader.vue";
 import { dbValue, fmtPan, fmtSigned } from "../api.js";
 import { DYNAMICS } from "../nodes.js";
-import { live, patchSend, patchSignal, select, sends, signalOf, soloed, tallyOf, toggleSolo } from "../store.js";
+import { groupMuted, live, patchSend, patchSignal, select, sends, signalOf, soloed, tallyOf, toggleSolo, vcaMuted, vcasAbove } from "../store.js";
 
 const props = defineProps({
   signal: { type: Object, required: true },
@@ -30,6 +30,8 @@ const selected = computed(() => live.selected === s.value.id);
 const mySends = computed(() => sends.value.filter((x) => x.from === s.value.id));
 const latency = computed(() => live.latency[s.value.id] || 0);
 const tally = computed(() => tallyOf(s.value.id));
+const myVcas = computed(() => vcasAbove(s.value.id));
+const otherMute = computed(() => (vcaMuted(s.value.id) ? "VCA" : groupMuted(s.value) ? "group" : ""));
 const dynamics = computed(() => s.value.chain.filter((n) => DYNAMICS.has(n.type)));
 function open() {
   if (props.compact) return;
@@ -88,7 +90,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
 <template>
   <section
     class="strip"
-    :class="{ bus, compact, selected: selected && !compact, muted: s.mute, onair: tally?.on_air, preview: tally?.preview && !tally?.on_air }"
+    :class="{ bus, compact, selected: selected && !compact, muted: s.mute || !!otherMute, onair: tally?.on_air, preview: tally?.preview && !tally?.on_air }"
     :style="{ '--colour': colour || 'var(--border)' }"
     :data-signal="s.id"
   >
@@ -163,7 +165,10 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       <button class="btn small" :class="soloed[s.id] === 'pfl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'pfl'" :aria-label="`PFL ${s.name}`" title="pre-fader listen" @click="toggleSolo(s.id, 'pfl')">PFL</button>
       <button v-if="!compact" class="btn small" :class="soloed[s.id] === 'afl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'afl'" :aria-label="`AFL ${s.name}`" title="after-fader listen" @click="toggleSolo(s.id, 'afl')">AFL</button>
     </div>
-    <button class="btn mute" :class="s.mute ? 'danger' : 'secondary'" :aria-pressed="s.mute" @click="patchSignal(s.id, { mute: !s.mute })">Mute</button>
+    <button class="btn mute" :class="[s.mute ? 'danger' : 'secondary', { othermute: !s.mute && otherMute }]" :aria-pressed="s.mute" :title="otherMute ? `muted by a ${otherMute === 'VCA' ? 'VCA' : 'mute group'}` : ''" @click="patchSignal(s.id, { mute: !s.mute })">Mute</button>
+    <div v-if="myVcas.length && !compact" class="vcachips muted small" :title="`VCAs: ${myVcas.map((v) => v.name).join(', ')}`">
+      <span v-for="v in myVcas" :key="v.id" class="vcachip" :style="{ borderColor: v.colour || 'var(--border)' }">{{ v.name }}</span>
+    </div>
 
     <div class="faderrow">
       <VFader :value="s.fader_db" :label="`${s.name} fader`" :colour="colour" @change="(v) => patchSignal(s.id, { fader_db: v })" />
