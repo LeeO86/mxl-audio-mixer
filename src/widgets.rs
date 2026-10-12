@@ -7,8 +7,9 @@
 //!   <WIDGET_FRAME_ANCESTORS>`, no `X-Frame-Options`. A bad parameter is 400, an
 //!   unknown id 404, another method than GET 405.
 //!
-//! Widgets now: `strip`, `fader-bank`, `loudness`, `monitor`. `talkback` comes with
-//! talkback (M5), `vca` with the VCAs (M6).
+//! Widgets now: `strip`, `fader-bank`, `loudness`, `monitor`, `talkback`; `vca`
+//! comes with the VCAs (M6). The `talkback` widget's browser microphone needs a
+//! frame with `allow="microphone"` on an HTTPS page.
 
 use std::collections::HashMap;
 
@@ -81,6 +82,13 @@ fn catalogue(mix: &Mix) -> Value {
         .iter()
         .map(|m| m.id.as_str())
         .collect();
+    let talkback = &mix.control_room.talkback;
+    let destinations: Vec<&str> = talkback
+        .destinations
+        .iter()
+        .map(|d| d.id.as_str())
+        .collect();
+    let mics: Vec<&str> = talkback.mics.iter().map(|m| m.id.as_str()).collect();
     let pages: Vec<String> = mix
         .layouts
         .iter()
@@ -124,6 +132,19 @@ fn catalogue(mix: &Mix) -> Value {
             360,
             200
         ),
+        item(
+            "talkback",
+            "Talkback",
+            json!({
+                "type": "object",
+                "properties": {
+                    "destinations": {"type": "string", "title": "Destinations, comma-separated (default: all)", "examples": destinations},
+                    "mic": {"type": "string", "title": "Talkback mic (default: the browser's microphone)", "enum": mics}
+                }
+            }),
+            260,
+            110
+        ),
     ])
 }
 
@@ -166,6 +187,31 @@ pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (St
     match id {
         "strip" => signal("strip"),
         "loudness" => signal("signal"),
+        "talkback" => {
+            let t = &mix.control_room.talkback;
+            if let Some(list) = q.get("destinations") {
+                let ids: Vec<&str> = list
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if ids.is_empty() {
+                    return bad("destinations lists at least one destination".into());
+                }
+                if let Some(d) = ids
+                    .iter()
+                    .find(|d| !t.destinations.iter().any(|x| x.id == **d))
+                {
+                    return bad(format!("talkback destination {d} does not exist"));
+                }
+            }
+            match q.get("mic") {
+                Some(m) if !t.mics.iter().any(|x| &x.id == m) => {
+                    bad(format!("talkback mic {m} does not exist"))
+                }
+                _ => Ok(()),
+            }
+        }
         "monitor" => match q.get("monitor") {
             Some(m) if mix.control_room.monitors.iter().any(|x| &x.id == m) => Ok(()),
             Some(m) => bad(format!("monitor {m} does not exist")),
@@ -301,5 +347,8 @@ mod tests {
         assert_eq!(status("fader-bank", &[]), Some(400));
         assert_eq!(status("monitor", &[("monitor", "main")]), Some(400));
         assert_eq!(status("vca", &[]), Some(404));
+        assert_eq!(status("talkback", &[]), None);
+        assert_eq!(status("talkback", &[("destinations", "ifb")]), Some(400));
+        assert_eq!(status("talkback", &[("mic", "dir")]), Some(400));
     }
 }
