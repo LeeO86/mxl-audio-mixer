@@ -15,8 +15,7 @@ use serde_json::{json, Value};
 use crate::control::{fade_wait, Staged};
 use crate::mix::chain::Proc;
 use crate::mix::model::{
-    Afv, Bus, Db, Kind, MixSettings, Output, PatchPoint, Send, Strip, Tap, DEFAULT_RAMP_MS,
-    MAX_RAMP_MS,
+    Afv, Bus, Db, Kind, MixSettings, Output, Patch, Send, Strip, Tap, DEFAULT_RAMP_MS, MAX_RAMP_MS,
 };
 use crate::mix::{Format, Mix};
 use crate::ops::{error, App};
@@ -296,7 +295,7 @@ struct StripBody {
     id: Option<String>,
     name: Option<String>,
     format: Option<Format>,
-    patch: Option<Vec<Option<PatchPoint>>>,
+    patch: Option<Vec<Option<Patch>>>,
     trim_db: Option<f64>,
     polarity: Option<Vec<bool>>,
     fader_db: Option<Db>,

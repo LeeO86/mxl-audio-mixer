@@ -18,8 +18,9 @@ use std::hash::{Hash, Hasher};
 
 use super::chain::{Category, Proc, ProcKind};
 use super::format::{pan_gains, stereo_matrix, width_matrix, Format};
-use super::model::{Db, Kind, Mix, Tap};
+use super::model::{Db, Kind, Mix, Patch, Tap};
 use super::room::{check_matrix, monitor_gain, Monitor, SoloKind, Source};
+use super::talkback::{destination_gains, dims_control_room, MicInfo, Talking};
 use crate::engine::plan::{NodeId, Plan, PlanBuilder, Processor, Span, Step};
 
 /// A gain node of a compiled plan, as the control side remembers it.
@@ -58,6 +59,49 @@ pub struct Compiler {
     pub streams: HashMap<String, usize>,
     /// The personal monitors of browser clients (runtime).
     pub personal: Vec<Personal>,
+    /// Who talks to what (talkback, runtime).
+    pub talking: Talking,
+    /// The engine's talkback slot of each browser microphone (runtime).
+    pub browser_mics: std::collections::BTreeMap<String, usize>,
+    /// The engine input index of talkback slot 0 (after the MXL inputs).
+    pub talk_base: usize,
+    /// What the monitors that follow solo play instead of their source
+    /// (listen-back, runtime).
+    pub listen_back: Option<Source>,
+}
+
+/// A talkback mic with where the engine reads it (input index, channel).
+struct MicSource {
+    info: MicInfo,
+    input: u32,
+    channel: u32,
+}
+
+impl Compiler {
+    fn mic_sources(&self, mix: &Mix) -> Vec<MicSource> {
+        let t = &mix.control_room.talkback;
+        let configured = t.mics.iter().map(|m| MicSource {
+            info: MicInfo {
+                id: m.id.clone(),
+                priority: m.priority,
+                level_db: m.level_db,
+                dims_control_room: m.dims_control_room,
+            },
+            input: (m.input - 1) as u32,
+            channel: (m.channel - 1) as u32,
+        });
+        let browser = self.browser_mics.iter().map(|(id, slot)| MicSource {
+            info: MicInfo {
+                id: id.clone(),
+                priority: t.browser_priority,
+                level_db: 0.0,
+                dims_control_room: false,
+            },
+            input: (self.talk_base + slot) as u32,
+            channel: 0,
+        });
+        configured.chain(browser).collect()
+    }
 }
 
 /// A browser client's own monitor path (§10.1 personal monitoring): stereo, its
@@ -365,6 +409,34 @@ impl Compiler {
         let mut meters = Vec::new();
         let mut latency = HashMap::new();
 
+        // Talkback mics: one mono buffer each, metered as `talkback:<id>`.
+        let mics = c.compiler.mic_sources(mix);
+        let talking = c.compiler.talking.clone();
+        let mut mic_bufs: HashMap<String, Span> = HashMap::new();
+        for m in &mics {
+            let dst = c.b.buffers(1);
+            let buffer = c.b.buffer(dst, 0);
+            c.b.step(Step::Patch {
+                input: m.input,
+                channel: m.channel,
+                dst: buffer,
+            });
+            (&m.info.id, m.input, m.channel).hash(&mut c.structure);
+            let key = format!("talkback:{}", m.info.id);
+            let tp = c.state(format!("meter/{key}"), 1, |pid| {
+                Processor::true_peak(pid, 1)
+            });
+            let slot = c.b.meter(1);
+            c.b.step(Step::Meter {
+                src: dst,
+                slot,
+                proc: tp,
+            });
+            meters.push((key, slot, 1));
+            mic_bufs.insert(m.info.id.clone(), dst);
+        }
+        let mic_infos: Vec<MicInfo> = mics.iter().map(|m| m.info.clone()).collect();
+
         // Block-delay sends read last block's source, held across the block.
         let mut held: HashMap<(String, String), (u32, Span)> = HashMap::new();
         for s in mix.sends.iter().filter(|s| s.block_delay) {
@@ -392,13 +464,25 @@ impl Compiler {
                     let Some(s) = mix.strip(id) else { continue };
                     let n = s.format.channels();
                     let input = c.b.buffers(n);
+                    let mut resolved = Vec::with_capacity(n);
                     for (ch, point) in s.patch.iter().enumerate() {
-                        match point {
-                            Some(p) => {
+                        let at = match point {
+                            Some(Patch::Input(p)) => {
+                                Some(((p.input - 1) as u32, (p.channel - 1) as u32))
+                            }
+                            Some(Patch::Talkback(t)) => mics
+                                .iter()
+                                .find(|m| m.info.id == t.talkback)
+                                .map(|m| (m.input, m.channel)),
+                            None => None,
+                        };
+                        resolved.push(at);
+                        match at {
+                            Some((input_index, channel)) => {
                                 let dst = c.b.buffer(input, ch);
                                 c.b.step(Step::Patch {
-                                    input: (p.input - 1) as u32,
-                                    channel: (p.channel - 1) as u32,
+                                    input: input_index,
+                                    channel,
                                     dst,
                                 });
                             }
@@ -416,7 +500,7 @@ impl Compiler {
                         .collect();
                     let node = c.node(
                         format!("strip/{}/trim", s.id),
-                        (format_name(s.format), &s.patch),
+                        (format_name(s.format), &resolved),
                         values,
                     );
                     let chain_in = c.b.buffers(n);
@@ -607,12 +691,55 @@ impl Compiler {
                         (format_name(bus.format), chain_sig),
                         vec![fader; n],
                     );
-                    let post = c.b.buffers(n);
+                    let mut post = c.b.buffers(n);
                     c.b.step(Step::Gain {
                         node,
                         src: pre.0,
                         dst: post,
                     });
+                    // Talkback into this bus (§10.2): the programme (down while an
+                    // interrupt talks), plus every mic at its gain.
+                    let dest = mix
+                        .control_room
+                        .talkback
+                        .destinations
+                        .iter()
+                        .find(|d| d.bus == bus.id);
+                    if let Some(d) = dest {
+                        let (programme, gains) = destination_gains(d, &mic_infos, &talking);
+                        let out = c.b.buffers(n);
+                        let node = c.node(
+                            format!("talkback/{}/programme", d.id),
+                            (format_name(bus.format), chain_sig),
+                            vec![programme; n],
+                        );
+                        c.b.step(Step::Gain {
+                            node,
+                            src: post,
+                            dst: out,
+                        });
+                        let coefficients =
+                            c.b.coefficients(&width_matrix(Format::Mono, bus.format, laws));
+                        for (m, g) in mics.iter().zip(gains) {
+                            let node = c.node(
+                                format!("talkback/{}/{}", d.id, m.info.id),
+                                (
+                                    format_name(bus.format),
+                                    m.input,
+                                    m.channel,
+                                    f64::from(laws.pan).to_bits(),
+                                ),
+                                vec![g],
+                            );
+                            c.b.step(Step::Send {
+                                node,
+                                src: mic_bufs[&m.info.id],
+                                dst: out,
+                                coefficients,
+                            });
+                        }
+                        post = out;
+                    }
                     Taps {
                         input: sum,
                         chain_in: sum,
@@ -668,11 +795,21 @@ impl Compiler {
         }
         // Monitor paths: the control room's, then the personal ones (each with its
         // own solo), each with its stream slot if someone listens.
+        let listen_back = c.compiler.listen_back.clone();
+        let talk_dim = dims_control_room(&mic_infos, &talking);
         let mut jobs: Vec<(Monitor, Option<Span>, Option<usize>)> = room
             .monitors
             .iter()
-            .map(|m| (m.clone(), solo_bus, c.compiler.streams.get(&m.id).copied()))
+            .map(|m| {
+                let mut m = m.clone();
+                if let (Some(s), true) = (&listen_back, m.follows_solo) {
+                    m.source = Some(s.clone());
+                }
+                let slot = c.compiler.streams.get(&m.id).copied();
+                (m, solo_bus, slot)
+            })
             .collect();
+        let control_room_monitors = jobs.len();
         for w in c.compiler.personal.clone() {
             let bus = build_solo_bus(
                 &mut c,
@@ -686,8 +823,9 @@ impl Compiler {
             jobs.push((w.monitor, bus, slot));
         }
         let mono_sum = Db(f64::from(laws.mono_sum)).gain() as f32;
-        for (m, solo_bus, stream) in &jobs {
+        for (j, (m, solo_bus, stream)) in jobs.iter().enumerate() {
             let solo_bus = *solo_bus;
+            let talk_dimmed = talk_dim && j < control_room_monitors;
             let n = m.format.channels();
             let key = m.key();
             let mon = c.b.buffers(n);
@@ -790,7 +928,7 @@ impl Compiler {
             let node = c.node(
                 format!("{key}/level"),
                 format_name(m.format),
-                vec![monitor_gain(m); n],
+                vec![monitor_gain(m, talk_dimmed); n],
             );
             c.b.step(Step::Gain {
                 node,
@@ -974,10 +1112,13 @@ mod tests {
             format,
             patch: (0..n)
                 .map(|c| {
-                    Some(PatchPoint {
-                        input,
-                        channel: c + 1,
-                    })
+                    Some(
+                        PatchPoint {
+                            input,
+                            channel: c + 1,
+                        }
+                        .into(),
+                    )
                 })
                 .collect(),
             trim_db: 0.0,
@@ -1084,6 +1225,97 @@ mod tests {
     }
 
     #[test]
+    fn talkback_into_a_bus_with_interrupt_and_priority() {
+        use crate::mix::model::{Patch, TalkbackPoint};
+        use crate::mix::talkback::{Destination, Mic, Mode};
+        let mut m = Mix::default();
+        m.strips.push(strip("vox", Format::Mono, 1));
+        m.buses.push(bus("ifb", Format::Mono));
+        m.sends.push(send("vox", "ifb", Tap::PostFader));
+        m.outputs.push(Output {
+            signal: "ifb".into(),
+            format: None,
+            commit_samples: None,
+        });
+        // A strip on the browser microphone, into its own bus.
+        let mut remote = strip("remote", Format::Mono, 1);
+        remote.patch[0] = Some(Patch::Talkback(TalkbackPoint {
+            talkback: "browser-1".into(),
+        }));
+        m.strips.push(remote);
+        m.buses.push(bus("rec", Format::Mono));
+        m.sends.push(send("remote", "rec", Tap::PostFader));
+        m.outputs.push(Output {
+            signal: "rec".into(),
+            format: None,
+            commit_samples: None,
+        });
+        let mic = |id: &str, channel, priority| Mic {
+            id: id.into(),
+            name: id.into(),
+            input: 2,
+            channel,
+            level_db: 0.0,
+            priority,
+            dims_control_room: true,
+        };
+        let t = &mut m.control_room.talkback;
+        t.mics.push(mic("dir", 1, 5));
+        t.mics.push(mic("prod", 2, 1));
+        t.destinations.push(Destination {
+            id: "ifb".into(),
+            name: "IFB".into(),
+            bus: "ifb".into(),
+            mode: Mode::Interrupt,
+            interrupt_db: Db::MINUS_INF,
+            level_db: 0.0,
+            return_feed: None,
+        });
+        assert_eq!(m.validate(2, 48), Ok(()));
+        let slots = HashMap::from([("ifb".to_string(), 3), ("rec".to_string(), 4)]);
+        let mut compiler = Compiler {
+            talk_base: 2,
+            ..Compiler::default()
+        };
+        compiler.browser_mics.insert("browser-1".into(), 0);
+        // vox 0.5, dir 0.3, prod 0.2, the browser 0.05 (talkback slot 0).
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.3; 48], vec![0.2; 48]],
+            vec![vec![0.05; 48]],
+        ]);
+        let mut level = |compiler: &mut Compiler, talking: &[(&str, &str)], mix: &Mix| {
+            compiler.talking.clear();
+            for (mic, dest) in talking {
+                compiler
+                    .talking
+                    .entry(mic.to_string())
+                    .or_default()
+                    .insert(dest.to_string());
+            }
+            let mut c = compiler.compile(mix, 48, 0, &slots, &HashMap::new());
+            let out = run(&mut c, &inputs, 1);
+            (out.0[&3][0][0], out.0[&4][0][0], c.structure)
+        };
+        let (idle, rec, structure) = level(&mut compiler, &[], &m);
+        assert_eq!((idle, rec), (0.5, 0.05));
+        let (dir, _, s) = level(&mut compiler, &[("dir", "ifb")], &m);
+        assert_eq!(dir, 0.3, "interrupt: the programme cut");
+        assert_eq!(s, structure, "talk is a value change, not a new plan");
+        let (both, _, _) = level(&mut compiler, &[("dir", "ifb"), ("prod", "ifb")], &m);
+        assert_eq!(both, 0.3, "the director outranks the producer");
+        let (prod, _, _) = level(&mut compiler, &[("prod", "ifb")], &m);
+        assert_eq!(prod, 0.2);
+        let mut mixed = m.clone();
+        mixed.control_room.talkback.destinations[0].mode = Mode::Mix;
+        let (sum, _, _) = level(&mut compiler, &[("dir", "ifb"), ("prod", "ifb")], &mixed);
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "mix: programme and both mics: {sum}"
+        );
+    }
+
+    #[test]
     fn afv_adds_a_gain_after_the_fader() {
         let mut compiler = Compiler::default();
         let base = mix();
@@ -1143,10 +1375,13 @@ mod tests {
         assert_eq!(differing, 1, "only the send changed its wiring");
 
         let mut repatched = base;
-        repatched.strips[0].patch[0] = Some(PatchPoint {
-            input: 2,
-            channel: 2,
-        });
+        repatched.strips[0].patch[0] = Some(
+            PatchPoint {
+                input: 2,
+                channel: 2,
+            }
+            .into(),
+        );
         let d = compile(&mut compiler, &repatched, 48);
         assert_ne!(a.structure, d.structure);
     }

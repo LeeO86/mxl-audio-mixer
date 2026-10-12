@@ -16,7 +16,7 @@ use crate::inputs::Inputs;
 use crate::loudness::LoudnessMeters;
 use crate::meters::Meters;
 use crate::mix::compile::{Compiler, LayoutNode};
-use crate::mix::model::{Kind, Mix, Strip, Tap};
+use crate::mix::model::{Kind, Mix, Patch, Strip, Tap};
 use crate::outputs::{OutputSpec, Outputs};
 
 /// Time between fading out the nodes a change removes or rewires and the swap:
@@ -516,7 +516,16 @@ impl Control {
             .iter()
             .map(|p| match p {
                 None => PatchState::Unpatched,
-                Some(p) if self.inputs.has_channels(p.input - 1, p.channel) => PatchState::Ok,
+                Some(Patch::Input(p)) if self.inputs.has_channels(p.input - 1, p.channel) => {
+                    PatchState::Ok
+                }
+                Some(Patch::Talkback(t))
+                    if self.mix.control_room.talkback.mics.iter().any(|m| {
+                        m.id == t.talkback && self.inputs.has_channels(m.input - 1, m.channel)
+                    }) || self.compiler.browser_mics.contains_key(&t.talkback) =>
+                {
+                    PatchState::Ok
+                }
                 Some(_) => PatchState::Missing,
             })
             .collect()
