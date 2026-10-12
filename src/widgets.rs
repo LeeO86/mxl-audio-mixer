@@ -7,9 +7,9 @@
 //!   <WIDGET_FRAME_ANCESTORS>`, no `X-Frame-Options`. A bad parameter is 400, an
 //!   unknown id 404, another method than GET 405.
 //!
-//! Widgets now: `strip`, `fader-bank`, `loudness`, `monitor`, `talkback`; `vca`
-//! comes with the VCAs (M6). The `talkback` widget's browser microphone needs a
-//! frame with `allow="microphone"` on an HTTPS page.
+//! Widgets: `strip`, `fader-bank`, `loudness`, `monitor`, `talkback`, `vca`. The
+//! `talkback` widget's browser microphone needs a frame with `allow="microphone"`
+//! on an HTTPS page.
 
 use std::collections::HashMap;
 
@@ -89,6 +89,7 @@ fn catalogue(mix: &Mix) -> Value {
         .map(|d| d.id.as_str())
         .collect();
     let mics: Vec<&str> = talkback.mics.iter().map(|m| m.id.as_str()).collect();
+    let vcas: Vec<&str> = mix.vcas.iter().map(|v| v.id.as_str()).collect();
     let pages: Vec<String> = mix
         .layouts
         .iter()
@@ -111,7 +112,7 @@ fn catalogue(mix: &Mix) -> Value {
                 "properties": {
                     "layout": {"type": "string", "title": "Layout", "enum": layouts},
                     "page": {"type": "string", "title": "Page of the layout (its name or 1-based number)", "examples": pages},
-                    "strips": {"type": "string", "title": "Strips and buses, comma-separated (instead of a layout page)"}
+                    "strips": {"type": "string", "title": "Strips, buses and VCAs, comma-separated (instead of a layout page)"}
                 },
                 "oneOf": [{"required": ["layout", "page"]}, {"required": ["strips"]}]
             }),
@@ -144,6 +145,13 @@ fn catalogue(mix: &Mix) -> Value {
             }),
             260,
             110
+        ),
+        item(
+            "vca",
+            "VCA",
+            json!({"type": "object", "properties": {"vca": {"type": "string", "title": "VCA", "enum": vcas}}, "required": ["vca"]}),
+            120,
+            480
         ),
     ])
 }
@@ -212,6 +220,11 @@ pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (St
                 _ => Ok(()),
             }
         }
+        "vca" => match q.get("vca") {
+            Some(v) if mix.vca(v).is_some() => Ok(()),
+            Some(v) => bad(format!("VCA {v} does not exist")),
+            None => bad("vca is required".into()),
+        },
         "monitor" => match q.get("monitor") {
             Some(m) if mix.control_room.monitors.iter().any(|x| &x.id == m) => Ok(()),
             Some(m) => bad(format!("monitor {m} does not exist")),
@@ -225,10 +238,15 @@ pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (St
                     .filter(|s| !s.is_empty())
                     .collect();
                 if ids.is_empty() || ids.len() > MAX_BANK {
-                    return bad(format!("strips lists 1 to {MAX_BANK} strips or buses"));
+                    return bad(format!(
+                        "strips lists 1 to {MAX_BANK} strips, buses or VCAs"
+                    ));
                 }
-                if let Some(s) = ids.iter().find(|s| mix.kind(s).is_none()) {
-                    return bad(format!("{s} is not a strip or bus"));
+                if let Some(s) = ids
+                    .iter()
+                    .find(|s| mix.kind(s).is_none() && mix.vca(s).is_none())
+                {
+                    return bad(format!("{s} is not a strip, bus or VCA"));
                 }
                 return Ok(());
             }
@@ -346,7 +364,9 @@ mod tests {
         assert_eq!(status("fader-bank", &[("strips", "s1,x")]), Some(400));
         assert_eq!(status("fader-bank", &[]), Some(400));
         assert_eq!(status("monitor", &[("monitor", "main")]), Some(400));
-        assert_eq!(status("vca", &[]), Some(404));
+        assert_eq!(status("vca", &[]), Some(400));
+        assert_eq!(status("vca", &[("vca", "band")]), Some(400));
+        assert_eq!(status("nope", &[]), Some(404));
         assert_eq!(status("talkback", &[]), None);
         assert_eq!(status("talkback", &[("destinations", "ifb")]), Some(400));
         assert_eq!(status("talkback", &[("mic", "dir")]), Some(400));

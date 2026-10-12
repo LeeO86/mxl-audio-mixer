@@ -84,6 +84,8 @@ pub enum Class {
 pub enum Section {
     Strips,
     Buses,
+    /// VCA faders and mutes (§9).
+    Vcas,
 }
 
 /// What a recall touches; empty fields mean everything.
@@ -139,6 +141,20 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
             },
         );
     }
+    for v in &mix.vcas {
+        signals.insert(
+            v.id.clone(),
+            SignalState {
+                trim_db: None,
+                polarity: None,
+                fader_db: v.fader_db,
+                mute: v.mute,
+                pan: None,
+                width: None,
+                chain: Vec::new(),
+            },
+        );
+    }
     let sends = mix
         .sends
         .iter()
@@ -163,19 +179,16 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
 /// parameters change: signals, sends and nodes that no longer exist (or whose
 /// node type differs) are skipped. Returns the number of signals touched.
 pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
-    let wanted = |id: &str, bus: bool, safe: bool| {
+    let wanted = |id: &str, section: Section, safe: bool| {
         !safe
             && filter
                 .signals
                 .as_ref()
                 .is_none_or(|s| s.iter().any(|x| x == id))
-            && filter.sections.as_ref().is_none_or(|ss| {
-                ss.contains(if bus {
-                    &Section::Buses
-                } else {
-                    &Section::Strips
-                })
-            })
+            && filter
+                .sections
+                .as_ref()
+                .is_none_or(|ss| ss.contains(&section))
     };
     let restore_chain = |chain: &mut Vec<super::chain::Proc>, saved: &[Value]| {
         for v in saved {
@@ -195,7 +208,7 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
         let Some(st) = snap.signals.get(&s.id) else {
             continue;
         };
-        if !wanted(&s.id, false, s.recall_safe) {
+        if !wanted(&s.id, Section::Strips, s.recall_safe) {
             continue;
         }
         if filter.class(Class::Trim) {
@@ -231,7 +244,7 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
         let Some(st) = snap.signals.get(&b.id) else {
             continue;
         };
-        if !wanted(&b.id, true, b.recall_safe) {
+        if !wanted(&b.id, Section::Buses, b.recall_safe) {
             continue;
         }
         if filter.class(Class::Fader) {
@@ -244,6 +257,21 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
             restore_chain(&mut b.chain, &st.chain);
         }
         touched.push(b.id.clone());
+    }
+    for v in &mut mix.vcas {
+        let Some(st) = snap.signals.get(&v.id) else {
+            continue;
+        };
+        if !wanted(&v.id, Section::Vcas, v.recall_safe) {
+            continue;
+        }
+        if filter.class(Class::Fader) {
+            v.fader_db = st.fader_db;
+        }
+        if filter.class(Class::Mute) {
+            v.mute = st.mute;
+        }
+        touched.push(v.id.clone());
     }
     if filter.class(Class::Sends) {
         for s in &mut mix.sends {
@@ -279,9 +307,9 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
                 ));
             }
             for s in &p.signals {
-                if mix.kind(s).is_none() {
+                if mix.kind(s).is_none() && mix.vca(s).is_none() {
                     return Err(format!(
-                        "layout {} page {}: signal {s} does not exist",
+                        "layout {} page {}: signal or VCA {s} does not exist",
                         l.name, p.name
                     ));
                 }
@@ -339,6 +367,7 @@ mod tests {
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
             tally_index: None,
             afv: None,
         }
@@ -358,6 +387,7 @@ mod tests {
             colour: None,
             recall_safe: false,
             solo_safe: false,
+            mute_safe: false,
         });
         for from in ["a", "b"] {
             m.sends.push(Send {
@@ -438,5 +468,34 @@ mod tests {
         assert_eq!(validate(&m), Ok(()));
         m.layouts[0].pages[0].signals.push("nope".into());
         assert!(validate(&m).unwrap_err().contains("nope"));
+    }
+
+    #[test]
+    fn vcas_in_snapshots() {
+        let mut m = mix();
+        m.vcas.push(crate::mix::vca::Vca {
+            id: "band".into(),
+            name: "Band".into(),
+            fader_db: Db(-6.0),
+            mute: false,
+            members: vec!["a".into(), "b".into()],
+            colour: None,
+            recall_safe: false,
+        });
+        let snap = capture(&m, "s".into(), "S".into(), 0);
+        m.vcas[0].fader_db = Db(0.0);
+        m.vcas[0].mute = true;
+        let strips_only = Filter {
+            sections: Some(vec![Section::Strips]),
+            ..Filter::default()
+        };
+        recall(&mut m, &snap, &strips_only);
+        assert_eq!((m.vcas[0].fader_db, m.vcas[0].mute), (Db(0.0), true));
+        recall(&mut m, &snap, &Filter::default());
+        assert_eq!((m.vcas[0].fader_db, m.vcas[0].mute), (Db(-6.0), false));
+        m.vcas[0].fader_db = Db(3.0);
+        m.vcas[0].recall_safe = true;
+        recall(&mut m, &snap, &Filter::default());
+        assert_eq!(m.vcas[0].fader_db, Db(3.0), "recall-safe");
     }
 }

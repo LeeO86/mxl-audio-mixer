@@ -1,12 +1,15 @@
 <script setup>
-// The console (§12.1): strips in banks or in a layout's pages, and the buses beside them. A strip's
-// name or chain opens its processing.
+// The console (§12.1): strips in banks or in a layout's pages, the buses and the VCAs beside them, the
+// mute groups in the toolbar. A strip's name or chain opens its processing; a VCA's spill shows only its
+// members.
 import { computed, ref, watch } from "vue";
+import GroupsPanel from "./GroupsPanel.vue";
 import Segmented from "./Segmented.vue";
 import Strip from "./Strip.vue";
+import VcaStrip from "./VcaStrip.vue";
 import { SCALES } from "../dsp.js";
 import { api } from "../api.js";
-import { act, buses, live, store, stored, strips } from "../store.js";
+import { act, buses, live, muteGroups, patchMuteGroup, spill, store, stored, strips, vcaOf, vcaSignals, vcas } from "../store.js";
 
 const emit = defineEmits(["open"]);
 
@@ -29,8 +32,14 @@ const pageOptions = computed(() =>
     ? layout.value.pages.map((p, i) => ({ value: i, label: p.name }))
     : Array.from({ length: banks.value }, (_, i) => ({ value: i, label: `${i * bankSize.value + 1}–${Math.min(strips.value.length, (i + 1) * bankSize.value)}` })),
 );
-const byId = (id) => strips.value.find((s) => s.id === id) || buses.value.find((b) => b.id === id);
+const byId = (id) => strips.value.find((s) => s.id === id) || buses.value.find((b) => b.id === id) || vcaOf(id);
+const isVcaId = (id) => !!vcaOf(id);
+const spilled = computed(() => (spill.vca ? vcaOf(spill.vca) : null));
 const shown = computed(() => {
+  if (spilled.value) {
+    const ids = new Set(vcaSignals(spilled.value.id));
+    return [...strips.value, ...buses.value].filter((x) => ids.has(x.id));
+  }
   if (layout.value) {
     const p = layout.value.pages[Math.min(page.value, layout.value.pages.length - 1)];
     return (p?.signals || []).map(byId).filter(Boolean);
@@ -55,6 +64,7 @@ async function add() {
   if (ok) adding.value = "";
 }
 const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
+const editingGroups = ref(false);
 </script>
 
 <template>
@@ -80,7 +90,27 @@ const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
     <div class="group">
       <button class="btn secondary" @click="startAdd('strip')">+ Strip</button>
       <button class="btn secondary" @click="startAdd('bus')">+ Bus</button>
+      <button class="btn secondary" :aria-pressed="editingGroups" @click="editingGroups = !editingGroups">VCAs &amp; groups</button>
     </div>
+  </div>
+  <div v-if="muteGroups.length" class="toolbar mutegroups">
+    <span class="caption">Mute groups</span>
+    <button
+      v-for="g in muteGroups"
+      :key="g.id"
+      class="btn on-bad"
+      :class="g.active ? '' : 'secondary'"
+      :aria-pressed="g.active"
+      :title="`${g.members.length} members; mute-safe members stay`"
+      @click="patchMuteGroup(g.id, { active: !g.active })"
+    >
+      {{ g.name }}
+    </button>
+  </div>
+  <GroupsPanel v-if="editingGroups" @close="editingGroups = false" />
+  <div v-if="spilled" class="banner info spillbanner">
+    Spill: VCA <strong>{{ spilled.name }}</strong>, {{ shown.length }} members
+    <button class="btn small secondary" @click="spill.vca = null">Show all</button>
   </div>
 
   <div v-if="adding" class="panel addform">
@@ -103,11 +133,17 @@ const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
   <div v-else-if="!strips.length && !buses.length" class="empty">No strips or buses yet. Add one above, or import a show in Settings.</div>
   <div v-else class="console">
     <div class="strips">
-      <Strip v-for="s in shown" :key="s.id" :signal="s" :bus="isBusId(s.id)" :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+      <template v-for="s in shown" :key="s.id">
+        <VcaStrip v-if="isVcaId(s.id)" :vca="s" />
+        <Strip v-else :signal="s" :bus="isBusId(s.id)" :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+      </template>
       <div v-if="!shown.length" class="empty">This page is empty.</div>
     </div>
-    <div v-if="shownBuses.length" class="busesec">
+    <div v-if="shownBuses.length && !spilled" class="busesec">
       <Strip v-for="b in shownBuses" :key="b.id" :signal="b" bus :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+    </div>
+    <div v-if="vcas.length" class="vcasec">
+      <VcaStrip v-for="v in vcas" :key="v.id" :vca="v" />
     </div>
   </div>
 </template>

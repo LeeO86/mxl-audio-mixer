@@ -2,6 +2,7 @@
 // Operator-screen widgets (§12.6, Appendix B.2): /widget/strip?strip=<id>,
 // /widget/fader-bank?layout=<name>&page=<name or 1-based number> or ?strips=<id,id,…>,
 // /widget/loudness?signal=<id>, /widget/monitor?monitor=<id>, /widget/talkback[?destinations=<id,id,…>][&mic=<id>],
+// /widget/vca?vca=<id> (spill: its members beside it),
 // each with [&theme=dark|light|transparent], without the app around them,
 // on this mixer's own API (same origin). The page posts {type: "widget-ready"} and
 // {type: "widget-size", w, h} to the page that frames it.
@@ -10,8 +11,9 @@ import MonitorCard from "./MonitorCard.vue";
 import Pill from "./Pill.vue";
 import Strip from "./Strip.vue";
 import TalkbackPanel from "./TalkbackPanel.vue";
+import VcaStrip from "./VcaStrip.vue";
 import { api } from "../api.js";
-import { act, isBus, live, room, signalOf, startLive, stopLive, stored, wantMeters } from "../store.js";
+import { act, isBus, live, room, signalOf, spill, startLive, stopLive, stored, vcaOf, vcaSignals, wantMeters } from "../store.js";
 
 const query = location.search;
 const params = new URLSearchParams(query);
@@ -24,22 +26,25 @@ const scale = stored("meter.scale", "dbfs");
 const alignment = Number(stored("meter.alignment", -18));
 
 const monitor = computed(() => (id === "monitor" ? room.value.monitors.find((m) => m.id === params.get("monitor")) || null : null));
+const vca = computed(() => (id === "vca" ? vcaOf(params.get("vca")) : null));
+const spilled = computed(() => (vca.value && spill.vca === vca.value.id ? vcaSignals(vca.value.id).map(signalOf).filter(Boolean) : []));
 const shown = computed(() => {
   if (id === "monitor") return monitor.value ? [monitor.value] : [];
+  if (id === "vca") return vca.value ? [vca.value] : [];
   if (id === "strip") return [signalOf(params.get("strip"))].filter(Boolean);
   if (id === "loudness") return [signalOf(params.get("signal"))].filter(Boolean);
   if (params.get("strips")) {
     return params
       .get("strips")
       .split(",")
-      .map((s) => signalOf(s.trim()))
+      .map((s) => signalOf(s.trim()) || vcaOf(s.trim()))
       .filter(Boolean);
   }
   const layout = (live.mix?.layouts || []).find((l) => l.name === params.get("layout"));
   const page = params.get("page") || "";
   const n = /^\d+$/.test(page) ? Number(page) : 0;
   const p = n >= 1 ? layout?.pages[n - 1] : layout?.pages.find((x) => x.name === page);
-  return (p?.signals || []).map(signalOf).filter(Boolean);
+  return (p?.signals || []).map((s) => signalOf(s) || vcaOf(s)).filter(Boolean);
 });
 const talkback = id === "talkback";
 const talkTo = params.get("destinations")
@@ -51,6 +56,7 @@ const talkTo = params.get("destinations")
   : null;
 const ids = computed(() => {
   if (talkback) return (room.value.talkback?.mics || []).map((m) => `talkback:${m.id}`).concat((live.status?.talkback?.browser_mics || []).map((m) => `talkback:${m}`));
+  if (vca.value) return spilled.value.map((s) => s.id);
   return monitor.value ? [`monitor:${monitor.value.id}`] : shown.value.map((s) => s.id);
 });
 watch(ids, (list) => wantMeters(list.length ? list : null), { immediate: true });
@@ -97,9 +103,16 @@ onUnmounted(() => {
   <div ref="root" class="widget-root" :class="`widget-${id}`">
     <TalkbackPanel v-if="talkback && live.mix" :only="talkTo" :mic="params.get('mic')" compact />
     <MonitorCard v-else-if="monitor" :monitor="monitor" compact />
+    <div v-else-if="vca" class="wstrips">
+      <VcaStrip :vca="vca" compact />
+      <Strip v-for="s in spilled" :key="s.id" :signal="s" :bus="isBus(s.id)" :scale="scale" :alignment="alignment" compact />
+    </div>
     <template v-else-if="shown.length && id !== 'loudness'">
       <div class="wstrips">
-        <Strip v-for="s in shown" :key="s.id" :signal="s" :bus="isBus(s.id)" :scale="scale" :alignment="alignment" compact />
+        <template v-for="s in shown" :key="s.id">
+          <VcaStrip v-if="vcaOf(s.id)" :vca="s" compact />
+          <Strip v-else :signal="s" :bus="isBus(s.id)" :scale="scale" :alignment="alignment" compact />
+        </template>
       </div>
     </template>
     <template v-else-if="signal && id === 'loudness'">

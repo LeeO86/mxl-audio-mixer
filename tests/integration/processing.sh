@@ -28,6 +28,21 @@ swaps() { curl -fsS "$WEB/metrics" | sed -n 's/^mxl_audio_mixer_plan_swaps_total
 peak() { # <channel> : peak dBFS of channel <channel> in the last probe
     python3 -c "import json,sys; print(json.loads(sys.argv[1])['levels'][$1 - 1]['peak_dbfs'])" "$PROBED"
 }
+# probe_peak <python condition on p (channel 1's peak)>: probe until it holds; a
+# late input block resets a dynamics node's envelope (a transient gets through),
+# so measure again when one came during the probe, at most three times.
+probe_peak() {
+    local before p
+    for _ in 1 2 3; do
+        before=$(glitches)
+        probe 1
+        p=$(peak 1)
+        python3 -c "p = $p; exit(0 if ($1) else 1)" && return 0
+        [[ "$(glitches)" == "$before" ]] && return 1
+        log "the input was late during the peak measurement; measuring again"
+    done
+    return 1
+}
 
 # EQ: a +6.02 dB bell at 1 kHz doubles the 1 kHz tone (zero phase at the centre).
 id=$(api POST /api/v1/strips/vox/chain '{"type": "eq", "bands": [{"type": "bell", "freq_hz": 1000, "q": 1, "gain_db": 6.0206}]}' |
@@ -61,8 +76,7 @@ api POST /api/v1/strips/vox/chain '{"id": "comp", "type": "compressor", "thresho
 sleep 0.5
 gr=$(json "$WEB/api/v1/meters" "d['vox']['nodes']['comp']['gain_reduction_db']")
 python3 -c "exit(0 if abs($gr - 7.5) < 0.5 else 1)" || fail "compressor gain reduction $gr dB, not 7.5"
-probe 1
-python3 -c "exit(0 if abs($(peak 1) + 27.5) < 0.3 else 1)" || fail "compressed peak $(peak 1)"
+probe_peak "abs(p + 27.5) < 0.3" || fail "compressed peak $(peak 1)"
 pass "compressor −30 dB 4:1: gain reduction $gr dB, peak $(peak 1) dBFS"
 curl -fsS -X DELETE "$WEB/api/v1/strips/vox/chain/comp"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/sends/vox/main" -d '{"tap": {"after": "nope"}}')
@@ -71,8 +85,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: applicati
 # Limiter on the bus: ceiling −26 dBFS, 1.5 ms look-ahead.
 api POST /api/v1/buses/main/chain '{"id": "lim", "type": "limiter", "ceiling_db": -26, "release_ms": 50, "lookahead_ms": 1.5, "true_peak": false}' >/dev/null
 sleep 0.5
-probe 1
-python3 -c "exit(0 if $(peak 1) <= -25.99 and $(peak 1) > -26.5 else 1)" || fail "limited peak $(peak 1)"
+probe_peak "-26.5 < p <= -25.99" || fail "limited peak $(peak 1)"
 latency=$(json "$WEB/api/v1/outputs/main" "d['latency_ms']")
 python3 -c "exit(0 if abs($latency - 5.5) < 1e-6 else 1)" || fail "output latency $latency ms, not 5.5"
 pass "limiter: peak $(peak 1) dBFS under the −26 dBFS ceiling; output latency $latency ms (2 + 2 + 1.5)"

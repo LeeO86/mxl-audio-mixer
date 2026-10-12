@@ -113,7 +113,8 @@ export function transfer(node, x) {
 }
 
 // ---- fader law ---------------------------------------------------------------------
-// Position 0…1 to dB: +10 at the top, 0 dB at three quarters, −∞ at the bottom.
+// Position 0…1 to dB: +15 (the most a fader goes) at the top, 0 dB at three quarters, −∞ at the bottom.
+export const FADER_MAX_DB = 15;
 const LAW = [
   [0, -Infinity],
   [0.03, -80],
@@ -123,8 +124,9 @@ const LAW = [
   [0.55, -10],
   [0.65, -5],
   [0.75, 0],
-  [0.875, 5],
-  [1, 10],
+  [0.835, 5],
+  [0.92, 10],
+  [1, 15],
 ];
 
 export function posToDb(p) {
@@ -134,7 +136,7 @@ export function posToDb(p) {
     const [p0, d0] = LAW[i - 1];
     if (p <= p1) return i === 1 ? -80 : d0 + ((p - p0) / (p1 - p0)) * (d1 - d0);
   }
-  return 10;
+  return FADER_MAX_DB;
 }
 
 export function dbToPos(db) {
@@ -147,7 +149,7 @@ export function dbToPos(db) {
   return 1;
 }
 
-export const FADER_MARKS = [10, 5, 0, -5, -10, -20, -30, -50];
+export const FADER_MARKS = [15, 10, 5, 0, -5, -10, -20, -30, -50];
 
 // ---- meter scales ------------------------------------------------------------------
 // The digital scale (dBFS) and the PPM scales of IEC 60268-10 / EBU Tech 3205, placed relative to the

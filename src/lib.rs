@@ -7,6 +7,7 @@ pub mod control;
 pub mod dsp;
 pub mod engine;
 pub mod events;
+pub mod group_api;
 pub mod history;
 pub mod inputs;
 pub mod loudness;

@@ -54,6 +54,7 @@ const depth = computed(() => {
         </div>
         <label class="check"><input type="checkbox" :checked="s.recall_safe" @change="set({ recall_safe: $event.target.checked })" /> Recall-safe</label>
         <label class="check" title="solo in place never mutes it"><input type="checkbox" :checked="s.solo_safe" @change="set({ solo_safe: $event.target.checked })" /> Solo-safe</label>
+        <label class="check" title="mute groups never mute it (isolate)"><input type="checkbox" :checked="s.mute_safe" @change="set({ mute_safe: $event.target.checked })" /> Mute-safe</label>
         <label class="check"><input type="checkbox" :checked="s.loudness" @change="set({ loudness: $event.target.checked })" /> Measure loudness</label>
       </div>
       <template v-if="!bus">

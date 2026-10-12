@@ -290,7 +290,7 @@ async fn put_solo(
         let b: PutSolo = body(&bytes)?;
         {
             let mut c = app.control();
-            if c.mix.kind(&signal).is_none() {
+            if c.mix.kind(&signal).is_none() && c.mix.vca(&signal).is_none() {
                 return Err(not_found(format!("signal {signal} does not exist")));
             }
             c.set_solo(&signal, Some(b.kind));
