@@ -446,6 +446,7 @@ impl Mix {
             .iter()
             .map(|s| (&s.id, &s.colour))
             .chain(self.buses.iter().map(|b| (&b.id, &b.colour)))
+            .chain(self.vcas.iter().map(|v| (&v.id, &v.colour)))
         {
             if let Some(c) = colour {
                 let hex = c.strip_prefix('#').unwrap_or("");

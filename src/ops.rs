@@ -86,6 +86,7 @@ pub fn router(app: App) -> Router {
         .merge(crate::room_api::routes())
         .merge(crate::preview_api::routes())
         .merge(crate::talkback_api::routes())
+        .merge(crate::group_api::routes())
         .merge(crate::widgets::routes())
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
