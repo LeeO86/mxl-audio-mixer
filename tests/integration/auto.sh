@@ -91,6 +91,19 @@ am '{"enabled": false}'
 probe 1 1:1:1 2:2:1
 [[ "$(swaps)" == "$SWAPS" ]] || fail "auto-mix settings swapped the plan ($SWAPS → $(swaps))"
 pass "disabled: both at 0 dB; no plan swap for weights, bypass, mutes or enabling"
+# Before the fader by default: a pre-fader aux carries the auto gain, the fader does not change it.
+am '{"enabled": true}'
+api POST /api/v1/buses '{"id": "aux", "name": "Aux", "format": "mono"}' >/dev/null
+api PUT /api/v1/sends/t1/aux '{"tap": "pre-fader"}' >/dev/null
+api PATCH /api/v1/strips/t1 '{"fader_db": -6.0206}' >/dev/null
+api PUT /api/v1/outputs/aux >/dev/null
+sleep 0.5
+OUT_FLOW=$(json "$WEB/api/v1/outputs/aux" "d['mxl_flow_id']") probe 1 1:1:0.70710677
+probe 1 1:1:0.35355338 2:2:0.70710677
+api PATCH /api/v1/strips/t1 '{"fader_db": 0}' >/dev/null
+api DELETE /api/v1/outputs/aux >/dev/null
+api DELETE /api/v1/buses/aux >/dev/null
+pass "the auto gain acts before the fader: t1 pre-fader into an aux at 0.707; its fader at −6 dB on top in the programme only (0.354)"
 api DELETE /api/v1/automixes/tones >/dev/null
 
 # The VAD: t1 (a tone) and vox (speech) analysed; 12 s, two periods.
@@ -187,6 +200,23 @@ assert held > 0.9, ("last-mic-hold", held, quiet[:5])
 print(f"vox alone: {ok_vox:.2f}, guest alone: {ok_guest:.2f} of the polls with the talker at 0 dB and the other below −20 dB; nobody: {held:.2f} held")
 EOF
 pass "auto-mix of two talkers: the one speaking near 0 dB, the other below −20 dB; last-mic-hold keeps the last talker"
+
+# Snapshots: a moderation (the duck, no auto-mix), then the panel (the auto-mix, no duck).
+api POST /api/v1/ducks '{"id": "bed", "name": "Bed", "keys": ["vox"], "targets": ["t1"]}' >/dev/null
+api DELETE /api/v1/automixes/panel >/dev/null
+api POST /api/v1/snapshots '{"id": "moderation", "name": "Moderation"}' >/dev/null
+api DELETE /api/v1/ducks/bed >/dev/null
+api POST /api/v1/automixes '{"id": "panel", "name": "Panel", "members": ["vox", "guest"]}' >/dev/null
+api POST /api/v1/snapshots '{"id": "panel", "name": "Panel"}' >/dev/null
+api POST /api/v1/snapshots/moderation/recall '{}' >/dev/null
+[[ "$(json "$WEB/api/v1/mix" "([a['id'] for a in d.get('automixes', [])], [x['id'] for x in d.get('ducks', [])])")" == "([], ['bed'])" ]] || fail "moderation recalled: $(curl -fsS "$WEB/api/v1/mix" | head -c 300)"
+api POST /api/v1/snapshots/panel/recall '{"sections": ["strips"]}' >/dev/null
+[[ "$(json "$WEB/api/v1/ducks" "len(d)")" == 1 ]] || fail "a strips-only recall changed the ducks"
+api POST /api/v1/snapshots/panel/recall '{}' >/dev/null
+[[ "$(json "$WEB/api/v1/mix" "([a['id'] for a in d.get('automixes', [])], [x['id'] for x in d.get('ducks', [])])")" == "(['panel'], [])" ]] || fail "panel recalled"
+sleep 1
+[[ "$(json "$WEB/api/v1/automixes/panel" "sorted(d['gains_db'])")" == "['guest', 'vox']" ]] || fail "the recalled auto-mix does not run"
+pass "snapshots: a moderation (duck) and a panel (auto-mix) recalled in turn; a strips-only recall leaves them"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/vad/vox" -d '{"threshold": 0.99}')
 [[ "$code" == 400 ]] || fail "threshold 0.99 answered $code"
