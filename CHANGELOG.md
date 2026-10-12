@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Widgets and tally
+
+- Widgets for operator screens (Appendix B.2): `GET /widgets`, `/widget/strip`,
+  `/widget/fader-bank`, `/widget/loudness`; `WIDGET_FRAME_ANCESTORS`.
+- Tally: TSL UMD 5.0 receiver on UDP and TCP (`TSL_ENABLE`, `TSL_UDP_PORT`,
+  `TSL_TCP_PORT`, `TSL_SCREEN`, `TSL_MAP`), `GET /api/v1/tally`,
+  `tally_packets_total`; tally lamps on the console.
+- Audio-follows-video per strip (`tally_index`, `afv`): open while on air, at its
+  depth otherwise, with fade times.
+
 ### Milestone 4: console UI, processing editor, routing matrix, snapshots, show files
 
 - Web UI (Vue 3, one page embedded in the binary, the family look): console with

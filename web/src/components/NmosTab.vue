@@ -2,10 +2,30 @@
 // NMOS (§3, §12.3): the node, the inputs (one IS-05 receiver each: routing state, flow, arrival lag,
 // delay) and the published outputs (one IS-05 sender each). Routing is done by a controller through
 // IS-05; here inputs get a label and their extra delay.
-import { computed, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import Pill from "./Pill.vue";
 import { api, shortId } from "../api.js";
-import { act, live, signalOf } from "../store.js";
+import { act, live, signalOf, strips } from "../store.js";
+
+const tally = ref(null);
+let timer = 0;
+async function loadTally() {
+  try {
+    tally.value = await api.get("/api/v1/tally");
+  } catch {
+    /* the banner tells */
+  }
+}
+onMounted(() => {
+  loadTally();
+  timer = setInterval(loadTally, 1000);
+});
+onUnmounted(() => clearInterval(timer));
+const stripsOf = (index) =>
+  strips.value
+    .filter((s) => s.tally_index === index)
+    .map((s) => s.name + (s.afv?.enabled ? " (AFV)" : ""))
+    .join(", ");
 
 const nmos = computed(() => live.status?.nmos || {});
 const inputs = computed(() => live.status?.inputs || []);
@@ -44,6 +64,35 @@ const confirm = (i) => act(() => api.post(`/api/v1/inputs/${i.input}/delay/confi
       <dt>Registration</dt>
       <dd><Pill :text="nmos.registry ? (nmos.registered ? 'registered' : 'not registered') : 'no registry configured'" :kind="nmos.registered ? 'ok' : nmos.registry ? 'warn' : 'neutral'" /></dd>
     </dl>
+  </div>
+
+  <div class="panel">
+    <h3>Tally (TSL UMD 5.0)</h3>
+    <template v-if="tally?.enabled">
+      <dl class="kv">
+        <dt>Receiver</dt>
+        <dd>udp/{{ tally.udp_port }}, tcp/{{ tally.tcp_port }}; screen {{ tally.screen ?? "any" }}; {{ Object.keys(tally.map).length ? `map ${Object.entries(tally.map).map(([d, i]) => `${d}→${i}`).join(", ")}` : "display index = tally index" }}</dd>
+        <dt>Packets</dt>
+        <dd>{{ tally.packets }} ({{ tally.errors }} not readable); last {{ tally.last_packet_age_s === null ? "never" : `${tally.last_packet_age_s.toFixed(1)} s ago` }}</dd>
+      </dl>
+      <table style="margin-top: 0.5rem">
+        <thead><tr><th class="num">Index</th><th>Label</th><th>On air</th><th>Preview</th><th class="num">Screen</th><th class="num">Display</th><th>Strips</th><th class="num">Age s</th></tr></thead>
+        <tbody>
+          <tr v-for="(l, i) in tally.lamps" :key="i">
+            <td class="num">{{ i }}</td>
+            <td>{{ l.label || "–" }}</td>
+            <td><span class="lamp" :class="l.lh ? `c${l.lh}` : ''"></span></td>
+            <td><span class="lamp" :class="l.rh ? `c${l.rh}` : ''"></span></td>
+            <td class="num">{{ l.screen }}</td>
+            <td class="num">{{ l.display }}</td>
+            <td>{{ stripsOf(Number(i)) || "–" }}</td>
+            <td class="num">{{ l.age_s.toFixed(1) }}</td>
+          </tr>
+          <tr v-if="!Object.keys(tally.lamps).length"><td colspan="8" class="empty">No tally received yet.</td></tr>
+        </tbody>
+      </table>
+    </template>
+    <p v-else class="note" style="margin: 0">Off. With <code>TSL_ENABLE=true</code> the mixer receives TSL UMD 5.0 on <code>TSL_UDP_PORT</code> and <code>TSL_TCP_PORT</code>; strips with a tally index can follow it (audio follows video, under Processing).</p>
   </div>
 
   <div class="panel">

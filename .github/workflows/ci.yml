@@ -131,6 +131,17 @@ jobs:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
           CHROME: /usr/bin/google-chrome
+      - name: tests/integration/tally.sh
+        run: tests/integration/tally.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/widgets.sh (headless Chrome)
+        run: tests/integration/widgets.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+          CHROME: /usr/bin/google-chrome
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -183,6 +194,7 @@ jobs:
           for _ in $(seq 1 50); do curl -fs http://127.0.0.1:8160/livez && break; sleep 0.2; done
           curl -fs http://127.0.0.1:8160/readyz
           curl -fs http://127.0.0.1:8160/ | grep -q 'id="app"'
+          curl -fs http://127.0.0.1:8160/widgets | grep -q '"fader-bank"'
           docker stop -t 15 smoke
           [ "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 143 ]
           docker logs smoke 2>&1 | tail -5

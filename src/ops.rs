@@ -81,11 +81,12 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/inputs/{input}/delay/confirm", post(confirm_delay))
         .merge(crate::api::routes())
         .merge(crate::show_api::routes())
+        .merge(crate::widgets::routes())
         .with_state(app)
 }
 
 /// The web UI: one self-contained page embedded at build time (`build.rs`).
-const UI: &str = include_str!(env!("MIXER_UI_HTML"));
+pub const UI: &str = include_str!(env!("MIXER_UI_HTML"));
 
 async fn ui() -> Response {
     (
@@ -162,6 +163,10 @@ pub fn status_json(app: &App) -> Value {
             "sends": control.mix.sends.len(),
         },
         "outputs": control.output_status(),
+        "tally": {
+            "enabled": app.config.tsl_enable,
+            "state": control.tally_status(),
+        },
     })
 }
 
@@ -403,6 +408,12 @@ async fn metrics(State(app): State<App>) -> Response {
         "counter",
         "Execution plans swapped in by the DSP thread.",
         vec![format!(" {}", c.plan_swaps.load(Ordering::Relaxed))],
+    );
+    metric(
+        "tally_packets_total",
+        "counter",
+        "TSL UMD 5.0 packets received (UDP and TCP).",
+        vec![format!(" {}", control.tally.packets)],
     );
     metric(
         "plan_compile_seconds",

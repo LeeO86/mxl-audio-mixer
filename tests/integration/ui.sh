@@ -9,7 +9,8 @@ FLOW=88888888-8888-4888-8888-888888888888
 DOMAIN=99999999-9999-4999-8999-999999999999
 start_tone "$WORK/mxl/tones" "$FLOW" --domain-id "$DOMAIN" --channels 2
 wait_until 10 "tone flow" test -d "$WORK/mxl/tones/$FLOW.mxl-flow"
-start_mixer NMOS_SEED=it-ui
+TSL_UDP=${TSL_TEST_UDP:-8930}
+start_mixer NMOS_SEED=it-ui TSL_ENABLE=true TSL_UDP_PORT="$TSL_UDP" TSL_TCP_PORT=$((TSL_UDP + 1))
 route 1 "$DOMAIN" "$FLOW"
 wait_until 5 "input 1 running" is_state 1 running
 
@@ -22,7 +23,7 @@ api PUT /api/v1/sends/vox/main >/dev/null
 api PUT /api/v1/sends/gtr/main >/dev/null
 api PUT /api/v1/outputs/main >/dev/null
 
-node "$ROOT/web/tests/ui.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/ui.mjs"
+TSL_UDP="$TSL_UDP" node "$ROOT/web/tests/ui.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/ui.mjs"
 
 rc=0
 stop_mixer || rc=$?

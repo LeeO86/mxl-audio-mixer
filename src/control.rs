@@ -53,6 +53,7 @@ pub struct Control {
     node: mxl_nmos::Node,
     compiler: Compiler,
     pub analyser: crate::analysis::Analyser,
+    pub tally: crate::tally::Tally,
     layout: HashMap<NodeId, LayoutNode>,
     procs: HashMap<NodeId, LayoutNode>,
     /// Processing latency of each signal's post-fader point, in samples.
@@ -91,6 +92,7 @@ impl Control {
             node,
             compiler: Compiler::default(),
             analyser: crate::analysis::Analyser::new(config.block_samples as usize),
+            tally: crate::tally::Tally::default(),
             layout: HashMap::new(),
             procs: HashMap::new(),
             latency: HashMap::new(),
@@ -121,6 +123,85 @@ impl Control {
         let true_peaks = self.meters.true_peaks();
         self.loudness.tick(&true_peaks);
         self.analyser.tick(&mut self.engine.analysis);
+    }
+
+    /// The AFV gain of every strip with AFV on: 1 while its tally index is on air,
+    /// its depth otherwise (also without a tally index or before any tally).
+    fn afv_targets(&self, mix: &Mix) -> HashMap<String, f32> {
+        mix.strips
+            .iter()
+            .filter_map(|s| {
+                let a = s.afv.filter(|a| a.enabled)?;
+                let on = s.tally_index.is_some_and(|i| self.tally.on_air(i));
+                Some((
+                    s.id.clone(),
+                    if on { 1.0 } else { a.depth_db.gain() as f32 },
+                ))
+            })
+            .collect()
+    }
+
+    /// One TSL packet; AFV strips whose tally changed fade open or closed.
+    pub fn tally_packet(&mut self, config: &Config, packet: &[u8]) {
+        if self.tally.packet(config, packet) {
+            self.apply_afv();
+        }
+    }
+
+    fn apply_afv(&mut self) {
+        for (id, g) in self.afv_targets(&self.mix) {
+            if self.compiler.afv.get(&id) == Some(&g) {
+                continue;
+            }
+            self.compiler.afv.insert(id.clone(), g);
+            let Some(a) = self.mix.strip(&id).and_then(|s| s.afv) else {
+                continue;
+            };
+            let Some(node) = self.compiler.node_id(&format!("strip/{id}/afv")) else {
+                continue;
+            };
+            let Some(l) = self.layout.get_mut(&node) else {
+                continue;
+            };
+            let ms = if g >= 1.0 {
+                a.fade_in_ms
+            } else {
+                a.fade_out_ms
+            };
+            let values = vec![g; l.values.len()];
+            self.engine.param(node, &values, (ms * 48.0).round() as u32);
+            l.values = values;
+            tracing::info!(strip = %id, open = g >= 1.0, "afv");
+        }
+    }
+
+    /// Per AFV strip: its tally index, on air, preview, open.
+    pub fn tally_status(&self) -> serde_json::Value {
+        let strips: serde_json::Map<String, serde_json::Value> = self
+            .mix
+            .strips
+            .iter()
+            .filter(|s| s.tally_index.is_some())
+            .map(|s| {
+                let i = s.tally_index.unwrap_or_default();
+                (
+                    s.id.clone(),
+                    serde_json::json!({
+                        "index": i,
+                        "on_air": self.tally.on_air(i),
+                        "preview": self.tally.preview(i),
+                        "afv": s.afv.is_some_and(|a| a.enabled),
+                        "afv_open": self.compiler.afv.get(&s.id).is_some_and(|g| *g >= 1.0),
+                    }),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "packets": self.tally.packets,
+            "errors": self.tally.errors,
+            "last_packet_age_s": self.tally.last_packet_age_s(),
+            "strips": strips,
+        })
     }
 
     /// Analyse `target` (signal and tap) or nothing; applied with the next
@@ -154,6 +235,7 @@ impl Control {
     /// [`Control::swap`] after [`fade_wait`].
     pub fn stage(&mut self, next: Mix, ramp: u32) -> Result<Staged, String> {
         next.validate(self.input_count, self.block)?;
+        self.compiler.afv = self.afv_targets(&next);
         let compiled = self.compiler.compile(
             &next,
             self.block as usize,

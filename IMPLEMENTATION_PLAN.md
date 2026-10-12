@@ -529,6 +529,64 @@ None.
 | 5 | Widgets (§12.6) and tally/AFV: next, or after M6 | Next, before M5. |
 | 6 | Merge PR 5 and PR 6 | Merged. |
 
+## Widgets and tally (1.0.0 set, before M5)
+
+The maintainer chose to do the 1.0.0 widgets and tally/AFV next (M4 answer 5).
+The widgets that need later milestones come with them: `monitor` and `talkback`
+with the control room (M5), `vca` with M6, PFL in the strip widget with M5.
+
+### What exists
+
+- `src/widgets.rs`: `/widgets` and `/widget/<id>` (`strip`, `fader-bank`,
+  `loudness`); `web/src/components/WidgetPage.vue`, compact strips.
+- `src/tally.rs`: the TSL UMD 5.0 receiver; AFV in `src/control.rs` and the
+  compiler; strip settings (tally index, AFV) and the tally panel in the UI.
+- `tests/integration/tally.sh` (with `tsl_send.py`, an independent encoder),
+  `tests/integration/widgets.sh` (with `web/tests/widgets.mjs`, `frame.html`).
+
+### Decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D53 | The widget pages are the embedded UI page; it shows the widget its path names. `strip` takes a strip or bus id; `fader-bank` takes a layout page (`layout` by name, `page` by name or 1-based number) or `strips` (1–32 ids); `loudness` takes a signal id. Bad parameters (unknown ids, layouts or pages, a wrong theme) are 400. The params schema lists the current ids and layout names as enums. | Appendix B.2 and the siblings (`mxl-color-corrector`: one page, the widget from the URL). The designer can offer the ids as a choice. A bank is a layout page (maintainer, question 4). |
+| D54 | `/widgets` CORS and the page CSP as in the siblings: an origin is listed when a source of `WIDGET_FRAME_ANCESTORS` equals it (case and a trailing slash ignored) or is `*`; no API CORS on these routes; `;`, `,` and control characters in the setting exit with 78. | Appendix B.2 ("two Access-Control-Allow-Origin values make browsers refuse it"). |
+| D55 | The TSL receiver is the one of mxl-webrtc-monitor ported: DLE/STX framing (DLE DLE, DLE/ETX accepted, a packet complete at PBC + 2), bare or wrapped UDP datagrams, UTF-16 labels, at most 8 TCP senders, `TSL_SCREEN`. Default ports 8910/8911 as §10.3 says. | §10.3 "as in mxl-multiviewer and mxl-webrtc-monitor". The monitor moved its defaults to 8912/8913 because it runs with host networking next to a multiviewer; the mixer runs on the pod network (question 1). |
+| D56 | `TSL_MAP` maps a TSL display index to a tally index (`display:index`; empty: the same number; with a map, unmapped displays are ignored). Strips carry their `tally_index` in the show. | The siblings map displays to their own channels; the mixer's strips are show data, so the deployment maps displays and the show maps strips. |
+| D57 | AFV is a gain after the strip's fader, present only while AFV is enabled: open (1) while the index is on air (LH lit), at `depth_db` otherwise, also before any tally arrived; the gain ramps linearly over `fade_in_ms` or `fade_out_ms` (0–10 000) without a plan swap. Post-fader sends, outputs and meters follow it; pre-fader sends do not. | §10.3: "opens when its mapped tally index is on air (LH), and closes otherwise". The engine has no defaults (D28); the UI proposes −∞, 100 ms, 500 ms (question 2). |
+| D58 | The last tally state stays when packets stop (no timeout); the NMOS tab shows each index's age and the time since the last packet. | Closing every AFV strip because the tally calculator restarted would cut the programme; question 3. |
+
+### Results (dev VM)
+
+- `cargo test`: 88 unit tests (7 new: TSL packets with UTF-16 labels, framing
+  with escapes across reads, screen and map, the AFV node in the compiler, widget
+  origins and parameters, the settings).
+- `tests/integration/tally.sh`, through MXL:
+  - an AFV strip without tally is closed (silent output);
+  - index 3 on air over UDP with a UTF-16 label ("Kamera 3 Zürich"): open,
+    sample-exact; a message for another screen is ignored;
+  - on preview only over TCP (DLE/STX): closed;
+  - a 1 s fade in: −28.6 dBFS after 0.4 s (gain ≈ 0.37), −20.0 dBFS after 1.2 s;
+  - AFV removed: the strip follows its fader; `tally_packets_total` counts.
+- `tests/integration/widgets.sh`: the list (CORS for the listed origin only,
+  `Vary: Origin`, 405 with `Allow: GET`), the pages (CSP, no `X-Frame-Options`,
+  400/404), and in headless Chrome: each widget framed from the allowed origin
+  posts `widget-ready` and `widget-size`; from a refused origin the frame is
+  blocked and nothing arrives.
+- `tests/integration/ui.sh`: tally index and AFV set in the strip settings, index
+  on air over UDP: AFV opens, the strip is lit red on both clients, the NMOS tab
+  lists the lamp.
+- All other integration tests pass.
+
+### Answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | TSL default ports 8910/8911 (§10.3) | Accepted. |
+| 2 | AFV defaults in the UI: depth −∞, fade in 100 ms, fade out 500 ms | Accepted. |
+| 3 | AFV closed before any tally; the last state stays when packets stop | Accepted, both. |
+| 4 | `fader-bank`: banks in mix order, or a layout page | A layout page: `layout` and `page` (name or 1-based number) replace `bank` and `size` (D53). |
+| 5 | Merge PR 7 | Merged. |
+
 ## tests/hw scripts for the maintainers
 
 | Script | What |

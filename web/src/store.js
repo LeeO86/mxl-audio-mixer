@@ -139,6 +139,15 @@ function subscribe() {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "subscribe", ...subscription }));
 }
 
+/** Only these signals' meters (null: all), e.g. for a widget. */
+export function wantMeters(ids) {
+  subscription.meters = ids;
+  subscribe();
+}
+
+/** The tally of a strip: { index, on_air, preview, afv, afv_open }, or null. */
+export const tallyOf = (id) => live.status?.tally?.state?.strips?.[id] || null;
+
 /** Ask for the analyser's values (spectrum, goniometer) or stop them. */
 export function wantAnalysis(on) {
   subscription.analysis = on;

@@ -36,6 +36,11 @@ spec:
               containerPort: 8160
             - name: nmos
               containerPort: 3312
+            - name: tsl-udp
+              containerPort: 8910
+              protocol: UDP
+            - name: tsl-tcp
+              containerPort: 8911
           env:
             - name: HOST_ID
               value: production-mix1
@@ -71,6 +76,16 @@ spec:
               value: "16"
             - name: SHUTDOWN_TIMEOUT_S
               value: "10"
+            # Operator-screen widgets framed by the production designer.
+            - name: WIDGET_FRAME_ANCESTORS
+              value: "'self' https://designer.example"
+            # Tally from the platform's tally calculator (audio-follows-video).
+            - name: TSL_ENABLE
+              value: "true"
+            - name: TSL_UDP_PORT
+              value: "8910"
+            - name: TSL_TCP_PORT
+              value: "8911"
             # SCHED_FIFO for the DSP thread (needs the SYS_NICE capability below).
             # - name: MIXER_RT_PRIORITY
             #   value: "49"
@@ -132,3 +147,10 @@ spec:
     - name: nmos
       port: 3312
       targetPort: nmos
+    - name: tsl-udp
+      port: 8910
+      targetPort: tsl-udp
+      protocol: UDP
+    - name: tsl-tcp
+      port: 8911
+      targetPort: tsl-tcp

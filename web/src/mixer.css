@@ -140,6 +140,47 @@ main.full { max-width: none; }
 .gonio path { fill: none; stroke: var(--ok); stroke-width: 1; opacity: .85; }
 .gonio text { fill: var(--muted); font-size: 10px; }
 
+/* ---- tally ------------------------------------------------------------------------ */
+.strip.onair .sname { background: var(--bad); color: #fff; }
+.strip.onair .sname .fmt { color: #fff; }
+.strip.preview .sname { box-shadow: inset 0 -3px 0 var(--ok); }
+.sname .afv { font-weight: 700; color: var(--muted); }
+.sname .afv.open { color: var(--ok); }
+.strip.onair .sname .afv.open { color: #fff; }
+.lamp { display: inline-block; width: .8rem; height: .8rem; border-radius: 50%; background: var(--chip); vertical-align: middle; }
+.lamp.c1 { background: var(--bad); }
+.lamp.c2 { background: var(--ok); }
+.lamp.c3 { background: var(--warn); }
+
+/* ---- widgets (/widget/<id>): fill the frame ---------------------------------------- */
+.widget-root { position: relative; height: 100vh; display: flex; flex-direction: column; gap: .4rem; padding: .5rem; overflow: hidden; }
+.widget-root > .empty { padding: .6rem; }
+.widget-error { position: absolute; left: .5rem; right: .5rem; bottom: .5rem; padding: .3rem .5rem; border-radius: 5px; background: var(--bad); color: #fff; font-size: .78rem; font-weight: 600; cursor: pointer; }
+.widget-head { display: flex; align-items: center; gap: .5rem; font-size: .85rem; min-width: 0; }
+.widget-head .name { font-weight: 700; }
+.widget-head .muted { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.btn-grid { display: grid; gap: .4rem; }
+.btn-grid.three { grid-template-columns: repeat(3, 1fr); }
+.btn-grid button.btn { padding: .6rem .3rem; font-size: .9rem; }
+.wstrips { display: flex; gap: .35rem; flex: 1; min-height: 0; overflow-x: auto; }
+.widget-strip .wstrips .strip { flex: 1 1 auto; width: auto; }
+.strip.compact { flex: 0 0 100px; width: 100px; min-height: 0; }
+.strip.compact .faderrow { min-height: 0; justify-content: center; }
+.strip.compact .vfader { flex: 0 0 56px; }
+.btn-grid.two { grid-template-columns: repeat(2, 1fr); }
+.strip.compact .vtrack { min-height: 120px; }
+.strip.compact .meter .bars { min-height: 100px; }
+.grlist { display: flex; flex-direction: column; gap: 2px; min-height: 1.2rem; }
+.grlist .node { display: flex; align-items: center; gap: .25rem; font-size: .64rem; }
+.grlist .nid { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wloud { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: .4rem; flex: 1; align-content: center; }
+.wloud > div { display: flex; flex-direction: column; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: .3rem; }
+.wloud .cap { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.wloud .num { font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.wloud .big .num { font-size: 1.8rem; }
+.wloud .big.ok .num { color: var(--ok); }
+.wloud .big.warn .num { color: var(--warn); }
+
 /* ---- snapshots ------------------------------------------------------------------- */
 .checks { display: flex; flex-wrap: wrap; gap: .2rem 1rem; }
 .checks label.check { margin: .15rem 0; }

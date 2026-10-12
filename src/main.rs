@@ -208,6 +208,36 @@ async fn run(config: Config) -> ExitCode {
             )
         }
     };
+    if config.tsl_enable {
+        let sockets = match mxl_audio_mixer::tally::bind(&config).await {
+            Ok(s) => s,
+            Err(e) => {
+                return fail(
+                    EX_UNAVAILABLE,
+                    format!(
+                        "cannot bind TSL_UDP_PORT {} / TSL_TCP_PORT {}: {e}",
+                        config.tsl_udp_port, config.tsl_tcp_port
+                    ),
+                )
+            }
+        };
+        let tally_control = control.clone();
+        let tally_config = config.clone();
+        mxl_audio_mixer::tally::spawn(
+            sockets,
+            Arc::new(move |packet: &[u8]| {
+                tally_control
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .tally_packet(&tally_config, packet)
+            }),
+        );
+        tracing::info!(
+            "TSL UMD 5.0 on udp/{} and tcp/{}",
+            config.tsl_udp_port,
+            config.tsl_tcp_port
+        );
+    }
     let config = Arc::new(config);
     let app = App {
         config: config.clone(),

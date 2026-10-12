@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- A page that frames a widget (?src=<widget url>) and puts the messages it gets into its title. -->
+<meta charset="utf-8" />
+<title>waiting</title>
+<body style="margin: 0; background: #444">
+  <iframe id="f" style="border: 0; width: 640px; height: 520px"></iframe>
+  <script>
+    const messages = [];
+    window.addEventListener("message", (e) => {
+      messages.push(e.data);
+      document.title = JSON.stringify(messages);
+    });
+    document.getElementById("f").src = new URLSearchParams(location.search).get("src");
+  </script>
+</body>

@@ -14,6 +14,7 @@ const GROUPS = [
   { title: "Mixer", test: /^MIXER_/ },
   { title: "MXL", test: /^MXL_/ },
   { title: "NMOS", test: /^(NMOS_|HOST_ID)/ },
+  { title: "Tally and widgets", test: /^(TSL_|WIDGET_)/ },
   { title: "Web and process", test: /./ },
 ];
 const ORIGIN = {

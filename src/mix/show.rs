@@ -338,6 +338,8 @@ mod tests {
             loudness: false,
             colour: None,
             recall_safe: false,
+            tally_index: None,
+            afv: None,
         }
         };
         let mut m = Mix::default();
