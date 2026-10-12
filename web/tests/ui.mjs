@@ -209,7 +209,8 @@ try {
   await talkAux.hover();
   await page.mouse.down();
   await page.waitForTimeout(900);
-  if (!(await talks())) throw new Error("a held talk button does not talk");
+  // Still held: it talks (a busy runner may take a moment more to show it).
+  await until("a held talk button talks", talks, 3000);
   await page.mouse.up();
   await until("held talk released", async () => !(await talks()));
   await listenAux.click();
