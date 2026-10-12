@@ -8,6 +8,12 @@
 //! index, so a reader can check what it gets. `--delay-ms` writes every block that
 //! much late (a mirrored or batched input). The domain directory and its
 //! `domain_def.json` are created if missing (`--domain-id` sets the id).
+//!
+//! `--wav FILE` writes a recording instead (speech for the VAD tests; the mean of
+//! its channels, at 48 kHz, on every channel), followed by `--gap-s` seconds of
+//! silence, repeated; sample index i plays position (i + `--offset-s` · 48000)
+//! modulo that period, so the recording starts on every multiple of the period
+//! in TAI and two writers with different offsets take turns.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +38,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--block B] [--commit C]");
+        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--block B] [--commit C] [--wav FILE [--gap-s G] [--offset-s O]]");
         std::process::exit(2)
     };
     let domain_dir = PathBuf::from(arg(&args, "--domain").unwrap_or_else(|| usage()));
@@ -54,6 +60,33 @@ fn main() {
     let commit: u32 = arg(&args, "--commit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(block as u32);
+    let seconds = |name: &str| -> u64 {
+        arg(&args, name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map_or(0, |s| (s * 48_000.0).round().max(0.0) as u64)
+    };
+    let (gap, shift) = (seconds("--gap-s"), seconds("--offset-s"));
+    let recording: Option<Vec<f32>> = arg(&args, "--wav").map(|path| {
+        mxl_audio_mixer::wav::Wav::read(std::path::Path::new(&path))
+            .map(|w| w.mono_48k())
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1)
+            })
+    });
+    let period = recording
+        .as_ref()
+        .map_or(1, |r| r.len() as u64 + gap)
+        .max(1);
+    let sample = |c: usize, index: u64| -> f32 {
+        match &recording {
+            Some(r) => r
+                .get(((index + shift) % period) as usize)
+                .copied()
+                .unwrap_or(0.0),
+            None => tone(c, index),
+        }
+    };
 
     if let Err(e) = domain::ensure_output_domain(&domain_dir, domain_id, "tones", 200_000_000) {
         eprintln!("{e}");
@@ -109,7 +142,7 @@ fn main() {
         let start = head - block;
         let _ = writer.write(head, block as usize, |c, offset, samples| {
             for (k, s) in samples.iter_mut().enumerate() {
-                *s = tone(c, start + (offset + k) as u64);
+                *s = sample(c, start + (offset + k) as u64);
             }
         });
         // A late writer catches up block by block instead of skipping: a skipped

@@ -5,7 +5,8 @@
 //!   `min_level_dbfs`) and analyses it; `DELETE` removes them;
 //! - `GET`, `POST /api/v1/automixes`, `GET`, `PATCH`, `DELETE
 //!   /api/v1/automixes/{id}` (`name`, `enabled`, `last_mic_hold`,
-//!   `vad_weighting`, `members`: strip ids or `{signal, weight_db, bypass}`);
+//!   `vad_weighting`, `members`: strip ids or `{signal, weight_db, bypass}`; a
+//!   bare id keeps that member's weight and bypass, an object sets them);
 //!   GET adds `gains_db`;
 //! - `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/{id}`
 //!   (`name`, `enabled`, `keys`, `targets`, `depth_db`, `attack_ms`, `hold_ms`,
