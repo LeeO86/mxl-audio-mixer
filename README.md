@@ -133,8 +133,9 @@ other formats downmixed) and publishes it over RTSP to MediaMTX as
   dim, cut, check and solo, not part of the show. Unheard for 10 minutes, it is
   removed.
 - **Latency:** from the media time of a sample to the browser's audio output,
-  83–99 ms measured in headless Chrome on the development machine (target ≤ 150
-  ms; `tests/integration/preview.sh` with the `second-pulse` oscillator).
+  79–99 ms (median per run; single pulses 75–104 ms) measured in headless Chrome
+  on the development machine (target ≤ 150 ms; `tests/integration/preview.sh`
+  with the `second-pulse` oscillator).
 
 ## Run
 

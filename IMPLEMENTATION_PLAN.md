@@ -710,9 +710,10 @@ at −12.1 dBFS, L below −45 dBFS; off again: 30 Hz on L).
     RTSP reader on it (ffmpeg) kept the stream for 14 s without listen requests;
     without it the stream stopped.
 - **Latency** (media time to the browser's audio output, Chrome's output latency 32
-  ms included), median per run over 6–12 pulses: 83.8, 87.4, 89.2, 93.4, 98.5 ms
-  (own), 95.1, 99.1 ms (shared); the largest single value 104 ms. Below 150 ms: no
-  in-process WebRTC stack (§3).
+  ms included), median per run over 6–12 pulses, in seven runs: 82.4–98.5 ms for
+  `main` (own mode, also after a child restart), 78.8–93.8 ms for a personal
+  monitor, 95.1 and 99.1 ms in shared mode; single pulses 75.2–104 ms. Below 150
+  ms: no in-process WebRTC stack (§3).
 - `ui.sh`: Listen on a monitor card until "Listening", the stream publishing in
   the Status tab, stopped; two mute presses around a mix pushed 1 s late (below).
 - All integration tests pass on release binaries; the image starts the child (uid

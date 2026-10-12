@@ -13,7 +13,7 @@
   `/api/v1/personal`; Listen on the monitor cards and "My headphones" in the
   Control room tab; `preview_*` metrics.
 - The `second-pulse` oscillator waveform; the latency measured in headless Chrome
-  (83–99 ms to the audio output).
+  (medians 79–99 ms to the audio output).
 - Fixed: a toggle pressed twice quickly could stay on when a mix pushed before the
   first press arrived in between (`x-mix-revision`); at most one change per path
   in flight.

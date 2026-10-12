@@ -5,8 +5,9 @@
 #
 #   cargo build --release --bins && scripts/demo.sh
 #
-# Needs libmxl (LD_LIBRARY_PATH, docs/development.md). State and the MXL domain
-# go to a temporary directory under /dev/shm.
+# Needs libmxl (LD_LIBRARY_PATH, docs/development.md); for listening in the
+# browser, MediaMTX (MEDIAMTX_BIN, the same file). State and the MXL domain go to
+# a temporary directory under /dev/shm.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
