@@ -295,7 +295,7 @@ None.
 | 5 | Meters | Peak per 40 ms update and RMS over 300 ms, post-fader, accepted; plus a peak hold that is cleared manually (`POST /api/v1/meters[/<id>]/clear`). |
 | 6 | Mono into 3.0 and surround | Into C (changed from the proposed front L/R pair). |
 | 7 | Published outputs | At most 128. Accepted. |
-| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. |
+| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. (2026-10-12: the mixer stays MIT for now, see M5b answers.) |
 
 ## M3: EQ, filters, dynamics, delay; delay compensation; true peak and loudness
 
@@ -745,6 +745,22 @@ at −12.1 dBFS, L below −45 dBFS; off again: 30 Hz on L).
 | 2 | Browser talkback (M5c) is published by WHIP; the built-in MediaMTX takes publishing only from this host. | Allow publishing from anywhere only on `<prefix>/talkback/…` paths (the mixer only reads them), and only in own mode; the shared MediaMTX is the platform's. |
 | 3 | The deployment example's `PREVIEW_*` values (`rtsp://mediamtx:8554`, `production/mix1`, `https://preview.example`, `http://mediamtx:9997`) are placeholders. | Tell me the platform's names, or leave them as examples. |
 | 4 | Merge M5b (PR 10) before M5c? | Yes, as with M5a. |
+
+### M5b: answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Defaults (Opus 128 kbit/s, 10 ms; 10 s grace; listen every 5 s; 8 web monitors; personal monitors removed after 10 min) | Accepted. |
+| 2 | Browser talkback with the built-in MediaMTX | Accepted: publishing from anywhere only on `<prefix>/talkback/…`, own mode only (M5c). |
+| 3 | `PREVIEW_*` values in the deployment example | Kept as examples. |
+| 4 | Merge M5b before M5c | Yes. |
+
+**Licence (Com-IS-Assist, §8.2):** the mixer stays MIT. Whether Com-IS-Assist's
+core can be used under a permissive licence is an open discussion between the
+maintainer and its author. Its own licensing notes say GPLv3 comes only from the
+VST3 target (`vst3-sys`) and that the core crate could be licensed separately.
+Until it is settled, no Com-IS-Assist code is copied; answer 8 of M2 (a release
+blocker for the release that contains it) still holds.
 
 ## tests/hw scripts for the maintainers
 
