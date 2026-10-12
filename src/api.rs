@@ -15,7 +15,8 @@ use serde_json::{json, Value};
 use crate::control::{fade_wait, Staged};
 use crate::mix::chain::Proc;
 use crate::mix::model::{
-    Bus, Db, Kind, MixSettings, Output, PatchPoint, Send, Strip, Tap, DEFAULT_RAMP_MS, MAX_RAMP_MS,
+    Afv, Bus, Db, Kind, MixSettings, Output, PatchPoint, Send, Strip, Tap, DEFAULT_RAMP_MS,
+    MAX_RAMP_MS,
 };
 use crate::mix::{Format, Mix};
 use crate::ops::{error, App};
@@ -82,6 +83,22 @@ pub fn routes() -> Router<App> {
             "/api/v1/analysis",
             get(analysis).put(put_analysis).delete(delete_analysis),
         )
+        .route("/api/v1/tally", get(tally))
+}
+
+/// The TSL receiver's settings, the lamps of every tally index seen, and the
+/// strips that follow one.
+async fn tally(State(app): State<App>) -> Json<Value> {
+    let c = &app.config;
+    let control = app.control();
+    let mut v = control.tally_status();
+    v["enabled"] = json!(c.tsl_enable);
+    v["udp_port"] = json!(c.tsl_udp_port);
+    v["tcp_port"] = json!(c.tsl_tcp_port);
+    v["screen"] = json!(c.tsl_screen);
+    v["map"] = json!(c.tsl_map);
+    v["lamps"] = json!(control.tally.lamps());
+    Json(v)
 }
 
 /// The analyser's signal and tap, and its last values (spectrum, correlation,
@@ -290,7 +307,19 @@ struct StripBody {
     loudness: Option<bool>,
     colour: Option<String>,
     recall_safe: Option<bool>,
+    /// `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    tally_index: Option<Option<u16>>,
+    #[serde(default, deserialize_with = "present")]
+    afv: Option<Option<Afv>>,
     ramp_ms: Option<f64>,
+}
+
+/// A field that is present (`Some`, perhaps `Some(None)` for `null`) or absent.
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
 }
 
 /// `""` clears the colour.
@@ -300,6 +329,12 @@ fn colour(v: String) -> Option<String> {
 
 impl StripBody {
     fn apply(self, s: &mut Strip) {
+        if let Some(v) = self.tally_index {
+            s.tally_index = v;
+        }
+        if let Some(v) = self.afv {
+            s.afv = v;
+        }
         if let Some(v) = self.colour {
             s.colour = colour(v);
         }
@@ -369,6 +404,8 @@ async fn create_strip(State(app): State<App>, bytes: axum::body::Bytes) -> Respo
             loudness: false,
             colour: None,
             recall_safe: false,
+            tally_index: None,
+            afv: None,
         };
         b.apply(&mut s);
         let errors = apply(&app, 0, |m| {

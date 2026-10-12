@@ -49,6 +49,15 @@ pub struct Compiler {
     ids: HashMap<String, NodeId>,
     /// The signal and tap the analyser (spectrum, goniometer) reads, if any.
     pub analysis: Option<(String, Tap)>,
+    /// The gain of each AFV strip's AFV node (1 open, its depth closed).
+    pub afv: HashMap<String, f32>,
+}
+
+impl Compiler {
+    /// The node id of `key` (e.g. `strip/vox/afv`), once it has been compiled.
+    pub fn node_id(&self, key: &str) -> Option<NodeId> {
+        self.ids.get(key).copied()
+    }
 }
 
 /// A signal's tap points and their latencies.
@@ -361,12 +370,27 @@ impl Compiler {
                         (format_name(s.format), chain_sig),
                         vec![fader; n],
                     );
-                    let post = c.b.buffers(n);
+                    let mut post = c.b.buffers(n);
                     c.b.step(Step::Gain {
                         node,
                         src: pre.0,
                         dst: post,
                     });
+                    if s.afv.is_some_and(|a| a.enabled) {
+                        let g = c.compiler.afv.get(&s.id).copied().unwrap_or(0.0);
+                        let node = c.node(
+                            format!("strip/{}/afv", s.id),
+                            (format_name(s.format), chain_sig),
+                            vec![g; n],
+                        );
+                        let after = c.b.buffers(n);
+                        c.b.step(Step::Gain {
+                            node,
+                            src: post,
+                            dst: after,
+                        });
+                        post = after;
+                    }
                     let pan_values = match s.format {
                         Format::Mono => {
                             let (l, r) = pan_gains(s.pan, laws.pan);
@@ -673,6 +697,8 @@ mod tests {
             loudness: false,
             colour: None,
             recall_safe: false,
+            tally_index: None,
+            afv: None,
         }
     }
 
@@ -760,6 +786,32 @@ mod tests {
         assert_eq!(c.meters.len(), 3);
         let kinds: Vec<&str> = c.plan.steps.iter().map(|s| s.kind()).collect();
         assert_eq!(kinds.iter().filter(|k| **k == "send").count(), 3);
+    }
+
+    #[test]
+    fn afv_adds_a_gain_after_the_fader() {
+        let mut compiler = Compiler::default();
+        let base = mix();
+        let a = compile(&mut compiler, &base, 48);
+        assert!(compiler.node_id("strip/vox/afv").is_none());
+        let mut with = base.clone();
+        with.strips[0].afv = Some(crate::mix::model::Afv {
+            enabled: true,
+            depth_db: Db(-20.0),
+            fade_in_ms: 100.0,
+            fade_out_ms: 500.0,
+        });
+        compiler.afv.insert("vox".into(), 0.1);
+        let b = compile(&mut compiler, &with, 48);
+        assert_ne!(a.structure, b.structure);
+        let id = compiler.node_id("strip/vox/afv").expect("afv node");
+        assert_eq!(b.nodes[&id].values, vec![0.1]);
+        let gains = |c: &Compiled| c.plan.steps.iter().filter(|s| s.kind() == "gain").count();
+        assert_eq!(gains(&b), gains(&a) + 1);
+        // Off again: the node goes.
+        with.strips[0].afv.as_mut().unwrap().enabled = false;
+        let c = compile(&mut compiler, &with, 48);
+        assert_eq!(gains(&c), gains(&a));
     }
 
     #[test]

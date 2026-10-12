@@ -18,4 +18,6 @@ pub mod ops;
 pub mod outputs;
 pub mod show_api;
 pub mod state;
+pub mod tally;
 pub mod timing;
+pub mod widgets;

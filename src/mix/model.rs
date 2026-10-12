@@ -102,7 +102,26 @@ pub struct Strip {
     /// Snapshot recalls leave this signal alone (§12.5).
     #[serde(default)]
     pub recall_safe: bool,
+    /// The tally index (§10.3) this strip follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tally_index: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub afv: Option<Afv>,
 }
+
+/// Audio-follows-video (§10.3): with `enabled`, the strip is open while its tally
+/// index is on air (LH) and at `depth_db` otherwise, after its fader.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Afv {
+    pub enabled: bool,
+    pub depth_db: Db,
+    pub fade_in_ms: f64,
+    pub fade_out_ms: f64,
+}
+
+/// Longest AFV fade.
+pub const MAX_AFV_FADE_MS: f64 = 10_000.0;
 
 fn yes() -> bool {
     true
@@ -390,6 +409,19 @@ impl Mix {
         super::show::validate(self)?;
         for s in &self.strips {
             check_name(&s.name)?;
+            if let Some(a) = &s.afv {
+                if a.depth_db.0 > 0.0 {
+                    return Err(format!("strip {}: afv depth_db must be -inf to 0", s.id));
+                }
+                for (what, ms) in [("fade_in_ms", a.fade_in_ms), ("fade_out_ms", a.fade_out_ms)] {
+                    if !(0.0..=MAX_AFV_FADE_MS).contains(&ms) {
+                        return Err(format!(
+                            "strip {}: afv {what} must be 0 to {MAX_AFV_FADE_MS}",
+                            s.id
+                        ));
+                    }
+                }
+            }
             let n = s.format.channels();
             if s.patch.len() != n || s.polarity.len() != n {
                 return Err(format!(
@@ -649,7 +681,7 @@ fn check_gain(what: &str, db: Db) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub fn strip(id: &str, format: Format) -> Strip {
@@ -669,6 +701,8 @@ mod tests {
             loudness: false,
             colour: None,
             recall_safe: false,
+            tally_index: None,
+            afv: None,
         }
     }
 
