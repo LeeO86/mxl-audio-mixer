@@ -54,6 +54,10 @@ pub struct Control {
     compiler: Compiler,
     pub analyser: crate::analysis::Analyser,
     pub tally: crate::tally::Tally,
+    /// Monitors heard in the browser (§10.1, B.1).
+    pub streams: crate::preview::Streams,
+    /// Most personal monitors.
+    max_personal: usize,
     layout: HashMap<NodeId, LayoutNode>,
     procs: HashMap<NodeId, LayoutNode>,
     /// Processing latency of each signal's post-fader point, in samples.
@@ -93,6 +97,8 @@ impl Control {
             compiler: Compiler::default(),
             analyser: crate::analysis::Analyser::new(config.block_samples as usize),
             tally: crate::tally::Tally::default(),
+            streams: crate::preview::Streams::new(config),
+            max_personal: config.max_web_monitors,
             layout: HashMap::new(),
             procs: HashMap::new(),
             latency: HashMap::new(),
@@ -266,6 +272,107 @@ impl Control {
         &self.compiler.solo
     }
 
+    /// The personal monitors (runtime).
+    pub fn personal(&self) -> &[crate::mix::compile::Personal] {
+        &self.compiler.personal
+    }
+
+    /// Add a personal monitor on `source`; applied with the next change of the mix.
+    pub fn add_personal(
+        &mut self,
+        source: Option<crate::mix::room::Source>,
+    ) -> Result<String, String> {
+        if self.compiler.personal.len() >= self.max_personal {
+            return Err(format!(
+                "at most {} personal monitors (MIXER_MAX_WEB_MONITORS)",
+                self.max_personal
+            ));
+        }
+        let id = (1..)
+            .map(|n| format!("personal-{n}"))
+            .find(|id| self.compiler.personal.iter().all(|p| &p.monitor.id != id))
+            .expect("unbounded");
+        let mut monitor: crate::mix::room::Monitor = serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "kind": "headphones", "format": "stereo"
+        }))
+        .map_err(|e| e.to_string())?;
+        monitor.source = source;
+        self.compiler.personal.push(crate::mix::compile::Personal {
+            monitor,
+            solo: BTreeMap::new(),
+            created: Instant::now(),
+        });
+        Ok(id)
+    }
+
+    /// Change personal monitor `id` with `f`.
+    pub fn with_personal<T>(
+        &mut self,
+        id: &str,
+        f: impl FnOnce(&mut crate::mix::compile::Personal) -> T,
+    ) -> Option<T> {
+        self.compiler
+            .personal
+            .iter_mut()
+            .find(|p| p.monitor.id == id)
+            .map(f)
+    }
+
+    pub fn remove_personal(&mut self, id: &str) -> bool {
+        let before = self.compiler.personal.len();
+        self.compiler.personal.retain(|p| p.monitor.id != id);
+        self.compiler.personal.len() != before
+    }
+
+    /// Remove the personal monitors nobody listened to for `idle` (counted from
+    /// their creation when never). True when any went.
+    pub fn expire_personal(&mut self, idle: Duration) -> bool {
+        let streams = &self.streams;
+        let before = self.compiler.personal.len();
+        self.compiler.personal.retain(|p| {
+            let last = streams
+                .last_heard(&p.monitor.id)
+                .unwrap_or(p.created)
+                .max(p.created);
+            last.elapsed() < idle
+        });
+        self.compiler.personal.len() != before
+    }
+
+    /// A monitor or personal monitor with this id exists.
+    pub fn has_monitor(&self, id: &str) -> bool {
+        self.mix.control_room.monitors.iter().any(|m| m.id == id)
+            || self.compiler.personal.iter().any(|p| p.monitor.id == id)
+    }
+
+    /// Every stream id: the monitors, then the personal monitors.
+    pub fn stream_ids(&self) -> Vec<String> {
+        self.mix
+            .control_room
+            .monitors
+            .iter()
+            .map(|m| m.id.clone())
+            .chain(self.compiler.personal.iter().map(|p| p.monitor.id.clone()))
+            .collect()
+    }
+
+    /// Start streaming `id` (someone listens). True when the plan needs it.
+    pub fn listen(&mut self, id: &str) -> Result<bool, String> {
+        if !self.has_monitor(id) {
+            return Err(format!("monitor {id} does not exist"));
+        }
+        let c = &mut *self;
+        c.streams.listen(&mut c.engine, id)
+    }
+
+    /// Stop unheard streams; true when the plan needs a change.
+    pub fn expire_streams(&mut self) -> bool {
+        let ids = self.stream_ids();
+        let c = &mut *self;
+        c.streams
+            .expire(&mut c.engine, |id| ids.iter().any(|x| x == id))
+    }
+
     /// Check `next` and start applying it. Parameter-only changes ramp over `ramp`
     /// samples and are done; anything else fades the affected nodes out and needs
     /// [`Control::swap`] after [`fade_wait`].
@@ -273,6 +380,15 @@ impl Control {
         next.validate(self.input_count, self.block)?;
         self.compiler.afv = self.afv_targets(&next);
         self.compiler.solo.retain(|s, _| next.kind(s).is_some());
+        self.compiler.streams = self.streams.slots();
+        for p in &mut self.compiler.personal {
+            p.solo.retain(|s, _| next.kind(s).is_some());
+            if let Some(crate::mix::room::Source::Signal(id)) = &p.monitor.source {
+                if next.kind(id).is_none() {
+                    p.monitor.source = None;
+                }
+            }
+        }
         let compiled = self.compiler.compile(
             &next,
             self.block as usize,

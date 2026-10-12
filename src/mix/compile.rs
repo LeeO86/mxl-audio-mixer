@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use super::chain::{Category, Proc, ProcKind};
 use super::format::{pan_gains, stereo_matrix, width_matrix, Format};
 use super::model::{Db, Kind, Mix, Tap};
-use super::room::{check_matrix, monitor_gain, SoloKind, Source};
+use super::room::{check_matrix, monitor_gain, Monitor, SoloKind, Source};
 use crate::engine::plan::{NodeId, Plan, PlanBuilder, Processor, Span, Step};
 
 /// A gain node of a compiled plan, as the control side remembers it.
@@ -54,6 +54,70 @@ pub struct Compiler {
     pub afv: HashMap<String, f32>,
     /// Who is soloed, and how (the control room's runtime state).
     pub solo: std::collections::BTreeMap<String, SoloKind>,
+    /// The stream slot of each monitor (by id) someone listens to.
+    pub streams: HashMap<String, usize>,
+    /// The personal monitors of browser clients (runtime).
+    pub personal: Vec<Personal>,
+}
+
+/// A browser client's own monitor path (§10.1 personal monitoring): stereo, its
+/// own source and its own solo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Personal {
+    pub monitor: Monitor,
+    pub solo: std::collections::BTreeMap<String, SoloKind>,
+    pub created: std::time::Instant,
+}
+
+/// A stereo solo bus of `soloed` (PFL from the pre-fader tap with `pfl_trim_db`,
+/// AFL from the output tap); none without solos. Node keys start with `key`.
+fn build_solo_bus(
+    c: &mut Build,
+    mix: &Mix,
+    taps: &HashMap<String, Taps>,
+    soloed: &std::collections::BTreeMap<String, SoloKind>,
+    pfl_trim_db: f64,
+    key: &str,
+) -> Option<Span> {
+    if soloed.is_empty() {
+        return None;
+    }
+    let laws = mix.settings.laws();
+    let bus = c.b.buffers(2);
+    c.b.step(Step::Clear { dst: bus });
+    for (id, kind) in soloed {
+        let tap = match kind {
+            SoloKind::Pfl => Tap::PreFader,
+            SoloKind::Afl => mix.default_tap(id),
+        };
+        let (Some(t), Some(from)) = (taps.get(id), mix.tap_format(id, &tap)) else {
+            continue;
+        };
+        let src = t.get(&tap).0;
+        let coefficients = c.b.coefficients(&width_matrix(from, Format::Stereo, laws));
+        let gain = match kind {
+            SoloKind::Pfl => Db(pfl_trim_db).gain() as f32,
+            SoloKind::Afl => 1.0,
+        };
+        let node = c.node(
+            format!("{key}/{id}"),
+            (
+                format_name(from),
+                *kind,
+                f64::from(laws.pan).to_bits(),
+                f64::from(laws.mono_sum).to_bits(),
+                t.chain,
+            ),
+            vec![gain],
+        );
+        c.b.step(Step::Send {
+            node,
+            src,
+            dst: bus,
+            coefficients,
+        });
+    }
+    Some(bus)
 }
 
 impl Compiler {
@@ -591,43 +655,8 @@ impl Compiler {
         // The control room: the solo bus, then every monitor path.
         let room = &mix.control_room;
         let soloed = c.compiler.solo.clone();
-        let solo_bus = if soloed.is_empty() {
-            None
-        } else {
-            let bus = c.b.buffers(2);
-            c.b.step(Step::Clear { dst: bus });
-            for (id, kind) in &soloed {
-                let tap = match kind {
-                    SoloKind::Pfl => Tap::PreFader,
-                    SoloKind::Afl => mix.default_tap(id),
-                };
-                let (Some(t), Some(from)) = (taps.get(id), mix.tap_format(id, &tap)) else {
-                    continue;
-                };
-                let src = t.get(&tap).0;
-                let coefficients = c.b.coefficients(&width_matrix(from, Format::Stereo, laws));
-                let gain = match kind {
-                    SoloKind::Pfl => Db(room.solo.pfl_trim_db).gain() as f32,
-                    SoloKind::Afl => 1.0,
-                };
-                let node = c.node(
-                    format!("solo/{id}"),
-                    (
-                        format_name(from),
-                        *kind,
-                        f64::from(laws.pan).to_bits(),
-                        f64::from(laws.mono_sum).to_bits(),
-                        t.chain,
-                    ),
-                    vec![gain],
-                );
-                c.b.step(Step::Send {
-                    node,
-                    src,
-                    dst: bus,
-                    coefficients,
-                });
-            }
+        let solo_bus = build_solo_bus(&mut c, mix, &taps, &soloed, room.solo.pfl_trim_db, "solo");
+        if let Some(bus) = solo_bus {
             let tp = c.state("meter/solo".into(), 2, |pid| Processor::true_peak(pid, 2));
             let slot = c.b.meter(2);
             c.b.step(Step::Meter {
@@ -636,10 +665,29 @@ impl Compiler {
                 proc: tp,
             });
             meters.push(("solo".into(), slot, 2));
-            Some(bus)
-        };
+        }
+        // Monitor paths: the control room's, then the personal ones (each with its
+        // own solo), each with its stream slot if someone listens.
+        let mut jobs: Vec<(Monitor, Option<Span>, Option<usize>)> = room
+            .monitors
+            .iter()
+            .map(|m| (m.clone(), solo_bus, c.compiler.streams.get(&m.id).copied()))
+            .collect();
+        for w in c.compiler.personal.clone() {
+            let bus = build_solo_bus(
+                &mut c,
+                mix,
+                &taps,
+                &w.solo,
+                room.solo.pfl_trim_db,
+                &format!("{}/solo", w.monitor.id),
+            );
+            let slot = c.compiler.streams.get(&w.monitor.id).copied();
+            jobs.push((w.monitor, bus, slot));
+        }
         let mono_sum = Db(f64::from(laws.mono_sum)).gain() as f32;
-        for m in &room.monitors {
+        for (m, solo_bus, stream) in &jobs {
+            let solo_bus = *solo_bus;
             let n = m.format.channels();
             let key = m.key();
             let mon = c.b.buffers(n);
@@ -795,6 +843,29 @@ impl Compiler {
                 proc: tp,
             });
             meters.push((key.clone(), slot, n));
+            if let Some(slot) = stream {
+                let src = if m.format == Format::Stereo {
+                    cur
+                } else {
+                    let st = c.b.buffers(2);
+                    c.b.step(Step::Clear { dst: st });
+                    let coefficients =
+                        c.b.coefficients(&width_matrix(m.format, Format::Stereo, laws));
+                    let node = c.node(format!("{key}/stream"), format_name(m.format), vec![1.0]);
+                    c.b.step(Step::Send {
+                        node,
+                        src: cur,
+                        dst: st,
+                        coefficients,
+                    });
+                    st
+                };
+                c.b.step(Step::Stream {
+                    src,
+                    slot: *slot as u32,
+                });
+                (&m.id, *slot).hash(&mut c.structure);
+            }
             if let (true, Some(&slot)) = (m.publish, outputs.get(&key)) {
                 c.b.step(Step::Output {
                     src: cur,
