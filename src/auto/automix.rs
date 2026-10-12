@@ -3,7 +3,7 @@
 //!
 //! Per 10 ms frame, a member's level L is the mean square of its frame (the VAD
 //! tap: before the fader), rising at once and falling with a time constant of
-//! 100 ms. With the weight w (10^(weight_db/10)) and, with VAD weighting, its
+//! 100 ms; a member takes part from its first measured frame on. With the weight w (10^(weight_db/10)) and, with VAD weighting, its
 //! speech probability p (counting p + 0.1 × (1 − p), so a member without speech
 //! weighs 10 dB less), the member's gain is
 //!
@@ -59,9 +59,10 @@ impl State {
         self.gains
             .retain(|s, _| a.members.iter().any(|m| &m.signal == s));
         for m in &a.members {
-            let l = self.levels.entry(m.signal.clone()).or_insert(0.0);
-            let p = inputs.get(&m.signal).map_or(0.0, |i| i.power);
-            *l = p.max(*l * LEVEL_FALL);
+            if let Some(i) = inputs.get(&m.signal) {
+                let l = self.levels.entry(m.signal.clone()).or_insert(0.0);
+                *l = i.power.max(*l * LEVEL_FALL);
+            }
         }
         if !a.enabled {
             for m in &a.members {
@@ -69,10 +70,13 @@ impl State {
             }
             return &self.gains;
         }
+        // A member shares once its level was measured (a new member's VAD tap
+        // starts with the next plan).
         let sharing: Vec<_> = a
             .members
             .iter()
             .filter(|m| !m.bypass && !muted.contains(&m.signal))
+            .filter(|m| self.levels.contains_key(&m.signal))
             .collect();
         for m in a.members.iter().filter(|m| m.bypass) {
             self.gains.insert(m.signal.clone(), 1.0);
@@ -309,6 +313,30 @@ mod tests {
             )
             .clone();
         assert!(g["b"] > 0.99, "{g:?}");
+    }
+
+    #[test]
+    fn a_new_member_shares_from_its_first_frame() {
+        let mut a = automix(&["a"]);
+        a.last_mic_hold = true;
+        let none = BTreeSet::new();
+        let mut st = State::default();
+        st.frame(&a, &inputs(&[("a", -30.0, false)]), &none);
+        a.members.push(AutomixMember::new("b"));
+        // b's tap has no frame yet: a keeps its gain, b gets none, nothing is held.
+        let g = st.frame(&a, &inputs(&[("a", -30.0, false)]), &none).clone();
+        assert_eq!((g.get("a"), g.get("b")), (Some(&1.0), None));
+        let g = st
+            .frame(
+                &a,
+                &inputs(&[("a", -30.0, false), ("b", -30.0, false)]),
+                &none,
+            )
+            .clone();
+        assert!(
+            close(db(g["a"]), -3.01) && close(db(g["b"]), -3.01),
+            "{g:?}"
+        );
     }
 
     #[test]
