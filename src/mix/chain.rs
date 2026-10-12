@@ -107,6 +107,9 @@ pub enum Waveform {
     /// The stereo ident of EBU R 49: the tone on every channel, the first (left)
     /// one interrupted for 0.25 s every 3 s.
     EbuIdent,
+    /// The tone during the first 20 ms of every TAI second, on every channel:
+    /// a signal with a known media time, for measuring the preview latency.
+    SecondPulse,
 }
 
 /// A node's type and parameters.

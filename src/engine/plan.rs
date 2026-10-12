@@ -687,6 +687,7 @@ impl Plan {
                     }
                     let meters = &self.node_meters;
                     if let Some(p) = self.procs.get_mut(proc as usize) {
+                        p.start = start;
                         p.process(&mut io[..n], &keys[..kn], block, meters);
                     }
                 }

@@ -135,7 +135,7 @@ const setOsc = (body) => act(() => api.patch(`/api/v1/buses/${oscillator.value.b
         </div>
         <div class="mbuttons">
           <button class="btn on-warn" :class="oscillator.node.bypass ? 'secondary' : ''" :aria-pressed="!oscillator.node.bypass" @click="setOsc({ bypass: !oscillator.node.bypass })">{{ oscillator.node.bypass ? "Off" : "On" }}</button>
-          <span class="muted small" style="align-self: center">{{ oscillator.node.waveform === "ebu-ident" ? "EBU ident" : "sine" }} {{ oscillator.node.freq_hz }} Hz, {{ oscillator.node.level_dbfs }} dBFS</span>
+          <span class="muted small" style="align-self: center">{{ ({ "ebu-ident": "EBU ident", "second-pulse": "second pulse" })[oscillator.node.waveform] || "sine" }} {{ oscillator.node.freq_hz }} Hz, {{ oscillator.node.level_dbfs }} dBFS</span>
         </div>
         <Pot label="Frequency" unit="Hz" :value="oscillator.node.freq_hz" :min="20" :max="20000" :def="1000" :fine="0.02" :digits="0" log @change="(v) => setOsc({ freq_hz: v })" />
         <Pot label="Level" unit="dBFS" :value="oscillator.node.level_dbfs" :min="-60" :max="0" :def="-18" :fine="0.5" @change="(v) => setOsc({ level_dbfs: v })" />
