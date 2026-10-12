@@ -86,7 +86,31 @@ pub fn router(app: App) -> Router {
         .merge(crate::room_api::routes())
         .merge(crate::preview_api::routes())
         .merge(crate::widgets::routes())
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            mix_revision,
+        ))
         .with_state(app)
+}
+
+/// Every change answers with `x-mix-revision`, the mix revision after it: a client
+/// keeps its own change over pushed mixes older than that (`web/src/store.js`).
+async fn mix_revision(
+    State(app): State<App>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let change = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    );
+    let mut resp = next.run(req).await;
+    if change {
+        let revision = app.control().revision;
+        resp.headers_mut()
+            .insert("x-mix-revision", axum::http::HeaderValue::from(revision));
+    }
+    resp
 }
 
 /// The web UI: one self-contained page embedded at build time (`build.rs`).

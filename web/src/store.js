@@ -2,7 +2,7 @@
 // updates"), the configuration, and the actions every view uses. Every client sees every change: the
 // mix comes back on the WebSocket after a change from any client.
 import { computed, reactive } from "vue";
-import { api } from "./api.js";
+import { api, exchange } from "./api.js";
 
 const PREFIX = "mxl-audio-mixer.";
 export function stored(key, fallback) {
@@ -66,24 +66,46 @@ export async function act(fn, notice = "") {
 
 // ---- parameter changes -------------------------------------------------------------
 // A fader or pot being moved sends at most 30 PATCHes a second per path; changes to one path merge, so
-// a fast second control does not drop the first.
+// a fast second control does not drop the first. One request per path at a time: two in flight could
+// reach the server in the wrong order and leave the older value.
 
 const pending = new Map(); // "METHOD path" -> body
 const timers = new Map(); // key -> timeout
 const lastSend = new Map(); // key -> time
+const inFlight = new Set(); // keys
+// Local changes not yet in a pushed mix: key -> { target: () => object, body, until: revision }. A mix
+// pushed before the server applied them (still on its way) would otherwise undo them for a moment, and
+// a toggle pressed then would toggle from the old value.
+const unacked = new Map();
 
 function flushKey(key) {
   clearTimeout(timers.get(key));
   timers.delete(key);
+  if (inFlight.has(key)) return;
   const body = pending.get(key);
   pending.delete(key);
   if (!body) return;
   lastSend.set(key, performance.now());
+  inFlight.add(key);
   const [method, path] = key.split(" ");
-  act(() => (method === "PUT" ? api.put(path, body) : api.patch(path, body))).then((ok) => {
-    // Refused: the server's mix did not change, so take it back over the local change.
-    if (ok === undefined) refreshMix();
+  act(() => exchange(path, { method, body })).then((ok) => {
+    inFlight.delete(key);
+    if (ok === undefined) {
+      // Refused: the server's mix did not change, so take it back over the local change.
+      unacked.delete(key);
+      refreshMix();
+    } else if (!pending.has(key) && unacked.has(key)) {
+      if (ok.revision === null || ok.revision <= live.revision) unacked.delete(key);
+      else unacked.get(key).until = ok.revision;
+    }
+    if (pending.has(key)) schedule(key);
   });
+}
+
+function schedule(key) {
+  const wait = 33 - (performance.now() - (lastSend.get(key) || 0));
+  if (wait <= 0) flushKey(key);
+  else if (!timers.has(key)) timers.set(key, setTimeout(() => flushKey(key), wait));
 }
 
 async function refreshMix() {
@@ -98,29 +120,32 @@ async function refreshMix() {
 export function patch(path, body, method = "PATCH") {
   const key = `${method} ${path}`;
   pending.set(key, { ...(pending.get(key) || {}), ...body });
-  const wait = 33 - (performance.now() - (lastSend.get(key) || 0));
-  if (wait <= 0) flushKey(key);
-  else if (!timers.has(key)) timers.set(key, setTimeout(() => flushKey(key), wait));
+  schedule(key);
 }
 
-// Changes show at once in this client (the next mix from the server replaces them), so a toggle pressed
-// twice quickly toggles twice.
-function local(target, body) {
+// Changes show at once in this client and stay over pushed mixes until one has them, so a toggle
+// pressed twice quickly toggles twice.
+function assign(target, body) {
   if (!target) return;
   for (const [k, v] of Object.entries(body)) if (k !== "ramp_ms") target[k] = v;
 }
+function local(key, target, body) {
+  assign(target(), body);
+  unacked.set(key, { target, body: { ...(unacked.get(key)?.body || {}), ...body }, until: Infinity });
+}
+function changeLocally(target, path, body, method = "PATCH") {
+  local(`${method} ${path}`, target, body);
+  patch(path, body, method);
+}
 export const signalPath = (id) => `/api/v1/${isBus(id) ? "buses" : "strips"}/${encodeURIComponent(id)}`;
 export function patchSignal(id, body) {
-  local(signalOf(id), body);
-  patch(signalPath(id), body);
+  changeLocally(() => signalOf(id), signalPath(id), body);
 }
 export function patchSend(from, to, body) {
-  local(sendOf(from, to), body);
-  patch(`/api/v1/sends/${encodeURIComponent(from)}/${encodeURIComponent(to)}`, body, "PUT");
+  changeLocally(() => sendOf(from, to), `/api/v1/sends/${encodeURIComponent(from)}/${encodeURIComponent(to)}`, body, "PUT");
 }
 export function patchNode(id, node, body) {
-  local(signalOf(id)?.chain?.find((n) => n.id === node), body);
-  patch(`${signalPath(id)}/chain/${encodeURIComponent(node)}`, body);
+  changeLocally(() => signalOf(id)?.chain?.find((n) => n.id === node), `${signalPath(id)}/chain/${encodeURIComponent(node)}`, body);
 }
 
 /** Send everything pending now (before an action that depends on it). */
@@ -156,8 +181,7 @@ export function toggleSolo(id, kind) {
 export const clearSolo = () => act(() => api.del("/api/v1/solo"));
 export const room = computed(() => live.mix?.control_room || { monitors: [], sources: [], solo: {}, reference_spl: [] });
 export const patchMonitor = (id, body) => {
-  local(room.value.monitors.find((m) => m.id === id), body);
-  patch(`/api/v1/monitors/${encodeURIComponent(id)}`, body);
+  changeLocally(() => room.value.monitors.find((m) => m.id === id), `/api/v1/monitors/${encodeURIComponent(id)}`, body);
 };
 
 /** The tally of a strip: { index, on_air, preview, afv, afv_open }, or null. */
@@ -193,6 +217,10 @@ function onMessage(m) {
   else if (m.type === "mix") {
     live.mix = m.mix;
     live.revision = m.revision;
+    for (const [key, u] of unacked) {
+      if (m.revision >= u.until) unacked.delete(key);
+      else assign(u.target(), u.body);
+    }
     live.latency = m.latency_ms || {};
   } else if (m.type === "meters") {
     live.meters = m.meters;
