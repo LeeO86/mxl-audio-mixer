@@ -4,8 +4,10 @@
 //! - `{"type": "status", "status": …}` five times a second (as `GET /api/v1/status`);
 //! - `{"type": "mix", "revision": n, "mix": …, "latency_ms": {signal: ms}}` on connect
 //!   and within 40 ms of every change of the mix, from any client;
-//! - `{"type": "meters", "meters": …, "loudness": …}` at the meter rate (25 Hz,
-//!   as `GET /api/v1/meters` and `GET /api/v1/loudness`).
+//! - `{"type": "meters", "meters": …, "loudness": …, "vad": {signal: {"active",
+//!   "probability"}}, "auto_db": {signal: dB}}` at the meter rate (25 Hz, as
+//!   `GET /api/v1/meters` and `GET /api/v1/loudness`; `vad` and `auto_db` are the
+//!   analysed signals and the auto nodes' gains, §8).
 //!
 //! - `{"type": "analysis", …}` with the meters, for clients that subscribed to it
 //!   (as `values` of `GET /api/v1/analysis`).
@@ -61,11 +63,26 @@ fn meters_json(app: &App, only: Option<&[String]>) -> Value {
     let control = app.control();
     let mut meters = control.meters.values();
     let mut loudness = control.loudness.values(&control.mix.settings);
+    let mut vad: serde_json::Map<String, Value> = control
+        .auto
+        .vads
+        .iter()
+        .map(|(s, v)| {
+            let p = (v.state.speech_probability * 100.0).round() / 100.0;
+            (
+                s.clone(),
+                json!({"active": v.state.speech_active, "probability": p}),
+            )
+        })
+        .collect();
+    let mut auto_db = control.auto.gains_db();
     if let Some(only) = only {
         meters.retain(|s, _| only.contains(s));
         loudness.retain(|s, _| only.contains(s));
+        vad.retain(|s, _| only.contains(s));
+        auto_db.retain(|s, _| only.contains(s));
     }
-    json!({"type": "meters", "meters": meters, "loudness": loudness})
+    json!({"type": "meters", "meters": meters, "loudness": loudness, "vad": vad, "auto_db": auto_db})
 }
 
 async fn send(socket: &mut WebSocket, value: &Value) -> bool {
