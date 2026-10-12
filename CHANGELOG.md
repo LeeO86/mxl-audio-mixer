@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Licence
+
+- The mixer is licensed under the GNU General Public License, version 3 or later
+  (`GPL-3.0-or-later`), instead of MIT, so that it and every fork stay open
+  source. No release was made under MIT.
+
 ### Milestone 5 (part 2): monitors in the browser
 
 - The preview contract (Appendix B.1): monitors encoded as Opus (libopus) and
