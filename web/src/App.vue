@@ -7,6 +7,7 @@ import ConsoleTab from "./components/ConsoleTab.vue";
 import ControlRoomTab from "./components/ControlRoomTab.vue";
 import ChainTab from "./components/ChainTab.vue";
 import RoutingTab from "./components/RoutingTab.vue";
+import GraphTab from "./components/GraphTab.vue";
 import SnapshotsTab from "./components/SnapshotsTab.vue";
 import MetersTab from "./components/MetersTab.vue";
 import NmosTab from "./components/NmosTab.vue";
@@ -19,6 +20,7 @@ const tabs = [
   { id: "control-room", label: "Control room", component: ControlRoomTab, full: true },
   { id: "processing", label: "Processing", component: ChainTab, full: true },
   { id: "routing", label: "Routing", component: RoutingTab, full: true },
+  { id: "graph", label: "Graph", component: GraphTab, full: true },
   { id: "snapshots", label: "Snapshots", component: SnapshotsTab },
   { id: "meters", label: "Meters", component: MetersTab, full: true },
   { id: "nmos", label: "NMOS", component: NmosTab },

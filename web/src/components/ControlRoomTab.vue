@@ -54,10 +54,19 @@ const PRESETS = [
   { label: "1 kHz −18 dBFS (EBU R 68)", body: { waveform: "sine", freq_hz: 1000, level_dbfs: -18 } },
   { label: "1 kHz −20 dBFS (SMPTE RP 155)", body: { waveform: "sine", freq_hz: 1000, level_dbfs: -20 } },
   { label: "EBU stereo ident (R 49)", body: { waveform: "ebu-ident", freq_hz: 1000, level_dbfs: -18 } },
+  { label: "Pink noise −18 dBFS RMS", body: { waveform: "pink", level_dbfs: -18 } },
+  { label: "White noise −18 dBFS RMS", body: { waveform: "white", level_dbfs: -18 } },
+  { label: "Sweep 20 Hz–20 kHz, 10 s", body: { waveform: "sweep", freq_hz: 20, sweep_to_hz: 20000, sweep_s: 10, level_dbfs: -18 } },
 ];
 async function addOscillator() {
   const ok = await act(() => api.post("/api/v1/buses", { id: "osc", name: "Oscillator", format: "stereo" }));
   if (ok) await act(() => api.post("/api/v1/buses/osc/chain", { id: "tone", type: "oscillator", ...PRESETS[0].body }), "Oscillator added: send it from the routing matrix, or pick it as a monitor source.");
+}
+function oscLabel(n) {
+  if (n.waveform === "pink" || n.waveform === "white") return `${n.waveform} noise, ${n.level_dbfs} dBFS RMS`;
+  if (n.waveform === "sweep") return `sweep ${n.freq_hz}–${n.sweep_to_hz} Hz in ${n.sweep_s} s, ${n.level_dbfs} dBFS`;
+  const name = { "ebu-ident": "EBU ident", "second-pulse": "second pulse" }[n.waveform] || "sine";
+  return `${name} ${n.freq_hz} Hz, ${n.level_dbfs} dBFS`;
 }
 const setOsc = (body) => act(() => api.patch(`/api/v1/buses/${oscillator.value.bus.id}/chain/${oscillator.value.node.id}`, body));
 </script>
@@ -138,9 +147,13 @@ const setOsc = (body) => act(() => api.patch(`/api/v1/buses/${oscillator.value.b
         </div>
         <div class="mbuttons">
           <button class="btn on-warn" :class="oscillator.node.bypass ? 'secondary' : ''" :aria-pressed="!oscillator.node.bypass" @click="setOsc({ bypass: !oscillator.node.bypass })">{{ oscillator.node.bypass ? "Off" : "On" }}</button>
-          <span class="muted small" style="align-self: center">{{ ({ "ebu-ident": "EBU ident", "second-pulse": "second pulse" })[oscillator.node.waveform] || "sine" }} {{ oscillator.node.freq_hz }} Hz, {{ oscillator.node.level_dbfs }} dBFS</span>
+          <span class="muted small" style="align-self: center">{{ oscLabel(oscillator.node) }}</span>
         </div>
-        <Pot label="Frequency" unit="Hz" :value="oscillator.node.freq_hz" :min="20" :max="20000" :def="1000" :fine="0.02" :digits="0" log @change="(v) => setOsc({ freq_hz: v })" />
+        <Pot v-if="!['white', 'pink'].includes(oscillator.node.waveform)" :label="oscillator.node.waveform === 'sweep' ? 'Sweep from' : 'Frequency'" unit="Hz" :value="oscillator.node.freq_hz" :min="20" :max="20000" :def="1000" :fine="0.02" :digits="0" log @change="(v) => setOsc({ freq_hz: v })" />
+        <template v-if="oscillator.node.waveform === 'sweep'">
+          <Pot label="Sweep to" unit="Hz" :value="oscillator.node.sweep_to_hz" :min="20" :max="20000" :def="20000" :fine="0.02" :digits="0" log @change="(v) => setOsc({ sweep_to_hz: v })" />
+          <Pot label="Sweep time" unit="s" :value="oscillator.node.sweep_s" :min="0.1" :max="600" :def="10" :fine="0.1" :digits="1" @change="(v) => setOsc({ sweep_s: v })" />
+        </template>
         <Pot label="Level" unit="dBFS" :value="oscillator.node.level_dbfs" :min="-60" :max="0" :def="-18" :fine="0.5" @change="(v) => setOsc({ level_dbfs: v })" />
         <ConfirmButton label="Remove the oscillator bus" small @confirm="act(() => api.del(`/api/v1/buses/${oscillator.bus.id}`))" />
       </template>

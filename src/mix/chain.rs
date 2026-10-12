@@ -110,6 +110,22 @@ pub enum Waveform {
     /// The tone during the first 20 ms of every TAI second, on every channel:
     /// a signal with a known media time, for measuring the preview latency.
     SecondPulse,
+    /// White noise, independent on every channel, at `level_dbfs` RMS.
+    White,
+    /// Pink noise (−3 dB per octave), independent on every channel, at
+    /// `level_dbfs` RMS.
+    Pink,
+    /// A logarithmic sweep from `freq_hz` to `sweep_to_hz` in `sweep_s`, again and
+    /// again, on every channel.
+    Sweep,
+}
+
+fn sweep_to() -> f64 {
+    20_000.0
+}
+
+fn sweep_time() -> f64 {
+    10.0
 }
 
 /// A node's type and parameters.
@@ -189,12 +205,16 @@ pub enum ProcKind {
         crossovers_hz: Vec<f64>,
         bands: Vec<MultibandBand>,
     },
-    /// A tone generator: replaces the signal with a sine at `level_dbfs` on every
-    /// channel (bypass: the input again).
+    /// A tone generator: replaces the signal (bypass: the input again). Sine,
+    /// ident, pulse and sweep at `level_dbfs` peak, noise at `level_dbfs` RMS.
     Oscillator {
         waveform: Waveform,
         freq_hz: f64,
         level_dbfs: f64,
+        #[serde(default = "sweep_to")]
+        sweep_to_hz: f64,
+        #[serde(default = "sweep_time")]
+        sweep_s: f64,
     },
     /// Bass management of a monitor (§10.1), not a chain node: the channels
     /// other than `lfe` high-passed, their sum low-passed into `lfe` (Linkwitz-
@@ -444,10 +464,14 @@ impl ProcKind {
             Self::Oscillator {
                 freq_hz,
                 level_dbfs,
+                sweep_to_hz,
+                sweep_s,
                 ..
             } => {
                 freq(*freq_hz)?;
+                freq(*sweep_to_hz)?;
                 range("level_dbfs", *level_dbfs, -100.0, 0.0)?;
+                range("sweep_s", *sweep_s, 0.1, 600.0)?;
             }
             Self::Delay {
                 time,
@@ -604,8 +628,10 @@ impl ProcKind {
             Self::Oscillator {
                 freq_hz,
                 level_dbfs,
+                sweep_to_hz,
+                sweep_s,
                 ..
-            } => vec![*freq_hz, *level_dbfs],
+            } => vec![*freq_hz, *level_dbfs, *sweep_to_hz, *sweep_s],
             Self::BassManagement {
                 crossover_hz,
                 lfe_gain_db,

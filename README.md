@@ -29,7 +29,11 @@ sends, pan and width, mute, fader, meter; the buses beside them), **Processing**
 (the chain of a strip or bus: drag node types in from the palette, drag nodes to
 reorder, bypass, delete; EQ curve with band handles, filter, dynamics transfer
 curves with the live level, de-esser listen, keys), **Routing** (the send matrix,
-a send's tap, gain, mute, phase and block delay; publishing outputs),
+a send's tap, gain, mute, phase and block delay; publishing outputs), **Graph**
+(the routing as a graph, read-write: inputs, strips, buses, monitors and outputs
+with their patches, sends, mix-minus, monitor sources and outputs; draw from a
+strip or bus to a bus to send, click a send to edit it, Delete removes it; nodes
+in columns by routing depth, moved ones kept in the browser),
 **Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
 history), **Meters** (the bridge on dBFS, true peak or PPM EBU, BBC, Nordic, DIN at
 an alignment level, phase correlation; loudness; spectrum and goniometer of any
@@ -381,7 +385,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `ducker` | `key` `{signal, tap}`, `threshold_db`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms` |
 | `multiband` | `crossovers_hz` (2–4, rising; Linkwitz-Riley 24 dB/oct, sum flat), `bands` (one more: `{threshold_db, ratio, attack_ms, release_ms, makeup_db}`) |
 | `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
-| `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s), `freq_hz`, `level_dbfs` (−100 … 0); replaces the signal (bypass: the input again) |
+| `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
 ±24 dB, a chain at most 32 nodes. A key is another signal's tap; its signal is
@@ -536,10 +540,10 @@ layouts, show history, PPM, correlation, the analyser, the events WebSocket),
 `tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
 checked on the API and on the other client; tally and AFV; a toggle pressed twice
 around a late mix; listening to a monitor with `MEDIAMTX_BIN`; talkback latched,
-held and listen-back),
+held and listen-back; a send drawn and deleted in the graph),
 `tests/integration/room.sh` (a published monitor sample-exact with level, dim,
 cut and checks; PFL, AFL, interlock, solo-in-place; an input source; the
-oscillator), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
+oscillator with pink noise and a sweep), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
 closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contract
 and a framing check in headless Chrome from an allowed and a refused origin),
 `tests/integration/preview.sh` (MediaMTX built in and shared, monitors played over
@@ -568,5 +572,5 @@ through `opusic-sys`; its notice is in the image under `/usr/share/doc/libopus`)
 and crates under MIT, Apache-2.0, BSD, ISC, Zlib or Unicode-3.0 terms (aws-lc,
 through `mxl-nmos`'s HTTP client, is Apache-2.0 and ISC). The image also has
 MediaMTX (MIT, a separate executable, `/usr/share/doc/mediamtx`). The UI: Vue
-(MIT), built with Vite (MIT); its base styles and components come from the
+(MIT) and Vue Flow (MIT, the routing graph), built with Vite (MIT); its base styles and components come from the
 sibling media functions (MIT, same author).

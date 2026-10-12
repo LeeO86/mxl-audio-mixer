@@ -1098,3 +1098,62 @@ frames a `fader-bank` with a VCA.
 | 3 | Link and unlink as implemented | Yes. |
 | 4 | Defaults (formats, ids) | Yes. |
 | 5 | Merge M6b, then prepare 1.0.0 | Yes. |
+
+## Release 1.0.0 (preparation)
+
+Milestones 0–6 are merged (§19: 1.0.0 = milestones 0–6, the widgets `strip`,
+`fader-bank`, `loudness`, `monitor`, `talkback`, and tally/AFV; `vca` too). The
+release PR sets the version to 1.0.0 (crate, UI) and adds:
+- `docs/release-notes/1.0.0.md`: the GitHub release text of Appendix B.3 (image,
+  every setting, ports, volumes, widgets, exit codes, what the platform must set,
+  what is not in 1.0.0, what was tested); the digest and the hardware results are
+  TODO until the tag and the maintainers' tests;
+- `docs/release-notes/1.0.0-checklist.md`: the maintainers' hardware and manual
+  tests, each with its pass criterion (including the group refused with a
+  mix-minus, M6b answer 2).
+
+**Performance at the release** (§19 "measured at every release";
+`tests/perf/section16.sh`, now with 8 real N-1 buses, mix-minus of main without
+one strip each, and 4 VCAs; release build, SCHED_OTHER, shared 4-vCPU VM, the
+demo stopped): 1440 sends in the plan (672 and 768 mirrored), mean block 772 µs,
+`dsp_load_ratio` 0.386 (< 0.5), every block ≤ 1.5 ms, 8 deadline misses in 60 s
+(the 1 h, zero-miss target of §16 is for the platform node, in the checklist).
+
+### Release 1.0.0: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Two items of §5 and §6 are not built: the read-write routing graph view (the matrix is there) and the oscillator's pink/white noise and sweep. In 1.0.0, or later? | Later (1.1.0), listed under "Not in 1.0.0". |
+| 2 | Anything to announce to the platform's operators before the release (B.3: names, labels, ports, volumes)? | The release notes are the announcement; this is the first release. |
+| 3 | When the checklist is done: may I tag `v1.0.0` on `main`, let `publish` build `1.0.0`, put the digest and the hardware results into the notes, and create the GitHub release? | Yes, after your results. |
+
+### Release 1.0.0: answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | The routing graph view and the oscillator's noise and sweep: in 1.0.0 or later? | In 1.0.0. |
+| 2 | The release notes as the announcement | Yes. |
+| 3 | Tag and release after the checklist | The maintainer schedules the hardware tests; the tag waits for them. |
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D97 | The oscillator's `white` and `pink` noise: independent on every channel (an xorshift generator per channel; pink with Paul Kellet's refined filter, scaled to the white noise's RMS), `level_dbfs` is the RMS; `sweep`: logarithmic from `freq_hz` to `sweep_to_hz` in `sweep_s` (0.1–600 s, defaults 20 kHz and 10 s), repeated, continuous phase, `level_dbfs` peak. Presets: pink and white −18 dBFS RMS, a 20 Hz–20 kHz sweep in 10 s. | §6 "oscillator/tone (sine, pink/white noise, sweep, EBU stereo ident)"; answer 1. Independent channels for speaker line-up (correlated noise would image in the centre); RMS for noise as in line-up practice (question 1). |
+| D98 | The routing graph is a tab of its own with Vue Flow (MIT): inputs, strips, buses (in columns by routing depth), monitors and published outputs; edges for patches, sends (level, tap; pre-fader dashed, muted red), a mix-minus (one dotted edge from its bus), monitor sources and outputs. Read-write for sends: drawn from a strip or bus to a bus (0 dB from its output), edited in a panel from a click, deleted with Delete; deleting an output edge unpublishes. Patches, monitor sources and the mix-minus are shown, edited where they live. Moved nodes stay where they were put, per browser. | §5 "graph view: a visual routing graph (read-write) for advanced users; the console view stays the default"; §3 "Vue flow/graph library"; answer 1. The UI page grows from 227 to 439 kB (question 2). |
+
+After the answers: both built, unit-tested (white and pink at −18 dBFS RMS within
+0.2 dB, the channels uncorrelated, pink with equal energy per octave within 1 dB,
+the sweep's level and its start and end) and in `room.sh` (pink noise at −18 dBFS
+RMS on a published monitor with a correlation of 0.02 between its channels, a
+sweep at −18 dBFS peak) and `ui.mjs` (a send drawn from a strip to a bus in the
+graph, edited from its edge, removed with Delete).
+
+**Finding:** Vue Flow checks every edge it is given with `is-valid-connection`,
+not only new ones: the first version (any send needs a bus as its target) hid the
+patch, monitor and output edges. The check now passes edges with an id.
+
+### Release 1.0.0: questions after the answers
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Noise: independent channels and the level as RMS. | As implemented. |
+| 2 | The UI page is 439 kB (141 kB compressed) with Vue Flow. | Fine for an embedded UI. |

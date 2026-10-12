@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (not released yet)
+
+The first release: milestones 0–6 (§19). Release notes:
+`docs/release-notes/1.0.0.md`.
+
+### Before the release
+
+- The routing graph (§5): a Graph tab with inputs, strips, buses, monitors and
+  outputs; sends drawn, edited and deleted in it (Vue Flow, MIT).
+- Oscillator: white and pink noise (level as RMS, independent channels) and a
+  logarithmic sweep (`sweep_to_hz`, `sweep_s`).
 
 ### Milestone 6 (part 2): N-1 and group operations
 

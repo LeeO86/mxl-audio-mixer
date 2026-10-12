@@ -243,3 +243,28 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .operations .opbox h4 { margin: 0 0 .2rem; }
 .strip .fmt .minus { color: var(--accent); }
 .minusedit .check { display: block; }
+
+/* Routing graph (§5) */
+.graphwrap { position: relative; height: calc(100vh - 11rem); min-height: 420px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.graph { width: 100%; height: 100%; }
+.gnode { min-width: 150px; padding: .35rem .6rem; border: 1px solid var(--border); border-left: 4px solid var(--colour); border-radius: 6px; background: var(--panel); color: var(--text); font-size: .8rem; }
+.gnode.muted { opacity: .55; }
+.gnode .gname { font-weight: 600; white-space: nowrap; }
+.gnode .gmeta { color: var(--muted); font-size: .7rem; white-space: nowrap; }
+.gnode.k-input { border-left-color: var(--muted); }
+.gnode.k-output { border-left-color: var(--ok); }
+.gnode.k-monitor { border-left-color: #e0c23a; }
+.vue-flow__node.selected .gnode { outline: 2px solid var(--accent); }
+.vue-flow__edge.patch .vue-flow__edge-path { stroke: var(--muted); stroke-width: 1; }
+.vue-flow__edge.send .vue-flow__edge-path { stroke: var(--accent); stroke-width: 2; }
+.vue-flow__edge.send.pre .vue-flow__edge-path { stroke-dasharray: 6 4; }
+.vue-flow__edge.send.off .vue-flow__edge-path { stroke: var(--bad); opacity: .6; }
+.vue-flow__edge.minus .vue-flow__edge-path { stroke: var(--warn); stroke-dasharray: 2 4; stroke-width: 2; }
+.vue-flow__edge.monsrc .vue-flow__edge-path { stroke: #e0c23a; }
+.vue-flow__edge.pub .vue-flow__edge-path { stroke: var(--ok); }
+.vue-flow__edge.selected .vue-flow__edge-path { stroke-width: 4; }
+.vue-flow__edge-text { fill: var(--text); font-size: 10px; }
+.vue-flow__edge-textbg { fill: var(--panel); }
+.vue-flow__handle { width: 10px; height: 10px; background: var(--accent); border: 2px solid var(--panel); }
+.graphsend { position: absolute; right: .6rem; top: .6rem; width: 280px; height: fit-content; z-index: 5; }
+.graphsend .row { display: flex; gap: .4rem; align-items: center; margin-top: .4rem; }

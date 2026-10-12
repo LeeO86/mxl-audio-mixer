@@ -94,6 +94,23 @@ for k in osc monitor:main; do
     python3 -c "exit(0 if all(abs(v + 18) < 0.05 for v in $p) else 1)" || fail "$k peak $p"
 done
 pass "oscillator bus at 1 kHz −18 dBFS on the monitor"
+OUT_FLOW=$MON
+api PATCH /api/v1/buses/osc/chain/tone '{"waveform": "pink"}' >/dev/null
+sleep 1
+"$PROBE_BIN" --domain "$OWN" --flow "$MON" --seconds 3 >"$WORK/pink.json"
+corr=$(json "$WEB/api/v1/meters" "d['monitor:main']['correlation']")
+python3 - "$(cat "$WORK/pink.json")" "$corr" <<'EOF' || fail "pink noise: $(cat "$WORK/pink.json"), correlation $corr"
+import json, sys
+d = json.loads(sys.argv[1])
+assert all(abs(l["rms_dbfs"] + 18) < 0.5 for l in d["levels"]), d["levels"]
+assert abs(float(sys.argv[2])) < 0.2, sys.argv[2]
+EOF
+api PATCH /api/v1/buses/osc/chain/tone '{"waveform": "sweep", "freq_hz": 20, "sweep_to_hz": 20000, "sweep_s": 1}' >/dev/null
+sleep 0.5
+"$PROBE_BIN" --domain "$OWN" --flow "$MON" --seconds 2 >"$WORK/sweep.json"
+python3 -c "import json,sys; d=json.load(open('$WORK/sweep.json')); sys.exit(0 if all(abs(l['peak_dbfs'] + 18) < 0.1 for l in d['levels']) else 1)" || fail "sweep: $(cat "$WORK/sweep.json")"
+api PATCH /api/v1/buses/osc/chain/tone '{"waveform": "sine", "freq_hz": 1000}' >/dev/null
+pass "oscillator pink noise at −18 dBFS RMS, independent channels (correlation $corr); a sweep at −18 dBFS peak"
 
 # Bass management on a 5.1 monitor fed by the stereo oscillator (L → L, R → R).
 api POST /api/v1/monitors '{"id": "surround", "name": "Surround", "format": "5.1", "source": {"signal": "osc"}, "bass_management": {"enabled": true, "crossover_hz": 80, "lfe_gain_db": 10}}' >/dev/null

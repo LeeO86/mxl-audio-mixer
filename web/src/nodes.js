@@ -135,9 +135,11 @@ export const NODE_TYPES = {
     group: "Other",
     make: () => ({ type: "oscillator", waveform: "sine", freq_hz: 1000, level_dbfs: -18 }),
     fields: [
-      { key: "waveform", label: "Waveform", options: [["sine", "Sine"], ["ebu-ident", "EBU stereo ident"], ["second-pulse", "Second pulse (latency)"]] },
-      { key: "freq_hz", label: "Frequency", min: 20, max: 20000, def: 1000, fine: 0.02, digits: 0, unit: "Hz", log: true },
-      { key: "level_dbfs", label: "Level", min: -60, max: 0, def: -18, fine: 0.5, unit: "dBFS" },
+      { key: "waveform", label: "Waveform", options: [["sine", "Sine"], ["ebu-ident", "EBU stereo ident"], ["white", "White noise"], ["pink", "Pink noise"], ["sweep", "Sweep"], ["second-pulse", "Second pulse (latency)"]] },
+      { key: "freq_hz", label: "Frequency", min: 20, max: 20000, def: 1000, fine: 0.02, digits: 0, unit: "Hz", log: true, when: (n) => n.waveform !== "white" && n.waveform !== "pink" },
+      { key: "sweep_to_hz", label: "Sweep to", min: 20, max: 20000, def: 20000, fine: 0.02, digits: 0, unit: "Hz", log: true, when: (n) => n.waveform === "sweep" },
+      { key: "sweep_s", label: "Sweep time", min: 0.1, max: 600, def: 10, fine: 0.1, digits: 1, unit: "s", when: (n) => n.waveform === "sweep" },
+      { key: "level_dbfs", label: "Level", min: -60, max: 0, def: -18, fine: 0.5, unit: "dBFS (noise: RMS)" },
     ],
   },
   delay: {

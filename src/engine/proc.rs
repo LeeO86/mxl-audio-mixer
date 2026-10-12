@@ -143,6 +143,34 @@ fn ident_gain(played: u64) -> f32 {
     }
 }
 
+/// Uniform white noise with an RMS of 1 (xorshift32).
+fn white(state: &mut u32) -> f32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    // Uniform in [−1, 1): RMS 1/√3.
+    let u = (x as f32 / u32::MAX as f32) * 2.0 - 1.0;
+    u * 1.732_050_8
+}
+
+/// Paul Kellet's refined pink filter on white noise of RMS 1, scaled back to an
+/// RMS of 1 (the filter's gain on unit white noise, measured over 10 s: 3.043).
+fn pink_filter(b: &mut [f32; 7], w: f32) -> f32 {
+    b[0] = 0.99886 * b[0] + w * 0.055_517_9;
+    b[1] = 0.99332 * b[1] + w * 0.075_075_9;
+    b[2] = 0.96900 * b[2] + w * 0.153_852;
+    b[3] = 0.86650 * b[3] + w * 0.310_485_6;
+    b[4] = 0.55000 * b[4] + w * 0.532_952_2;
+    b[5] = -0.7616 * b[5] - w * 0.016_898;
+    let out = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + w * 0.5362;
+    b[6] = w * 0.115_926;
+    out / PINK_GAIN
+}
+
+const PINK_GAIN: f32 = 3.043;
+
 /// The latency test signal: the tone during the first 20 ms of every second of
 /// the TAI sample index, starting at phase 0 (at 1 kHz exactly 20 cycles).
 const PULSE: u64 = 960;
@@ -203,11 +231,14 @@ pub enum Kind {
         low_states: [State; 2],
         sum: Vec<f32>,
     },
-    /// Phase (cycles, 0–1) and the samples played (for the ident's period).
+    /// Phase (cycles, 0–1) and the samples played (for the ident's period and
+    /// the sweep); for noise, a generator and the pink filter per channel.
     Oscillator {
         waveform: crate::mix::chain::Waveform,
         phase: f64,
         played: u64,
+        noise: Vec<u32>,
+        pink: Vec<[f32; 7]>,
     },
     Gate {
         attack: f64,
@@ -365,6 +396,10 @@ impl Processor {
                 waveform: *waveform,
                 phase: 0.0,
                 played: 0,
+                noise: (0..channels)
+                    .map(|c| 0x9e37_79b9u32.wrapping_mul(c as u32 + 1) | 1)
+                    .collect(),
+                pink: vec![[0.0; 7]; channels],
             },
             ProcKind::Gate { .. } => Kind::Gate {
                 attack: 0.0,
@@ -1056,18 +1091,56 @@ impl Processor {
                 waveform,
                 phase,
                 played,
+                noise,
+                pink,
             } => {
                 use crate::mix::chain::Waveform;
-                let step = p(1) / f64::from(crate::config::SAMPLE_RATE);
+                let rate = f64::from(crate::config::SAMPLE_RATE);
                 let amplitude = from_db(p(2));
+                match waveform {
+                    Waveform::White | Waveform::Pink => {
+                        let rms = amplitude as f32;
+                        let is_pink = *waveform == Waveform::Pink;
+                        for (c, ch) in io.iter_mut().enumerate() {
+                            let (Some(state), Some(filter)) = (noise.get_mut(c), pink.get_mut(c))
+                            else {
+                                continue;
+                            };
+                            for y in ch.iter_mut().take(block) {
+                                let w = white(state);
+                                *y = rms * if is_pink { pink_filter(filter, w) } else { w };
+                            }
+                        }
+                        *played = played.wrapping_add(block as u64);
+                        return 0.0;
+                    }
+                    Waveform::Sweep => {
+                        let (from, to, secs) = (p(1), p(3), p(4));
+                        let period = (secs * rate).max(1.0) as u64;
+                        for k in 0..block {
+                            let t = (*played % period) as f64 / period as f64;
+                            let f = from * (to / from).powf(t);
+                            let s =
+                                ((2.0 * std::f64::consts::PI * *phase).sin() * amplitude) as f32;
+                            *phase = (*phase + f / rate).fract();
+                            *played = played.wrapping_add(1);
+                            for ch in io.iter_mut() {
+                                ch[k] = s;
+                            }
+                        }
+                        return 0.0;
+                    }
+                    _ => {}
+                }
+                let step = p(1) / rate;
                 for k in 0..block {
                     let (left, all) = match waveform {
-                        Waveform::Sine => (1.0, 1.0),
                         Waveform::EbuIdent => (ident_gain(*played), 1.0),
                         Waveform::SecondPulse => {
                             let g = pulse_gain(start + k as u64);
                             (g, g)
                         }
+                        _ => (1.0, 1.0),
                     };
                     let s = ((2.0 * std::f64::consts::PI * *phase).sin() * amplitude) as f32;
                     *phase = if all == 0.0 {
@@ -1168,6 +1241,8 @@ mod tests {
             waveform: crate::mix::chain::Waveform::Sine,
             freq_hz: 1000.0,
             level_dbfs: -18.0,
+            sweep_to_hz: 20_000.0,
+            sweep_s: 10.0,
         };
         let mut p = proc(sine, 2);
         let out = run(&mut p, &vec![vec![0.5f32; 48_000]; 2], None);
@@ -1188,6 +1263,8 @@ mod tests {
             waveform: crate::mix::chain::Waveform::EbuIdent,
             freq_hz: 1000.0,
             level_dbfs: -18.0,
+            sweep_to_hz: 20_000.0,
+            sweep_s: 10.0,
         };
         let mut p = proc(ident, 2);
         let out = run(&mut p, &vec![vec![0.0f32; 4 * 48_000]; 2], None);
@@ -1199,11 +1276,95 @@ mod tests {
     }
 
     #[test]
+    fn noise_and_sweep() {
+        let rms = |x: &[f32]| {
+            (x.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
+        };
+        let db = |r: f64| 20.0 * r.log10();
+        let osc = |waveform| ProcKind::Oscillator {
+            waveform,
+            freq_hz: 20.0,
+            level_dbfs: -18.0,
+            sweep_to_hz: 20_000.0,
+            sweep_s: 1.0,
+        };
+        use crate::mix::chain::Waveform;
+        for w in [Waveform::White, Waveform::Pink] {
+            let out = run(
+                &mut proc(osc(w), 2),
+                &vec![vec![0f32; 10 * 48_000]; 2],
+                None,
+            );
+            for c in &out {
+                assert!(
+                    (db(rms(&c[48_000..])) + 18.0).abs() < 0.2,
+                    "{w:?} at {} dBFS RMS",
+                    db(rms(&c[48_000..]))
+                );
+            }
+            // Independent channels: almost no correlation.
+            let dot: f64 = out[0]
+                .iter()
+                .zip(&out[1])
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
+            let corr = dot / (rms(&out[0]) * rms(&out[1]) * out[0].len() as f64);
+            assert!(corr.abs() < 0.02, "{w:?} channels correlate {corr}");
+        }
+        // Pink: −3 dB per octave, compared over two octaves of bands.
+        let out = run(
+            &mut proc(osc(Waveform::Pink), 1),
+            &[vec![0f32; 20 * 48_000]],
+            None,
+        );
+        let band = |lo: f64| {
+            let k = |f: f64| ProcKind::Filter {
+                mode: crate::mix::chain::FilterMode::HighPass,
+                freq_hz: f,
+                slope_db_per_oct: 48,
+            };
+            let lp = |f: f64| ProcKind::Filter {
+                mode: crate::mix::chain::FilterMode::LowPass,
+                freq_hz: f,
+                slope_db_per_oct: 48,
+            };
+            let x = run(&mut proc(k(lo), 1), &out, None);
+            let x = run(&mut proc(lp(lo * 2.0), 1), &x, None);
+            db(rms(&x[0][48_000..]))
+        };
+        let (b250, b1k, b4k) = (band(250.0), band(1000.0), band(4000.0));
+        // Equal energy per octave: within a dB from octave to octave.
+        assert!(
+            (b250 - b1k).abs() < 1.0 && (b1k - b4k).abs() < 1.0,
+            "{b250} {b1k} {b4k}"
+        );
+        // Sweep: peak at the level, from 20 Hz up to 20 kHz in 1 s, again.
+        let out = run(
+            &mut proc(osc(Waveform::Sweep), 1),
+            &[vec![0f32; 2 * 48_000]],
+            None,
+        );
+        let peak = out[0].iter().fold(0f32, |a, x| a.max(x.abs()));
+        assert!((20.0 * f64::from(peak).log10() + 18.0).abs() < 0.05);
+        let crossings = |x: &[f32]| {
+            x.windows(2)
+                .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+                .count()
+        };
+        // The first 100 ms of a sweep run 20 Hz to ~40 Hz; the last 100 ms ~10–20 kHz.
+        assert!(crossings(&out[0][..4_800]) < 10);
+        assert!(crossings(&out[0][43_200..48_000]) > 2_000);
+        assert!(crossings(&out[0][48_000..52_800]) < 10, "it starts again");
+    }
+
+    #[test]
     fn second_pulse_follows_the_sample_index() {
         let pulse = ProcKind::Oscillator {
             waveform: crate::mix::chain::Waveform::SecondPulse,
             freq_hz: 1000.0,
             level_dbfs: -18.0,
+            sweep_to_hz: 20_000.0,
+            sweep_s: 10.0,
         };
         let mut p = proc(pulse, 2);
         // Start 0.5 s into a second: the first pulse is at 24 000.
