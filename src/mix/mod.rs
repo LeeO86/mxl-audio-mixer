@@ -6,6 +6,7 @@ pub mod format;
 pub mod model;
 pub mod room;
 pub mod show;
+pub mod talkback;
 
 pub use format::Format;
 pub use model::Mix;

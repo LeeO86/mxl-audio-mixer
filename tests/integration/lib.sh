@@ -107,6 +107,22 @@ api() { # <method> <path> [body] ; prints the response, fails on HTTP errors
     curl -fsS -X "$1" -H 'content-type: application/json' "$WEB$2" ${3:+-d "$3"}
 }
 
+settled() { # <input>: wait until its automatic delay held for 1.5 s (at most 10 s)
+    local last now same=0
+    last=$(input "$1" effective_delay_ms)
+    for _ in $(seq 1 100); do
+        sleep 0.1
+        now=$(input "$1" effective_delay_ms)
+        if [[ "$now" == "$last" ]]; then
+            same=$((same + 1))
+            ((same >= 15)) && return 0
+        else
+            same=0
+            last=$now
+        fi
+    done
+}
+
 glitches() { # input 1 missing samples + DSP deadline misses + its delay (an automatic change fades the input)
     local missing misses delay
     missing=$(input 1 missing_samples)
@@ -122,7 +138,7 @@ probe() {
     local secs=$1 out args=() before attempt
     shift
     for e in "$@"; do args+=(--expect "$e"); done
-    for attempt in 1 2; do
+    for attempt in 1 2 3; do
         before=$(glitches)
         out=$("$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds "$secs" "${args[@]}")
         echo "$out" >>"$IT_OUT/$(basename "$0" .sh)-probe.log"
@@ -138,7 +154,7 @@ EOF
         fi
         # A late input block (missing samples, faded) or a missed DSP deadline on
         # this shared machine is not a mixing error: measure once more.
-        if ((attempt == 2)) || [[ "$(glitches)" == "$before" ]]; then
+        if ((attempt == 3)) || [[ "$(glitches)" == "$before" ]]; then
             fail "probe: $out"
         fi
         log "the input was late, its delay changed or the DSP missed a deadline during the probe; measuring again"

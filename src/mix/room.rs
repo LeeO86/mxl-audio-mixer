@@ -24,6 +24,9 @@ pub struct ControlRoom {
     /// SPL presets (dB SPL) for monitors with a calibration.
     #[serde(default = "reference_presets")]
     pub reference_spl: Vec<f64>,
+    /// Talkback mics and destinations (§10.2).
+    #[serde(default)]
+    pub talkback: super::talkback::Talkback,
 }
 
 fn reference_presets() -> Vec<f64> {
@@ -80,6 +83,9 @@ pub struct Monitor {
     pub dim_db: f64,
     #[serde(default)]
     pub cut: bool,
+    /// The dim while a control-room talkback mic talks.
+    #[serde(default = "dim_depth")]
+    pub talkback_dim_db: f64,
     #[serde(default)]
     pub check: Check,
     /// Plays the solo bus while anything is soloed (the programme then at
@@ -245,6 +251,7 @@ pub fn validate(mix: &Mix, inputs: usize) -> Result<(), String> {
         }
         range("level_db", m.level_db, -80.0, 12.0).map_err(at)?;
         range("dim_db", m.dim_db, -60.0, 0.0).map_err(at)?;
+        range("talkback_dim_db", m.talkback_dim_db, -60.0, 0.0).map_err(at)?;
         range("trim_db", m.trim_db, -24.0, 24.0).map_err(at)?;
         range("delay_ms", m.delay_ms, 0.0, MAX_DELAY_MS).map_err(at)?;
         if let Some(c) = m.calibration_spl {
@@ -275,7 +282,7 @@ pub fn validate(mix: &Mix, inputs: usize) -> Result<(), String> {
     for r in &room.reference_spl {
         range("reference_spl", *r, 40.0, 130.0)?;
     }
-    Ok(())
+    super::talkback::validate(mix, inputs)
 }
 
 /// The L/R matrix of a check, row-major (L′ from L, R; R′ from L, R); `sum` is
@@ -291,13 +298,15 @@ pub fn check_matrix(check: Check, sum: f32) -> [f32; 4] {
     }
 }
 
-/// The monitor's gain after the check: level, dim, cut, trim.
-pub fn monitor_gain(m: &Monitor) -> f32 {
+/// The monitor's gain after the check: level, dim, cut, trim, and the talkback
+/// dim while `talkback` (a control-room mic talks).
+pub fn monitor_gain(m: &Monitor, talkback: bool) -> f32 {
     if m.cut {
         return 0.0;
     }
     let dim = if m.dim { m.dim_db } else { 0.0 };
-    Db(m.level_db + dim + m.trim_db).gain() as f32
+    let talk = if talkback { m.talkback_dim_db } else { 0.0 };
+    Db(m.level_db + dim + talk + m.trim_db).gain() as f32
 }
 
 #[cfg(test)]
@@ -360,8 +369,11 @@ mod tests {
         m.level_db = -10.0;
         m.dim = true;
         // −10 dB level and the default −21 dB dim.
-        assert!((monitor_gain(&m) - 0.028_183_83).abs() < 1e-6);
+        assert!((monitor_gain(&m, false) - 0.028_183_83).abs() < 1e-6);
+        // and the default −21 dB talkback dim.
+        m.dim = false;
+        assert!((monitor_gain(&m, true) - 0.028_183_83).abs() < 1e-6);
         m.cut = true;
-        assert_eq!(monitor_gain(&m), 0.0);
+        assert_eq!(monitor_gain(&m, false), 0.0);
     }
 }

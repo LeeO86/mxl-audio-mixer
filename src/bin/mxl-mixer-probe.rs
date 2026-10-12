@@ -1,7 +1,7 @@
 //! Test reader: reads an MXL audio flow on the TAI clock and reports what it got.
 //!
 //! ```sh
-//! mxl-mixer-probe --domain DIR --flow UUID [--seconds 2] [--behind-ms 20] [--expect CH:SRC:GAIN ...] [--dump FILE]
+//! mxl-mixer-probe --domain DIR --flow UUID [--seconds 2] [--behind-ms 20] [--expect CH:SRC:GAIN ...] [--onsets LEVEL] [--dump FILE]
 //! ```
 //!
 //! Reads `--behind-ms` behind the TAI now (more for mirrored flows, which arrive
@@ -9,6 +9,9 @@
 //! RMS level. `--expect 1:2:0.5` checks that channel 1 carries 0.5 × the
 //! `mxl-mixer-tone` signal of tone channel 2; the tone repeats every 48 samples,
 //! so the probe finds the best of the 48 alignments and reports the largest error.
+//! `--onsets 0.05` lists where channel 1 rises above that level after 100 ms
+//! below it: the flow index, and its position in the TAI second in ms (for a
+//! source that starts a burst on every second, the latency).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -33,7 +36,7 @@ fn main() {
             .and_then(|i| args.get(i + 1).cloned())
     };
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--behind-ms MS] [--expect CH:SRC:GAIN ...]");
+        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--behind-ms MS] [--expect CH:SRC:GAIN ...] [--onsets LEVEL]");
         std::process::exit(2)
     };
     let domain = PathBuf::from(arg("--domain").unwrap_or_else(|| usage()));
@@ -185,11 +188,42 @@ fn main() {
         .first()
         .map(|d| d.iter().filter(|v| !v.is_nan()).count())
         .unwrap_or(0);
+    let onsets: Vec<serde_json::Value> = match arg("--onsets").and_then(|l| l.parse::<f32>().ok()) {
+        Some(level) => {
+            let mut quiet = 0usize;
+            let mut found = Vec::new();
+            for (k, v) in data
+                .first()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                if v.is_nan() {
+                    quiet = 0;
+                } else if v.abs() > level {
+                    if quiet >= 4800 {
+                        let index = first + k as u64;
+                        found.push(serde_json::json!({
+                            "index": index,
+                            "ms_in_second": (index % 48_000) as f64 / 48.0,
+                        }));
+                    }
+                    quiet = 0;
+                } else {
+                    quiet += 1;
+                }
+            }
+            found
+        }
+        None => Vec::new(),
+    };
     println!(
         "{}",
         serde_json::json!({
             "flow": flow, "channels": channels, "samples": read,
             "failed_reads": failed, "levels": per_channel, "checks": checks,
+            "onsets": onsets,
         })
     );
 }

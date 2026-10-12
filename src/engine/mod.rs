@@ -10,6 +10,7 @@
 mod dsp;
 pub mod plan;
 pub mod proc;
+pub mod talk;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -90,6 +91,14 @@ pub enum Command {
     ClearStream {
         slot: usize,
     },
+    /// Play talkback slot `slot` (engine input `inputs + slot`) from this ring.
+    SetTalk {
+        slot: usize,
+        ring: Box<rtrb::Consumer<f32>>,
+    },
+    ClearTalk {
+        slot: usize,
+    },
 }
 
 /// A message from the DSP thread back: things it must not free itself.
@@ -99,6 +108,7 @@ pub enum Returned {
     Output(Box<OutputWriter>),
     Loudness(Box<SegmentMeter>),
     Stream(Box<rtrb::Producer<f32>>),
+    Talk(Box<rtrb::Consumer<f32>>),
 }
 
 /// An output's writer with its commit staging (§4.3: the commit size is separate
@@ -182,6 +192,7 @@ pub struct EngineCounters {
     pub stop: AtomicBool,
     pub inputs: Vec<InputCounters>,
     pub outputs: Vec<OutputCounters>,
+    pub talk: Vec<talk::TalkCounters>,
 }
 
 impl EngineCounters {
@@ -199,6 +210,9 @@ impl EngineCounters {
             inputs: (0..inputs).map(|_| InputCounters::default()).collect(),
             outputs: (0..MAX_OUTPUTS)
                 .map(|_| OutputCounters::default())
+                .collect(),
+            talk: (0..talk::MAX_TALK)
+                .map(|_| talk::TalkCounters::default())
                 .collect(),
         }
     }

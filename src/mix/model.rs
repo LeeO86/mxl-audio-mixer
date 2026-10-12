@@ -64,12 +64,42 @@ impl<'de> Deserialize<'de> for Db {
     }
 }
 
-/// One strip channel's source: channel `channel` (from 1) of input `input` (from 1).
+/// Channel `channel` (from 1) of input `input` (from 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchPoint {
     pub input: usize,
     pub channel: usize,
+}
+
+/// A talkback mic (§10.2), configured or a browser's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TalkbackPoint {
+    pub talkback: String,
+}
+
+/// One strip channel's source: an input channel or a talkback mic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Patch {
+    Input(PatchPoint),
+    Talkback(TalkbackPoint),
+}
+
+impl From<PatchPoint> for Patch {
+    fn from(p: PatchPoint) -> Self {
+        Patch::Input(p)
+    }
+}
+
+impl Patch {
+    pub fn input(&self) -> Option<PatchPoint> {
+        match self {
+            Patch::Input(p) => Some(*p),
+            Patch::Talkback(_) => None,
+        }
+    }
 }
 
 /// An input strip: patch → trim and polarity → fader and mute → pan.
@@ -79,8 +109,9 @@ pub struct Strip {
     pub id: String,
     pub name: String,
     pub format: Format,
-    /// Per strip channel, the input channel it reads (`null`: unpatched).
-    pub patch: Vec<Option<PatchPoint>>,
+    /// Per strip channel, the input channel or talkback mic it reads (`null`:
+    /// unpatched).
+    pub patch: Vec<Option<Patch>>,
     pub trim_db: f64,
     /// Per strip channel, `true` inverts the polarity.
     pub polarity: Vec<bool>,
@@ -439,6 +470,25 @@ impl Mix {
                 ));
             }
             for p in s.patch.iter().flatten() {
+                let p = match p {
+                    Patch::Input(p) => p,
+                    Patch::Talkback(t) => {
+                        let known = t.talkback.starts_with(super::talkback::BROWSER_PREFIX)
+                            || self
+                                .control_room
+                                .talkback
+                                .mics
+                                .iter()
+                                .any(|m| m.id == t.talkback);
+                        if !known {
+                            return Err(format!(
+                                "strip {}: talkback mic {} does not exist",
+                                s.id, t.talkback
+                            ));
+                        }
+                        continue;
+                    }
+                };
                 if p.input == 0 || p.input > inputs {
                     return Err(format!(
                         "strip {}: input {} does not exist (1 to {inputs})",
@@ -653,6 +703,10 @@ impl Mix {
         self.buses.retain(|b| b.id != id);
         self.sends.retain(|s| s.from != id && s.to != id);
         self.outputs.retain(|o| o.signal != id);
+        self.control_room
+            .talkback
+            .destinations
+            .retain(|d| d.bus != id);
     }
 }
 
@@ -765,10 +819,13 @@ pub(crate) mod tests {
         assert_eq!(mix.validate(4, 96), Ok(()));
 
         let mut bad = mix.clone();
-        bad.strips[0].patch[0] = Some(PatchPoint {
-            input: 5,
-            channel: 1,
-        });
+        bad.strips[0].patch[0] = Some(
+            PatchPoint {
+                input: 5,
+                channel: 1,
+            }
+            .into(),
+        );
         assert!(bad.validate(4, 96).unwrap_err().contains("input 5"));
         let mut bad = mix.clone();
         bad.strips[0].fader_db = Db(10.5);

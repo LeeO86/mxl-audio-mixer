@@ -1,13 +1,15 @@
 <script setup>
 // Operator-screen widgets (§12.6, Appendix B.2): /widget/strip?strip=<id>,
 // /widget/fader-bank?layout=<name>&page=<name or 1-based number> or ?strips=<id,id,…>,
-// /widget/loudness?signal=<id>, each with [&theme=dark|light|transparent], without the app around them,
+// /widget/loudness?signal=<id>, /widget/monitor?monitor=<id>, /widget/talkback[?destinations=<id,id,…>][&mic=<id>],
+// each with [&theme=dark|light|transparent], without the app around them,
 // on this mixer's own API (same origin). The page posts {type: "widget-ready"} and
 // {type: "widget-size", w, h} to the page that frames it.
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import MonitorCard from "./MonitorCard.vue";
 import Pill from "./Pill.vue";
 import Strip from "./Strip.vue";
+import TalkbackPanel from "./TalkbackPanel.vue";
 import { api } from "../api.js";
 import { act, isBus, live, room, signalOf, startLive, stopLive, stored, wantMeters } from "../store.js";
 
@@ -39,7 +41,18 @@ const shown = computed(() => {
   const p = n >= 1 ? layout?.pages[n - 1] : layout?.pages.find((x) => x.name === page);
   return (p?.signals || []).map(signalOf).filter(Boolean);
 });
-const ids = computed(() => (monitor.value ? [`monitor:${monitor.value.id}`] : shown.value.map((s) => s.id)));
+const talkback = id === "talkback";
+const talkTo = params.get("destinations")
+  ? params
+      .get("destinations")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  : null;
+const ids = computed(() => {
+  if (talkback) return (room.value.talkback?.mics || []).map((m) => `talkback:${m.id}`).concat((live.status?.talkback?.browser_mics || []).map((m) => `talkback:${m}`));
+  return monitor.value ? [`monitor:${monitor.value.id}`] : shown.value.map((s) => s.id);
+});
 watch(ids, (list) => wantMeters(list.length ? list : null), { immediate: true });
 
 const signal = computed(() => shown.value[0] || null);
@@ -60,7 +73,7 @@ function postSize() {
   post({ type: "widget-size", w: Math.round(rect.width), h: Math.round(rect.height) });
 }
 watch(
-  () => shown.value.length,
+  () => (talkback ? (live.mix ? 1 : 0) : shown.value.length),
   (n) => {
     if (!n || ready) return;
     ready = true;
@@ -82,7 +95,8 @@ onUnmounted(() => {
 
 <template>
   <div ref="root" class="widget-root" :class="`widget-${id}`">
-    <MonitorCard v-if="monitor" :monitor="monitor" compact />
+    <TalkbackPanel v-if="talkback && live.mix" :only="talkTo" :mic="params.get('mic')" compact />
+    <MonitorCard v-else-if="monitor" :monitor="monitor" compact />
     <template v-else-if="shown.length && id !== 'loudness'">
       <div class="wstrips">
         <Strip v-for="s in shown" :key="s.id" :signal="s" :bus="isBus(s.id)" :scale="scale" :alignment="alignment" compact />

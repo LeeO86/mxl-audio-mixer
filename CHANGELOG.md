@@ -8,6 +8,18 @@
   (`GPL-3.0-or-later`), instead of MIT, so that it and every fork stay open
   source. No release was made under MIT.
 
+### Milestone 5 (part 3): talkback
+
+- Talkback (§10.2): mics on MXL input channels and browser microphones (WHIP to
+  MediaMTX, read back over RTSP, Opus decoded with loss concealment, a jitter
+  buffer); destinations on buses, mixing or interrupting (IFB) with per-mic
+  priority; the control room's talkback dim (`talkback_dim_db`); latching or
+  momentary talk; listen-back of a destination's return; strips patched to a
+  talkback mic (`{"talkback": "<mic>"}`).
+- `/api/v1/talkback…`, `/api/v1/listen-back`; the talkback panel in the Control
+  room tab; the `talkback` widget.
+- `mxl-mixer-probe --onsets` (burst onsets in the TAI second, for latency).
+
 ### Milestone 5 (part 2): monitors in the browser
 
 - The preview contract (Appendix B.1): monitors encoded as Opus (libopus) and
