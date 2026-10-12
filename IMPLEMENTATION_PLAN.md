@@ -518,19 +518,16 @@ None.
   and 2.763 ms (Type II), and a steady tone reads 0.2 dB low without the calibration
   gain.
 
-### Questions
+### Answers (maintainer, 2026-10-12)
 
-1. Show history: an automatic version at most every 60 s, the newest 100 kept
-   (named versions kept until deleted). Other values?
-2. PPM alignment: −18 dBFS (EBU R 68) by default, −20 dBFS as option; DIN 0 dB at
-   alignment + 9 dB. Right, or another reference for DIN (or a free alignment
-   value)?
-3. The analyser: one tap at a time shared by every client (X4), or one per client?
-4. Snapshot crossfade: every changed value ramps over it (D44), not only faders.
-   Fine?
-5. Widgets (§12.6) and tally/AFV are in the 1.0.0 set. Next, before the control room
-   (M5), or after M6?
-6. Merge PR 5 (EBU test set, CI green) and PR 6 (this milestone)?
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Show history: an automatic version at most every 60 s, the newest 100 kept | Accepted. |
+| 2 | PPM alignment −18 dBFS (EBU R 68), −20 dBFS as option; DIN 0 dB at alignment + 9 dB | Accepted. |
+| 3 | One analyser tap shared by every client (X4), or one per client | One for now. |
+| 4 | Snapshot crossfade ramps every changed value | Accepted. |
+| 5 | Widgets (§12.6) and tally/AFV: next, or after M6 | Next, before M5. |
+| 6 | Merge PR 5 and PR 6 | Merged. |
 
 ## tests/hw scripts for the maintainers
 
