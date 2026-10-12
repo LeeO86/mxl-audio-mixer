@@ -77,7 +77,7 @@ const setOsc = (body) => act(() => api.patch(`/api/v1/buses/${oscillator.value.b
         <Segmented :model-value="solo.mode" :options="[{ value: 'additive', label: 'Additive' }, { value: 'interlock', label: 'Interlock' }]" label="Solo mode" @update:model-value="(v) => setRoom({ solo: { mode: v } })" />
       </div>
       <Pot label="PFL trim" unit="dB" :value="solo.pfl_trim_db ?? 0" :min="-24" :max="24" :def="0" :fine="0.5" @change="(v) => setRoom({ solo: { pfl_trim_db: v } })" />
-      <Pot label="Programme under solo" unit="dB (−80: −∞)" :value="programme" :min="-80" :max="0" :def="-20" :fine="1" @change="(v) => setRoom({ solo: { programme_db: v <= -80 ? '-inf' : v } })" />
+      <Pot label="Programme under solo" unit="dB (−80: −∞)" :value="programme" :min="-80" :max="0" :def="-21" :fine="1" @change="(v) => setRoom({ solo: { programme_db: v <= -80 ? '-inf' : v } })" />
       <div>
         <label class="check" style="margin-top: 1.2rem" title="while anything is soloed, every other strip that is not solo-safe is muted in the mix">
           <input type="checkbox" :checked="solo.sip" @change="setRoom({ solo: { sip: $event.target.checked } })" /> Solo in place (destructive)

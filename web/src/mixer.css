@@ -203,3 +203,4 @@ button.btn.on-warn[aria-pressed="true"], button.btn.on-warn[aria-pressed="true"]
 button.btn.on-bad[aria-pressed="true"], button.btn.on-bad[aria-pressed="true"]:hover:not(:disabled) { background: var(--bad); color: #fff; }
 button.btn.pfl:hover:not(:disabled) { background: #e0c23a; }
 .widget-monitor .monitor { flex: 1; overflow: auto; }
+.monitor .bass { margin-top: .5rem; }

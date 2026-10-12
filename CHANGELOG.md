@@ -6,7 +6,9 @@
 
 - Monitors in the show (`control_room`): source (strip, bus or input), level, dim,
   cut, mono/difference/swap/left/right checks, room alignment (trim, delay, chain),
-  SPL presets, published as MXL flows with NMOS senders.
+  SPL presets, published as MXL flows with NMOS senders; bass management (LR4
+  crossover to the LFE) switched on and off per monitor. Dim and the programme
+  under solo default to −21 dB.
 - Solo: PFL and AFL on every strip and bus, additive or interlock, PFL trim, the
   programme under solo, solo-in-place with solo-safe signals.
 - The `oscillator` node (sine, EBU R 49 stereo ident).

@@ -622,16 +622,17 @@ In three parts, each a PR:
 | D59 | A monitor path: sum of its source (strip post-pan, bus post-fader, or an input's channels 1–2, width-mapped to the monitor's format) and, while anything is soloed and it follows solo, the solo bus; then the L/R check (a 2×2 matrix, other channels unchanged), the level (level, dim, cut, trim), its alignment chain, its delay, its meter, its output. Every control is a smoothed value: no plan swap. | §10.1 monitor controls and speaker sets with trim, delay, EQ. |
 | D60 | The checks are one choice (`stereo`, `mono`, `difference`, `swap`, `left`, `right`): together they would contradict each other. Mono and difference use the mix's stereo-to-mono sum. | §10.1 "mono check, phase check (L−R), L/R swap, solo L / solo R". |
 | D61 | Solo: the solo bus is stereo; soloed signals send into it (PFL from the pre-fader tap with `pfl_trim_db`, AFL from the output tap), width-mapped (mono centred with the pan law). Who is soloed is runtime state, not part of the show; a change swaps the plan, the new sends fading in, nothing else touched. | §10.1 solo system. Solo is operating state; after a restart nothing is soloed. |
-| D62 | The automatic PFL dim: a monitor that follows solo plays its programme at `programme_db` while anything is soloed (default −20 dB; `-inf` replaces it). | §10.1 "automatic PFL dim of the main monitor". The default is mine (question 1). |
+| D62 | The automatic PFL dim: a monitor that follows solo plays its programme at `programme_db` while anything is soloed (default −21 dB; `-inf` replaces it). Dim depth default −21 dB. | §10.1 "automatic PFL dim of the main monitor". The defaults are the maintainer's (answer 1). |
 | D63 | Solo-in-place (`sip`, off by default): while anything is soloed, every strip that is neither soloed nor `solo_safe` gets fader 0 in the mix. | §10.1 "SIP … destructive; requires explicit enable and a solo-safe list". |
 | D64 | The oscillator is a node type (`oscillator`: sine or the EBU R 49 stereo ident, coherent on every channel, the left channel off for 0.25 s every 3 s with 2 ms ramps), usually alone on a bus. A bus goes anywhere: sends, monitor sources, published outputs. | §10.2 "oscillator to any destination … tone presets, EBU ident"; no new kind of signal. Presets in the UI: 1 kHz −18 dBFS (R 68), 1 kHz −20 dBFS, the ident. |
 | D65 | A published monitor is an MXL output with an NMOS sender "Monitor <name>" and flow id UUIDv5 of `monitor:<id>` (a colon never appears in a signal id). | §10.1 "each speaker set/headphone path is published as an MXL audio flow". |
+| D67 | Bass management per monitor, switched on and off in the control room: for formats with an LFE channel, the other channels high-passed and their sum low-passed into the LFE (Linkwitz-Riley 24 dB/oct: two Butterworth sections each way, so the halves sum flat), the LFE input at `lfe_gain_db`; after the alignment chain, before the delay. The UI proposes 80 Hz and +10 dB. Stereo monitors have no sub channel. | Maintainer, answer 2. 80 Hz and +10 dB (the LFE's in-band gain) are common practice, not from the spec (question below). |
 | D66 | CI runs the integration tests on release binaries. | A debug build's DSP thread is about 15 times slower (load 0.2 against 0.013 for the test mix); on shared runners that missed deadlines. The image ships release binaries. |
 
 ### M5a: results (dev VM)
 
-- `cargo test`: 91 unit tests (3 new: the oscillator and the ident, the room
-  model and its validation, checks and monitor gain).
+- `cargo test`: 92 unit tests (4 new: the oscillator and the ident, the room
+  model and its validation, checks and monitor gain, bass management).
 - `tests/integration/room.sh`, through MXL:
   - a published monitor on the programme bus, sample-exact; its NMOS sender
     "Monitor Main";
@@ -647,15 +648,19 @@ In three parts, each a PR:
   changed during them (the change fades the input). The probe retry now also
   watches the input's effective delay.
 
-### M5a: questions
+### M5a: answers (maintainer, 2026-10-12)
 
-1. Defaults: dim −20 dB, programme under solo −20 dB, SPL presets 79/82/85 dB (the
-   spec's example), monitor level −80 to +12 dB, at most 16 monitors. Right?
-2. Bass management: today the alignment chain (filters, EQ, delay) per monitor.
-   Enough, or a dedicated bass-management function (a crossover sending the lows of
-   the main channels to the LFE/sub)?
-3. Solo state is not saved: after a restart nothing is soloed. Right?
-4. Merge this part (PR) before M5b?
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Defaults (dim, programme under solo, presets, level range, 16 monitors) | Dim −21 dB and the programme under solo −21 dB; the others accepted. |
+| 2 | Bass management | A bass management that is switched on and off in the control room (D67). |
+| 3 | Solo state not saved | Correct. |
+| 4 | Merge M5a before M5b | Merged. |
+
+After the answers: bass management (D67), unit-tested (1 kHz stays on L, 30 Hz on
+the LFE, the crossover sums flat within 0.05 dB at 80 Hz, the LFE input at +10 dB)
+and in `room.sh` (a 5.1 monitor on the oscillator: at 30 Hz the LFE carries L + R
+at −12.1 dBFS, L below −45 dBFS; off again: 30 Hz on L).
 
 ## tests/hw scripts for the maintainers
 

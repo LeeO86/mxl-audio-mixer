@@ -94,6 +94,10 @@ pub struct Monitor {
     pub delay_ms: f64,
     #[serde(default)]
     pub chain: Vec<Proc>,
+    /// Bass management (formats with an LFE channel): switched on and off in the
+    /// control room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bass_management: Option<BassManagement>,
     /// dB SPL at a level of 0 dB, for the reference presets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration_spl: Option<f64>,
@@ -102,8 +106,26 @@ pub struct Monitor {
     pub publish: bool,
 }
 
+/// Bass management: the lows of every main channel to the LFE (sub) channel.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BassManagement {
+    pub enabled: bool,
+    /// Linkwitz-Riley 24 dB/oct crossover, 40–250 Hz.
+    pub crossover_hz: f64,
+    /// Gain of the LFE input on the sub, −20 to +20 dB.
+    pub lfe_gain_db: f64,
+}
+
+impl Monitor {
+    /// The LFE channel of its format, if it has one.
+    pub fn lfe(&self) -> Option<usize> {
+        self.format.labels().iter().position(|l| *l == "LFE")
+    }
+}
+
 fn dim_depth() -> f64 {
-    -20.0
+    -21.0
 }
 
 fn yes() -> bool {
@@ -129,7 +151,8 @@ pub struct SoloSettings {
     #[serde(default)]
     pub pfl_trim_db: f64,
     /// The programme on a monitor that follows solo, while anything is soloed
-    /// (the automatic PFL dim; `-inf`: solo replaces the programme).
+    /// (the automatic PFL dim, default −21 dB; `-inf`: solo replaces the
+    /// programme).
     #[serde(default = "programme_under_solo")]
     pub programme_db: Db,
     /// Solo-in-place: while anything is soloed, every other strip that is not
@@ -139,7 +162,7 @@ pub struct SoloSettings {
 }
 
 fn programme_under_solo() -> Db {
-    Db(-20.0)
+    Db(-21.0)
 }
 
 impl Default for SoloSettings {
@@ -222,6 +245,16 @@ pub fn validate(mix: &Mix, inputs: usize) -> Result<(), String> {
             range("calibration_spl", c, 40.0, 130.0).map_err(at)?;
         }
         chain::validate(&m.chain).map_err(at)?;
+        if let Some(b) = &m.bass_management {
+            if b.enabled && m.lfe().is_none() {
+                return Err(at(format!(
+                    "bass management needs a format with an LFE channel, not {}",
+                    serde_json::to_string(&m.format).unwrap_or_default()
+                )));
+            }
+            range("crossover_hz", b.crossover_hz, 40.0, 250.0).map_err(at)?;
+            range("lfe_gain_db", b.lfe_gain_db, -20.0, 20.0).map_err(at)?;
+        }
         if m.chain.iter().any(|p| p.kind.key().is_some()) {
             return Err(at("a monitor's chain takes no keyed nodes".into()));
         }
@@ -276,10 +309,10 @@ mod tests {
         let m = monitor("main");
         assert_eq!(
             (m.level_db, m.dim_db, m.check, m.follows_solo, m.publish),
-            (0.0, -20.0, Check::Stereo, true, false)
+            (0.0, -21.0, Check::Stereo, true, false)
         );
         let room = ControlRoom::default();
-        assert_eq!(room.solo.programme_db, Db(-20.0));
+        assert_eq!(room.solo.programme_db, Db(-21.0));
         assert_eq!(room.solo.mode, SoloMode::Additive);
         let mut mix = Mix::default();
         mix.strips.push(strip("vox", Format::Mono));

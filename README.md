@@ -86,17 +86,22 @@ The control room (§10.1) is part of the show (`control_room`); who is soloed is
 
 - **Monitors** (speakers or headphones, any format): a source (a strip at its
   post-pan, a bus post-fader, or `{"input": n}`: an input's channels 1 and 2),
-  `level_db` (−80 … +12), `dim` with `dim_db` (default −20), `cut`, a `check` of L
+  `level_db` (−80 … +12), `dim` with `dim_db` (default −21), `cut`, a `check` of L
   and R (`stereo`, `mono` and `difference` with the stereo-to-mono sum, `swap`,
   `left` or `right` on both sides), `follows_solo`, room alignment (`trim_db`,
-  `delay_ms`, a `chain` of processing nodes for EQ and bass management), a
+  `delay_ms`, a `chain` of processing nodes for EQ), a
   `calibration_spl` (dB SPL at 0 dB) for the SPL presets `reference_spl` (79, 82,
   85), and `publish`: an MXL flow with an NMOS sender "Monitor <name>" for physical
   speakers. Every control ramps; at most 16 monitors.
+- **Bass management** (formats with an LFE channel), switched on and off per
+  monitor: `bass_management` `{"enabled", "crossover_hz" (40–250), "lfe_gain_db"
+  (−20 … +20)}`. The other channels are high-passed and their sum low-passed into
+  the LFE channel (Linkwitz-Riley 24 dB/oct, flat summed), the LFE input at its
+  gain. The UI proposes 80 Hz and +10 dB.
 - **Solo:** PFL (pre-fader) and AFL (strips post-pan, buses post-fader) on any strip
   or bus, summed to stereo (PFL with `pfl_trim_db`); `additive` or `interlock`.
   While anything is soloed, a monitor that follows solo plays the solo bus with its
-  programme at `programme_db` (default −20 dB; `-inf`: solo replaces it).
+  programme at `programme_db` (default −21 dB; `-inf`: solo replaces it).
   Solo-in-place (`sip`, off by default, destructive) mutes every other strip in
   the mix that is not `solo_safe`.
 - **Source buttons** (`sources`): the buttons every monitor shows.

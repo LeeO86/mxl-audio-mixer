@@ -751,6 +751,24 @@ impl Compiler {
             });
             let (_, _, out) = c.chain(&key, &m.chain, level, n, &taps);
             cur = out.0;
+            if let (Some(b), Some(lfe)) = (m.bass_management.filter(|b| b.enabled), m.lfe()) {
+                let kind = ProcKind::BassManagement {
+                    crossover_hz: b.crossover_hz,
+                    lfe_gain_db: b.lfe_gain_db,
+                    lfe,
+                };
+                let mut values = vec![1.0];
+                values.extend(kind.values());
+                let proc = c.processor(format!("{key}/bass"), &kind, values, n, usize::MAX);
+                let dst = c.b.buffers(n);
+                c.b.step(Step::Process {
+                    proc,
+                    src: cur,
+                    dst,
+                    key: Span::default(),
+                });
+                cur = dst;
+            }
             if m.delay_ms > 0.0 {
                 let kind = ProcKind::Delay {
                     time: m.delay_ms,

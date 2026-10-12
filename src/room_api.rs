@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use crate::api::{apply, bad, body, conflict, not_found, ramp, with_errors, ApiResult};
 use crate::mix::chain::Proc;
 use crate::mix::model::Db;
-use crate::mix::room::{Check, Monitor, MonitorKind, SoloKind, SoloMode, Source};
+use crate::mix::room::{BassManagement, Check, Monitor, MonitorKind, SoloKind, SoloMode, Source};
 use crate::mix::Format;
 use crate::ops::App;
 
@@ -143,6 +143,8 @@ struct MonitorBody {
     chain: Option<Vec<Proc>>,
     #[serde(default, deserialize_with = "present")]
     calibration_spl: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "present")]
+    bass_management: Option<Option<BassManagement>>,
     publish: Option<bool>,
     ramp_ms: Option<f64>,
 }
@@ -167,6 +169,7 @@ impl MonitorBody {
             delay_ms,
             chain,
             calibration_spl,
+            bass_management,
             publish
         );
     }

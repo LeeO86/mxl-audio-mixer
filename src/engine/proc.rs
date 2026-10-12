@@ -181,6 +181,16 @@ pub enum Kind {
         ballistics: Ballistics,
         envelope: f64,
     },
+    /// Linkwitz-Riley 24 dB/oct: two Butterworth sections each way.
+    BassManagement {
+        lfe: usize,
+        low: Coefficients,
+        high: Coefficients,
+        /// Two high-pass sections per channel (unused on the LFE).
+        high_states: Vec<State>,
+        low_states: [State; 2],
+        sum: Vec<f32>,
+    },
     /// Phase (cycles, 0–1) and the samples played (for the ident's period).
     Oscillator {
         ident: bool,
@@ -328,6 +338,14 @@ impl Processor {
             ProcKind::Expander { .. } => Kind::Expander {
                 ballistics: Ballistics::new(1.0, 1.0),
                 envelope: 0.0,
+            },
+            ProcKind::BassManagement { lfe, .. } => Kind::BassManagement {
+                lfe: *lfe,
+                low: Coefficients::IDENTITY,
+                high: Coefficients::IDENTITY,
+                high_states: vec![State::default(); 2 * channels],
+                low_states: [State::default(); 2],
+                sum: vec![0.0; block],
             },
             ProcKind::Oscillator { waveform, .. } => Kind::Oscillator {
                 ident: *waveform == crate::mix::chain::Waveform::EbuIdent,
@@ -565,6 +583,10 @@ impl Processor {
                     let o = 1 + crossovers + 5 * b;
                     *ballistic = Ballistics::new(p(o + 2), p(o + 3));
                 }
+            }
+            Kind::BassManagement { low, high, .. } => {
+                *low = biquad::low_pass(p(1), Q_BUTTERWORTH);
+                *high = biquad::high_pass(p(1), Q_BUTTERWORTH);
             }
             Kind::Delay(_) | Kind::Oscillator { .. } | Kind::TruePeak { .. } | Kind::Hold(_) => {}
         }
@@ -983,6 +1005,36 @@ impl Processor {
                 }
                 most
             }
+            Kind::BassManagement {
+                lfe,
+                low,
+                high,
+                high_states,
+                low_states,
+                sum,
+            } => {
+                let sum = &mut sum[..block];
+                sum.fill(0.0);
+                for (c, ch) in io.iter_mut().enumerate() {
+                    if c == *lfe {
+                        continue;
+                    }
+                    for (s, x) in sum.iter_mut().zip(ch.iter()) {
+                        *s += *x;
+                    }
+                    high_states[2 * c].run(high, ch);
+                    high_states[2 * c + 1].run(high, ch);
+                }
+                low_states[0].run(low, sum);
+                low_states[1].run(low, sum);
+                let g = from_db(p(2)) as f32;
+                if let Some(ch) = io.get_mut(*lfe) {
+                    for (y, s) in ch.iter_mut().zip(sum.iter()) {
+                        *y = *y * g + *s;
+                    }
+                }
+                0.0
+            }
             Kind::Oscillator {
                 ident,
                 phase,
@@ -1026,6 +1078,61 @@ mod tests {
     }
 
     /// Run `p` over `input` (per channel) with an optional key; returns the output.
+    #[test]
+    fn bass_management_sends_the_lows_to_the_lfe() {
+        let kind = ProcKind::BassManagement {
+            crossover_hz: 80.0,
+            lfe_gain_db: 10.0,
+            lfe: 3,
+        };
+        let sine = |f: f64| -> Vec<f32> {
+            (0..48_000)
+                .map(|i| (0.5 * (2.0 * PI * f * i as f64 / 48_000.0).sin()) as f32)
+                .collect()
+        };
+        let db = |c: &[f32]| {
+            20.0 * f64::from(c[24_000..].iter().fold(0f32, |a, x| a.max(x.abs()))).log10()
+        };
+        for (f, l_db, lfe_db) in [(1000.0, -6.02, -80.0), (30.0, -40.0, -6.0)] {
+            // 5.1: the tone on L only.
+            let mut input = vec![vec![0f32; 48_000]; 6];
+            input[0] = sine(f);
+            let mut p = proc(kind.clone(), 6);
+            let out = run(&mut p, &input, None);
+            if f > 100.0 {
+                assert!(
+                    (db(&out[0]) - l_db).abs() < 0.1,
+                    "{f} Hz on L: {}",
+                    db(&out[0])
+                );
+                assert!(db(&out[3]) < lfe_db, "{f} Hz on the LFE: {}", db(&out[3]));
+            } else {
+                assert!(db(&out[0]) < l_db, "{f} Hz on L: {}", db(&out[0]));
+                assert!(
+                    (db(&out[3]) - lfe_db).abs() < 0.3,
+                    "{f} Hz on the LFE: {}",
+                    db(&out[3])
+                );
+            }
+            assert!(db(&out[1]) < -100.0 && db(&out[2]) < -100.0);
+        }
+        // At the crossover the high-passed L and the low-passed sub add up to the input (LR4).
+        let mut input = vec![vec![0f32; 48_000]; 6];
+        input[0] = sine(80.0);
+        let out = run(&mut proc(kind.clone(), 6), &input, None);
+        let sum: Vec<f32> = out[0].iter().zip(&out[3]).map(|(a, b)| a + b).collect();
+        assert!((db(&sum) + 6.02).abs() < 0.05, "{}", db(&sum));
+        // The LFE input at +10 dB.
+        let mut input = vec![vec![0f32; 48_000]; 6];
+        input[3] = sine(30.0).iter().map(|x| x * 0.1).collect();
+        let out = run(&mut proc(kind, 6), &input, None);
+        assert!(
+            (db(&out[3]) - (-26.02 + 10.0)).abs() < 0.05,
+            "{}",
+            db(&out[3])
+        );
+    }
+
     #[test]
     fn oscillator_sine_and_ebu_ident() {
         let sine = ProcKind::Oscillator {

@@ -36,7 +36,7 @@ mon() { api PATCH /api/v1/monitors/main "$1" >/dev/null; sleep 0.2; }
 mon '{"level_db": -20}'
 probe 1 1:1:0.1 2:2:0.1
 mon '{"level_db": 0, "dim": true}'
-probe 1 1:1:0.1 2:2:0.1
+probe 1 1:1:0.089125094 2:2:0.089125094
 mon '{"dim": false, "cut": true}'
 probe 1 1:1:0 2:2:0
 mon '{"cut": false, "check": "swap"}'
@@ -44,7 +44,7 @@ probe 1 1:2:1 2:1:1
 mon '{"check": "left"}'
 probe 1 1:1:1 2:1:1
 mon '{"check": "stereo"}'
-pass "level −20 dB, dim (−20 dB), cut, swap, left only: sample-exact"
+pass "level −20 dB, dim (−21 dB), cut, swap, left only: sample-exact"
 
 solo() { api PUT "/api/v1/solo/$1" "{\"kind\": \"$2\"}" >/dev/null; sleep 0.3; }
 api PATCH /api/v1/control-room '{"solo": {"programme_db": "-inf"}}' >/dev/null
@@ -94,6 +94,26 @@ for k in osc monitor:main; do
     python3 -c "exit(0 if all(abs(v + 18) < 0.05 for v in $p) else 1)" || fail "$k peak $p"
 done
 pass "oscillator bus at 1 kHz −18 dBFS on the monitor"
+
+# Bass management on a 5.1 monitor fed by the stereo oscillator (L → L, R → R).
+api POST /api/v1/monitors '{"id": "surround", "name": "Surround", "format": "5.1", "source": {"signal": "osc"}, "bass_management": {"enabled": true, "crossover_hz": 80, "lfe_gain_db": 10}}' >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/monitors/main" \
+    -d '{"bass_management": {"enabled": true, "crossover_hz": 80, "lfe_gain_db": 10}}')
+[[ "$code" == 400 ]] || fail "bass management on a stereo monitor answered $code"
+peaks() { json "$WEB/api/v1/meters" "[round(v, 1) for v in d['monitor:surround']['peak_dbfs']]"; }
+sleep 0.5
+read -r l lfe < <(json "$WEB/api/v1/meters" "' '.join(str(d['monitor:surround']['peak_dbfs'][i]) for i in (0, 3))")
+python3 -c "exit(0 if abs($l + 18) < 0.1 and $lfe < -60 else 1)" || fail "1 kHz: L $l, LFE $lfe ($(peaks))"
+api PATCH /api/v1/buses/osc/chain/tone '{"freq_hz": 30}' >/dev/null
+sleep 1
+read -r l lfe < <(json "$WEB/api/v1/meters" "' '.join(str(d['monitor:surround']['peak_dbfs'][i]) for i in (0, 3))")
+python3 -c "exit(0 if $l < -45 and abs($lfe + 12.1) < 0.3 else 1)" || fail "30 Hz: L $l, LFE $lfe ($(peaks))"
+pass "bass management (80 Hz): 1 kHz stays on L, 30 Hz goes to the LFE at $lfe dBFS (L + R); a stereo monitor refuses it"
+api PATCH /api/v1/monitors/surround '{"bass_management": {"enabled": false, "crossover_hz": 80, "lfe_gain_db": 10}}' >/dev/null
+sleep 1
+read -r l lfe < <(json "$WEB/api/v1/meters" "' '.join(str(d['monitor:surround']['peak_dbfs'][i]) for i in (0, 3))")
+python3 -c "exit(0 if abs($l + 18) < 0.2 else 1)" || fail "bass management off: L $l"
+pass "bass management off: 30 Hz on L again"
 
 rc=0
 stop_mixer || rc=$?

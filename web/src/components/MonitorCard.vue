@@ -42,6 +42,11 @@ const CHECKS = [
 ];
 const presets = computed(() => (m.value.calibration_spl ? room.value.reference_spl : []));
 const removeMonitor = () => act(() => api.del(`/api/v1/monitors/${m.value.id}`));
+const hasLfe = computed(() => ["5.1", "7.1", "5.1.4", "7.1.4"].includes(m.value.format));
+// The values when bass management is first switched on (IMPLEMENTATION_PLAN.md, M5a, D67).
+const BASS_DEFAULTS = { enabled: true, crossover_hz: 80, lfe_gain_db: 10 };
+const bass = computed(() => m.value.bass_management || null);
+const setBass = (change) => set({ bass_management: { ...(bass.value || BASS_DEFAULTS), ...change } });
 const published = computed(() => (live.status?.outputs || []).find((o) => o.signal === key.value));
 </script>
 
@@ -77,9 +82,16 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
           <label>Check</label>
           <Segmented :model-value="m.check" :options="CHECKS" label="Check" @update:model-value="(v) => set({ check: v })" />
           <label class="check"><input type="checkbox" :checked="m.follows_solo" @change="set({ follows_solo: $event.target.checked })" /> Follows solo (PFL/AFL)</label>
+          <div v-if="hasLfe" class="bass">
+            <button class="btn secondary on-warn" :aria-pressed="!!bass?.enabled" @click="setBass({ enabled: !bass?.enabled })">Bass management</button>
+            <template v-if="bass?.enabled">
+              <Pot label="Crossover" unit="Hz" :value="bass.crossover_hz" :min="40" :max="250" :def="80" :fine="0.02" :digits="0" log @change="(v) => setBass({ crossover_hz: v })" />
+              <Pot label="LFE gain" unit="dB" :value="bass.lfe_gain_db" :min="-20" :max="20" :def="10" :fine="0.5" @change="(v) => setBass({ lfe_gain_db: v })" />
+            </template>
+          </div>
           <details>
             <summary class="muted small" style="cursor: pointer; margin-top: 0.4rem">Dim depth, alignment, output</summary>
-            <Pot label="Dim depth" unit="dB" :value="m.dim_db" :min="-60" :max="0" :def="-20" :fine="1" @change="(v) => set({ dim_db: v })" />
+            <Pot label="Dim depth" unit="dB" :value="m.dim_db" :min="-60" :max="0" :def="-21" :fine="1" @change="(v) => set({ dim_db: v })" />
             <Pot label="Trim" unit="dB" :value="m.trim_db" :min="-24" :max="24" :def="0" :fine="0.5" @change="(v) => set({ trim_db: v })" />
             <Pot label="Delay" unit="ms" :value="m.delay_ms" :min="0" :max="2000" :def="0" :fine="0.1" :digits="2" @change="(v) => set({ delay_ms: v })" />
             <label>Calibration: dB SPL at a level of 0 dB (for the presets)</label>

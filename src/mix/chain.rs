@@ -193,6 +193,15 @@ pub enum ProcKind {
         freq_hz: f64,
         level_dbfs: f64,
     },
+    /// Bass management of a monitor (§10.1), not a chain node: the channels
+    /// other than `lfe` high-passed, their sum low-passed into `lfe` (Linkwitz-
+    /// Riley 24 dB/oct at `crossover_hz`), the LFE input at `lfe_gain_db`.
+    #[serde(skip)]
+    BassManagement {
+        crossover_hz: f64,
+        lfe_gain_db: f64,
+        lfe: usize,
+    },
     /// Delay in samples, ms or frames (at `frame_rate`).
     Delay {
         time: f64,
@@ -255,6 +264,7 @@ impl ProcKind {
             Self::Limiter { .. } => "limiter",
             Self::Expander { .. } => "expander",
             Self::Oscillator { .. } => "oscillator",
+            Self::BassManagement { .. } => "bass-management",
             Self::Gate { .. } => "gate",
             Self::DeEsser { .. } => "de-esser",
             Self::Ducker { .. } => "ducker",
@@ -266,7 +276,9 @@ impl ProcKind {
     pub fn category(&self) -> Category {
         match self {
             Self::Eq { .. } | Self::Filter { .. } | Self::DynamicEq { .. } => Category::Eq,
-            Self::Delay { .. } | Self::Oscillator { .. } => Category::Other,
+            Self::Delay { .. } | Self::Oscillator { .. } | Self::BassManagement { .. } => {
+                Category::Other
+            }
             _ => Category::Dynamics,
         }
     }
@@ -417,6 +429,14 @@ impl ProcKind {
                     times(b.attack_ms, b.release_ms)?;
                     range("makeup_db", b.makeup_db, -24.0, 24.0)?;
                 }
+            }
+            Self::BassManagement {
+                crossover_hz,
+                lfe_gain_db,
+                ..
+            } => {
+                range("crossover_hz", *crossover_hz, 40.0, 250.0)?;
+                range("lfe_gain_db", *lfe_gain_db, -20.0, 20.0)?;
             }
             Self::Oscillator {
                 freq_hz,
@@ -583,6 +603,11 @@ impl ProcKind {
                 level_dbfs,
                 ..
             } => vec![*freq_hz, *level_dbfs],
+            Self::BassManagement {
+                crossover_hz,
+                lfe_gain_db,
+                ..
+            } => vec![*crossover_hz, *lfe_gain_db],
             Self::Delay { .. } => Vec::new(),
         };
         v.into_iter().map(|x| x as f32).collect()
@@ -626,6 +651,7 @@ impl ProcKind {
             Self::Multiband { bands, .. } => bands.len().hash(&mut h),
             Self::Delay { .. } => self.delay_samples().hash(&mut h),
             Self::Oscillator { waveform, .. } => waveform.hash(&mut h),
+            Self::BassManagement { lfe, .. } => lfe.hash(&mut h),
             Self::Expander { .. } | Self::Gate { .. } => {}
         }
         h.finish()
