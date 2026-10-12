@@ -307,9 +307,9 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
                 ));
             }
             for s in &p.signals {
-                if mix.kind(s).is_none() {
+                if mix.kind(s).is_none() && mix.vca(s).is_none() {
                     return Err(format!(
-                        "layout {} page {}: signal {s} does not exist",
+                        "layout {} page {}: signal or VCA {s} does not exist",
                         l.name, p.name
                     ));
                 }

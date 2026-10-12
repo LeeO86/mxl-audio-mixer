@@ -168,6 +168,7 @@ async fn delete_vca(State(app): State<App>, Path(id): Path<String>) -> Response 
             for v in &mut mix.vcas {
                 v.members.retain(|m| m != &id);
             }
+            mix.remove_from_layouts(&id);
             Ok(())
         })
         .await?;

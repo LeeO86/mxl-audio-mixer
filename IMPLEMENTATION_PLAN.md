@@ -974,8 +974,8 @@ In two parts, each a PR:
 
 | # | Decision | Reason |
 | --- | --- | --- |
-| D86 | A VCA lists its members (strips, buses, VCAs). A member's fader node gets its fader plus the `fader_db` of every VCA above it, each counted once even when reached twice; one at `-inf` silences it. The sum is not capped (a member at +10 under a VCA at +10 is at +20; question 1). VCA ids share the signals' namespace (a solo or a layout entry names either). | §9 "effective member gain = member fader + sum of all assigned VCA offsets (dB), nested VCAs allowed (cycles rejected)". |
-| D87 | A muted VCA, and an active mute group, set the member's fader node to 0; the member's own `mute` stays as it is, and the UI marks the mute button. `mute_safe` isolates a strip or bus from mute groups (not from a VCA's mute; question 2). | §9 "without changing their mute buttons' own state"; "mute groups (separate from VCAs), with safe/isolate per channel". |
+| D86 | A VCA lists its members (strips, buses, VCAs). A member's fader node gets its fader plus the `fader_db` of every VCA above it, each counted once even when reached twice; one at `-inf` silences it. The sum is capped at +15 dB (answer 1). VCA ids share the signals' namespace (a solo or a layout entry names either). | §9 "effective member gain = member fader + sum of all assigned VCA offsets (dB), nested VCAs allowed (cycles rejected)". |
+| D87 | A muted VCA, and an active mute group, set the member's fader node to 0; the member's own `mute` stays as it is, and the UI marks the mute button. `mute_safe` isolates a strip or bus from mute groups and from a VCA's mute (answer 2). | §9 "without changing their mute buttons' own state"; "mute groups (separate from VCAs), with safe/isolate per channel". |
 | D88 | VCAs and mute groups only change fader values (ramped like any fader, with `ramp_ms` and a snapshot's crossfade): never a plan swap, also when members change. | Real time: moving a VCA must not rebuild the graph. |
 | D89 | Soloing a VCA (PFL or AFL) solos all its members (a member's own solo kind wins); solo-in-place treats them as soloed. | §9 "VCA solo/PFL = PFL of all members". |
 | D90 | Snapshots hold VCA fader and mute (section `vcas`, classes `fader` and `mute`); `recall_safe` on VCAs. | §9 "controllable from … snapshots … like any fader". |
@@ -1013,3 +1013,23 @@ In two parts, each a PR:
 | 3 | VCAs in layout pages (and so in the `fader-bank` widget)? | Not yet: the console shows every VCA in its own section. |
 | 4 | Limits: 64 VCAs, 32 mute groups. | As implemented (§16 asks for 4 VCAs). |
 | 5 | Merge M6a, then M6b? | Yes. |
+
+### M6a: answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Cap a member's total gain? | Yes, at +15 dB; and every fader goes to +15 dB at most. |
+| 2 | Does mute-safe isolate from a VCA's mute? | Yes: mute-safe protects always. |
+| 3 | VCAs in layout pages and the `fader-bank` widget? | Yes. |
+| 4 | Limits 64 VCAs, 32 mute groups. | Accepted. |
+| 5 | Merge M6a, then M6b. | Yes. |
+
+After the answers: faders of strips, buses and VCAs `-inf` … +15 dB (sends stay
+at +10 dB, §5); a fader and its VCAs at most +15 dB (`MAX_FADER_DB`); `mute_safe`
+also against a VCA's mute; layout pages and the `fader-bank` widget take VCAs (the
+console and the widget show a VCA strip there); deleting a strip, bus or VCA takes
+it out of layout pages (before, a layout page kept a deleted strip from being
+deleted). The UI fader scale goes to +15 dB. `vca.sh` checks the cap (a fader at
++15 under two VCAs at +15: +15 dB, 5.62), +15.5 refused, a mute-safe strip under a
+muted VCA, a VCA in a layout page and a deleted strip leaving it; `widgets.sh`
+frames a `fader-bank` with a VCA.

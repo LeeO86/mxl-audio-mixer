@@ -3,7 +3,7 @@
 // arrow keys (shift: 0.1 dB), Home for 0 dB, End for −∞, double-click for 0 dB. While dragged, it shows
 // its own value so pushes from the server do not make it jump.
 import { computed, onUnmounted, ref, watch } from "vue";
-import { FADER_MARKS, dbToPos, posToDb } from "../dsp.js";
+import { FADER_MARKS, FADER_MAX_DB, dbToPos, posToDb } from "../dsp.js";
 import { dbValue, fmtDb } from "../api.js";
 
 const props = defineProps({
@@ -63,7 +63,7 @@ function up() {
 
 function stepDb(dir, size = 0.5) {
   const cur = Number.isFinite(db.value) ? db.value : -80;
-  const next = Math.min(10, cur + dir * size);
+  const next = Math.min(FADER_MAX_DB, cur + dir * size);
   send(next < -80 ? -Infinity : Math.round(next * 10) / 10);
 }
 let hold = 0;
@@ -104,7 +104,7 @@ onUnmounted(() => {
       tabindex="0"
       :aria-label="label"
       aria-valuemin="-80"
-      aria-valuemax="10"
+      :aria-valuemax="FADER_MAX_DB"
       :aria-valuenow="Number.isFinite(db) ? db : -80"
       :aria-valuetext="`${fmtDb(db)} dB`"
       @pointerdown="down"

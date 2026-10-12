@@ -3,16 +3,18 @@
 //! A VCA sums no audio: each member's fader gets the VCA's fader added (dB), and a
 //! muted VCA mutes its members without changing their own mute. VCAs nest (a VCA
 //! can be a member of another); a member gets the offset of every VCA above it,
-//! each counted once; cycles are rejected. A VCA at −∞ silences its members.
+//! each counted once; cycles are rejected. A VCA at −∞ silences its members; a
+//! fader and its VCAs add up to at most [`MAX_FADER_DB`].
 //!
-//! A mute group mutes its members while it is active, except members that are
-//! `mute_safe` (isolated). Neither changes the plan: only fader values move.
+//! A mute group mutes its members while it is active. A `mute_safe` (isolated)
+//! strip or bus is never muted by a mute group or a VCA. Neither changes the
+//! plan: only fader values move.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::model::{Db, Mix, MAX_GAIN_DB};
+use super::model::{check_fader, Db, Mix, MAX_FADER_DB};
 
 pub const MAX_VCAS: usize = 64;
 pub const MAX_MUTE_GROUPS: usize = 32;
@@ -131,20 +133,17 @@ impl Mix {
 
     /// The signals that active mute groups mute (members that are not mute-safe).
     pub fn group_muted(&self) -> BTreeSet<String> {
-        let safe = |id: &str| {
-            self.strip(id).is_some_and(|s| s.mute_safe) || self.bus(id).is_some_and(|b| b.mute_safe)
-        };
         self.mute_groups
             .iter()
             .filter(|g| g.active)
             .flat_map(|g| g.members.iter())
-            .filter(|m| !safe(m))
+            .filter(|m| !self.mute_safe(m))
             .cloned()
             .collect()
     }
 
     /// The gain of a signal's fader node: its fader, mute, the VCAs and the mute
-    /// groups.
+    /// groups (a mute-safe signal is muted only by its own mute).
     pub fn fader_gain(
         &self,
         id: &str,
@@ -157,10 +156,14 @@ impl Mix {
             offset_db: 0.0,
             muted: false,
         });
-        if mute || e.muted || grouped.contains(id) {
+        if mute || (e.muted && !self.mute_safe(id)) || grouped.contains(id) {
             return 0.0;
         }
-        Db(fader.0 + e.offset_db).gain() as f32
+        Db((fader.0 + e.offset_db).min(MAX_FADER_DB)).gain() as f32
+    }
+
+    fn mute_safe(&self, id: &str) -> bool {
+        self.strip(id).is_some_and(|s| s.mute_safe) || self.bus(id).is_some_and(|b| b.mute_safe)
     }
 }
 
@@ -206,12 +209,7 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
             return Err(format!("VCA id {} is used twice", v.id));
         }
         check_name(&format!("VCA {}", v.id), &v.name)?;
-        if v.fader_db.0 > MAX_GAIN_DB {
-            return Err(format!(
-                "VCA {}: fader_db must be -inf to {MAX_GAIN_DB}",
-                v.id
-            ));
-        }
+        check_fader(&format!("VCA {}: fader_db", v.id), v.fader_db)?;
         let mut seen = BTreeSet::new();
         for m in &v.members {
             if !seen.insert(m.as_str()) {
@@ -323,6 +321,19 @@ mod tests {
         });
         m.strips[2].mute_safe = true;
         assert_eq!(m.group_muted(), BTreeSet::from(["gtr".into()]));
+        // Mute-safe also holds against a VCA's mute.
+        m.mute_groups.clear();
+        m.vcas[0].fader_db = Db(0.0);
+        m.vcas[0].mute = true;
+        let g = m.group_muted();
+        assert_eq!(gain(&m, "gtr"), 0.0);
+        assert!(gain(&m, "keys") > 0.0, "keys is mute-safe");
+        // A fader and its VCAs add up to at most +15 dB.
+        m.vcas[0].mute = false;
+        m.vcas[0].fader_db = Db(15.0);
+        m.vcas[1].fader_db = Db(15.0);
+        let capped = m.fader_gain("gtr", Db(15.0), false, &m.vca_effects(), &g);
+        assert!((capped - 5.623_413).abs() < 1e-5, "{capped}");
     }
 
     #[test]
@@ -342,7 +353,8 @@ mod tests {
         assert!(bad(&|m| m.vcas[0].members.push("vox".into())), "twice");
         assert!(bad(&|m| m.vcas[0].id = "vox".into()), "a signal's id");
         assert!(bad(&|m| m.vcas[1].id = "a".into()));
-        assert!(bad(&|m| m.vcas[0].fader_db = Db(11.0)));
+        assert!(!bad(&|m| m.vcas[0].fader_db = Db(15.0)));
+        assert!(bad(&|m| m.vcas[0].fader_db = Db(15.5)));
         assert!(
             bad(&|m| m.mute_groups.push(MuteGroup {
                 id: "g".into(),

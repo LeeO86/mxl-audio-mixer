@@ -32,7 +32,8 @@ const pageOptions = computed(() =>
     ? layout.value.pages.map((p, i) => ({ value: i, label: p.name }))
     : Array.from({ length: banks.value }, (_, i) => ({ value: i, label: `${i * bankSize.value + 1}–${Math.min(strips.value.length, (i + 1) * bankSize.value)}` })),
 );
-const byId = (id) => strips.value.find((s) => s.id === id) || buses.value.find((b) => b.id === id);
+const byId = (id) => strips.value.find((s) => s.id === id) || buses.value.find((b) => b.id === id) || vcaOf(id);
+const isVcaId = (id) => !!vcaOf(id);
 const spilled = computed(() => (spill.vca ? vcaOf(spill.vca) : null));
 const shown = computed(() => {
   if (spilled.value) {
@@ -132,7 +133,10 @@ const editingGroups = ref(false);
   <div v-else-if="!strips.length && !buses.length" class="empty">No strips or buses yet. Add one above, or import a show in Settings.</div>
   <div v-else class="console">
     <div class="strips">
-      <Strip v-for="s in shown" :key="s.id" :signal="s" :bus="isBusId(s.id)" :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+      <template v-for="s in shown" :key="s.id">
+        <VcaStrip v-if="isVcaId(s.id)" :vca="s" />
+        <Strip v-else :signal="s" :bus="isBusId(s.id)" :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+      </template>
       <div v-if="!shown.length" class="empty">This page is empty.</div>
     </div>
     <div v-if="shownBuses.length && !spilled" class="busesec">

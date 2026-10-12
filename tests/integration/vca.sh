@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # VCAs and mute groups (§9) through MXL, sample-exact: a VCA's fader on its
-# members, nested VCAs, VCA mute (the members' mutes unchanged), VCA PFL on the
-# monitor, a mute group with a mute-safe strip, a snapshot of the VCAs, a nesting
-# cycle refused; none of it swaps the plan.
+# members, nested VCAs, VCA mute (the members' mutes unchanged, a mute-safe strip
+# untouched), a fader and its VCAs capped at +15 dB, VCA PFL on the monitor, a
+# mute group with a mute-safe strip, a snapshot of the VCAs, a nesting cycle
+# refused, a VCA in a layout page; none of it swaps the plan.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
 
@@ -43,11 +44,28 @@ pass "nested: VCA all (−6 dB) over band (−20 dB): 0.05"
 vca all '{"mute": true}'
 probe 1 1:1:0 2:2:0
 [[ "$(json "$WEB/api/v1/strips/vox" "d['mute']")" == False ]] || fail "VCA mute changed vox's own mute"
+api PATCH /api/v1/strips/vox '{"mute_safe": true}' >/dev/null
+sleep 0.2
+probe 1 1:1:0.05 2:2:0
+api PATCH /api/v1/strips/vox '{"mute_safe": false}' >/dev/null
 vca all '{"mute": false}'
 vca all '{"fader_db": 0}'
 vca band '{"fader_db": 0}'
 probe 1 1:1:1 2:2:1
-pass "VCA mute mutes the nested members without touching their own mute"
+pass "VCA mute mutes the nested members without touching their own mute; a mute-safe member stays"
+
+vca band '{"fader_db": 15}'
+vca all '{"fader_db": 15}'
+api PATCH /api/v1/strips/vox '{"fader_db": 15}' >/dev/null
+sleep 0.2
+probe 1 1:1:5.6234133 2:2:5.6234133
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/vcas/band" -d '{"fader_db": 15.5}')
+[[ "$code" == 400 ]] || fail "a VCA at +15.5 dB answered $code"
+api PATCH /api/v1/strips/vox '{"fader_db": 0}' >/dev/null
+vca all '{"fader_db": 0}'
+vca band '{"fader_db": 0}'
+probe 1 1:1:1 2:2:1
+pass "a fader and its VCAs add up to at most +15 dB (vox +15 under +15 and +15; gtr +30 of VCAs): 5.62; +15.5 refused"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/vcas/band" -d '{"members": ["vox", "gtr", "all"]}')
 [[ "$code" == 400 ]] || fail "a nesting cycle answered $code"
@@ -89,10 +107,13 @@ pass "a snapshot recalls the VCA fader (section vcas)"
 
 [[ "$(swaps)" == "$SWAPS" ]] || fail "VCAs and mute groups swapped the plan ($SWAPS → $(swaps))"
 pass "no plan swap for any VCA or mute group change"
+api PUT /api/v1/layouts '[{"name": "Show", "pages": [{"name": "Band", "signals": ["vox", "gtr", "band"]}]}]' >/dev/null
+pass "a VCA in a layout page"
 
 api DELETE /api/v1/strips/vox >/dev/null
 [[ "$(json "$WEB/api/v1/vcas/band" "d['members']")" == "['gtr']" ]] || fail "a deleted strip stays a member"
-pass "a deleted strip leaves its VCAs"
+[[ "$(json "$WEB/api/v1/layouts" "d[0]['pages'][0]['signals']")" == "['gtr', 'band']" ]] || fail "a deleted strip stays in its layout page"
+pass "a deleted strip leaves its VCAs and its layout pages"
 
 rc=0
 stop_mixer || rc=$?

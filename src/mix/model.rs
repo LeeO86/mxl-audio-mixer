@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use super::chain::{Category, Proc};
 use super::format::{Format, Laws, MonoSum, PanLaw};
 
-/// Largest fader and send gain (§5: −∞ … +10 dB).
+/// Largest send gain (§5: −∞ … +10 dB).
 pub const MAX_GAIN_DB: f64 = 10.0;
+/// Largest fader (strips, buses, VCAs), and the most a fader and its VCAs add up to.
+pub const MAX_FADER_DB: f64 = 15.0;
 /// Trim range, ± dB.
 pub const TRIM_RANGE_DB: f64 = 42.0;
 /// Default parameter ramp (§2).
@@ -522,7 +524,7 @@ impl Mix {
                     s.id
                 ));
             }
-            check_gain(&format!("strip {}: fader_db", s.id), s.fader_db)?;
+            check_fader(&format!("strip {}: fader_db", s.id), s.fader_db)?;
             if !(-1.0..=1.0).contains(&s.pan) {
                 return Err(format!("strip {}: pan must be -1 to 1", s.id));
             }
@@ -532,7 +534,7 @@ impl Mix {
         }
         for b in &self.buses {
             check_name(&b.name)?;
-            check_gain(&format!("bus {}: fader_db", b.id), b.fader_db)?;
+            check_fader(&format!("bus {}: fader_db", b.id), b.fader_db)?;
         }
         let mut pairs = BTreeSet::new();
         for send in &self.sends {
@@ -725,6 +727,14 @@ impl Mix {
         for g in &mut self.mute_groups {
             g.members.retain(|m| m != id);
         }
+        self.remove_from_layouts(id);
+    }
+
+    /// Take `id` (a signal or VCA) out of every layout page.
+    pub fn remove_from_layouts(&mut self, id: &str) {
+        for p in self.layouts.iter_mut().flat_map(|l| l.pages.iter_mut()) {
+            p.signals.retain(|s| s != id);
+        }
     }
 }
 
@@ -749,6 +759,14 @@ fn check_name(name: &str) -> Result<(), String> {
         Err("a name must have 1 to 64 characters".into())
     } else {
         Ok(())
+    }
+}
+
+pub(crate) fn check_fader(what: &str, db: Db) -> Result<(), String> {
+    if db.0 <= MAX_FADER_DB {
+        Ok(())
+    } else {
+        Err(format!("{what} must be -inf to +{MAX_FADER_DB} dB"))
     }
 }
 
@@ -848,7 +866,7 @@ pub(crate) mod tests {
         );
         assert!(bad.validate(4, 96).unwrap_err().contains("input 5"));
         let mut bad = mix.clone();
-        bad.strips[0].fader_db = Db(10.5);
+        bad.strips[0].fader_db = Db(15.5);
         assert!(bad.validate(4, 96).is_err());
         let mut bad = mix.clone();
         bad.buses[0].id = "vox".into();

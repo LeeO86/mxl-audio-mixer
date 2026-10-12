@@ -55,7 +55,7 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 | id | Params | Shows and controls | min_size |
 | --- | --- | --- | --- |
 | `strip` | `strip` (a strip or bus id) | name, tally, gain reduction per dynamics node, PFL, mute, fader, meter | 120×480 |
-| `fader-bank` | `layout` (a layout's name) and `page` (its name or 1-based number), or `strips` (ids, comma-separated, 1–32) | the strips and buses of that page, side by side | 480×480 |
+| `fader-bank` | `layout` (a layout's name) and `page` (its name or 1-based number), or `strips` (strip, bus or VCA ids, comma-separated, 1–32) | the strips, buses and VCAs of that page, side by side | 480×480 |
 | `loudness` | `signal` (a strip or bus id) | momentary, short-term, integrated LUFS, LRA, max true peak, the tolerance; start, stop, reset | 320×200 |
 | `monitor` | `monitor` (a monitor id) | source buttons, level, dim, cut, mono, the meter | 360×200 |
 | `talkback` | `destinations` (ids, comma-separated; default all), `mic` (a talkback mic id; default the browser's microphone) | talk buttons (a short press latches, hold to talk), "All", the mic's meter; with the browser's microphone its on/off | 260×110 |
@@ -264,10 +264,10 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Strip:** patch → trim and polarity → `chain` → fader and mute → panner.
   `patch` has one entry per strip channel: `{"input": n, "channel": c}` (both from
   1) or `null`. A channel the input does not have is silent and shows `missing` in
-  `patch_state`. `trim_db` ±42, `fader_db` `"-inf"` … +10, `pan` −1 … +1 (mono:
+  `patch_state`. `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
   position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
   (measure it). A mono strip is stereo after its panner.
-- **Bus:** sum of its sends → `chain` → fader and mute; `loudness`;
+- **Bus:** sum of its sends → `chain` → fader (`"-inf"` … +15) and mute; `loudness`;
   `compensate` (delay compensation, default `true`).
 - **Taps** (sends and keys): `input` (strips), `pre-eq`, `post-eq`,
   `pre-dynamics`, `post-dynamics` (the input of the first and the output of the last
@@ -304,15 +304,18 @@ an id gets `strip-<n>` or `bus-<n>`.
   `layouts`: `[{"name", "pages": [{"name", "signals": [ids]}]}]`.
 - **VCAs** (§9, `vcas`): `{"id", "name", "fader_db", "mute", "members",
   "colour", "recall_safe"}`; members are strips, buses or other VCAs (nested; a
-  cycle is refused). A VCA sums no audio: a member's fader gets the `fader_db` of
-  every VCA above it added (each counted once; one at `-inf` silences it), and a
-  muted VCA mutes its members without changing their own `mute`. PFL or AFL of a
-  VCA (`PUT /api/v1/solo/<vca>`) is that of all its members. VCA ids share the
-  signals' namespace. At most 64.
+  cycle is refused). A VCA sums no audio: a member's fader gets the `fader_db`
+  (`"-inf"` … +15) of every VCA above it added (each counted once; one at `-inf`
+  silences it; fader and VCAs together at most +15 dB), and a muted VCA mutes its
+  members without changing their own `mute`. PFL or AFL of a VCA (`PUT
+  /api/v1/solo/<vca>`) is that of all its members. VCA ids share the signals'
+  namespace; layout pages (and so the `fader-bank` widget) take VCAs too. At most
+  64.
 - **Mute groups** (`mute_groups`): `{"id", "name", "active", "members"}` (strips
-  and buses); while active, every member that is not `mute_safe` is muted, again
-  without changing its own `mute`. At most 32. Neither VCAs nor mute groups change
-  the plan: only fader values move.
+  and buses); while active, every member is muted, again without changing its own
+  `mute`. A `mute_safe` strip or bus is never muted by a mute group or a VCA. At
+  most 32. Neither VCAs nor mute groups change the plan: only fader values move.
+  Deleting a strip, bus or VCA takes it out of VCAs, mute groups and layout pages.
 - **Snapshots** (§12.5): parameter states of every strip, bus, send and VCA (trim,
   polarity, fader, mute, pan, width, every chain node's parameters and bypass,
   send gain, mute and phase; VCA fader and mute). A recall takes `signals`,

@@ -23,8 +23,9 @@ try {
     ["monitor", "monitor=main&theme=dark"],
     ["talkback", "theme=dark"],
     ["vca", "vca=band&theme=dark"],
+    ["fader-bank", "strips=gtr,keys,band&theme=dark", "fader-bank-vca"],
   ];
-  for (const [id, query] of widgets) {
+  for (const [id, query, shot] of widgets) {
     const src = `${mixer}/widget/${id}?${query}`;
     await page.goto(`${allowed}/frame.html?src=${encodeURIComponent(src)}`);
     await page.waitForFunction(() => document.title.includes("widget-size"), null, { timeout: 8000 });
@@ -32,7 +33,7 @@ try {
     const size = m.find((x) => x.type === "widget-size");
     if (m[0]?.type !== "widget-ready" || !(size?.w > 0 && size?.h > 0)) throw new Error(`${id}: ${JSON.stringify(m)}`);
     await page.waitForTimeout(700);
-    await page.screenshot({ path: `${out}/widget-${id}.png` });
+    await page.screenshot({ path: `${out}/widget-${shot || id}.png` });
     pass(`${id}: framed from an allowed origin, widget-ready and widget-size ${size.w}×${size.h}`);
   }
   await page.goto(`${refused}/frame.html?src=${encodeURIComponent(`${mixer}/widget/strip?strip=vox`)}`);

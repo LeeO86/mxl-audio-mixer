@@ -112,7 +112,7 @@ fn catalogue(mix: &Mix) -> Value {
                 "properties": {
                     "layout": {"type": "string", "title": "Layout", "enum": layouts},
                     "page": {"type": "string", "title": "Page of the layout (its name or 1-based number)", "examples": pages},
-                    "strips": {"type": "string", "title": "Strips and buses, comma-separated (instead of a layout page)"}
+                    "strips": {"type": "string", "title": "Strips, buses and VCAs, comma-separated (instead of a layout page)"}
                 },
                 "oneOf": [{"required": ["layout", "page"]}, {"required": ["strips"]}]
             }),
@@ -238,10 +238,15 @@ pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (St
                     .filter(|s| !s.is_empty())
                     .collect();
                 if ids.is_empty() || ids.len() > MAX_BANK {
-                    return bad(format!("strips lists 1 to {MAX_BANK} strips or buses"));
+                    return bad(format!(
+                        "strips lists 1 to {MAX_BANK} strips, buses or VCAs"
+                    ));
                 }
-                if let Some(s) = ids.iter().find(|s| mix.kind(s).is_none()) {
-                    return bad(format!("{s} is not a strip or bus"));
+                if let Some(s) = ids
+                    .iter()
+                    .find(|s| mix.kind(s).is_none() && mix.vca(s).is_none())
+                {
+                    return bad(format!("{s} is not a strip, bus or VCA"));
                 }
                 return Ok(());
             }

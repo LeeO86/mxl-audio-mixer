@@ -8,7 +8,11 @@
   them, VCA mute without touching the members' mutes, PFL/AFL of all members,
   spill on the console, in snapshots (section `vcas`), recall-safe; never a plan
   swap. `/api/v1/vcas`.
-- Mute groups with mute-safe (isolated) strips and buses. `/api/v1/mute-groups`.
+- Mute groups. A mute-safe (isolated) strip or bus is muted neither by a mute
+  group nor by a VCA. `/api/v1/mute-groups`.
+- Faders (strips, buses, VCAs) go to +15 dB; a fader and its VCAs add up to at
+  most +15 dB. VCAs in layout pages and the `fader-bank` widget. Deleting a
+  signal takes it out of layout pages.
 - UI: VCA strips beside the buses, the VCAs and groups panel, mute group buttons,
   VCA chips on the strips; the `vca` widget.
 

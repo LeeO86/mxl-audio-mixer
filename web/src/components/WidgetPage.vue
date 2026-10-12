@@ -37,14 +37,14 @@ const shown = computed(() => {
     return params
       .get("strips")
       .split(",")
-      .map((s) => signalOf(s.trim()))
+      .map((s) => signalOf(s.trim()) || vcaOf(s.trim()))
       .filter(Boolean);
   }
   const layout = (live.mix?.layouts || []).find((l) => l.name === params.get("layout"));
   const page = params.get("page") || "";
   const n = /^\d+$/.test(page) ? Number(page) : 0;
   const p = n >= 1 ? layout?.pages[n - 1] : layout?.pages.find((x) => x.name === page);
-  return (p?.signals || []).map(signalOf).filter(Boolean);
+  return (p?.signals || []).map((s) => signalOf(s) || vcaOf(s)).filter(Boolean);
 });
 const talkback = id === "talkback";
 const talkTo = params.get("destinations")
@@ -109,7 +109,10 @@ onUnmounted(() => {
     </div>
     <template v-else-if="shown.length && id !== 'loudness'">
       <div class="wstrips">
-        <Strip v-for="s in shown" :key="s.id" :signal="s" :bus="isBus(s.id)" :scale="scale" :alignment="alignment" compact />
+        <template v-for="s in shown" :key="s.id">
+          <VcaStrip v-if="vcaOf(s.id)" :vca="s" compact />
+          <Strip v-else :signal="s" :bus="isBus(s.id)" :scale="scale" :alignment="alignment" compact />
+        </template>
       </div>
     </template>
     <template v-else-if="signal && id === 'loudness'">

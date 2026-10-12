@@ -54,7 +54,7 @@ grep -qi "^content-security-policy: frame-ancestors 'self' $ALLOWED$" <<<"$h" ||
 status() { curl -s -o /dev/null -w '%{http_code}' "$WEB/widget/$1"; }
 for case in "strip?strip=nope:400" "strip:400" "strip?strip=vox&theme=pink:400" "fader-bank?layout=Show&page=3:400" \
     "fader-bank?layout=Nope&page=1:400" "fader-bank?layout=Show:400" "fader-bank?strips=vox,gtr:200" \
-    "fader-bank?layout=Show&page=2:200" "fader-bank?layout=Show&page=Talent:200" "loudness?signal=main:200" "monitor?monitor=main:200" "monitor?monitor=nope:400" "vca?vca=band:200" "vca?vca=1:400" "nope:404"; do
+    "fader-bank?layout=Show&page=2:200" "fader-bank?layout=Show&page=Talent:200" "loudness?signal=main:200" "monitor?monitor=main:200" "monitor?monitor=nope:400" "fader-bank?strips=gtr,band:200" "vca?vca=band:200" "vca?vca=1:400" "nope:404"; do
     [[ "$(status "${case%:*}")" == "${case##*:}" ]] || fail "/widget/${case%:*}: $(status "${case%:*}"), not ${case##*:}"
 done
 pass "widget pages: CSP frame-ancestors, no X-Frame-Options; 400 for bad parameters, 404 for unknown widgets"

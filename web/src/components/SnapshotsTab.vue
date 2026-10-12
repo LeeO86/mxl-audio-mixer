@@ -6,7 +6,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import Pot from "./Pot.vue";
 import { api, download } from "../api.js";
-import { act, live, patchSignal, signals, store, stored } from "../store.js";
+import { act, live, patchSignal, signals, store, stored, vcas } from "../store.js";
 
 const snapshots = computed(() => live.mix?.snapshots || []);
 const name = ref("");
@@ -27,7 +27,7 @@ const CLASSES = [
   ["sends", "Sends"],
 ];
 const classes = ref(JSON.parse(stored("recall.classes", JSON.stringify(CLASSES.map((c) => c[0])))));
-const sections = ref(JSON.parse(stored("recall.sections", '["strips","buses"]')));
+const sections = ref(JSON.parse(stored("recall.sections", '["strips","buses","vcas"]')));
 const only = ref([]); // empty: every signal
 const crossfade = ref(Number(stored("recall.crossfade", 0)));
 watch(classes, (v) => store("recall.classes", JSON.stringify(v)), { deep: true });
@@ -68,7 +68,7 @@ const moveSignal = (p, i, d) =>
     const [x] = p.signals.splice(i, 1);
     p.signals.splice(i + d, 0, x);
   });
-const nameOf = (id) => signals.value.find((s) => s.id === id)?.name || id;
+const nameOf = (id) => [...signals.value, ...vcas.value].find((s) => s.id === id)?.name || id;
 async function saveLayouts() {
   if (await act(() => api.put("/api/v1/layouts", draft.value), "Layouts saved.")) dirty.value = false;
 }
@@ -149,6 +149,7 @@ async function downloadVersion(v) {
       <div class="checks">
         <label class="check"><input v-model="sections" type="checkbox" value="strips" /> Strips</label>
         <label class="check"><input v-model="sections" type="checkbox" value="buses" /> Buses</label>
+        <label class="check"><input v-model="sections" type="checkbox" value="vcas" /> VCAs</label>
       </div>
       <div class="group-caption">Parameters</div>
       <div class="checks">
@@ -198,8 +199,9 @@ async function downloadVersion(v) {
             <button class="btn small secondary" @click="edit(() => p.signals.splice(i, 1))">✕</button>
           </div>
           <select :value="''" aria-label="Add a signal" @change="edit(() => p.signals.push($event.target.value)), ($event.target.value = '')">
-            <option value="" disabled>+ Add a strip or bus</option>
+            <option value="" disabled>+ Add a strip, bus or VCA</option>
             <option v-for="s in signals.filter((x) => !p.signals.includes(x.id))" :key="s.id" :value="s.id">{{ s.name }}</option>
+            <option v-for="v in vcas.filter((x) => !p.signals.includes(x.id))" :key="v.id" :value="v.id">VCA {{ v.name }}</option>
           </select>
         </div>
       </div>
