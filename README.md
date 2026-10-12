@@ -268,7 +268,11 @@ an id gets `strip-<n>` or `bus-<n>`.
   position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
   (measure it). A mono strip is stereo after its panner.
 - **Bus:** sum of its sends → `chain` → fader (`"-inf"` … +15) and mute; `loudness`;
-  `compensate` (delay compensation, default `true`).
+  `compensate` (delay compensation, default `true`). A **mix-minus** bus (N-1, §5)
+  has `minus: {"of": "<bus>", "without": [ids]}`: besides its own sends it takes
+  every send into `of`, as it is (tap, level, mute, phase), except those from
+  `without`; its own send from a source wins. It follows `of` without a plan swap.
+  `without` names `of`'s direct sources.
 - **Taps** (sends and keys): `input` (strips), `pre-eq`, `post-eq`,
   `pre-dynamics`, `post-dynamics` (the input of the first and the output of the last
   node of that kind; the chain's input without one), `pre-fader` (the chain's
@@ -332,6 +336,29 @@ graph fades the affected paths out and in (10 ms) around the plan swap; unrelate
 paths are not touched, and processing nodes keep their state. Parameters are
 addressed by signal id and field (§12.4), e.g. `strips/vox/fader_db`,
 `sends/vox/main/gain_db`, `strips/vox/chain/eq-1/bands/0/gain_db`.
+
+### Operations (§5)
+
+High-level operations make ordinary buses and sends (editable afterwards), each
+`POST /api/v1/operations/<op>` answering `{"buses", "strips", "removed"}`:
+- `group` `{"strips", "id"?, "name"?, "format"? (stereo)}`: a subgroup bus; the
+  strips' post-fader and post-pan sends move to it and it sends where they sent
+  (pre-fader sends stay). Refused while a mix-minus of one of those buses leaves
+  out one of the strips (through the group it would be back in).
+- `n-1` `{"strips", "of"?, "mode"?: "per-participant" | "one", "format"?}`: with
+  `of`, mix-minus buses of it: `n1-<strip>` without that strip, or one without the
+  selection; without `of`, a bus per participant with sends from the others. The
+  format is `of`'s or mono.
+- `mix-minus` `{"of", "without", "id"?, "name"?}`: a mix-minus bus.
+- `link` `{"strips", "format"?, "id"?, "name"?}`: mono strips into one stereo or
+  surround strip (2: stereo, 3: 3.0, 6: 5.1, 8: 7.1, 10: 5.1.4, 12: 7.1.4): their
+  patches in order, the first strip's processing, fader and settings, a send to
+  every bus one of them sent to (the first one's); references (layouts, VCAs, mute
+  groups, monitor sources, mix-minus) move to it.
+- `unlink` `{"strip"}`: a stereo strip into `<id>-l` and `<id>-r`, hard left and
+  right, each with its processing, fader and sends.
+
+The console's Operations panel runs them on a selection of strips.
 
 ### Processing nodes (§6)
 
@@ -442,6 +469,7 @@ without touching the audio.
 | `GET`, `POST /api/v1/shows/history` | versions, newest first (`id`, `time_ms`, `name`, sizes); keep the current show as a named version (`{"name"}`) |
 | `GET`, `DELETE /api/v1/shows/history/<id>`, `POST …/<id>/restore` | a version's mix; delete; restore it as the show |
 | `GET`, `PATCH /api/v1/control-room` | the control room (with `soloed`); change `sources`, `solo` (`mode`, `pfl_trim_db`, `programme_db`, `sip`), `reference_spl` |
+| `POST /api/v1/operations/{group,n-1,mix-minus,link,unlink}` | the high-level operations (above) |
 | `GET`, `POST /api/v1/vcas`, `GET`, `PATCH`, `DELETE /api/v1/vcas/<id>` | VCAs (every field, `ramp_ms`; GET adds `signals`: the strips and buses under it) |
 | `GET`, `POST /api/v1/mute-groups`, `GET`, `PATCH`, `DELETE /api/v1/mute-groups/<id>` | mute groups (`active`, `members`, `name`) |
 | `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
@@ -516,7 +544,9 @@ closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contr
 and a framing check in headless Chrome from an allowed and a refused origin),
 `tests/integration/preview.sh` (MediaMTX built in and shared, monitors played over
 WHEP in headless Chrome, the latency, on-demand streams, the child restarted,
-personal monitors), `tests/integration/vca.sh` (VCAs sample-exact: offsets,
+personal monitors), `tests/integration/n1.sh` (N-1 per participant and of a
+selection by correlation, a mix-minus following its bus without a plan swap, link
+and unlink sample-exact, a group), `tests/integration/vca.sh` (VCAs sample-exact: offsets,
 nesting, VCA mute, VCA PFL, a mute group with a mute-safe strip, a snapshot of the
 VCAs, a cycle refused, no plan swap), `tests/integration/talkback.sh` (talkback into an IFB bus
 sample-exact: interrupt, priority, mix, the control room's talkback dim, a

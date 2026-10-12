@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Milestone 6 (part 2): N-1 and group operations
+
+- Mix-minus buses (`minus: {of, without}`): every send into another bus except
+  some, following it without a plan swap.
+- Operations (§5): group (a subgroup bus taking over the strips' post-fader
+  sends), N-1 per participant or of a selection, mix-minus, link (mono strips into
+  a stereo or surround strip) and unlink. `/api/v1/operations/…`; the console's
+  Operations panel; mix-minus in the bus settings.
+- `mxl-mixer-probe --correlate`.
+
 ### Milestone 6 (part 1): VCAs and mute groups
 
 - VCA (DCA) groups (§9): nested, the members' faders offset by every VCA above

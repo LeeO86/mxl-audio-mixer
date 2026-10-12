@@ -950,7 +950,7 @@ inspired by them and built from the mixer's own nodes:
 In two parts, each a PR:
 - **M6a** (PR 14): VCAs (nested, mute, PFL/AFL, spill, snapshots), mute groups
   with mute-safe signals, the `vca` widget.
-- **M6b**: the high-level operations of §5: group (strips → a subgroup bus with
+- **M6b** (PR 15): the high-level operations of §5: group (strips → a subgroup bus with
   routing), N-1 (per participant or one of a selection; a first-class signal),
   stereo pair / surround link (shared processing and fader), mix-minus from a bus
   ("bus minus X"); N-1s as talkback destinations; the §17 N-1 correlation test.
@@ -1033,3 +1033,54 @@ deleted). The UI fader scale goes to +15 dB. `vca.sh` checks the cap (a fader at
 +15 under two VCAs at +15: +15 dB, 5.62), +15.5 refused, a mute-safe strip under a
 muted VCA, a VCA in a layout page and a deleted strip leaving it; `widgets.sh`
 frames a `fader-bank` with a VCA.
+
+### M6b: what exists
+
+- `src/mix/model.rs`: `Bus.minus` (a mix-minus: `of`, `without`), `Mix::all_sends`
+  (the sends and those mix-minus buses mirror), in the signal order and the loop
+  check; `Strip::new`, `Bus::new`.
+- `src/mix/operations.rs`: group, N-1, mix-minus, link, unlink;
+  `src/operations_api.rs`: `POST /api/v1/operations/…`; `minus` in `PATCH
+  /api/v1/buses/<id>`.
+- `src/mix/compile.rs`: every bus sums its own and its mirrored sends.
+- UI: `OperationsPanel.vue`, the mix-minus in the bus settings and on bus strips.
+- `tests/integration/n1.sh`; `mxl-mixer-probe --correlate`; operations in
+  `ui.mjs`.
+
+### M6b: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D92 | A mix-minus is a bus property, not copied sends: the bus takes every send into `of` (tap, level, mute, phase as they are) except those from `without`, besides its own sends (its own wins). It follows `of`'s sends, and a level change there is a value change, no plan swap. | §5 "mix-minus from bus: for any bus, generate 'bus minus X'"; an N-1 that does not follow the programme is wrong as soon as a fader moves. |
+| D93 | N-1 from a bus (`of`): a mix-minus bus per participant (`n1-<strip>`, the bus minus that strip) or one of the selection (the bus minus all of it). Without `of`: a bus per participant with sends of its own from the selection's other strips (post-pan, 0 dB). Format: `of`'s, else mono. | §5 "N-1 bus per selected participant (each receives the sum of all others) or one N-1 of the selection; result is a normal signal" (question 1). |
+| D94 | Group: a new bus (stereo unless asked); the strips' post-fader and post-pan sends move to it, it sends to each of those buses at 0 dB; pre-fader sends (auxes) stay. Refused while a mix-minus of one of those buses leaves out one of the strips: a sum cannot have one member taken out again. | §5 "selected strips → new subgroup bus with routing" (question 2). |
+| D95 | Link makes one strip: mono strips (2, 3, 6, 8, 10 or 12) into stereo, 3.0, 5.1, 7.1, 5.1.4 or 7.1.4, their patches in order, the first strip's processing, fader and settings, a send to every bus any of them sent to (the first one's level); layouts, VCAs, mute groups, monitor sources, talkback returns and mix-minus exclusions move to it. Unlink splits a stereo strip into two mono strips (hard left and right) with copies of its processing, fader and sends. | §5 "stereo pair / surround link: link strips (shared processing and fader)": one multichannel strip shares them by construction, and its nodes link across channels (§6). |
+| D96 | Operations make ordinary graph and answer what they made; nothing remembers the operation. | §1 "the operator sees a console; the engine sees a graph", "high-level operations generate the graph underneath". |
+
+### M6b: results (dev VM)
+
+- `cargo test`: 109 unit tests (new: group with the aux left alone and the refusal
+  against a mix-minus, N-1 per participant and one, from a bus and from the
+  selection, a mix-minus following its bus and its own send winning, loops through
+  a mirror, link and unlink with their references).
+- `tests/integration/n1.sh`, four tones into a mono programme:
+  - N-1 per participant from the programme: each correlates 0.000 with its own tone
+    and 0.577 with each other (three equal tones);
+  - one N-1 of s1 and s2: 0.707 with tones 3 and 4, 0.000 with 1 and 2;
+  - a mix-minus without s4 follows the programme: s2's send at −∞ there leaves it
+    and the N-1s, no plan swap;
+  - link of s3 and s4 into a stereo strip, and unlink: sample-exact on a stereo
+    bus; the mix-minus's exclusion moved to the linked strip;
+  - group of s1 and s2: refused while N-1s leave them out; then their programme
+    sends go through the group.
+- `ui.sh`: N-1s of Main for two strips from the Operations panel.
+
+### M6b: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | N-1 "each receives the sum of all others": the bus it comes from minus the participant (it follows that bus), or only the selection's others? | Both, as implemented: with `of` the bus minus the participant, without `of` the selection's others. |
+| 2 | A group of strips that a mix-minus leaves out is refused. Alternative: a mix-minus could also leave out a group's members (a group-minus underneath), at the cost of a bus per mix-minus. | Refuse, as implemented. |
+| 3 | Link: the first strip's processing and fader, the union of the sends at the first one's level; unlink only for stereo. | As implemented. |
+| 4 | Defaults: group stereo, N-1 the bus's format or mono, ids `group-<n>`, `n1-<strip>`, `minus-<n>`, `link-<n>`, `<id>-l`/`<id>-r`. | As implemented. |
+| 5 | Merge M6b? Milestone 6 is then done; 1.0.0 is milestones 0–6 (§19): prepare it (release notes B.3, image digest, the maintainers' hardware tests)? | Yes, and prepare 1.0.0. |
