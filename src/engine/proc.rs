@@ -125,6 +125,24 @@ impl Smoothing {
     }
 }
 
+/// EBU R 49 ident: the left channel is off for 0.25 s every 3 s, with 2 ms ramps.
+const IDENT_PERIOD: u64 = 3 * 48_000;
+const IDENT_GAP: u64 = 12_000;
+const IDENT_RAMP: u64 = 96;
+
+fn ident_gain(played: u64) -> f32 {
+    let t = played % IDENT_PERIOD;
+    if t < IDENT_GAP {
+        0.0
+    } else if t < IDENT_GAP + IDENT_RAMP {
+        (t - IDENT_GAP) as f32 / IDENT_RAMP as f32
+    } else if t >= IDENT_PERIOD - IDENT_RAMP {
+        (IDENT_PERIOD - t) as f32 / IDENT_RAMP as f32
+    } else {
+        1.0
+    }
+}
+
 /// The type-specific part: coefficients and state.
 pub enum Kind {
     Eq {
@@ -162,6 +180,12 @@ pub enum Kind {
     Expander {
         ballistics: Ballistics,
         envelope: f64,
+    },
+    /// Phase (cycles, 0–1) and the samples played (for the ident's period).
+    Oscillator {
+        ident: bool,
+        phase: f64,
+        played: u64,
     },
     Gate {
         attack: f64,
@@ -304,6 +328,11 @@ impl Processor {
             ProcKind::Expander { .. } => Kind::Expander {
                 ballistics: Ballistics::new(1.0, 1.0),
                 envelope: 0.0,
+            },
+            ProcKind::Oscillator { waveform, .. } => Kind::Oscillator {
+                ident: *waveform == crate::mix::chain::Waveform::EbuIdent,
+                phase: 0.0,
+                played: 0,
             },
             ProcKind::Gate { .. } => Kind::Gate {
                 attack: 0.0,
@@ -537,7 +566,7 @@ impl Processor {
                     *ballistic = Ballistics::new(p(o + 2), p(o + 3));
                 }
             }
-            Kind::Delay(_) | Kind::TruePeak { .. } | Kind::Hold(_) => {}
+            Kind::Delay(_) | Kind::Oscillator { .. } | Kind::TruePeak { .. } | Kind::Hold(_) => {}
         }
     }
 
@@ -954,6 +983,24 @@ impl Processor {
                 }
                 most
             }
+            Kind::Oscillator {
+                ident,
+                phase,
+                played,
+            } => {
+                let step = p(1) / f64::from(crate::config::SAMPLE_RATE);
+                let amplitude = from_db(p(2));
+                for k in 0..block {
+                    let s = ((2.0 * std::f64::consts::PI * *phase).sin() * amplitude) as f32;
+                    *phase = (*phase + step).fract();
+                    let left = if *ident { ident_gain(*played) } else { 1.0 };
+                    *played = played.wrapping_add(1);
+                    for (c, ch) in io.iter_mut().enumerate() {
+                        ch[k] = if c == 0 { s * left } else { s };
+                    }
+                }
+                0.0
+            }
             Kind::Delay(d) => {
                 d.run(io);
                 0.0
@@ -979,6 +1026,42 @@ mod tests {
     }
 
     /// Run `p` over `input` (per channel) with an optional key; returns the output.
+    #[test]
+    fn oscillator_sine_and_ebu_ident() {
+        let sine = ProcKind::Oscillator {
+            waveform: crate::mix::chain::Waveform::Sine,
+            freq_hz: 1000.0,
+            level_dbfs: -18.0,
+        };
+        let mut p = proc(sine, 2);
+        let out = run(&mut p, &vec![vec![0.5f32; 48_000]; 2], None);
+        let peak = out[0].iter().fold(0f32, |a, x| a.max(x.abs()));
+        assert!(
+            (20.0 * f64::from(peak).log10() + 18.0).abs() < 0.01,
+            "{peak}"
+        );
+        assert_eq!(out[0], out[1]);
+        // 1 kHz: 2000 zero crossings a second.
+        let crossings = out[0]
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
+        assert!((1998..=2001).contains(&crossings), "{crossings}");
+
+        let ident = ProcKind::Oscillator {
+            waveform: crate::mix::chain::Waveform::EbuIdent,
+            freq_hz: 1000.0,
+            level_dbfs: -18.0,
+        };
+        let mut p = proc(ident, 2);
+        let out = run(&mut p, &vec![vec![0.0f32; 4 * 48_000]; 2], None);
+        let peak = |c: &[f32]| c.iter().fold(0f32, |a, x| a.max(x.abs()));
+        assert_eq!(peak(&out[0][..12_000]), 0.0, "left off for 0.25 s");
+        assert!(peak(&out[1][..12_000]) > 0.12, "right on");
+        assert!(peak(&out[0][12_200..143_000]) > 0.12, "left back");
+        assert_eq!(peak(&out[0][144_000..156_000]), 0.0, "again after 3 s");
+    }
+
     fn run(p: &mut Processor, input: &[Vec<f32>], key: Option<&[Vec<f32>]>) -> Vec<Vec<f32>> {
         let mut out = input.to_vec();
         let n = input[0].len() / B * B;
