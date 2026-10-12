@@ -159,6 +159,12 @@ jobs:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
           CHROME: /usr/bin/google-chrome
+      - name: tests/integration/talkback.sh (talkback, IFB, listen-back; browser WHIP)
+        run: tests/integration/talkback.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+          CHROME: /usr/bin/google-chrome
       - name: tests/integration/preview.sh (MediaMTX, WHEP in headless Chrome, latency)
         run: tests/integration/preview.sh
         env:
