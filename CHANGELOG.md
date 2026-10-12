@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (not released yet)
+
+The first release: milestones 0–6 (§19). Release notes:
+`docs/release-notes/1.0.0.md`.
 
 ### Milestone 6 (part 2): N-1 and group operations
 

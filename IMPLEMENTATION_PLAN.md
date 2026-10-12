@@ -1098,3 +1098,31 @@ frames a `fader-bank` with a VCA.
 | 3 | Link and unlink as implemented | Yes. |
 | 4 | Defaults (formats, ids) | Yes. |
 | 5 | Merge M6b, then prepare 1.0.0 | Yes. |
+
+## Release 1.0.0 (preparation)
+
+Milestones 0–6 are merged (§19: 1.0.0 = milestones 0–6, the widgets `strip`,
+`fader-bank`, `loudness`, `monitor`, `talkback`, and tally/AFV; `vca` too). The
+release PR sets the version to 1.0.0 (crate, UI) and adds:
+- `docs/release-notes/1.0.0.md`: the GitHub release text of Appendix B.3 (image,
+  every setting, ports, volumes, widgets, exit codes, what the platform must set,
+  what is not in 1.0.0, what was tested); the digest and the hardware results are
+  TODO until the tag and the maintainers' tests;
+- `docs/release-notes/1.0.0-checklist.md`: the maintainers' hardware and manual
+  tests, each with its pass criterion (including the group refused with a
+  mix-minus, M6b answer 2).
+
+**Performance at the release** (§19 "measured at every release";
+`tests/perf/section16.sh`, now with 8 real N-1 buses, mix-minus of main without
+one strip each, and 4 VCAs; release build, SCHED_OTHER, shared 4-vCPU VM, the
+demo stopped): 1440 sends in the plan (672 and 768 mirrored), mean block 772 µs,
+`dsp_load_ratio` 0.386 (< 0.5), every block ≤ 1.5 ms, 8 deadline misses in 60 s
+(the 1 h, zero-miss target of §16 is for the platform node, in the checklist).
+
+### Release 1.0.0: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Two items of §5 and §6 are not built: the read-write routing graph view (the matrix is there) and the oscillator's pink/white noise and sweep. In 1.0.0, or later? | Later (1.1.0), listed under "Not in 1.0.0". |
+| 2 | Anything to announce to the platform's operators before the release (B.3: names, labels, ports, volumes)? | The release notes are the announcement; this is the first release. |
+| 3 | When the checklist is done: may I tag `v1.0.0` on `main`, let `publish` build `1.0.0`, put the digest and the hardware results into the notes, and create the GitHub release? | Yes, after your results. |

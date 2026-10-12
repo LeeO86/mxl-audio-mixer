@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The §16-shaped load: 64 mono strips (HPF, 4-band EQ, compressor; a de-esser on 16),
-# 32 stereo buses, 16 aux and 8 N-1 buses, 696 sends, 8 published outputs, fed by
-# 8 tone flows of 8 channels. Measures the DSP block time over SECONDS (default 60)
+# 32 stereo buses, 16 aux buses, 8 N-1 buses (mix-minus of main without one strip
+# each: 95 mirrored sends each), 672 sends, 4 VCAs over the strips, 8 published
+# outputs, fed by 8 tone flows of 8 channels. Measures the DSP block time over SECONDS (default 60)
 # and prints mean, dsp_load_ratio, the slowest histogram bucket and deadline misses.
 #
 #   cargo build --release --bins && tests/perf/section16.sh
@@ -71,7 +72,8 @@ buses.append(bus("main", "stereo"))
 groups = [f"g{k}" for k in range(31)]
 auxes = [f"a{k}" for k in range(16)]
 n1 = [f"n{k}" for k in range(8)]
-buses += [bus(g, "stereo") for g in groups] + [bus(a, "mono") for a in auxes] + [bus(n, "mono") for n in n1]
+buses += [bus(g, "stereo") for g in groups] + [bus(a, "mono") for a in auxes]
+buses += [{**bus(n, "mono"), "minus": {"of": "main", "without": [f"s{k}"]}} for k, n in enumerate(n1)]
 for i in range(64):
     send(f"s{i}", "main")
     send(f"s{i}", groups[i % 31])
@@ -79,13 +81,12 @@ for i in range(64):
         send(f"s{i}", auxes[(i + k) % 16])
 for g in groups:
     send(g, "main")
-for k, n in enumerate(n1):
-    for g in groups[k * 3:k * 3 + 3]:
-        send(g, n)
 send("a0", "main")
-assert len(sends) == 696, len(sends)
+assert len(sends) == 672, len(sends)
+vcas = [{"id": f"v{k}", "name": f"V{k}", "fader_db": 0, "members": [f"s{i}" for i in range(k * 16, k * 16 + 16)]}
+        for k in range(4)]
 outputs = [{"signal": s} for s in ["main", "g0", "g1", "a0", "a1", "n0", "n1", "n2"]]
-print(json.dumps({"version": 1, "mix": {"strips": strips, "buses": buses, "sends": sends, "outputs": outputs}}))
+print(json.dumps({"version": 1, "mix": {"strips": strips, "buses": buses, "sends": sends, "outputs": outputs, "vcas": vcas}}))
 EOF
 curl -fsS -o /dev/null -X POST -H 'content-type: application/json' "$WEB/api/v1/config/import" --data-binary @"$WORK/show.json"
 sleep 3
