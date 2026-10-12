@@ -96,6 +96,13 @@ against a mixer on MXL, with two clients; screenshots of every tab go to
 `$IT_OUT/ui/`. `tests/integration/show.sh` uses Node's built-in WebSocket client
 (`tests/integration/ws_events.mjs`).
 
+`tests/integration/widgets.sh` serves a framing page (`tests/integration/frame.html`)
+from two local origins with `python3 -m http.server` (ports `WIDGET_TEST_PORT`,
+8198, and the next) and checks in headless Chrome that the allowed one gets the
+widget's messages and the other is refused. `tests/integration/tally.sh` sends TSL
+with `tests/integration/tsl_send.py` to ports `TSL_TEST_UDP`/`TSL_TEST_TCP` (8920,
+8921); `ui.sh` uses 8930/8931.
+
 ## Load test
 
 `tests/perf/section16.sh` (release build) runs the §16-shaped load for 60 s
