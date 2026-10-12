@@ -185,24 +185,36 @@ impl Loudness {
         self.max_true_peak = 0.0;
     }
 
-    /// Take one segment. A gap in the segment numbers restarts the windows.
+    /// Take one segment. Missing segments up to 3 s count as silence (the DSP
+    /// thread zero-fills the blocks it misses); a longer gap, or one backwards,
+    /// restarts the windows.
     pub fn push(&mut self, s: &Segment) {
-        if self.last.is_some_and(|l| s.index != l + 1) {
-            self.recent.clear();
+        match self.last {
+            Some(l) if s.index > l + 1 && s.index - l - 1 <= SHORT_TERM as u64 => {
+                for index in l + 1..s.index {
+                    self.push_power(index, 0.0);
+                }
+            }
+            Some(l) if s.index != l + 1 => self.recent.clear(),
+            _ => {}
         }
-        self.last = Some(s.index);
         let p: f64 = self
             .weights
             .iter()
             .zip(s.energy.iter())
             .map(|(g, e)| g * e / SEGMENT as f64)
             .sum();
+        self.push_power(s.index, p);
+    }
+
+    fn push_power(&mut self, index: u64, p: f64) {
+        self.last = Some(index);
         self.recent.push_back(p);
         while self.recent.len() > SHORT_TERM {
             self.recent.pop_front();
         }
         // Gating blocks and short-term values for the range every 100 ms.
-        if !self.running || !(s.index + 1).is_multiple_of(STEP as u64) {
+        if !self.running || !(index + 1).is_multiple_of(STEP as u64) {
             return;
         }
         if self.recent.len() >= MOMENTARY {
@@ -317,6 +329,31 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn short_gaps_are_silence_long_ones_restart() {
+        let mut l = Loudness::new(weights(&["M"]));
+        let seg = |index: u64| {
+            let mut energy = [0.0; MAX_CHANNELS];
+            energy[0] = 0.01 * SEGMENT as f64;
+            Segment { index, energy }
+        };
+        for i in 0..400 {
+            l.push(&seg(i));
+        }
+        let full = l.values().momentary;
+        // Two segments (20 ms) missing: 2 of the 40 momentary segments are silent.
+        l.push(&seg(402));
+        let m = l.values().momentary;
+        assert!(
+            close(m, full + 10.0 * (38.0f64 / 40.0).log10(), 1e-9),
+            "{m} vs {full}"
+        );
+        assert!(l.values().short_term.is_finite());
+        // More than 3 s missing: the windows restart.
+        l.push(&seg(402 + 400));
+        assert_eq!(l.values().momentary, f64::NEG_INFINITY);
     }
 
     fn close(a: f64, b: f64, tol: f64) -> bool {

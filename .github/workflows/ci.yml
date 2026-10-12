@@ -36,7 +36,14 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check && cargo clippy --all-targets -- -D warnings
         working-directory: spikes/m0
-      - run: shellcheck -x tests/integration/*.sh tests/hw/*/run.sh scripts/build-mxl.sh ci/amwa.sh
+      - run: shellcheck -x tests/integration/*.sh tests/hw/*/run.sh tests/perf/*.sh scripts/build-mxl.sh scripts/demo.sh ci/amwa.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web UI build
+        run: cd web && npm ci --no-audit --no-fund && npm run build
 
   test:
     runs-on: ubuntu-24.04
@@ -83,6 +90,13 @@ jobs:
       - name: Build libmxl ${{ env.MXL_REF }}
         if: steps.mxl-cache.outputs.cache-hit != 'true'
         run: scripts/build-mxl.sh /opt/mxl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web UI build (embedded by cargo build)
+        run: cd web && npm ci --no-audit --no-fund && npm run build
       - run: cargo build --bins
       - name: Kernel TAI offset (CLOCK_TAI = UTC + 37 s)
         run: sudo scripts/set-tai-offset.py 37
@@ -106,6 +120,17 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/show.sh
+        run: tests/integration/show.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/ui.sh (headless Chrome)
+        run: tests/integration/ui.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+          CHROME: /usr/bin/google-chrome
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -157,6 +182,7 @@ jobs:
             -e MXL_DOMAIN_SCAN_PATH=/tmp mxl-audio-mixer:ci
           for _ in $(seq 1 50); do curl -fs http://127.0.0.1:8160/livez && break; sleep 0.2; done
           curl -fs http://127.0.0.1:8160/readyz
+          curl -fs http://127.0.0.1:8160/ | grep -q 'id="app"'
           docker stop -t 15 smoke
           [ "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 143 ]
           docker logs smoke 2>&1 | tail -5

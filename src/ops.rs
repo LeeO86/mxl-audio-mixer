@@ -21,6 +21,8 @@ use crate::mix::Mix;
 use crate::timing;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The MXL commit the mixer is built against (the platform pin).
+pub const MXL_REVISION: &str = "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7";
 
 #[derive(Clone)]
 pub struct App {
@@ -65,6 +67,8 @@ impl App {
 
 pub fn router(app: App) -> Router {
     Router::new()
+        .route("/", get(ui))
+        .route("/api/v1/events", get(crate::events::events))
         .route("/livez", get(|| async { "ok\n" }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -76,7 +80,22 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/inputs/{input}", get(input).patch(patch_input))
         .route("/api/v1/inputs/{input}/delay/confirm", post(confirm_delay))
         .merge(crate::api::routes())
+        .merge(crate::show_api::routes())
         .with_state(app)
+}
+
+/// The web UI: one self-contained page embedded at build time (`build.rs`).
+const UI: &str = include_str!(env!("MIXER_UI_HTML"));
+
+async fn ui() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        UI,
+    )
+        .into_response()
 }
 
 pub fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -94,6 +113,11 @@ async fn readyz(State(app): State<App>) -> Response {
 }
 
 async fn status(State(app): State<App>) -> Json<Value> {
+    Json(status_json(&app))
+}
+
+/// `GET /api/v1/status`, also sent on the events WebSocket.
+pub fn status_json(app: &App) -> Value {
     let (_, readiness) = app.ready();
     let control = app.control();
     let c = &control.engine.counters;
@@ -103,15 +127,18 @@ async fn status(State(app): State<App>) -> Json<Value> {
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    Json(json!({
+    json!({
         "application": "mxl-audio-mixer",
         "version": VERSION,
+        "label": app.config.nmos_label,
+        "mxl_revision": MXL_REVISION,
         "uptime_s": app.started.elapsed().as_secs(),
         "readiness": readiness,
         "nmos": {
             "node_id": app.node.node_id(),
             "host": app.node.host().to_string(),
             "port": app.config.nmos_port,
+            "registry": app.node.registration_required(),
             "registered": app.node.is_registered(),
         },
         "mxl": {
@@ -135,7 +162,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
             "sends": control.mix.sends.len(),
         },
         "outputs": control.output_status(),
-    }))
+    })
 }
 
 async fn config(State(app): State<App>) -> Json<Value> {
@@ -218,6 +245,12 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
     }
     let mut output_errors = Vec::new();
     if let Some(mix) = show.mix {
+        {
+            let control = app.control();
+            if let Err(e) = control.history.record(&control.mix, None) {
+                tracing::warn!("show history before import: {e}");
+            }
+        }
         match crate::api::apply(&app, crate::engine::FADE_SAMPLES, move |m| {
             *m = mix;
             Ok(())

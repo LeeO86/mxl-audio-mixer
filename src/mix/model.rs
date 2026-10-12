@@ -96,6 +96,12 @@ pub struct Strip {
     /// Measure loudness (§7) at the post-fader point.
     #[serde(default)]
     pub loudness: bool,
+    /// The strip's colour on the console, `#rrggbb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<String>,
+    /// Snapshot recalls leave this signal alone (§12.5).
+    #[serde(default)]
+    pub recall_safe: bool,
 }
 
 fn yes() -> bool {
@@ -119,6 +125,10 @@ pub struct Bus {
     /// largest. Off for minimum-latency paths (talkback, IFB).
     #[serde(default = "yes")]
     pub compensate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<String>,
+    #[serde(default)]
+    pub recall_safe: bool,
 }
 
 /// Where a send or key taps its source (§5). Pre/post-EQ and pre/post-dynamics
@@ -277,6 +287,10 @@ pub struct Mix {
     pub sends: Vec<Send>,
     #[serde(default)]
     pub outputs: Vec<Output>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<super::show::Layout>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshots: Vec<super::show::Snapshot>,
 }
 
 /// What a signal id names.
@@ -360,6 +374,20 @@ impl Mix {
                 return Err(format!("signal id {id} is used twice"));
             }
         }
+        for (id, colour) in self
+            .strips
+            .iter()
+            .map(|s| (&s.id, &s.colour))
+            .chain(self.buses.iter().map(|b| (&b.id, &b.colour)))
+        {
+            if let Some(c) = colour {
+                let hex = c.strip_prefix('#').unwrap_or("");
+                if hex.len() != 6 || !hex.chars().all(|x| x.is_ascii_hexdigit()) {
+                    return Err(format!("{id}: colour {c:?} is not #rrggbb"));
+                }
+            }
+        }
+        super::show::validate(self)?;
         for s in &self.strips {
             check_name(&s.name)?;
             let n = s.format.channels();
@@ -639,6 +667,8 @@ mod tests {
             width: 1.0,
             chain: Vec::new(),
             loudness: false,
+            colour: None,
+            recall_safe: false,
         }
     }
 
@@ -652,6 +682,8 @@ mod tests {
             chain: Vec::new(),
             loudness: false,
             compensate: true,
+            colour: None,
+            recall_safe: false,
         }
     }
 

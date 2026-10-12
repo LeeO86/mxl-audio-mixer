@@ -52,10 +52,13 @@ pub struct Control {
     pub mix: Mix,
     node: mxl_nmos::Node,
     compiler: Compiler,
+    pub analyser: crate::analysis::Analyser,
     layout: HashMap<NodeId, LayoutNode>,
     procs: HashMap<NodeId, LayoutNode>,
     /// Processing latency of each signal's post-fader point, in samples.
     pub latency: HashMap<String, usize>,
+    /// Counts changes of the mix; clients reload it when it moves.
+    pub revision: u64,
     structure: Option<u64>,
     pending: Option<Mix>,
     block: u32,
@@ -63,6 +66,7 @@ pub struct Control {
     input_count: usize,
     default_commit: u32,
     mix_path: PathBuf,
+    pub history: crate::history::History,
     /// Duration of the last plan compile (§15 `plan_compile_seconds`).
     pub compile_seconds: f64,
     /// Steps of the running plan by type (§15 `nodes{type}`).
@@ -86,9 +90,11 @@ impl Control {
             mix: Mix::default(),
             node,
             compiler: Compiler::default(),
+            analyser: crate::analysis::Analyser::new(config.block_samples as usize),
             layout: HashMap::new(),
             procs: HashMap::new(),
             latency: HashMap::new(),
+            revision: 0,
             structure: None,
             pending: None,
             block: config.block_samples,
@@ -96,6 +102,7 @@ impl Control {
             input_count: config.input_flows,
             default_commit: config.output_commit_samples,
             mix_path: config.state_dir.join("mix.json"),
+            history: crate::history::History::new(&config.state_dir),
             compile_seconds: 0.0,
             step_counts: BTreeMap::new(),
         }
@@ -105,13 +112,22 @@ impl Control {
     pub fn tick(&mut self) {
         self.engine.collect();
         self.inputs.tick(&mut self.engine);
+        self.history.tick(&self.mix);
     }
 
-    /// The meter tick (§7, 25 Hz): meters, then loudness.
+    /// The meter tick (§7, 25 Hz): meters, loudness, the analyser.
     pub fn meter_tick(&mut self) {
         self.meters.tick();
         let true_peaks = self.meters.true_peaks();
         self.loudness.tick(&true_peaks);
+        self.analyser.tick(&mut self.engine.analysis);
+    }
+
+    /// Analyse `target` (signal and tap) or nothing; applied with the next
+    /// change of the mix (`api::apply` with no change).
+    pub fn set_analysis(&mut self, target: Option<(String, crate::mix::model::Tap)>) {
+        self.compiler.analysis = target.clone();
+        self.analyser.set_target(target);
     }
 
     fn specs(&self, mix: &Mix) -> Vec<OutputSpec> {
@@ -247,12 +263,15 @@ impl Control {
         Ok(errors)
     }
 
-    fn save(&self) -> Result<(), String> {
+    fn save(&mut self) -> Result<(), String> {
+        self.revision += 1;
         let body = serde_json::json!({"version": 1, "mix": self.mix});
         crate::state::write_atomic(
             &self.mix_path,
             &serde_json::to_vec_pretty(&body).unwrap_or_default(),
-        )
+        )?;
+        self.history.changed(&self.mix);
+        Ok(())
     }
 
     /// The patch state of each channel of `strip`.

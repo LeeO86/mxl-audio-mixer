@@ -75,8 +75,34 @@ unzip -q ebu.zip && rm ebu.zip
 cd - && EBU_TEST_SET=~/ebu-loudness-test-set cargo test --test ebu_loudness
 ```
 
+## Web UI
+
+Node 22 and npm. `web/` is a Vue 3 + Vite project that builds one self-contained
+`web/dist/index.html`; `build.rs` embeds it (without it, the binary serves a short
+note), so build the UI before `cargo build`:
+
+```sh
+cd web && npm ci && npm run build && cd -
+cargo build --release --bins
+scripts/demo.sh                 # tone flow, mixer on :8160 and a demo show
+```
+
+While working on the UI, `cd web && npx vite` serves it with hot reload on
+http://127.0.0.1:5175/ and proxies `/api` (WebSocket included) to the mixer on 8160.
+
+`tests/integration/ui.sh` runs `web/tests/ui.mjs` in headless Chrome
+(`playwright-core`, no browser download; `CHROME`, default `/usr/bin/google-chrome`)
+against a mixer on MXL, with two clients; screenshots of every tab go to
+`$IT_OUT/ui/`. `tests/integration/show.sh` uses Node's built-in WebSocket client
+(`tests/integration/ws_events.mjs`).
+
+## Load test
+
+`tests/perf/section16.sh` (release build) runs the §16-shaped load for 60 s
+(`SECONDS`) on ports 8180/3332 and prints the mean block time, the load ratio, the
+slowest histogram bucket and deadline misses.
+
 ## Added in later milestones
 
-MediaMTX (preview contract, milestone 5) and headless Chromium and Firefox (UI and
-widget checks, milestone 4) are added to this file and to CI with the milestone that
-needs them.
+MediaMTX (preview contract, milestone 5) and the widget framing checks (with the
+widgets) are added to this file and to CI with the milestone that needs them.

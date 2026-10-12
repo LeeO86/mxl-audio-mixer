@@ -211,9 +211,15 @@ pub struct Engine {
     pub returned: rtrb::Consumer<Returned>,
     /// Per input: arrival lag samples (in 48 kHz samples), one per read block.
     pub lags: Vec<rtrb::Consumer<u32>>,
+    /// The analysed signal: per block, channel 1 then channel 2 (a copy of
+    /// channel 1 for mono).
+    pub analysis: rtrb::Consumer<f32>,
     pub scheduling: Arc<std::sync::Mutex<String>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+
+/// One second of two channels.
+pub const ANALYSIS_RING: usize = 2 * 48_000;
 
 impl Engine {
     /// Start the DSP thread.
@@ -229,6 +235,7 @@ impl Engine {
             lags.push(rx);
         }
         let scheduling = Arc::new(std::sync::Mutex::new(String::new()));
+        let (analysis_tx, analysis) = rtrb::RingBuffer::new(ANALYSIS_RING);
         let thread_counters = counters.clone();
         let thread_scheduling = scheduling.clone();
         let thread = std::thread::Builder::new()
@@ -240,6 +247,7 @@ impl Engine {
                     command_rx,
                     returned_tx,
                     lag_tx,
+                    analysis_tx,
                     thread_scheduling,
                 )
             })?;
@@ -248,6 +256,7 @@ impl Engine {
             commands,
             returned,
             lags,
+            analysis,
             scheduling,
             thread: Some(thread),
         })

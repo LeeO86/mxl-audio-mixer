@@ -78,31 +78,85 @@ pub fn routes() -> Router<App> {
         .route("/api/v1/meters", get(meters))
         .route("/api/v1/meters/clear", post(clear_holds))
         .route("/api/v1/meters/{signal}/clear", post(clear_hold))
+        .route(
+            "/api/v1/analysis",
+            get(analysis).put(put_analysis).delete(delete_analysis),
+        )
+}
+
+/// The analyser's signal and tap, and its last values (spectrum, correlation,
+/// goniometer points).
+async fn analysis(State(app): State<App>) -> Json<Value> {
+    let control = app.control();
+    let target = control
+        .analyser
+        .target
+        .as_ref()
+        .map(|(signal, tap)| json!({"signal": signal, "tap": tap}));
+    Json(json!({"target": target, "values": control.analyser.values()}))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnalysisBody {
+    signal: String,
+    #[serde(default)]
+    tap: Option<Tap>,
+}
+
+async fn put_analysis(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
+    let run = async {
+        let b: AnalysisBody = body(&bytes)?;
+        {
+            let mut control = app.control();
+            let mix = &control.mix;
+            if mix.kind(&b.signal).is_none() {
+                return Err(not_found(format!("signal {} does not exist", b.signal)));
+            }
+            let tap = b.tap.unwrap_or(Tap::PostFader);
+            if mix.tap_format(&b.signal, &tap).is_none() {
+                return Err(bad(format!("{} has no such tap", b.signal)));
+            }
+            control.set_analysis(Some((b.signal, tap)));
+        }
+        apply(&app, 0, |_| Ok(())).await?;
+        Ok::<_, Box<Response>>(analysis(State(app)).await.into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
+}
+
+async fn delete_analysis(State(app): State<App>) -> Response {
+    let run = async {
+        app.control().set_analysis(None);
+        apply(&app, 0, |_| Ok(())).await?;
+        Ok::<_, Box<Response>>(StatusCode::NO_CONTENT.into_response())
+    };
+    run.await.unwrap_or_else(|r| *r)
 }
 
 pub type ApiResult<T> = Result<T, Box<Response>>;
 
-fn bad(message: impl Into<String>) -> Box<Response> {
+pub(crate) fn bad(message: impl Into<String>) -> Box<Response> {
     Box::new(error(StatusCode::BAD_REQUEST, message))
 }
 
-fn not_found(message: impl Into<String>) -> Box<Response> {
+pub(crate) fn not_found(message: impl Into<String>) -> Box<Response> {
     Box::new(error(StatusCode::NOT_FOUND, message))
 }
 
-fn conflict(message: impl Into<String>) -> Box<Response> {
+pub(crate) fn conflict(message: impl Into<String>) -> Box<Response> {
     Box::new(error(StatusCode::CONFLICT, message))
 }
 
-fn internal(message: impl Into<String>) -> Box<Response> {
+pub(crate) fn internal(message: impl Into<String>) -> Box<Response> {
     Box::new(error(StatusCode::INTERNAL_SERVER_ERROR, message))
 }
 
-fn body<T: DeserializeOwned>(bytes: &[u8]) -> ApiResult<T> {
+pub(crate) fn body<T: DeserializeOwned>(bytes: &[u8]) -> ApiResult<T> {
     serde_json::from_slice(bytes).map_err(|e| bad(e.to_string()))
 }
 
-fn ramp(ms: Option<f64>) -> ApiResult<u32> {
+pub(crate) fn ramp(ms: Option<f64>) -> ApiResult<u32> {
     let ms = ms.unwrap_or(DEFAULT_RAMP_MS);
     if !(0.0..=MAX_RAMP_MS).contains(&ms) {
         return Err(bad(format!("ramp_ms must be 0 to {MAX_RAMP_MS}")));
@@ -135,7 +189,7 @@ pub async fn apply(
     }
 }
 
-fn with_errors(mut value: Value, errors: Vec<String>) -> Value {
+pub(crate) fn with_errors(mut value: Value, errors: Vec<String>) -> Value {
     if !errors.is_empty() {
         value["output_errors"] = json!(errors);
     }
@@ -234,11 +288,24 @@ struct StripBody {
     width: Option<f64>,
     chain: Option<Vec<Proc>>,
     loudness: Option<bool>,
+    colour: Option<String>,
+    recall_safe: Option<bool>,
     ramp_ms: Option<f64>,
+}
+
+/// `""` clears the colour.
+fn colour(v: String) -> Option<String> {
+    (!v.is_empty()).then_some(v)
 }
 
 impl StripBody {
     fn apply(self, s: &mut Strip) {
+        if let Some(v) = self.colour {
+            s.colour = colour(v);
+        }
+        if let Some(v) = self.recall_safe {
+            s.recall_safe = v;
+        }
         if let Some(format) = self.format {
             let n = format.channels();
             s.format = format;
@@ -300,6 +367,8 @@ async fn create_strip(State(app): State<App>, bytes: axum::body::Bytes) -> Respo
             width: 1.0,
             chain: Vec::new(),
             loudness: false,
+            colour: None,
+            recall_safe: false,
         };
         b.apply(&mut s);
         let errors = apply(&app, 0, |m| {
@@ -386,11 +455,19 @@ struct BusBody {
     chain: Option<Vec<Proc>>,
     loudness: Option<bool>,
     compensate: Option<bool>,
+    colour: Option<String>,
+    recall_safe: Option<bool>,
     ramp_ms: Option<f64>,
 }
 
 impl BusBody {
     fn apply(self, b: &mut Bus) {
+        if let Some(v) = self.colour {
+            b.colour = colour(v);
+        }
+        if let Some(v) = self.recall_safe {
+            b.recall_safe = v;
+        }
         if let Some(v) = self.chain {
             b.chain = v;
         }
@@ -432,6 +509,8 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             chain: Vec::new(),
             loudness: false,
             compensate: true,
+            colour: None,
+            recall_safe: false,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {
