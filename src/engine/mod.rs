@@ -24,6 +24,10 @@ pub use plan::{NodeId, Plan, MAX_NODE_VALUES};
 pub const MAX_LOUDNESS: usize = MAX_OUTPUTS;
 /// Monitors and personal monitors that can stream at once.
 pub const MAX_STREAMS: usize = 96;
+/// VAD tap slots (§8.1).
+pub const MAX_VAD: usize = crate::mix::auto::MAX_VAD;
+/// Half a second of one VAD tap.
+pub const VAD_RING: usize = 24_000;
 
 /// Largest channel count of an input flow (§4.2).
 pub const MAX_CHANNELS: usize = 64;
@@ -240,6 +244,8 @@ pub struct Engine {
     /// The analysed signal: per block, channel 1 then channel 2 (a copy of
     /// channel 1 for mono).
     pub analysis: rtrb::Consumer<f32>,
+    /// Per VAD tap slot: the mean of the signal's channels before its fader.
+    pub vad: Vec<rtrb::Consumer<f32>>,
     pub scheduling: Arc<std::sync::Mutex<String>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -262,6 +268,9 @@ impl Engine {
         }
         let scheduling = Arc::new(std::sync::Mutex::new(String::new()));
         let (analysis_tx, analysis) = rtrb::RingBuffer::new(ANALYSIS_RING);
+        let (vad_tx, vad): (Vec<_>, Vec<_>) = (0..MAX_VAD)
+            .map(|_| rtrb::RingBuffer::new(VAD_RING))
+            .unzip();
         let thread_counters = counters.clone();
         let thread_scheduling = scheduling.clone();
         let thread = std::thread::Builder::new()
@@ -273,7 +282,10 @@ impl Engine {
                     command_rx,
                     returned_tx,
                     lag_tx,
-                    analysis_tx,
+                    dsp::Taps {
+                        analysis: analysis_tx,
+                        vad: vad_tx,
+                    },
                     thread_scheduling,
                 )
             })?;
@@ -283,6 +295,7 @@ impl Engine {
             returned,
             lags,
             analysis,
+            vad,
             scheduling,
             thread: Some(thread),
         })

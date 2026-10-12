@@ -53,6 +53,10 @@ pub struct Compiler {
     pub analysis: Option<(String, Tap)>,
     /// The gain of each AFV strip's AFV node (1 open, its depth closed).
     pub afv: HashMap<String, f32>,
+    /// The gain of each auto node (auto-mix × ducking, §8; 1 when absent).
+    pub auto: HashMap<String, f32>,
+    /// The VAD tap slot of each analysed signal (§8.1).
+    pub vad_slots: HashMap<String, usize>,
     /// Who is soloed, and how (the control room's runtime state).
     pub solo: std::collections::BTreeMap<String, SoloKind>,
     /// The stream slot of each monitor (by id) someone listens to.
@@ -335,6 +339,38 @@ impl Build<'_> {
         index
     }
 
+    /// The auto gain node `key` of `signal` on `src`; returns its output.
+    fn auto_node(
+        &mut self,
+        key: &str,
+        signal: &str,
+        format: Format,
+        chain: u64,
+        src: Span,
+    ) -> Span {
+        let g = self.compiler.auto.get(signal).copied().unwrap_or(1.0);
+        let n = format.channels();
+        let node = self.node(key.to_string(), (format_name(format), chain), vec![g; n]);
+        let dst = self.b.buffers(n);
+        self.b.step(Step::Gain { node, src, dst });
+        dst
+    }
+
+    /// Copy the mean of `src`'s channels to `signal`'s VAD tap slot, if it has one.
+    fn vad_tap(&mut self, signal: &str, src: Span) {
+        let Some(&slot) = self.compiler.vad_slots.get(signal) else {
+            return;
+        };
+        (signal, "vad", slot).hash(&mut self.structure);
+        let dst = self.b.buffers(1);
+        let dst = self.b.buffer(dst, 0);
+        self.b.step(Step::Vad {
+            src,
+            dst,
+            slot: slot as u32,
+        });
+    }
+
     fn single(&self, span: Span, i: usize) -> Span {
         Span {
             start: span.start + i as u32,
@@ -467,6 +503,7 @@ impl Compiler {
         let vca_effects = mix.vca_effects();
         let grouped = mix.group_muted();
         let soloed_signals = expand_solo(mix, &c.compiler.solo);
+        let auto_signals = mix.auto_signals();
 
         // Every send, the mix-minus buses' mirrored ones too (§5).
         let all_sends = mix.all_sends();
@@ -579,6 +616,16 @@ impl Compiler {
                         });
                         post = after;
                     }
+                    if auto_signals.contains(&s.id) {
+                        post = c.auto_node(
+                            &format!("strip/{}/auto", s.id),
+                            &s.id,
+                            s.format,
+                            chain_sig,
+                            post,
+                        );
+                    }
+                    c.vad_tap(&s.id, pre.0);
                     let pan_values = match s.format {
                         Format::Mono => {
                             let (l, r) = pan_gains(s.pan, laws.pan);
@@ -727,6 +774,16 @@ impl Compiler {
                         src: pre.0,
                         dst: post,
                     });
+                    if auto_signals.contains(&bus.id) {
+                        post = c.auto_node(
+                            &format!("bus/{}/auto", bus.id),
+                            &bus.id,
+                            bus.format,
+                            chain_sig,
+                            post,
+                        );
+                    }
+                    c.vad_tap(&bus.id, pre.0);
                     // Talkback into this bus (§10.2): the programme (down while an
                     // interrupt talks), plus every mic at its gain.
                     let dest = mix
@@ -1416,6 +1473,65 @@ mod tests {
         with.strips[0].afv.as_mut().unwrap().enabled = false;
         let c = compile(&mut compiler, &with, 48);
         assert_eq!(gains(&c), gains(&a));
+    }
+
+    #[derive(Default)]
+    struct Taps(HashMap<usize, Vec<f32>>);
+    impl OutputSink for Taps {
+        fn write(&mut self, _: usize, _: usize, _: usize, _: &[f32]) {}
+        fn vad(&mut self, slot: usize, samples: &[f32]) {
+            self.0.entry(slot).or_default().extend_from_slice(samples);
+        }
+    }
+
+    #[test]
+    fn auto_node_after_the_fader_and_the_vad_tap_before_it() {
+        let mut compiler = Compiler::default();
+        let mut m = mix();
+        m.strips[0].fader_db = Db(-6.0);
+        m.automixes.push(crate::mix::auto::Automix {
+            id: "am".into(),
+            name: "am".into(),
+            enabled: true,
+            last_mic_hold: true,
+            vad_weighting: false,
+            members: vec![crate::mix::auto::AutomixMember::new("vox")],
+        });
+        let mut d = crate::mix::auto::Duck::new("bed");
+        d.keys = vec!["vox".into()];
+        d.targets = vec!["main".into()];
+        m.ducks.push(d);
+        assert_eq!(m.validate(2, 48), Ok(()));
+        compiler.vad_slots = HashMap::from([("vox".to_string(), 5)]);
+        compiler.auto = HashMap::from([("vox".to_string(), 0.5), ("main".to_string(), 0.25)]);
+        let mut c = compile(&mut compiler, &m, 48);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 1);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // vox: fader −6 dB × auto 0.5, panned; the bus × 0.25.
+        let want = (0.5 * 0.501_187_2 * 0.5 * h + 0.1) * 0.25;
+        assert!((out.0[&3][0][0] - want).abs() < 1e-6, "{}", out.0[&3][0][0]);
+        let mut taps = Taps::default();
+        c.plan.process(0, &inputs, &mut taps);
+        assert_eq!(taps.0[&5], vec![0.5; 48], "the VAD reads before the fader");
+        // The stereo music strip's tap is the mean of its channels.
+        compiler.vad_slots.insert("music".into(), 6);
+        let structure = c.structure;
+        let mut c = compile(&mut compiler, &m, 48);
+        assert_ne!(c.structure, structure, "a new tap is a new plan");
+        let mut taps = Taps::default();
+        c.plan.process(0, &inputs, &mut taps);
+        assert!((taps.0[&6][0] - 0.15).abs() < 1e-7);
+        // Another gain is a value change.
+        compiler.auto.insert("vox".into(), 1.0);
+        let d = compile(&mut compiler, &m, 48);
+        assert_eq!(d.structure, c.structure);
+        let id = compiler.node_id("strip/vox/auto").unwrap();
+        assert_eq!(d.nodes[&id].values, vec![1.0]);
+        assert!(compiler.node_id("bus/main/auto").is_some());
     }
 
     #[test]

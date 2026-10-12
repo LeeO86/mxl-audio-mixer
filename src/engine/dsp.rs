@@ -84,6 +84,7 @@ struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
     loudness: &'a mut [Option<Box<SegmentMeter>>],
     analysis: &'a mut rtrb::Producer<f32>,
+    vad: &'a mut [rtrb::Producer<f32>],
     streams: &'a mut [Option<Box<rtrb::Producer<f32>>>],
     /// The stream ring has room for this block (checked at channel 1).
     stream_room: bool,
@@ -132,6 +133,16 @@ impl OutputSink for Outputs<'_> {
         }
     }
 
+    fn vad(&mut self, slot: usize, samples: &[f32]) {
+        let Some(ring) = self.vad.get_mut(slot) else {
+            return;
+        };
+        // A whole block or nothing: the reader frames by blocks.
+        if let Ok(chunk) = ring.write_chunk_uninit(self.block) {
+            chunk.fill_from_iter(samples[..self.block].iter().copied());
+        }
+    }
+
     fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
         if let Some(Some(m)) = self.loudness.get_mut(slot) {
             m.feed(start, channel, samples);
@@ -149,6 +160,14 @@ impl OutputSink for Outputs<'_> {
         o.staging[at..at + self.block].copy_from_slice(&samples[..self.block]);
         o.staged = true;
     }
+}
+
+/// The rings the DSP thread copies tapped audio into for the control side.
+pub(super) struct Taps {
+    /// The analysed signal (spectrum, goniometer).
+    pub analysis: rtrb::Producer<f32>,
+    /// One per VAD tap slot.
+    pub vad: Vec<rtrb::Producer<f32>>,
 }
 
 const FADE_STEP: f32 = 1.0 / FADE_SAMPLES as f32;
@@ -173,9 +192,13 @@ pub(super) fn run(
     mut commands: rtrb::Consumer<Command>,
     mut returned: rtrb::Producer<Returned>,
     mut lags: Vec<rtrb::Producer<u32>>,
-    mut analysis: rtrb::Producer<f32>,
+    taps: Taps,
     scheduling: Arc<std::sync::Mutex<String>>,
 ) {
+    let Taps {
+        mut analysis,
+        mut vad,
+    } = taps;
     let notes = crate::timing::set_up_dsp_thread(config.rt_priority, config.cpu);
     tracing::info!("DSP thread: {notes}");
     if let Ok(mut s) = scheduling.lock() {
@@ -446,6 +469,7 @@ pub(super) fn run(
                     loudness: &mut loudness,
                     analysis: &mut analysis,
                     analysis_room: false,
+                    vad: &mut vad,
                     streams: &mut streams,
                     stream_room: false,
                     block,
