@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Milestone 6 (part 1): VCAs and mute groups
+
+- VCA (DCA) groups (§9): nested, the members' faders offset by every VCA above
+  them, VCA mute without touching the members' mutes, PFL/AFL of all members,
+  spill on the console, in snapshots (section `vcas`), recall-safe; never a plan
+  swap. `/api/v1/vcas`.
+- Mute groups with mute-safe (isolated) strips and buses. `/api/v1/mute-groups`.
+- UI: VCA strips beside the buses, the VCAs and groups panel, mute group buttons,
+  VCA chips on the strips; the `vca` widget.
+
 ### Licence
 
 - MIT, as before. On 2026-10-12 `main` was GPL-3.0-or-later for a few hours; that

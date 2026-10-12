@@ -59,8 +59,9 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 | `loudness` | `signal` (a strip or bus id) | momentary, short-term, integrated LUFS, LRA, max true peak, the tolerance; start, stop, reset | 320×200 |
 | `monitor` | `monitor` (a monitor id) | source buttons, level, dim, cut, mono, the meter | 360×200 |
 | `talkback` | `destinations` (ids, comma-separated; default all), `mic` (a talkback mic id; default the browser's microphone) | talk buttons (a short press latches, hold to talk), "All", the mic's meter; with the browser's microphone its on/off | 260×110 |
+| `vca` | `vca` (a VCA id) | the VCA's fader, mute, PFL; spill shows its members beside it | 120×480 |
 
-`vca` comes with the VCAs (milestone 6). The strip widget has PFL. The talkback
+The strip widget has PFL. The talkback
 widget's browser microphone needs an HTTPS page and a frame with
 `allow="microphone"`.
 
@@ -298,12 +299,24 @@ an id gets `strip-<n>` or `bus-<n>`.
   (default) or −6; `loudness_target_lufs` (−23) and `loudness_tolerance_lu` (1).
 - **Tally:** `tally_index` and `afv` on strips (below, "Tally and
   audio-follows-video").
-- **Console:** `colour` (`#rrggbb`) and `recall_safe` on strips and buses;
+- **Console:** `colour` (`#rrggbb`), `recall_safe`, `solo_safe` and `mute_safe`
+  on strips and buses;
   `layouts`: `[{"name", "pages": [{"name", "signals": [ids]}]}]`.
-- **Snapshots** (§12.5): parameter states of every strip, bus and send (trim,
+- **VCAs** (§9, `vcas`): `{"id", "name", "fader_db", "mute", "members",
+  "colour", "recall_safe"}`; members are strips, buses or other VCAs (nested; a
+  cycle is refused). A VCA sums no audio: a member's fader gets the `fader_db` of
+  every VCA above it added (each counted once; one at `-inf` silences it), and a
+  muted VCA mutes its members without changing their own `mute`. PFL or AFL of a
+  VCA (`PUT /api/v1/solo/<vca>`) is that of all its members. VCA ids share the
+  signals' namespace. At most 64.
+- **Mute groups** (`mute_groups`): `{"id", "name", "active", "members"}` (strips
+  and buses); while active, every member that is not `mute_safe` is muted, again
+  without changing its own `mute`. At most 32. Neither VCAs nor mute groups change
+  the plan: only fader values move.
+- **Snapshots** (§12.5): parameter states of every strip, bus, send and VCA (trim,
   polarity, fader, mute, pan, width, every chain node's parameters and bypass,
-  send gain, mute and phase). A recall takes `signals`, `sections` (`strips`,
-  `buses`) and `classes` (`trim`, `fader`, `mute`, `pan`, `chain`, `sends`), all
+  send gain, mute and phase; VCA fader and mute). A recall takes `signals`,
+  `sections` (`strips`, `buses`, `vcas`) and `classes` (`trim`, `fader`, `mute`, `pan`, `chain`, `sends`), all
   optional (everything), and `crossfade_ms` (the ramp of every value); it never
   touches recall-safe signals, nor signals, sends and nodes that no longer exist
   (or whose node type changed). Snapshots and layouts are part of the show.
@@ -426,6 +439,8 @@ without touching the audio.
 | `GET`, `POST /api/v1/shows/history` | versions, newest first (`id`, `time_ms`, `name`, sizes); keep the current show as a named version (`{"name"}`) |
 | `GET`, `DELETE /api/v1/shows/history/<id>`, `POST …/<id>/restore` | a version's mix; delete; restore it as the show |
 | `GET`, `PATCH /api/v1/control-room` | the control room (with `soloed`); change `sources`, `solo` (`mode`, `pfl_trim_db`, `programme_db`, `sip`), `reference_spl` |
+| `GET`, `POST /api/v1/vcas`, `GET`, `PATCH`, `DELETE /api/v1/vcas/<id>` | VCAs (every field, `ramp_ms`; GET adds `signals`: the strips and buses under it) |
+| `GET`, `POST /api/v1/mute-groups`, `GET`, `PATCH`, `DELETE /api/v1/mute-groups/<id>` | mute groups (`active`, `members`, `name`) |
 | `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
 | `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
 | `GET /api/v1/preview` | the preview: `mode` (`own`, `shared`), the built-in MediaMTX (`child`: running, pid, restarts, last exit), `whep_url` or `whep_port`, every stream (path, state, frames, connects, error, readers, last listen) |
@@ -498,7 +513,9 @@ closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contr
 and a framing check in headless Chrome from an allowed and a refused origin),
 `tests/integration/preview.sh` (MediaMTX built in and shared, monitors played over
 WHEP in headless Chrome, the latency, on-demand streams, the child restarted,
-personal monitors), `tests/integration/talkback.sh` (talkback into an IFB bus
+personal monitors), `tests/integration/vca.sh` (VCAs sample-exact: offsets,
+nesting, VCA mute, VCA PFL, a mute group with a mute-safe strip, a snapshot of the
+VCAs, a cycle refused, no plan swap), `tests/integration/talkback.sh` (talkback into an IFB bus
 sample-exact: interrupt, priority, mix, the control room's talkback dim, a
 momentary talk that ends, listen-back, a strip on a talkback mic; a browser's
 microphone by WHIP from headless Chrome into an MXL output, with its latency),

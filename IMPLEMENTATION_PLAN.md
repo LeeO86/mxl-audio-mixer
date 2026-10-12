@@ -944,3 +944,68 @@ inspired by them and built from the mixer's own nodes:
   the mixer's own nodes; their behaviour is compared by measurement. Com-IS-Assist
   (MIT) code may be taken, with its notice.
 
+
+## M6: VCA/DCA, mute groups, N-1 and group operations
+
+In two parts, each a PR:
+- **M6a** (PR 14): VCAs (nested, mute, PFL/AFL, spill, snapshots), mute groups
+  with mute-safe signals, the `vca` widget.
+- **M6b**: the high-level operations of §5: group (strips → a subgroup bus with
+  routing), N-1 (per participant or one of a selection; a first-class signal),
+  stereo pair / surround link (shared processing and fader), mix-minus from a bus
+  ("bus minus X"); N-1s as talkback destinations; the §17 N-1 correlation test.
+
+### M6a: what exists
+
+- `src/mix/vca.rs`: VCAs and mute groups in the show (`vcas`, `mute_groups`), the
+  VCAs above a signal and the signals under a VCA, the effect on each fader,
+  validation; `mute_safe` on strips and buses.
+- `src/mix/compile.rs`: every strip's and bus's fader node takes its VCAs and mute
+  groups; a VCA's solo is its members'.
+- `src/mix/show.rs`: VCAs in snapshots (section `vcas`).
+- `src/group_api.rs`: `/api/v1/vcas`, `/api/v1/mute-groups`.
+- UI: `VcaStrip.vue` (beside the buses), `GroupsPanel.vue`, mute group buttons in
+  the console toolbar, spill, VCA chips and group mutes on the strips, mute-safe
+  in the signal settings; the `vca` widget.
+- `tests/integration/vca.sh`; VCAs and mute groups in `ui.mjs`, the widget in
+  `widgets.sh`.
+
+### M6a: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D86 | A VCA lists its members (strips, buses, VCAs). A member's fader node gets its fader plus the `fader_db` of every VCA above it, each counted once even when reached twice; one at `-inf` silences it. The sum is not capped (a member at +10 under a VCA at +10 is at +20; question 1). VCA ids share the signals' namespace (a solo or a layout entry names either). | §9 "effective member gain = member fader + sum of all assigned VCA offsets (dB), nested VCAs allowed (cycles rejected)". |
+| D87 | A muted VCA, and an active mute group, set the member's fader node to 0; the member's own `mute` stays as it is, and the UI marks the mute button. `mute_safe` isolates a strip or bus from mute groups (not from a VCA's mute; question 2). | §9 "without changing their mute buttons' own state"; "mute groups (separate from VCAs), with safe/isolate per channel". |
+| D88 | VCAs and mute groups only change fader values (ramped like any fader, with `ramp_ms` and a snapshot's crossfade): never a plan swap, also when members change. | Real time: moving a VCA must not rebuild the graph. |
+| D89 | Soloing a VCA (PFL or AFL) solos all its members (a member's own solo kind wins); solo-in-place treats them as soloed. | §9 "VCA solo/PFL = PFL of all members". |
+| D90 | Snapshots hold VCA fader and mute (section `vcas`, classes `fader` and `mute`); `recall_safe` on VCAs. | §9 "controllable from … snapshots … like any fader". |
+| D91 | Spill is the client's view: the console shows only the VCA's strips and buses (through nested VCAs) until "Show all"; the `vca` widget shows them beside the VCA. | §9 "selecting a VCA shows its members on the console". |
+
+### M6a: results (dev VM)
+
+- `cargo test`: 105 unit tests (new: VCA offsets with nesting counted once, VCA
+  and nested mutes, a VCA at −∞, mute groups with mute-safe, validation with
+  cycles; the compiled fader values with the structure unchanged; VCAs in
+  snapshots with sections and recall-safe).
+- `tests/integration/vca.sh`, sample-exact through MXL: VCA at −20 dB on both
+  members; nested −6 dB over −20 dB (0.05); VCA mute with the members' mutes
+  unchanged; a cycle refused (400); PFL of a VCA on the monitor (its member,
+  pre-fader); a mute group, a mute-safe strip, inactive again; a snapshot
+  recalling the VCA (section `vcas`); no plan swap for any of it; a deleted strip
+  leaving its VCAs.
+- `ui.sh`: a VCA made and assigned in the panel, its fader by keys followed by the
+  second client, spill, a mute group from the toolbar (the strip's own mute
+  unchanged). `widgets.sh`: the `vca` widget framed.
+- **Finding (again):** with the demo mixer running on the dev VM, the probes see
+  late inputs even on other CPUs; the tests ran with the demo stopped (as noted in
+  `docs/development.md`).
+
+### M6a: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Cap a member's total gain (fader + VCAs)? | No cap, as implemented; a console-like limit (e.g. +10 dB total) if wanted. |
+| 2 | Does `mute_safe` also isolate from a VCA's mute? | No: mute-safe is the mute groups' isolate; a VCA's mute always mutes its members. |
+| 3 | VCAs in layout pages (and so in the `fader-bank` widget)? | Not yet: the console shows every VCA in its own section. |
+| 4 | Limits: 64 VCAs, 32 mute groups. | As implemented (§16 asks for 4 VCAs). |
+| 5 | Merge M6a, then M6b? | Yes. |
