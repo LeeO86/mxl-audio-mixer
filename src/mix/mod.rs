@@ -1,5 +1,6 @@
 //! The mix: signal model, channel formats and the plan compiler (§4.1, §5).
 
+pub mod auto;
 pub mod chain;
 pub mod compile;
 pub mod format;
