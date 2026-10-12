@@ -819,12 +819,34 @@ packages are MIT.
   (`faust -lang rust`) and wrap it as a node (a build-time tool; question 3).
   Their results can be reference tests for ours.
 
-### Licence: questions
+### Licence: answers (maintainer, 2026-10-12)
 
-| # | Question | Proposal |
+| # | Question | Answer |
 | --- | --- | --- |
-| 1 | GPL-3.0-**or-later** or GPL-3.0-**only**? | Or-later (implemented). |
-| 2 | An SPDX line (`// SPDX-License-Identifier: GPL-3.0-or-later`) at the top of every source file? | Not now: the repository's `LICENSE` and the crate's `license` field cover it; add them when code from elsewhere comes in, so copied files are marked. |
-| 3 | master_me and PodcastPlugins: port the Faust DSP by hand, or generate Rust from it with the Faust compiler in the build? | Compare in M7 first; decide per module. |
-| 4 | The MIT notice of the UI's base styles and components from the sibling repositories (same author): keep it in a NOTICE file? | Not needed while the author is the same; a `NOTICE` file once others' MIT code comes in. |
+| 1 | GPL-3.0-or-later or GPL-3.0-only? | Or-later. |
+| 2 | SPDX lines in every source file? | Not now; when code from elsewhere comes in. |
+| 3 | master_me and PodcastPlugins: port by hand or generate with Faust? | Plan the comparison. The mixer has most of the tools already; let them inspire a similar experience (below). |
+| 4 | A NOTICE file for the sibling repositories' MIT parts? | No. |
+| 5 | Merge this and M5c. | Yes. |
+
+### Planned for milestone 7: the master_me / PodcastPlugins experience
+
+Most of their tools exist (EQ, compressor, multiband, limiter, de-esser, gate,
+loudness since M3); what they offer beyond them is the experience: a chain that
+works out of the box, a few controls that matter, and automatic level. M7 adds,
+inspired by them and built from the mixer's own nodes:
+- **The comparison first:** for each of their modules (master_me: gate, EQ,
+  leveler, knee compressor, multiband, limiter, LUFS; PodcastPlugins `Track` and
+  `Master`) what the mixer has, what differs (parameters, ballistics, defaults),
+  what is missing. Recorded here, with a measurement against their output where
+  it helps.
+- **Chain presets:** a speech track chain and a master chain like theirs, made of
+  existing nodes with their kind of defaults, one click on a strip or a bus.
+- **A leveler:** gain riding towards a loudness target with a brake (it is the
+  §8.2 auto-level controller), with Com-IS-Assist's speech/bed logic beside it.
+- **A simple view:** for such a chain, the few controls (target, amount,
+  character) instead of every node's parameters; the full chain stays editable.
+- Code is taken only where ours lacks it, with its notices (GPLv3 §5a); the Faust
+  DSP is read for the algorithms, ported by hand to Rust nodes unless a module is
+  better generated (decided per module).
 
