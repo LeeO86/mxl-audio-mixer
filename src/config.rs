@@ -50,6 +50,12 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MIXER_INPUT_STALL_S", default: "2", description: "An input whose head index does not move for this long is stalled and re-opened." },
     Setting { name: "MIXER_INPUT_DELAY_MAX_MS", default: "150", description: "Upper limit of an input's automatic extra delay." },
     Setting { name: "MIXER_INPUT_DELAY_CONFIRM", default: "false", description: "true: an automatic delay change waits for operator confirmation instead of applying with a fade." },
+    Setting { name: "WIDGET_FRAME_ANCESTORS", default: "'self'", description: "CSP frame-ancestors of the /widget pages; /widgets answers these origins with CORS." },
+    Setting { name: "TSL_ENABLE", default: "false", description: "Listen for TSL UMD 5.0 tally (audio-follows-video)." },
+    Setting { name: "TSL_UDP_PORT", default: "8910", description: "TSL UMD 5.0 over UDP." },
+    Setting { name: "TSL_TCP_PORT", default: "8911", description: "TSL UMD 5.0 over TCP (DLE/STX framing)." },
+    Setting { name: "TSL_SCREEN", default: "-1", description: "Only this TSL screen; -1 is every screen." },
+    Setting { name: "TSL_MAP", default: "empty", description: "display:index pairs, e.g. 0:1,1:2: the tally index a TSL display index drives; empty: the same number." },
 ];
 
 pub const ALLOWED_BLOCKS: [u32; 4] = [48, 96, 144, 240];
@@ -110,6 +116,15 @@ pub struct Config {
     pub input_stall: Duration,
     pub input_delay_max_samples: u32,
     pub input_delay_confirm: bool,
+    /// CSP source list for the widget pages.
+    pub widget_frame_ancestors: String,
+    pub tsl_enable: bool,
+    pub tsl_udp_port: u16,
+    pub tsl_tcp_port: u16,
+    /// Only this TSL screen; `None`: every screen.
+    pub tsl_screen: Option<u16>,
+    /// TSL display index → tally index; empty: the same number.
+    pub tsl_map: BTreeMap<u16, u16>,
     /// Every setting's value as text and its origin, for `GET /api/v1/config`.
     pub values: Vec<(&'static str, String, Origin)>,
 }
@@ -380,6 +395,35 @@ impl Parser<'_> {
             ));
         }
         let input_delay_confirm = self.boolean("MIXER_INPUT_DELAY_CONFIRM", false)?;
+        let widget_frame_ancestors = self
+            .get("WIDGET_FRAME_ANCESTORS")
+            .map(|(v, _)| v)
+            .unwrap_or_else(|| "'self'".into());
+        // One CSP directive's source list: a ';' or ',' would start another directive or policy.
+        if widget_frame_ancestors
+            .chars()
+            .any(|c| c.is_control() || c == ';' || c == ',')
+        {
+            return err("WIDGET_FRAME_ANCESTORS must be a CSP source list, e.g. 'self' https://designer.example");
+        }
+        let tsl_enable = self.boolean("TSL_ENABLE", false)?;
+        let tsl_udp_port: u16 = self.int("TSL_UDP_PORT", 8910, 1, 65535)?;
+        let tsl_tcp_port: u16 = self.int("TSL_TCP_PORT", 8911, 1, 65535)?;
+        if tsl_enable {
+            for p in [tsl_udp_port, tsl_tcp_port] {
+                if p == web_port || p == nmos_port {
+                    return err(format!("TSL port {p} is WEB_PORT or NMOS_PORT"));
+                }
+            }
+        }
+        let tsl_screen = match self.int::<i64>("TSL_SCREEN", -1, -1, 65535)? {
+            -1 => None,
+            s => Some(s as u16),
+        };
+        let tsl_map = match self.get("TSL_MAP") {
+            None => BTreeMap::new(),
+            Some((raw, _)) => parse_tsl_map(&raw)?,
+        };
 
         let mut config = Config {
             host_id,
@@ -409,6 +453,12 @@ impl Parser<'_> {
             input_stall,
             input_delay_max_samples: ms_to_samples(delay_max_ms),
             input_delay_confirm,
+            widget_frame_ancestors,
+            tsl_enable,
+            tsl_udp_port,
+            tsl_tcp_port,
+            tsl_screen,
+            tsl_map,
             values: Vec::new(),
         };
         config.values = SETTINGS
@@ -458,6 +508,17 @@ impl Config {
                 f64::from(self.input_delay_max_samples) * 1000.0 / f64::from(SAMPLE_RATE)
             ),
             "MIXER_INPUT_DELAY_CONFIRM" => self.input_delay_confirm.to_string(),
+            "WIDGET_FRAME_ANCESTORS" => self.widget_frame_ancestors.clone(),
+            "TSL_ENABLE" => self.tsl_enable.to_string(),
+            "TSL_UDP_PORT" => self.tsl_udp_port.to_string(),
+            "TSL_TCP_PORT" => self.tsl_tcp_port.to_string(),
+            "TSL_SCREEN" => self.tsl_screen.map_or("-1".into(), |s| s.to_string()),
+            "TSL_MAP" => self
+                .tsl_map
+                .iter()
+                .map(|(d, i)| format!("{d}:{i}"))
+                .collect::<Vec<_>>()
+                .join(","),
             _ => String::new(),
         }
     }
@@ -504,6 +565,25 @@ fn is_host(text: &str) -> bool {
         })
         // All-numeric dotted text that is not a valid IPv4 address is a typo.
         && !labels.iter().all(|l| l.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `TSL_MAP`: comma-separated `display:index` pairs, both 0–65535, each display once.
+fn parse_tsl_map(raw: &str) -> Result<BTreeMap<u16, u16>, ConfigError> {
+    let mut map = BTreeMap::new();
+    for item in raw.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+        let parsed = item.split_once(':').and_then(|(d, i)| {
+            Some((d.trim().parse::<u16>().ok()?, i.trim().parse::<u16>().ok()?))
+        });
+        let Some((display, index)) = parsed else {
+            return err(format!(
+                "TSL_MAP entries must look like display:index (0-65535), got {item}"
+            ));
+        };
+        if map.insert(display, index).is_some() {
+            return err(format!("TSL_MAP maps display {display} twice"));
+        }
+    }
+    Ok(map)
 }
 
 fn hostname() -> Option<String> {
@@ -566,6 +646,38 @@ mod tests {
             .collect();
         assert_eq!(explicit, vec!["HOST_ID"]);
         assert_eq!(c.values.len(), SETTINGS.len());
+        assert_eq!(c.widget_frame_ancestors, "'self'");
+        assert!(!c.tsl_enable);
+        assert_eq!(
+            (c.tsl_udp_port, c.tsl_tcp_port, c.tsl_screen),
+            (8910, 8911, None)
+        );
+        assert!(c.tsl_map.is_empty());
+    }
+
+    #[test]
+    fn widgets_and_tally() {
+        let c = load_vars(&[
+            ("WIDGET_FRAME_ANCESTORS", "'self' https://designer.example"),
+            ("TSL_ENABLE", "true"),
+            ("TSL_SCREEN", "3"),
+            ("TSL_MAP", "0:1, 1:2,7:7"),
+        ])
+        .unwrap();
+        assert_eq!(c.widget_frame_ancestors, "'self' https://designer.example");
+        assert_eq!(c.tsl_screen, Some(3));
+        assert_eq!(c.tsl_map, BTreeMap::from([(0, 1), (1, 2), (7, 7)]));
+        for (k, v) in [
+            ("WIDGET_FRAME_ANCESTORS", "'self'; script-src *"),
+            ("WIDGET_FRAME_ANCESTORS", "a, b"),
+            ("TSL_MAP", "0-1"),
+            ("TSL_MAP", "0:1,0:2"),
+            ("TSL_MAP", "70000:1"),
+            ("TSL_SCREEN", "-2"),
+        ] {
+            assert!(load_vars(&[(k, v)]).is_err(), "{k}={v}");
+        }
+        assert!(load_vars(&[("TSL_ENABLE", "true"), ("TSL_UDP_PORT", "8160")]).is_err());
     }
 
     #[test]

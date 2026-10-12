@@ -97,6 +97,12 @@ origin. No setting is a secret.
 | `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move for this long is stalled and re-opened. |
 | `MIXER_INPUT_DELAY_MAX_MS` | 150 | Upper limit of an input's automatic extra delay. |
 | `MIXER_INPUT_DELAY_CONFIRM` | false | true: an automatic delay change waits for operator confirmation instead of applying with a fade. |
+| `WIDGET_FRAME_ANCESTORS` | 'self' | CSP frame-ancestors of the /widget pages; /widgets answers these origins with CORS. |
+| `TSL_ENABLE` | false | Listen for TSL UMD 5.0 tally (audio-follows-video). |
+| `TSL_UDP_PORT` | 8910 | TSL UMD 5.0 over UDP. |
+| `TSL_TCP_PORT` | 8911 | TSL UMD 5.0 over TCP (DLE/STX framing). |
+| `TSL_SCREEN` | -1 | Only this TSL screen; -1 is every screen. |
+| `TSL_MAP` | empty | display:index pairs, e.g. 0:1,1:2: the tally index a TSL display index drives; empty: the same number. |
 
 Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
 group hint, default `Input <n>`) and `extra_delay` (`"auto"`, the default, or ms).
