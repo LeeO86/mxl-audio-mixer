@@ -78,6 +78,8 @@ fn after_fader(tap: &Tap) -> bool {
 
 /// Group `strips` into a new bus: their post-fader (and post-pan) sends move to
 /// the group, which sends to each of those buses; pre-fader sends (auxes) stay.
+/// Refused when a mix-minus of one of those buses leaves out one of the strips:
+/// through the group it would be back in.
 pub fn group(
     mix: &mut Mix,
     strips: &[String],
@@ -86,6 +88,28 @@ pub fn group(
     format: Option<Format>,
 ) -> Result<Made, String> {
     strips_of(mix, strips)?;
+    let moving: Vec<&str> = mix
+        .sends
+        .iter()
+        .filter(|s| strips.contains(&s.from) && after_fader(&s.tap))
+        .map(|s| s.to.as_str())
+        .collect();
+    let broken: Vec<&str> = mix
+        .buses
+        .iter()
+        .filter(|b| {
+            b.minus.as_ref().is_some_and(|m| {
+                moving.contains(&m.of.as_str()) && m.without.iter().any(|w| strips.contains(w))
+            })
+        })
+        .map(|b| b.id.as_str())
+        .collect();
+    if !broken.is_empty() {
+        return Err(format!(
+            "the mix-minus {} leaves out a strip of the group; through the group it would be back in",
+            broken.join(", ")
+        ));
+    }
     let id = free_id(mix, id, "group")?;
     let mut bus = Bus::new(&id, format.unwrap_or(Format::Stereo));
     if let Some(n) = name {
@@ -452,6 +476,10 @@ mod tests {
         assert!(m.send("host", "group-1").is_some());
         assert!(m.send("group-1", "main").is_some());
         assert!(m.send("phone", "main").is_some());
+        // A mix-minus of main without phone: grouping phone is refused.
+        mix_minus(&mut m, "main", &["phone".into()], None, None).unwrap();
+        let err = group(&mut m, &["phone".into()], None, None, None).unwrap_err();
+        assert!(err.contains("minus-1"), "{err}");
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod meters;
 pub mod mix;
 pub mod mxlio;
 pub mod nmos;
+pub mod operations_api;
 pub mod ops;
 pub mod outputs;
 pub mod preview;

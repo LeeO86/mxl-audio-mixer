@@ -142,6 +142,11 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/n1.sh
+        run: tests/integration/n1.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
       - name: tests/integration/show.sh
         run: tests/integration/show.sh
         env:

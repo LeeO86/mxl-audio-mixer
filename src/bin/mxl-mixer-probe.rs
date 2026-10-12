@@ -12,6 +12,8 @@
 //! `--onsets 0.05` lists where channel 1 rises above that level after 100 ms
 //! below it: the flow index, and its position in the TAI second in ms (for a
 //! source that starts a burst on every second, the latency).
+//! `--correlate 4` gives channel 1's correlation with tones 1 to 4 (each at its
+//! best alignment): which tones a sum carries (the N-1 check of §17).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,7 +38,7 @@ fn main() {
             .and_then(|i| args.get(i + 1).cloned())
     };
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--behind-ms MS] [--expect CH:SRC:GAIN ...] [--onsets LEVEL]");
+        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--behind-ms MS] [--expect CH:SRC:GAIN ...] [--onsets LEVEL] [--correlate N]");
         std::process::exit(2)
     };
     let domain = PathBuf::from(arg("--domain").unwrap_or_else(|| usage()));
@@ -218,12 +220,45 @@ fn main() {
         }
         None => Vec::new(),
     };
+    let correlation: Vec<f64> = match arg("--correlate").and_then(|n| n.parse::<usize>().ok()) {
+        Some(n) => {
+            let x: Vec<(u64, f64)> = data
+                .first()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+                .skip(4800)
+                .filter(|(_, v)| !v.is_nan())
+                .map(|(k, v)| (first + k as u64, f64::from(*v)))
+                .collect();
+            let energy: f64 = x.iter().map(|(_, v)| v * v).sum();
+            (0..n)
+                .map(|t| {
+                    (0..48u64)
+                        .map(|shift| {
+                            let (dot, ref_energy) = x.iter().fold((0.0, 0.0), |(d, e), (i, v)| {
+                                let r = f64::from(tone(t, i + shift));
+                                (d + v * r, e + r * r)
+                            });
+                            if energy > 0.0 && ref_energy > 0.0 {
+                                dot / (energy * ref_energy).sqrt()
+                            } else {
+                                0.0
+                            }
+                        })
+                        .fold(0.0f64, f64::max)
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     println!(
         "{}",
         serde_json::json!({
             "flow": flow, "channels": channels, "samples": read,
             "failed_reads": failed, "levels": per_channel, "checks": checks,
-            "onsets": onsets,
+            "onsets": onsets, "correlation": correlation,
         })
     );
 }
