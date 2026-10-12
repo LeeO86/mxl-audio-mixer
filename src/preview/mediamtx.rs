@@ -13,8 +13,11 @@ use serde::Serialize;
 
 use crate::config::Config;
 
-/// The MediaMTX configuration of the built-in instance.
+/// The MediaMTX configuration of the built-in instance: only the mixer's paths
+/// (`<PREVIEW_PATH_PREFIX>/…`); publishing only from this host (the encoders over
+/// RTSP on 127.0.0.1), reading (WHEP) from anywhere.
 pub fn render(config: &Config) -> String {
+    let paths = config.preview_path_prefix.replace('.', "\\.");
     let hosts = config
         .nmos_host_address
         .map(|a| format!("[\"{a}\"]"))
@@ -31,6 +34,7 @@ pub fn render(config: &Config) -> String {
          rtmp: false\n\
          hls: false\n\
          srt: false\n\
+         moq: false\n\
          webrtc: true\n\
          webrtcAddress: :{whep}\n\
          webrtcAllowOrigins: [\"*\"]\n\
@@ -38,8 +42,12 @@ pub fn render(config: &Config) -> String {
          webrtcLocalTCPAddress: \"\"\n\
          webrtcAdditionalHosts: {hosts}\n\
          webrtcICEServers2: []\n\
+         authMethod: internal\n\
+         authInternalUsers:\n\
+         - user: any\n  ips: [\"127.0.0.1\", \"::1\"]\n  permissions:\n  - action: publish\n  - action: read\n\
+         - user: any\n  permissions:\n  - action: read\n\
          pathDefaults:\n  source: publisher\n\
-         paths:\n  all_others:\n",
+         paths:\n  '~^{paths}/':\n",
         rtsp = config.mediamtx_rtsp_port,
         whep = config.mediamtx_whep_port,
         ice = config.mediamtx_ice_udp_port,
@@ -198,6 +206,8 @@ mod tests {
         assert!(yml.contains("webrtcLocalUDPAddress: :8199\n"));
         assert!(yml.contains("webrtcAdditionalHosts: [\"192.0.2.7\"]\n"));
         assert!(yml.contains("api: false\n") && yml.contains("hls: false\n"));
+        assert!(yml.contains("moq: false\n"));
+        assert!(yml.contains("paths:\n  '~^mxl-audio-mixer/':\n"));
         let list = serde_json::json!({"items": [
             {"name": "mxl-audio-mixer/main", "readers": [{"type": "webRTCSession"}, {"type": "webRTCSession"}]},
             {"name": "mxl-audio-mixer/phones", "readers": []},

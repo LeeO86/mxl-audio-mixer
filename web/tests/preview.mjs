@@ -12,7 +12,8 @@ import { chromium } from "playwright-core";
 const [mixer, monitor, seconds] = process.argv.slice(2);
 const browser = await chromium.launch({
   executablePath: process.env.CHROME || "/usr/bin/google-chrome",
-  args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"],
+  // The measuring AudioWorklet needs a secure context; the UI's player (RTCPeerConnection, <audio>) does not.
+  args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", `--unsafely-treat-insecure-origin-as-secure=${new URL(mixer).origin}`],
 });
 try {
   const page = await browser.newPage();

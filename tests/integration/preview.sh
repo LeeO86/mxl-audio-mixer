@@ -4,7 +4,8 @@
 # - Own mode: the mixer starts MediaMTX as a child; a stream starts on a listen
 #   request, plays in the browser, its latency is measured with the second-pulse
 #   oscillator; it stops after the grace time; the child, killed, is restarted
-#   and the stream published again; a personal monitor plays.
+#   and the stream published again; a personal monitor plays (page and WHEP on
+#   the host address); no publishing from the network, only the mixer's paths.
 # - Shared mode (PREVIEW_PUBLISH_URL): no child; the streams go to a separate
 #   MediaMTX, kept alive by its readers (MEDIAMTX_API_URL).
 # Needs MEDIAMTX_BIN (default: mediamtx in PATH), Chrome ($CHROME) and the web
@@ -24,8 +25,8 @@ stream() { # <id> <field>
 is_stream() { [[ "$(stream "$1" state)" == "$2" ]]; }
 child_running() { [[ "$(preview "d['child']['running']")" == True ]]; }
 restarted() { [[ "$(preview "d['child']['restarts']")" -ge 1 ]]; }
-play() { # <monitor id> <seconds> ; the JSON of preview.mjs in $PLAYED
-    PLAYED=$(node "$ROOT/web/tests/preview.mjs" "$WEB" "$1" "$2")
+play() { # <monitor id> <seconds> [mixer base] ; the JSON of preview.mjs in $PLAYED
+    PLAYED=$(node "$ROOT/web/tests/preview.mjs" "${3:-$WEB}" "$1" "$2")
     echo "$PLAYED" >>"$IT_OUT/preview-played.log"
     log "played $1: $PLAYED"
 }
@@ -45,6 +46,10 @@ CHILD=$(preview "d['child']['pid']")
 pass "own mode: MediaMTX child $CHILD started"
 setup_show
 [[ "$(stream main state)" == idle ]] || fail "a stream nobody listens to: $(stream main state)"
+whip() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/sdp' --data-binary $'v=0\r\n' "$1"; }
+[[ "$(whip "http://$HOST_IP:8609/mxl-audio-mixer/x/whip")" == 401 ]] || fail "WHIP from the network not refused"
+[[ "$(whip "http://127.0.0.1:8609/other/x/whep")" == 400 ]] || fail "a path outside the prefix is served"
+pass "built-in MediaMTX: no publishing from the network, only the mixer's paths"
 
 play main 12
 [[ "$(played "d['received_s'] >= 8 and d['peak'] > 0.1")" == True ]] || fail "no audio in the browser: $PLAYED"
@@ -69,9 +74,9 @@ play main 6
 pass "MediaMTX killed: restarted (pid $NEW), the stream published again and playing"
 
 ID=$(api POST /api/v1/personal '{"source": {"signal": "osc"}}' | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-play "$ID" 6
+play "$ID" 6 "${WEB/127.0.0.1/$HOST_IP}"
 [[ "$(played "d['received_s'] >= 3 and d['onsets'] >= 4")" == True ]] || fail "personal monitor: $PLAYED"
-pass "personal monitor $ID: plays over WHEP"
+pass "personal monitor $ID: plays over WHEP, the page and WHEP on the host's address"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$WEB/api/v1/personal/$ID")
 [[ "$code" == 204 ]] || fail "delete personal: $code"
 
@@ -92,6 +97,7 @@ rtspTransports: [tcp]
 rtmp: false
 hls: false
 srt: false
+moq: false
 webrtc: true
 webrtcAddress: :8619
 webrtcLocalUDPAddress: :8219
