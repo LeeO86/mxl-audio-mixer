@@ -7,9 +7,9 @@
 //!   <WIDGET_FRAME_ANCESTORS>`, no `X-Frame-Options`. A bad parameter is 400, an
 //!   unknown id 404, another method than GET 405.
 //!
-//! Widgets now: `strip`, `fader-bank`, `loudness`, `monitor`, `talkback`; `vca`
-//! comes with the VCAs (M6). The `talkback` widget's browser microphone needs a
-//! frame with `allow="microphone"` on an HTTPS page.
+//! Widgets: `strip`, `fader-bank`, `loudness`, `monitor`, `talkback`, `vca`. The
+//! `talkback` widget's browser microphone needs a frame with `allow="microphone"`
+//! on an HTTPS page.
 
 use std::collections::HashMap;
 
@@ -89,6 +89,7 @@ fn catalogue(mix: &Mix) -> Value {
         .map(|d| d.id.as_str())
         .collect();
     let mics: Vec<&str> = talkback.mics.iter().map(|m| m.id.as_str()).collect();
+    let vcas: Vec<&str> = mix.vcas.iter().map(|v| v.id.as_str()).collect();
     let pages: Vec<String> = mix
         .layouts
         .iter()
@@ -144,6 +145,13 @@ fn catalogue(mix: &Mix) -> Value {
             }),
             260,
             110
+        ),
+        item(
+            "vca",
+            "VCA",
+            json!({"type": "object", "properties": {"vca": {"type": "string", "title": "VCA", "enum": vcas}}, "required": ["vca"]}),
+            120,
+            480
         ),
     ])
 }
@@ -212,6 +220,11 @@ pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (St
                 _ => Ok(()),
             }
         }
+        "vca" => match q.get("vca") {
+            Some(v) if mix.vca(v).is_some() => Ok(()),
+            Some(v) => bad(format!("VCA {v} does not exist")),
+            None => bad("vca is required".into()),
+        },
         "monitor" => match q.get("monitor") {
             Some(m) if mix.control_room.monitors.iter().any(|x| &x.id == m) => Ok(()),
             Some(m) => bad(format!("monitor {m} does not exist")),
@@ -346,7 +359,9 @@ mod tests {
         assert_eq!(status("fader-bank", &[("strips", "s1,x")]), Some(400));
         assert_eq!(status("fader-bank", &[]), Some(400));
         assert_eq!(status("monitor", &[("monitor", "main")]), Some(400));
-        assert_eq!(status("vca", &[]), Some(404));
+        assert_eq!(status("vca", &[]), Some(400));
+        assert_eq!(status("vca", &[("vca", "band")]), Some(400));
+        assert_eq!(status("nope", &[]), Some(404));
         assert_eq!(status("talkback", &[]), None);
         assert_eq!(status("talkback", &[("destinations", "ifb")]), Some(400));
         assert_eq!(status("talkback", &[("mic", "dir")]), Some(400));

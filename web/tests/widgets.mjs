@@ -22,6 +22,7 @@ try {
     ["loudness", "signal=main&theme=dark"],
     ["monitor", "monitor=main&theme=dark"],
     ["talkback", "theme=dark"],
+    ["vca", "vca=band&theme=dark"],
   ];
   for (const [id, query] of widgets) {
     const src = `${mixer}/widget/${id}?${query}`;

@@ -219,6 +219,42 @@ try {
   await until("listen-back off", async () => (await api("/api/v1/listen-back")) === null);
   pass("talkback: latched by a short press (the monitor's talkback dim shown), released; held talks only while held; listen-back of the return");
 
+  // VCAs and mute groups: made in the groups panel; the VCA fader by keys on both clients; spill; a mute
+  // group from the toolbar.
+  await page.goto(`${base}/#console`);
+  await page.getByRole("button", { name: "VCAs & groups" }).click();
+  await page.getByLabel("New VCA id").fill("talent");
+  await page.getByLabel("New VCA name").fill("Talent");
+  await page.getByRole("button", { name: "+ VCA" }).click();
+  await until("VCA talent", async () => (await api("/api/v1/vcas")).some((v) => v.id === "talent"));
+  await page.getByLabel("Vox in Talent").check();
+  await until("vox in talent", async () => (await api("/api/v1/vcas/talent")).members.includes("vox"));
+  await page.locator('[data-vca="talent"] .vtrack').focus();
+  for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowDown");
+  await until("VCA at −2 dB", async () => (await api("/api/v1/vcas/talent")).fader_db === -2);
+  await other.locator('[data-vca="talent"] .vvalue', { hasText: "−2.0" }).waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Spill Talent" }).click();
+  await page.locator(".spillbanner").waitFor({ timeout: 3000 });
+  const spilledStrips = await page.locator(".strips .strip").count();
+  if (spilledStrips !== 1 || !(await page.locator('.strips [data-signal="vox"]').count())) throw new Error(`spill shows ${spilledStrips} strips`);
+  await page.getByLabel("New mute group id").fill("band");
+  await page.getByLabel("New mute group name").fill("Band");
+  await page.getByRole("button", { name: "+ Mute group" }).click();
+  await until("mute group band", async () => (await api("/api/v1/mute-groups")).some((g) => g.id === "band"));
+  await page.getByLabel("Guitar in Band").check();
+  await until("gtr in band", async () => (await api("/api/v1/mute-groups/band")).members.includes("gtr"));
+  await page.screenshot({ path: `${out}/vca-groups.png`, fullPage: true });
+  await page.locator(".spillbanner").getByRole("button", { name: "Show all" }).click();
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.locator(".mutegroups").getByRole("button", { name: "Band" }).click();
+  await until("band active", async () => (await api("/api/v1/mute-groups/band")).active === true);
+  await page.locator('[data-signal="gtr"] .btn.mute.othermute').waitFor({ timeout: 3000 });
+  if ((await api("/api/v1/strips/gtr")).mute !== false) throw new Error("the mute group changed gtr's own mute");
+  await page.screenshot({ path: `${out}/console-vca.png`, fullPage: true });
+  await page.locator(".mutegroups").getByRole("button", { name: "Band" }).click();
+  await until("band inactive", async () => (await api("/api/v1/mute-groups/band")).active === false);
+  pass("VCAs and mute groups: VCA made and assigned in the panel, its fader by keys on both clients, spill, a mute group from the toolbar (gtr's own mute unchanged)");
+
   // Routing: a send from vox to aux through the matrix.
   await page.goto(`${base}/#routing`);
   await page.getByRole("button", { name: "Vox to Aux" }).click();
