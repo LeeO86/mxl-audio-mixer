@@ -751,7 +751,7 @@ at −12.1 dBFS, L below −45 dBFS; off again: 30 Hz on L).
 | # | Question | Answer |
 | --- | --- | --- |
 | 1 | Defaults (Opus 128 kbit/s, 10 ms; 10 s grace; listen every 5 s; 8 web monitors; personal monitors removed after 10 min) | Accepted. |
-| 2 | Browser talkback with the built-in MediaMTX | Accepted: publishing from anywhere only on `<prefix>/talkback/…`, own mode only (M5c). |
+| 2 | Browser talkback with the built-in MediaMTX | Accepted: publishing from anywhere only on the talkback paths, own mode only (M5c). The paths are §10.2's `<prefix>/talkback-<client>`. |
 | 3 | `PREVIEW_*` values in the deployment example | Kept as examples. |
 | 4 | Merge M5b before M5c | Yes. |
 
