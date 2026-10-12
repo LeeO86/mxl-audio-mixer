@@ -102,11 +102,12 @@ api() { # <method> <path> [body] ; prints the response, fails on HTTP errors
     curl -fsS -X "$1" -H 'content-type: application/json' "$WEB$2" ${3:+-d "$3"}
 }
 
-glitches() { # input 1 missing samples + DSP deadline misses
-    local missing misses
+glitches() { # input 1 missing samples + DSP deadline misses + its delay (an automatic change fades the input)
+    local missing misses delay
     missing=$(input 1 missing_samples)
     misses=$(curl -fsS "$WEB/metrics" | sed -n 's/^mxl_audio_mixer_dsp_deadline_misses_total \(.*\)/\1/p')
-    echo $((missing + misses))
+    delay=$(json "$WEB/api/v1/inputs/1" "round(d['effective_delay_ms'] * 48)")
+    echo $((missing + misses + delay))
 }
 
 # probe <seconds> <CH:TONE:GAIN...>: read $OUT_FLOW in $OWN with mxl-mixer-probe;
@@ -135,7 +136,7 @@ EOF
         if ((attempt == 2)) || [[ "$(glitches)" == "$before" ]]; then
             fail "probe: $out"
         fi
-        log "the input was late or the DSP missed a deadline during the probe; measuring again"
+        log "the input was late, its delay changed or the DSP missed a deadline during the probe; measuring again"
     done
 }
 
