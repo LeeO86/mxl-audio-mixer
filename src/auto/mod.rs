@@ -50,7 +50,8 @@ pub struct DuckStatus {
 }
 
 fn to_db(g: f64) -> Option<f64> {
-    (g > 0.0).then(|| (20.0 * g.log10() * 100.0).round() / 100.0)
+    // + 0.0: no "-0.0".
+    (g > 0.0).then(|| (20.0 * g.log10() * 100.0).round() / 100.0 + 0.0)
 }
 
 impl Auto {
