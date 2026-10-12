@@ -9,6 +9,20 @@ COPY scripts/build-mxl.sh /usr/local/bin/build-mxl.sh
 RUN VCPKG_ROOT=/opt/vcpkg MXL_BUILD_DIR=/tmp/mxl /usr/local/bin/build-mxl.sh /opt/mxl \
     && rm -rf /tmp/mxl /opt/vcpkg/buildtrees /opt/vcpkg/downloads
 
+# MediaMTX (MIT) for the built-in preview server (Appendix B.1), the release tarball by checksum.
+FROM ubuntu:24.04 AS mediamtx
+ARG TARGETARCH=amd64
+ARG MEDIAMTX_VERSION=v1.20.1
+ARG MEDIAMTX_SHA256_AMD64=81b143f55a5d23d4a8c028d52869c14ea4a59919900528698fcc97a747fd69c6
+ARG MEDIAMTX_SHA256_ARM64=d1689f0bfefb1864e5ed3dcc8495eb2d7ec0a654f90bf3cd48980cb3bd08718a
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "$TARGETARCH" in amd64) sum=$MEDIAMTX_SHA256_AMD64 ;; arm64) sum=$MEDIAMTX_SHA256_ARM64 ;; *) exit 1 ;; esac; \
+    curl -fsSL -o /tmp/m.tgz "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    echo "$sum  /tmp/m.tgz" | sha256sum -c; \
+    mkdir /opt/mediamtx && tar xzf /tmp/m.tgz -C /opt/mediamtx mediamtx LICENSE && rm /tmp/m.tgz
+
 FROM node:22-bookworm-slim AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
@@ -19,7 +33,7 @@ RUN npm run build
 
 FROM ubuntu:24.04 AS build
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential curl ca-certificates git pkg-config clang libclang-dev \
+        build-essential cmake curl ca-certificates git pkg-config clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
@@ -40,9 +54,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 COPY --from=mxl /opt/mxl/lib/libmxl.so* /usr/local/lib/
 COPY --from=build /usr/local/bin/mxl-audio-mixer /usr/local/bin/mxl-mixer-tone \
     /usr/local/bin/mxl-mixer-probe /usr/local/bin/
+COPY --from=mediamtx /opt/mediamtx/mediamtx /usr/local/bin/mediamtx
+COPY --from=mediamtx /opt/mediamtx/LICENSE /usr/share/doc/mediamtx/LICENSE
 RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found")
 USER 1000
-EXPOSE 8160 3312
+# Web/API, NMOS, the built-in MediaMTX's WHEP (TCP) and ICE (UDP).
+EXPOSE 8160 3312 8599 8199/udp
 LABEL org.opencontainers.image.source="https://github.com/LeeO86/mxl-audio-mixer" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \
