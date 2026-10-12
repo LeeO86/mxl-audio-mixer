@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Licence
+
+- The mixer is licensed under the GNU General Public License, version 3 or later
+  (`GPL-3.0-or-later`), instead of MIT, so that it and every fork stay open
+  source. No release was made under MIT.
+
 ### Milestone 5 (part 3): talkback
 
 - Talkback (§10.2): mics on MXL input channels and browser microphones (WHIP to
