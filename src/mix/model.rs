@@ -102,6 +102,9 @@ pub struct Strip {
     /// Snapshot recalls leave this signal alone (§12.5).
     #[serde(default)]
     pub recall_safe: bool,
+    /// Solo-in-place never mutes this signal (§10.1).
+    #[serde(default)]
+    pub solo_safe: bool,
     /// The tally index (§10.3) this strip follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tally_index: Option<u16>,
@@ -148,6 +151,8 @@ pub struct Bus {
     pub colour: Option<String>,
     #[serde(default)]
     pub recall_safe: bool,
+    #[serde(default)]
+    pub solo_safe: bool,
 }
 
 /// Where a send or key taps its source (§5). Pre/post-EQ and pre/post-dynamics
@@ -310,6 +315,8 @@ pub struct Mix {
     pub layouts: Vec<super::show::Layout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snapshots: Vec<super::show::Snapshot>,
+    #[serde(default)]
+    pub control_room: super::room::ControlRoom,
 }
 
 /// What a signal id names.
@@ -407,6 +414,7 @@ impl Mix {
             }
         }
         super::show::validate(self)?;
+        super::room::validate(self, inputs)?;
         for s in &self.strips {
             check_name(&s.name)?;
             if let Some(a) = &s.afv {
@@ -701,6 +709,7 @@ pub(crate) mod tests {
             loudness: false,
             colour: None,
             recall_safe: false,
+            solo_safe: false,
             tally_index: None,
             afv: None,
         }
@@ -718,6 +727,7 @@ pub(crate) mod tests {
             compensate: true,
             colour: None,
             recall_safe: false,
+            solo_safe: false,
         }
     }
 

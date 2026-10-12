@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Milestone 5 (part 1): control room
+
+- Monitors in the show (`control_room`): source (strip, bus or input), level, dim,
+  cut, mono/difference/swap/left/right checks, room alignment (trim, delay, chain),
+  SPL presets, published as MXL flows with NMOS senders; bass management (LR4
+  crossover to the LFE) switched on and off per monitor. Dim and the programme
+  under solo default to −21 dB.
+- Solo: PFL and AFL on every strip and bus, additive or interlock, PFL trim, the
+  programme under solo, solo-in-place with solo-safe signals.
+- The `oscillator` node (sine, EBU R 49 stereo ident).
+- `/api/v1/control-room`, `/api/v1/monitors`, `/api/v1/solo`; the Control room tab,
+  PFL/AFL on the strips, the `monitor` widget.
+- CI runs the integration tests on release binaries.
+
 ### Widgets and tally
 
 - Widgets for operator screens (Appendix B.2): `GET /widgets`, `/widget/strip`,

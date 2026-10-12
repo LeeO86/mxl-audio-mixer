@@ -99,6 +99,16 @@ pub enum DelayUnit {
     Frames,
 }
 
+/// What an oscillator plays (§10.2 line-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Waveform {
+    Sine,
+    /// The stereo ident of EBU R 49: the tone on every channel, the first (left)
+    /// one interrupted for 0.25 s every 3 s.
+    EbuIdent,
+}
+
 /// A node's type and parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
@@ -176,6 +186,22 @@ pub enum ProcKind {
         crossovers_hz: Vec<f64>,
         bands: Vec<MultibandBand>,
     },
+    /// A tone generator: replaces the signal with a sine at `level_dbfs` on every
+    /// channel (bypass: the input again).
+    Oscillator {
+        waveform: Waveform,
+        freq_hz: f64,
+        level_dbfs: f64,
+    },
+    /// Bass management of a monitor (§10.1), not a chain node: the channels
+    /// other than `lfe` high-passed, their sum low-passed into `lfe` (Linkwitz-
+    /// Riley 24 dB/oct at `crossover_hz`), the LFE input at `lfe_gain_db`.
+    #[serde(skip)]
+    BassManagement {
+        crossover_hz: f64,
+        lfe_gain_db: f64,
+        lfe: usize,
+    },
     /// Delay in samples, ms or frames (at `frame_rate`).
     Delay {
         time: f64,
@@ -237,6 +263,8 @@ impl ProcKind {
             Self::Compressor { .. } => "compressor",
             Self::Limiter { .. } => "limiter",
             Self::Expander { .. } => "expander",
+            Self::Oscillator { .. } => "oscillator",
+            Self::BassManagement { .. } => "bass-management",
             Self::Gate { .. } => "gate",
             Self::DeEsser { .. } => "de-esser",
             Self::Ducker { .. } => "ducker",
@@ -248,7 +276,9 @@ impl ProcKind {
     pub fn category(&self) -> Category {
         match self {
             Self::Eq { .. } | Self::Filter { .. } | Self::DynamicEq { .. } => Category::Eq,
-            Self::Delay { .. } => Category::Other,
+            Self::Delay { .. } | Self::Oscillator { .. } | Self::BassManagement { .. } => {
+                Category::Other
+            }
             _ => Category::Dynamics,
         }
     }
@@ -399,6 +429,22 @@ impl ProcKind {
                     times(b.attack_ms, b.release_ms)?;
                     range("makeup_db", b.makeup_db, -24.0, 24.0)?;
                 }
+            }
+            Self::BassManagement {
+                crossover_hz,
+                lfe_gain_db,
+                ..
+            } => {
+                range("crossover_hz", *crossover_hz, 40.0, 250.0)?;
+                range("lfe_gain_db", *lfe_gain_db, -20.0, 20.0)?;
+            }
+            Self::Oscillator {
+                freq_hz,
+                level_dbfs,
+                ..
+            } => {
+                freq(*freq_hz)?;
+                range("level_dbfs", *level_dbfs, -100.0, 0.0)?;
             }
             Self::Delay {
                 time,
@@ -552,6 +598,16 @@ impl ProcKind {
                     ]
                 }))
                 .collect(),
+            Self::Oscillator {
+                freq_hz,
+                level_dbfs,
+                ..
+            } => vec![*freq_hz, *level_dbfs],
+            Self::BassManagement {
+                crossover_hz,
+                lfe_gain_db,
+                ..
+            } => vec![*crossover_hz, *lfe_gain_db],
             Self::Delay { .. } => Vec::new(),
         };
         v.into_iter().map(|x| x as f32).collect()
@@ -594,6 +650,8 @@ impl ProcKind {
             Self::Ducker { key, .. } => (&key.signal, format!("{:?}", key.tap)).hash(&mut h),
             Self::Multiband { bands, .. } => bands.len().hash(&mut h),
             Self::Delay { .. } => self.delay_samples().hash(&mut h),
+            Self::Oscillator { waveform, .. } => waveform.hash(&mut h),
+            Self::BassManagement { lfe, .. } => lfe.hash(&mut h),
             Self::Expander { .. } | Self::Gate { .. } => {}
         }
         h.finish()

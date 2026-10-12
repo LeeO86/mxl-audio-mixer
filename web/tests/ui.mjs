@@ -136,6 +136,21 @@ try {
   await page.screenshot({ path: `${out}/nmos-tally.png`, fullPage: true });
   pass("tally: index and AFV set in the strip settings; on air over TSL: AFV open, the strip lit on both clients, the lamp listed");
 
+  // Control room: a monitor on main, PFL of vox from its strip, dim from the monitor card.
+  await api("/api/v1/monitors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "main", name: "Main", format: "stereo", source: { signal: "main" } }) });
+  await page.goto(`${base}/#console`);
+  await page.getByRole("button", { name: "PFL Vox" }).click();
+  await until("vox on PFL", async () => (await api("/api/v1/solo")).vox === "pfl");
+  await page.goto(`${base}/#control-room`);
+  await page.locator(".soloed .chip", { hasText: "PFL Vox" }).waitFor({ timeout: 3000 });
+  await page.locator(".monitor").getByRole("button", { name: "Dim" }).click();
+  await until("main dimmed", async () => (await api("/api/v1/monitors/main")).dim === true);
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: `${out}/control-room.png`, fullPage: true });
+  await page.getByRole("button", { name: "Clear solos" }).click();
+  await until("no solo", async () => Object.keys(await api("/api/v1/solo")).length === 0);
+  pass("control room: PFL from the strip shown as soloed, monitor dim from its card, solos cleared");
+
   // Routing: a send from vox to aux through the matrix.
   await page.goto(`${base}/#routing`);
   await page.getByRole("button", { name: "Vox to Aux" }).click();

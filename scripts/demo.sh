@@ -64,6 +64,11 @@ for s in host guest; do
 done
 api POST /api/v1/buses/main/chain '{"id": "lim", "type": "limiter", "ceiling_db": -1, "release_ms": 50, "lookahead_ms": 1.5, "true_peak": true}'
 api PUT /api/v1/outputs/main
+api POST /api/v1/buses '{"id": "osc", "name": "Oscillator", "format": "stereo"}'
+api POST /api/v1/buses/osc/chain '{"id": "tone", "type": "oscillator", "waveform": "ebu-ident", "freq_hz": 1000, "level_dbfs": -18, "bypass": true}'
+api POST /api/v1/monitors '{"id": "main", "name": "Main", "kind": "speakers", "format": "stereo", "source": {"signal": "main"}, "calibration_spl": 85, "publish": true}'
+api POST /api/v1/monitors '{"id": "phones", "name": "Phones", "kind": "headphones", "format": "stereo", "source": {"signal": "main"}}'
+api PATCH /api/v1/control-room '{"sources": [{"signal": "main"}, {"signal": "aux-1"}, {"signal": "aux-2"}, {"signal": "osc"}, {"input": 1}]}'
 api PUT /api/v1/layouts '[{"name": "Show", "pages": [{"name": "Talent", "signals": ["host", "guest", "phone"]}, {"name": "Playout", "signals": ["music-l", "music-r", "sfx", "amb"]}]}]'
 api POST /api/v1/snapshots '{"name": "Top of show"}'
 

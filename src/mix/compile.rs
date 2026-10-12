@@ -19,6 +19,7 @@ use std::hash::{Hash, Hasher};
 use super::chain::{Category, Proc, ProcKind};
 use super::format::{pan_gains, stereo_matrix, width_matrix, Format};
 use super::model::{Db, Kind, Mix, Tap};
+use super::room::{check_matrix, monitor_gain, SoloKind, Source};
 use crate::engine::plan::{NodeId, Plan, PlanBuilder, Processor, Span, Step};
 
 /// A gain node of a compiled plan, as the control side remembers it.
@@ -51,6 +52,8 @@ pub struct Compiler {
     pub analysis: Option<(String, Tap)>,
     /// The gain of each AFV strip's AFV node (1 open, its depth closed).
     pub afv: HashMap<String, f32>,
+    /// Who is soloed, and how (the control room's runtime state).
+    pub solo: std::collections::BTreeMap<String, SoloKind>,
 }
 
 impl Compiler {
@@ -360,7 +363,11 @@ impl Compiler {
                     });
                     let chain_sig = chain_hash(&s.chain);
                     let (after, named, pre) = c.chain(&s.id, &s.chain, chain_in, n, &taps);
-                    let fader = if s.mute {
+                    let sip_muted = mix.control_room.solo.sip
+                        && !c.compiler.solo.is_empty()
+                        && !c.compiler.solo.contains_key(&s.id)
+                        && !s.solo_safe;
+                    let fader = if s.mute || sip_muted {
                         0.0
                     } else {
                         s.fader_db.gain() as f32
@@ -581,6 +588,221 @@ impl Compiler {
             taps.insert(id.clone(), t);
         }
 
+        // The control room: the solo bus, then every monitor path.
+        let room = &mix.control_room;
+        let soloed = c.compiler.solo.clone();
+        let solo_bus = if soloed.is_empty() {
+            None
+        } else {
+            let bus = c.b.buffers(2);
+            c.b.step(Step::Clear { dst: bus });
+            for (id, kind) in &soloed {
+                let tap = match kind {
+                    SoloKind::Pfl => Tap::PreFader,
+                    SoloKind::Afl => mix.default_tap(id),
+                };
+                let (Some(t), Some(from)) = (taps.get(id), mix.tap_format(id, &tap)) else {
+                    continue;
+                };
+                let src = t.get(&tap).0;
+                let coefficients = c.b.coefficients(&width_matrix(from, Format::Stereo, laws));
+                let gain = match kind {
+                    SoloKind::Pfl => Db(room.solo.pfl_trim_db).gain() as f32,
+                    SoloKind::Afl => 1.0,
+                };
+                let node = c.node(
+                    format!("solo/{id}"),
+                    (
+                        format_name(from),
+                        *kind,
+                        f64::from(laws.pan).to_bits(),
+                        f64::from(laws.mono_sum).to_bits(),
+                        t.chain,
+                    ),
+                    vec![gain],
+                );
+                c.b.step(Step::Send {
+                    node,
+                    src,
+                    dst: bus,
+                    coefficients,
+                });
+            }
+            let tp = c.state("meter/solo".into(), 2, |pid| Processor::true_peak(pid, 2));
+            let slot = c.b.meter(2);
+            c.b.step(Step::Meter {
+                src: bus,
+                slot,
+                proc: tp,
+            });
+            meters.push(("solo".into(), slot, 2));
+            Some(bus)
+        };
+        let mono_sum = Db(f64::from(laws.mono_sum)).gain() as f32;
+        for m in &room.monitors {
+            let n = m.format.channels();
+            let key = m.key();
+            let mon = c.b.buffers(n);
+            c.b.step(Step::Clear { dst: mon });
+            let under_solo = solo_bus.is_some() && m.follows_solo;
+            let programme = if under_solo {
+                room.solo.programme_db.gain() as f32
+            } else {
+                1.0
+            };
+            let source = match &m.source {
+                Some(Source::Signal(id)) => {
+                    let tap = mix.default_tap(id);
+                    match (taps.get(id), mix.tap_format(id, &tap)) {
+                        (Some(t), Some(from)) => Some((t.get(&tap).0, from, id.clone(), t.chain)),
+                        _ => None,
+                    }
+                }
+                Some(Source::Input(i)) => {
+                    let pin = c.b.buffers(2);
+                    for ch in 0..2 {
+                        let dst = c.b.buffer(pin, ch);
+                        c.b.step(Step::Patch {
+                            input: (*i - 1) as u32,
+                            channel: ch as u32,
+                            dst,
+                        });
+                    }
+                    Some((pin, Format::Stereo, format!("input {i}"), 0))
+                }
+                None => None,
+            };
+            if let Some((src, from, name, chain)) = source {
+                let coefficients = c.b.coefficients(&width_matrix(from, m.format, laws));
+                let node = c.node(
+                    format!("{key}/source"),
+                    (
+                        format_name(from),
+                        format_name(m.format),
+                        name,
+                        f64::from(laws.pan).to_bits(),
+                        f64::from(laws.mono_sum).to_bits(),
+                        chain,
+                        under_solo,
+                    ),
+                    vec![programme],
+                );
+                c.b.step(Step::Send {
+                    node,
+                    src,
+                    dst: mon,
+                    coefficients,
+                });
+            }
+            if let (Some(bus), true) = (solo_bus, m.follows_solo) {
+                let coefficients =
+                    c.b.coefficients(&width_matrix(Format::Stereo, m.format, laws));
+                let node = c.node(format!("{key}/solo"), format_name(m.format), vec![1.0]);
+                c.b.step(Step::Send {
+                    node,
+                    src: bus,
+                    dst: mon,
+                    coefficients,
+                });
+            }
+            let mut cur = mon;
+            if n >= 2 {
+                let out = c.b.buffers(n);
+                let node = c.node(
+                    format!("{key}/check"),
+                    format_name(m.format),
+                    check_matrix(m.check, mono_sum).to_vec(),
+                );
+                c.b.step(Step::Matrix {
+                    node,
+                    src: c.b.first(cur, 2),
+                    dst: c.b.first(out, 2),
+                });
+                if n > 2 {
+                    let node = c.node(
+                        format!("{key}/through"),
+                        format_name(m.format),
+                        vec![1.0; n - 2],
+                    );
+                    c.b.step(Step::Gain {
+                        node,
+                        src: Span {
+                            start: cur.start + 2,
+                            len: (n - 2) as u32,
+                        },
+                        dst: Span {
+                            start: out.start + 2,
+                            len: (n - 2) as u32,
+                        },
+                    });
+                }
+                cur = out;
+            }
+            let level = c.b.buffers(n);
+            let node = c.node(
+                format!("{key}/level"),
+                format_name(m.format),
+                vec![monitor_gain(m); n],
+            );
+            c.b.step(Step::Gain {
+                node,
+                src: cur,
+                dst: level,
+            });
+            let (_, _, out) = c.chain(&key, &m.chain, level, n, &taps);
+            cur = out.0;
+            if let (Some(b), Some(lfe)) = (m.bass_management.filter(|b| b.enabled), m.lfe()) {
+                let kind = ProcKind::BassManagement {
+                    crossover_hz: b.crossover_hz,
+                    lfe_gain_db: b.lfe_gain_db,
+                    lfe,
+                };
+                let mut values = vec![1.0];
+                values.extend(kind.values());
+                let proc = c.processor(format!("{key}/bass"), &kind, values, n, usize::MAX);
+                let dst = c.b.buffers(n);
+                c.b.step(Step::Process {
+                    proc,
+                    src: cur,
+                    dst,
+                    key: Span::default(),
+                });
+                cur = dst;
+            }
+            if m.delay_ms > 0.0 {
+                let kind = ProcKind::Delay {
+                    time: m.delay_ms,
+                    unit: super::chain::DelayUnit::Ms,
+                    frame_rate: None,
+                };
+                let proc = c.processor(format!("{key}/delay"), &kind, vec![1.0], n, usize::MAX);
+                let dst = c.b.buffers(n);
+                c.b.step(Step::Process {
+                    proc,
+                    src: cur,
+                    dst,
+                    key: Span::default(),
+                });
+                cur = dst;
+            }
+            let tp = c.state(format!("meter/{key}"), n, |pid| {
+                Processor::true_peak(pid, n)
+            });
+            let slot = c.b.meter(n);
+            c.b.step(Step::Meter {
+                src: cur,
+                slot,
+                proc: tp,
+            });
+            meters.push((key.clone(), slot, n));
+            if let (true, Some(&slot)) = (m.publish, outputs.get(&key)) {
+                c.b.step(Step::Output {
+                    src: cur,
+                    slot: slot as u32,
+                });
+            }
+        }
+
         for o in &mix.outputs {
             let (Some(&slot), Some(t)) = (outputs.get(&o.signal), taps.get(&o.signal)) else {
                 continue;
@@ -697,6 +919,7 @@ mod tests {
             loudness: false,
             colour: None,
             recall_safe: false,
+            solo_safe: false,
             tally_index: None,
             afv: None,
         }
@@ -714,6 +937,7 @@ mod tests {
             compensate: true,
             colour: None,
             recall_safe: false,
+            solo_safe: false,
         }
     }
 

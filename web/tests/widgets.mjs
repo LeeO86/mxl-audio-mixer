@@ -20,6 +20,7 @@ try {
     ["strip", "strip=vox&theme=dark"],
     ["fader-bank", "layout=Show&page=Talent&theme=light"],
     ["loudness", "signal=main&theme=dark"],
+    ["monitor", "monitor=main&theme=dark"],
   ];
   for (const [id, query] of widgets) {
     const src = `${mixer}/widget/${id}?${query}`;

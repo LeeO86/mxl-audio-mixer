@@ -4,6 +4,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import Pill from "./components/Pill.vue";
 import ConsoleTab from "./components/ConsoleTab.vue";
+import ControlRoomTab from "./components/ControlRoomTab.vue";
 import ChainTab from "./components/ChainTab.vue";
 import RoutingTab from "./components/RoutingTab.vue";
 import SnapshotsTab from "./components/SnapshotsTab.vue";
@@ -15,6 +16,7 @@ import { buses, live, startLive, stopLive, store, stored, strips } from "./store
 
 const tabs = [
   { id: "console", label: "Console", component: ConsoleTab, full: true },
+  { id: "control-room", label: "Control room", component: ControlRoomTab, full: true },
   { id: "processing", label: "Processing", component: ChainTab, full: true },
   { id: "routing", label: "Routing", component: RoutingTab, full: true },
   { id: "snapshots", label: "Snapshots", component: SnapshotsTab },

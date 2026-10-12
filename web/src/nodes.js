@@ -130,6 +130,16 @@ export const NODE_TYPES = {
     }),
     fields: [],
   },
+  oscillator: {
+    label: "Oscillator",
+    group: "Other",
+    make: () => ({ type: "oscillator", waveform: "sine", freq_hz: 1000, level_dbfs: -18 }),
+    fields: [
+      { key: "waveform", label: "Waveform", options: [["sine", "Sine"], ["ebu-ident", "EBU stereo ident"]] },
+      { key: "freq_hz", label: "Frequency", min: 20, max: 20000, def: 1000, fine: 0.02, digits: 0, unit: "Hz", log: true },
+      { key: "level_dbfs", label: "Level", min: -60, max: 0, def: -18, fine: 0.5, unit: "dBFS" },
+    ],
+  },
   delay: {
     label: "Delay",
     group: "Other",

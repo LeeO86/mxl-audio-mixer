@@ -338,6 +338,7 @@ mod tests {
             loudness: false,
             colour: None,
             recall_safe: false,
+            solo_safe: false,
             tally_index: None,
             afv: None,
         }
@@ -356,6 +357,7 @@ mod tests {
             compensate: true,
             colour: None,
             recall_safe: false,
+            solo_safe: false,
         });
         for from in ["a", "b"] {
             m.sends.push(Send {

@@ -125,6 +125,24 @@ impl Smoothing {
     }
 }
 
+/// EBU R 49 ident: the left channel is off for 0.25 s every 3 s, with 2 ms ramps.
+const IDENT_PERIOD: u64 = 3 * 48_000;
+const IDENT_GAP: u64 = 12_000;
+const IDENT_RAMP: u64 = 96;
+
+fn ident_gain(played: u64) -> f32 {
+    let t = played % IDENT_PERIOD;
+    if t < IDENT_GAP {
+        0.0
+    } else if t < IDENT_GAP + IDENT_RAMP {
+        (t - IDENT_GAP) as f32 / IDENT_RAMP as f32
+    } else if t >= IDENT_PERIOD - IDENT_RAMP {
+        (IDENT_PERIOD - t) as f32 / IDENT_RAMP as f32
+    } else {
+        1.0
+    }
+}
+
 /// The type-specific part: coefficients and state.
 pub enum Kind {
     Eq {
@@ -162,6 +180,22 @@ pub enum Kind {
     Expander {
         ballistics: Ballistics,
         envelope: f64,
+    },
+    /// Linkwitz-Riley 24 dB/oct: two Butterworth sections each way.
+    BassManagement {
+        lfe: usize,
+        low: Coefficients,
+        high: Coefficients,
+        /// Two high-pass sections per channel (unused on the LFE).
+        high_states: Vec<State>,
+        low_states: [State; 2],
+        sum: Vec<f32>,
+    },
+    /// Phase (cycles, 0–1) and the samples played (for the ident's period).
+    Oscillator {
+        ident: bool,
+        phase: f64,
+        played: u64,
     },
     Gate {
         attack: f64,
@@ -304,6 +338,19 @@ impl Processor {
             ProcKind::Expander { .. } => Kind::Expander {
                 ballistics: Ballistics::new(1.0, 1.0),
                 envelope: 0.0,
+            },
+            ProcKind::BassManagement { lfe, .. } => Kind::BassManagement {
+                lfe: *lfe,
+                low: Coefficients::IDENTITY,
+                high: Coefficients::IDENTITY,
+                high_states: vec![State::default(); 2 * channels],
+                low_states: [State::default(); 2],
+                sum: vec![0.0; block],
+            },
+            ProcKind::Oscillator { waveform, .. } => Kind::Oscillator {
+                ident: *waveform == crate::mix::chain::Waveform::EbuIdent,
+                phase: 0.0,
+                played: 0,
             },
             ProcKind::Gate { .. } => Kind::Gate {
                 attack: 0.0,
@@ -537,7 +584,11 @@ impl Processor {
                     *ballistic = Ballistics::new(p(o + 2), p(o + 3));
                 }
             }
-            Kind::Delay(_) | Kind::TruePeak { .. } | Kind::Hold(_) => {}
+            Kind::BassManagement { low, high, .. } => {
+                *low = biquad::low_pass(p(1), Q_BUTTERWORTH);
+                *high = biquad::high_pass(p(1), Q_BUTTERWORTH);
+            }
+            Kind::Delay(_) | Kind::Oscillator { .. } | Kind::TruePeak { .. } | Kind::Hold(_) => {}
         }
     }
 
@@ -954,6 +1005,54 @@ impl Processor {
                 }
                 most
             }
+            Kind::BassManagement {
+                lfe,
+                low,
+                high,
+                high_states,
+                low_states,
+                sum,
+            } => {
+                let sum = &mut sum[..block];
+                sum.fill(0.0);
+                for (c, ch) in io.iter_mut().enumerate() {
+                    if c == *lfe {
+                        continue;
+                    }
+                    for (s, x) in sum.iter_mut().zip(ch.iter()) {
+                        *s += *x;
+                    }
+                    high_states[2 * c].run(high, ch);
+                    high_states[2 * c + 1].run(high, ch);
+                }
+                low_states[0].run(low, sum);
+                low_states[1].run(low, sum);
+                let g = from_db(p(2)) as f32;
+                if let Some(ch) = io.get_mut(*lfe) {
+                    for (y, s) in ch.iter_mut().zip(sum.iter()) {
+                        *y = *y * g + *s;
+                    }
+                }
+                0.0
+            }
+            Kind::Oscillator {
+                ident,
+                phase,
+                played,
+            } => {
+                let step = p(1) / f64::from(crate::config::SAMPLE_RATE);
+                let amplitude = from_db(p(2));
+                for k in 0..block {
+                    let s = ((2.0 * std::f64::consts::PI * *phase).sin() * amplitude) as f32;
+                    *phase = (*phase + step).fract();
+                    let left = if *ident { ident_gain(*played) } else { 1.0 };
+                    *played = played.wrapping_add(1);
+                    for (c, ch) in io.iter_mut().enumerate() {
+                        ch[k] = if c == 0 { s * left } else { s };
+                    }
+                }
+                0.0
+            }
             Kind::Delay(d) => {
                 d.run(io);
                 0.0
@@ -979,6 +1078,97 @@ mod tests {
     }
 
     /// Run `p` over `input` (per channel) with an optional key; returns the output.
+    #[test]
+    fn bass_management_sends_the_lows_to_the_lfe() {
+        let kind = ProcKind::BassManagement {
+            crossover_hz: 80.0,
+            lfe_gain_db: 10.0,
+            lfe: 3,
+        };
+        let sine = |f: f64| -> Vec<f32> {
+            (0..48_000)
+                .map(|i| (0.5 * (2.0 * PI * f * i as f64 / 48_000.0).sin()) as f32)
+                .collect()
+        };
+        let db = |c: &[f32]| {
+            20.0 * f64::from(c[24_000..].iter().fold(0f32, |a, x| a.max(x.abs()))).log10()
+        };
+        for (f, l_db, lfe_db) in [(1000.0, -6.02, -80.0), (30.0, -40.0, -6.0)] {
+            // 5.1: the tone on L only.
+            let mut input = vec![vec![0f32; 48_000]; 6];
+            input[0] = sine(f);
+            let mut p = proc(kind.clone(), 6);
+            let out = run(&mut p, &input, None);
+            if f > 100.0 {
+                assert!(
+                    (db(&out[0]) - l_db).abs() < 0.1,
+                    "{f} Hz on L: {}",
+                    db(&out[0])
+                );
+                assert!(db(&out[3]) < lfe_db, "{f} Hz on the LFE: {}", db(&out[3]));
+            } else {
+                assert!(db(&out[0]) < l_db, "{f} Hz on L: {}", db(&out[0]));
+                assert!(
+                    (db(&out[3]) - lfe_db).abs() < 0.3,
+                    "{f} Hz on the LFE: {}",
+                    db(&out[3])
+                );
+            }
+            assert!(db(&out[1]) < -100.0 && db(&out[2]) < -100.0);
+        }
+        // At the crossover the high-passed L and the low-passed sub add up to the input (LR4).
+        let mut input = vec![vec![0f32; 48_000]; 6];
+        input[0] = sine(80.0);
+        let out = run(&mut proc(kind.clone(), 6), &input, None);
+        let sum: Vec<f32> = out[0].iter().zip(&out[3]).map(|(a, b)| a + b).collect();
+        assert!((db(&sum) + 6.02).abs() < 0.05, "{}", db(&sum));
+        // The LFE input at +10 dB.
+        let mut input = vec![vec![0f32; 48_000]; 6];
+        input[3] = sine(30.0).iter().map(|x| x * 0.1).collect();
+        let out = run(&mut proc(kind, 6), &input, None);
+        assert!(
+            (db(&out[3]) - (-26.02 + 10.0)).abs() < 0.05,
+            "{}",
+            db(&out[3])
+        );
+    }
+
+    #[test]
+    fn oscillator_sine_and_ebu_ident() {
+        let sine = ProcKind::Oscillator {
+            waveform: crate::mix::chain::Waveform::Sine,
+            freq_hz: 1000.0,
+            level_dbfs: -18.0,
+        };
+        let mut p = proc(sine, 2);
+        let out = run(&mut p, &vec![vec![0.5f32; 48_000]; 2], None);
+        let peak = out[0].iter().fold(0f32, |a, x| a.max(x.abs()));
+        assert!(
+            (20.0 * f64::from(peak).log10() + 18.0).abs() < 0.01,
+            "{peak}"
+        );
+        assert_eq!(out[0], out[1]);
+        // 1 kHz: 2000 zero crossings a second.
+        let crossings = out[0]
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
+        assert!((1998..=2001).contains(&crossings), "{crossings}");
+
+        let ident = ProcKind::Oscillator {
+            waveform: crate::mix::chain::Waveform::EbuIdent,
+            freq_hz: 1000.0,
+            level_dbfs: -18.0,
+        };
+        let mut p = proc(ident, 2);
+        let out = run(&mut p, &vec![vec![0.0f32; 4 * 48_000]; 2], None);
+        let peak = |c: &[f32]| c.iter().fold(0f32, |a, x| a.max(x.abs()));
+        assert_eq!(peak(&out[0][..12_000]), 0.0, "left off for 0.25 s");
+        assert!(peak(&out[1][..12_000]) > 0.12, "right on");
+        assert!(peak(&out[0][12_200..143_000]) > 0.12, "left back");
+        assert_eq!(peak(&out[0][144_000..156_000]), 0.0, "again after 3 s");
+    }
+
     fn run(p: &mut Processor, input: &[Vec<f32>], key: Option<&[Vec<f32>]>) -> Vec<Vec<f32>> {
         let mut out = input.to_vec();
         let n = input[0].len() / B * B;
