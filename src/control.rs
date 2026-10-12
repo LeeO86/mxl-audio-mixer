@@ -227,7 +227,43 @@ impl Control {
                     commit: o.commit_samples.unwrap_or(self.default_commit),
                 })
             })
+            .chain(
+                mix.control_room
+                    .monitors
+                    .iter()
+                    .filter(|m| m.publish)
+                    .map(|m| OutputSpec {
+                        signal: m.key(),
+                        name: format!("Monitor {}", m.name),
+                        format: m.format,
+                        commit: self.default_commit,
+                    }),
+            )
             .collect()
+    }
+
+    /// Solo `signal` (PFL or AFL), or end its solo; interlock replaces the others.
+    /// Applied with the next change of the mix (`api::apply` with no change).
+    pub fn set_solo(&mut self, signal: &str, kind: Option<crate::mix::room::SoloKind>) {
+        match kind {
+            Some(k) => {
+                if self.mix.control_room.solo.mode == crate::mix::room::SoloMode::Interlock {
+                    self.compiler.solo.clear();
+                }
+                self.compiler.solo.insert(signal.to_string(), k);
+            }
+            None => {
+                self.compiler.solo.remove(signal);
+            }
+        }
+    }
+
+    pub fn clear_solo(&mut self) {
+        self.compiler.solo.clear();
+    }
+
+    pub fn solo(&self) -> &BTreeMap<String, crate::mix::room::SoloKind> {
+        &self.compiler.solo
     }
 
     /// Check `next` and start applying it. Parameter-only changes ramp over `ramp`
@@ -236,6 +272,7 @@ impl Control {
     pub fn stage(&mut self, next: Mix, ramp: u32) -> Result<Staged, String> {
         next.validate(self.input_count, self.block)?;
         self.compiler.afv = self.afv_targets(&next);
+        self.compiler.solo.retain(|s, _| next.kind(s).is_some());
         let compiled = self.compiler.compile(
             &next,
             self.block as usize,

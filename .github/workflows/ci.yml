@@ -73,6 +73,12 @@ jobs:
 
   integration:
     name: Integration (libmxl, nmos-cpp registry, AMWA)
+    # Release binaries, as in the image: a debug build's DSP thread is an order of
+    # magnitude slower, enough to miss deadlines on a shared runner.
+    env:
+      MIXER_BIN: ${{ github.workspace }}/target/release/mxl-audio-mixer
+      TONE_BIN: ${{ github.workspace }}/target/release/mxl-mixer-tone
+      PROBE_BIN: ${{ github.workspace }}/target/release/mxl-mixer-probe
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -97,7 +103,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Web UI build (embedded by cargo build)
         run: cd web && npm ci --no-audit --no-fund && npm run build
-      - run: cargo build --bins
+      - run: cargo build --release --bins
       - name: Kernel TAI offset (CLOCK_TAI = UTC + 37 s)
         run: sudo scripts/set-tai-offset.py 37
       - name: tests/integration/lifecycle.sh
@@ -117,6 +123,11 @@ jobs:
           IT_OUT: ${{ runner.temp }}/it
       - name: tests/integration/processing.sh
         run: tests/integration/processing.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/room.sh
+        run: tests/integration/room.sh
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
@@ -153,7 +164,7 @@ jobs:
           python -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install -q --disable-pip-version-check -r "$RUNNER_TEMP/nmos-testing/requirements.txt"
       - name: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 against the mixer
-        run: ci/amwa.sh off target/debug/mxl-audio-mixer
+        run: ci/amwa.sh off target/release/mxl-audio-mixer
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           NMOS_TESTING_DIR: ${{ runner.temp }}/nmos-testing
