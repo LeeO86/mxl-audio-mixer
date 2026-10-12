@@ -43,6 +43,9 @@ pub enum PatchState {
     Missing,
 }
 
+/// A momentary talk not repeated within this long ends (a client that went away).
+pub const MOMENTARY_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct Control {
     pub engine: Engine,
     pub inputs: Inputs,
@@ -58,6 +61,11 @@ pub struct Control {
     pub streams: crate::preview::Streams,
     /// Most personal monitors.
     max_personal: usize,
+    /// Browser microphones (talkback, §10.2).
+    pub talkers: crate::preview::talkback::Talkers,
+    /// Momentary talk (mic, destination): released unless repeated within
+    /// [`MOMENTARY_HOLD`].
+    momentary: BTreeMap<(String, String), std::time::Instant>,
     layout: HashMap<NodeId, LayoutNode>,
     procs: HashMap<NodeId, LayoutNode>,
     /// Processing latency of each signal's post-fader point, in samples.
@@ -94,11 +102,13 @@ impl Control {
             loudness: LoudnessMeters::default(),
             mix: Mix::default(),
             node,
-            compiler: Compiler::default(),
+            compiler: Compiler::with_talk_base(config.input_flows),
             analyser: crate::analysis::Analyser::new(config.block_samples as usize),
             tally: crate::tally::Tally::default(),
             streams: crate::preview::Streams::new(config),
             max_personal: config.max_web_monitors,
+            talkers: crate::preview::talkback::Talkers::new(config),
+            momentary: BTreeMap::new(),
             layout: HashMap::new(),
             procs: HashMap::new(),
             latency: HashMap::new(),
@@ -365,6 +375,136 @@ impl Control {
         c.streams.listen(&mut c.engine, id)
     }
 
+    /// Every talkback mic: configured, then the browsers'.
+    pub fn mic_ids(&self) -> Vec<String> {
+        self.mix
+            .control_room
+            .talkback
+            .mics
+            .iter()
+            .map(|m| m.id.clone())
+            .chain(self.talkers.slots().into_keys())
+            .collect()
+    }
+
+    /// Who talks to what.
+    pub fn talking(&self) -> &crate::mix::talkback::Talking {
+        &self.compiler.talking
+    }
+
+    /// Mic `mic` starts (`on`) or stops talking to `dest`; a momentary talk ends
+    /// unless repeated within [`MOMENTARY_HOLD`]. Applied with the next change.
+    pub fn set_talk(
+        &mut self,
+        mic: &str,
+        dest: &str,
+        on: bool,
+        momentary: bool,
+    ) -> Result<(), String> {
+        if !self.mic_ids().iter().any(|m| m == mic) {
+            return Err(format!("talkback mic {mic} does not exist"));
+        }
+        if !self
+            .mix
+            .control_room
+            .talkback
+            .destinations
+            .iter()
+            .any(|d| d.id == dest)
+        {
+            return Err(format!("talkback destination {dest} does not exist"));
+        }
+        let key = (mic.to_string(), dest.to_string());
+        if on {
+            self.compiler
+                .talking
+                .entry(mic.to_string())
+                .or_default()
+                .insert(dest.to_string());
+            if momentary {
+                self.momentary.insert(key, std::time::Instant::now());
+            } else {
+                self.momentary.remove(&key);
+            }
+        } else {
+            if let Some(d) = self.compiler.talking.get_mut(mic) {
+                d.remove(dest);
+                if d.is_empty() {
+                    self.compiler.talking.remove(mic);
+                }
+            }
+            self.momentary.remove(&key);
+        }
+        Ok(())
+    }
+
+    /// Stop `mic` (or every mic) talking.
+    pub fn clear_talk(&mut self, mic: Option<&str>) {
+        match mic {
+            Some(m) => {
+                self.compiler.talking.remove(m);
+                self.momentary.retain(|(x, _), _| x != m);
+            }
+            None => {
+                self.compiler.talking.clear();
+                self.momentary.clear();
+            }
+        }
+    }
+
+    /// End momentary talk that was not repeated; true when any ended.
+    pub fn expire_talk(&mut self) -> bool {
+        let old: Vec<(String, String)> = self
+            .momentary
+            .iter()
+            .filter(|(_, t)| t.elapsed() > MOMENTARY_HOLD)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for (m, d) in &old {
+            let _ = self.set_talk(m, d, false, false);
+        }
+        !old.is_empty()
+    }
+
+    /// A browser's microphone is on: its mic id, and whether it is new.
+    pub fn register_browser_mic(&mut self, client: &str) -> Result<(String, bool), String> {
+        let c = &mut *self;
+        c.talkers.register(&mut c.engine, client)
+    }
+
+    pub fn remove_browser_mic(&mut self, id: &str) -> bool {
+        let c = &mut *self;
+        let gone = c.talkers.remove(&mut c.engine, id);
+        if gone {
+            self.clear_talk(Some(id));
+        }
+        gone
+    }
+
+    /// Remove browser mics that stopped registering; true when any went.
+    pub fn expire_browser_mics(&mut self) -> bool {
+        let before = self.talkers.slots();
+        let c = &mut *self;
+        let changed = c.talkers.expire(&mut c.engine);
+        if changed {
+            let now = self.talkers.slots();
+            for id in before.keys().filter(|id| !now.contains_key(*id)) {
+                self.clear_talk(Some(id));
+            }
+        }
+        changed
+    }
+
+    pub fn listen_back(&self) -> Option<&crate::mix::room::Source> {
+        self.compiler.listen_back.as_ref()
+    }
+
+    /// The monitors that follow solo play `source` instead of theirs (or their
+    /// own again with `None`). Applied with the next change.
+    pub fn set_listen_back(&mut self, source: Option<crate::mix::room::Source>) {
+        self.compiler.listen_back = source;
+    }
+
     /// Stop unheard streams; true when the plan needs a change.
     pub fn expire_streams(&mut self) -> bool {
         let ids = self.stream_ids();
@@ -381,6 +521,33 @@ impl Control {
         self.compiler.afv = self.afv_targets(&next);
         self.compiler.solo.retain(|s, _| next.kind(s).is_some());
         self.compiler.streams = self.streams.slots();
+        self.compiler.browser_mics = self.talkers.slots();
+        let mics: Vec<String> = next
+            .control_room
+            .talkback
+            .mics
+            .iter()
+            .map(|m| m.id.clone())
+            .chain(self.compiler.browser_mics.keys().cloned())
+            .collect();
+        let dests: Vec<&str> = next
+            .control_room
+            .talkback
+            .destinations
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        self.compiler.talking.retain(|m, d| {
+            d.retain(|x| dests.contains(&x.as_str()));
+            mics.contains(m) && !d.is_empty()
+        });
+        self.momentary
+            .retain(|(m, d), _| mics.contains(m) && dests.contains(&d.as_str()));
+        if let Some(crate::mix::room::Source::Signal(id)) = &self.compiler.listen_back {
+            if next.kind(id).is_none() {
+                self.compiler.listen_back = None;
+            }
+        }
         for p in &mut self.compiler.personal {
             p.solo.retain(|s, _| next.kind(s).is_some());
             if let Some(crate::mix::room::Source::Signal(id)) = &p.monitor.source {

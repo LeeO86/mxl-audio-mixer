@@ -9,6 +9,7 @@
 
 pub mod mediamtx;
 pub mod rtsp;
+pub mod talkback;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};

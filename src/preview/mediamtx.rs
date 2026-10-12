@@ -14,8 +14,9 @@ use serde::Serialize;
 use crate::config::Config;
 
 /// The MediaMTX configuration of the built-in instance: only the mixer's paths
-/// (`<PREVIEW_PATH_PREFIX>/…`); publishing only from this host (the encoders over
-/// RTSP on 127.0.0.1), reading (WHEP) from anywhere.
+/// (`<PREVIEW_PATH_PREFIX>/…`); publishing from this host (the encoders over RTSP
+/// on 127.0.0.1) and, from anywhere, only browser talkback
+/// (`<prefix>/talkback-…`, WHIP); reading (WHEP) from anywhere.
 pub fn render(config: &Config) -> String {
     let paths = config.preview_path_prefix.replace('.', "\\.");
     let hosts = config
@@ -45,7 +46,7 @@ pub fn render(config: &Config) -> String {
          authMethod: internal\n\
          authInternalUsers:\n\
          - user: any\n  ips: [\"127.0.0.1\", \"::1\"]\n  permissions:\n  - action: publish\n  - action: read\n\
-         - user: any\n  permissions:\n  - action: read\n\
+         - user: any\n  permissions:\n  - action: read\n  - action: publish\n    path: '~^{paths}/talkback-'\n\
          pathDefaults:\n  source: publisher\n\
          paths:\n  '~^{paths}/':\n",
         rtsp = config.mediamtx_rtsp_port,
@@ -208,6 +209,7 @@ mod tests {
         assert!(yml.contains("api: false\n") && yml.contains("hls: false\n"));
         assert!(yml.contains("moq: false\n"));
         assert!(yml.contains("paths:\n  '~^mxl-audio-mixer/':\n"));
+        assert!(yml.contains("  - action: publish\n    path: '~^mxl-audio-mixer/talkback-'\n"));
         let list = serde_json::json!({"items": [
             {"name": "mxl-audio-mixer/main", "readers": [{"type": "webRTCSession"}, {"type": "webRTCSession"}]},
             {"name": "mxl-audio-mixer/phones", "readers": []},
