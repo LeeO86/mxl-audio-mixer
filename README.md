@@ -231,7 +231,9 @@ its input and output.
 
 ## Tests
 
-`cargo test` (unit), `tests/integration/lifecycle.sh` (G14: start, ready, SIGTERM,
+`cargo test` (unit, and EBU Tech 3341 cases 1–23 and Tech 3342 cases 1–6 on the EBU
+test set with `EBU_TEST_SET`, see `docs/development.md`),
+`tests/integration/lifecycle.sh` (G14: start, ready, SIGTERM,
 exit 143, deregistered, own domain removed; connections survive a restart),
 `tests/integration/inputs.sh` (§17: activation before the flow exists, stalled and
 re-created writers, a writer 30 ms late), `tests/integration/mix.sh` (the mix

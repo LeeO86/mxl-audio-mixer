@@ -1,19 +1,26 @@
 //! Loudness (§7): ITU-R BS.1770-4 and EBU R 128 / Tech 3341 / Tech 3342.
 //!
 //! The DSP side ([`SegmentMeter`]) K-weights every channel and sends the energy of
-//! each 100 ms segment (4800 samples, aligned to the sample index). The control
-//! side ([`Loudness`]) derives:
-//! - momentary loudness: the last 4 segments (400 ms), ungated;
-//! - short-term loudness: the last 30 segments (3 s), ungated;
+//! each 10 ms segment (480 samples, aligned to the sample index). The control side
+//! ([`Loudness`]) derives:
+//! - momentary loudness: the last 400 ms, ungated, every 10 ms;
+//! - short-term loudness: the last 3 s, ungated, every 10 ms;
 //! - integrated loudness: 400 ms blocks every 100 ms (75 % overlap), absolute
 //!   gate −70 LUFS, relative gate −10 LU;
 //! - loudness range (Tech 3342): short-term values every 100 ms, absolute gate
 //!   −70 LUFS, relative gate −20 LU, 95th minus 10th percentile.
+//!
+//! The 10 ms step lets the maximum of momentary loudness be found within 10 ms
+//! (EBU Tech 3341 cases 13 and 14).
 
 use crate::dsp::biquad::{Coefficients, State};
 
-/// Samples per segment (100 ms at 48 kHz).
-pub const SEGMENT: u64 = 4800;
+/// Samples per segment (10 ms at 48 kHz).
+pub const SEGMENT: u64 = 480;
+/// Segments per 100 ms step, per 400 ms block and per 3 s window.
+const STEP: usize = 10;
+const MOMENTARY: usize = 40;
+const SHORT_TERM: usize = 300;
 pub const MAX_CHANNELS: usize = crate::mix::format::MAX_FORMAT_CHANNELS;
 
 /// BS.1770-4 K-weighting at 48 kHz: the shelving pre-filter and the RLB high-pass.
@@ -35,7 +42,7 @@ pub const K_HIGH_PASS: Coefficients = Coefficients {
 /// The energy (sum of squared K-weighted samples) of one segment per channel.
 #[derive(Debug, Clone, Copy)]
 pub struct Segment {
-    /// Segment number: the segment covers samples [n·4800, (n+1)·4800).
+    /// Segment number: the segment covers samples [n·480, (n+1)·480).
     pub index: u64,
     pub energy: [f64; MAX_CHANNELS],
 }
@@ -56,7 +63,8 @@ pub struct SegmentMeter {
 impl SegmentMeter {
     /// A meter for `channels` channels and the consumer the control side reads.
     pub fn new(channels: usize) -> (Self, rtrb::Consumer<Segment>) {
-        let (out, rx) = rtrb::RingBuffer::new(256);
+        // 10 s of segments, far more than the control side's tick needs.
+        let (out, rx) = rtrb::RingBuffer::new(1024);
         (
             Self {
                 channels: channels.min(MAX_CHANNELS),
@@ -190,17 +198,18 @@ impl Loudness {
             .map(|(g, e)| g * e / SEGMENT as f64)
             .sum();
         self.recent.push_back(p);
-        while self.recent.len() > 30 {
+        while self.recent.len() > SHORT_TERM {
             self.recent.pop_front();
         }
-        if !self.running {
+        // Gating blocks and short-term values for the range every 100 ms.
+        if !self.running || !(s.index + 1).is_multiple_of(STEP as u64) {
             return;
         }
-        if self.recent.len() >= 4 {
-            self.blocks.push(self.mean(4));
+        if self.recent.len() >= MOMENTARY {
+            self.blocks.push(self.mean(MOMENTARY));
         }
-        if self.recent.len() >= 30 {
-            self.short_terms.push(self.mean(30));
+        if self.recent.len() >= SHORT_TERM {
+            self.short_terms.push(self.mean(SHORT_TERM));
         }
     }
 
@@ -214,8 +223,8 @@ impl Loudness {
 
     pub fn values(&self) -> Values {
         Values {
-            momentary: lufs(self.mean(4)),
-            short_term: lufs(self.mean(30)),
+            momentary: lufs(self.mean(MOMENTARY)),
+            short_term: lufs(self.mean(SHORT_TERM)),
             integrated: integrated(&self.blocks),
             range: range(&self.short_terms),
         }
@@ -406,15 +415,15 @@ mod tests {
     fn segments_are_aligned_and_partial_ones_skipped() {
         let (mut meter, mut rx) = SegmentMeter::new(1);
         let block = vec![0.1f32; 144];
-        // Start mid-segment at index 1000: the first segment sent is #1.
-        let mut start = 1000u64;
-        while start < 3 * SEGMENT + 500 {
+        // Start mid-segment 1: the first segment sent is #2.
+        let mut start = SEGMENT + 100;
+        while start < 4 * SEGMENT + 50 {
             meter.feed(start, 0, &block);
             start += 144;
         }
         let first = rx.pop().unwrap();
-        assert_eq!(first.index, 1);
-        assert_eq!(rx.pop().unwrap().index, 2);
+        assert_eq!(first.index, 2);
+        assert_eq!(rx.pop().unwrap().index, 3);
         assert!(rx.pop().is_err());
         assert!(first.energy[0] > 0.0);
     }

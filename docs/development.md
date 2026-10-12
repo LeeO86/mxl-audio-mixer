@@ -61,6 +61,20 @@ Connect its receiver to a flow with an IS-05 PATCH on
 `/x-nmos/connection/v1.2/single/receivers/<id>/staged` (see
 `tests/hw/m0-block-clock/run.sh` for the loopback to its own sender).
 
+## EBU loudness test set
+
+`tests/ebu_loudness.rs` checks Tech 3341 and Tech 3342 on the EBU test set v5
+(not committed; tech.ebu.ch refuses scripted downloads, so CI uses a GitHub copy
+hosted with the EBU's permission and checks the official hash):
+
+```sh
+mkdir -p ~/ebu-loudness-test-set && cd ~/ebu-loudness-test-set
+curl -fsSL -o ebu.zip https://github.com/maxwalley/EBULoudnessTestSetV5/releases/download/EBU_Loudness_Test_Set_v5/ebu-loudness-test-setv05.zip
+echo "9cc500b4df83f7c21855c74dce795ef5209a752bf884253ae57d0ce512efb062  ebu.zip" | sha256sum -c
+unzip -q ebu.zip && rm ebu.zip
+cd - && EBU_TEST_SET=~/ebu-loudness-test-set cargo test --test ebu_loudness
+```
+
 ## Added in later milestones
 
 MediaMTX (preview contract, milestone 5) and headless Chromium and Firefox (UI and
