@@ -85,6 +85,7 @@ pub fn router(app: App) -> Router {
         .merge(crate::show_api::routes())
         .merge(crate::room_api::routes())
         .merge(crate::preview_api::routes())
+        .merge(crate::talkback_api::routes())
         .merge(crate::widgets::routes())
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
@@ -196,6 +197,11 @@ pub fn status_json(app: &App) -> Value {
             "state": control.tally_status(),
         },
         "solo": control.solo(),
+        "talkback": {
+            "talking": control.talking(),
+            "listen_back": control.listen_back(),
+            "browser_mics": control.talkers.slots().into_keys().collect::<Vec<_>>(),
+        },
         "preview": {
             "mode": if app.config.preview_publish_url.is_none() { "own" } else { "shared" },
             "child_running": app.mediamtx.running.load(Ordering::Relaxed),

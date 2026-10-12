@@ -60,10 +60,13 @@ async fn preview_task(app: App, mut stop: tokio::sync::watch::Receiver<bool>) {
         let changed = {
             let mut c = app.control();
             let personal = c.expire_personal(mxl_audio_mixer::preview::PERSONAL_IDLE);
-            c.expire_streams() || personal
+            let mics = c.expire_browser_mics();
+            let talk = c.expire_talk();
+            c.expire_streams() || personal || mics || talk
         };
         if changed {
-            if let Err(r) = mxl_audio_mixer::api::apply(&app, 0, |_| Ok(())).await {
+            let ramp = mxl_audio_mixer::engine::FADE_SAMPLES;
+            if let Err(r) = mxl_audio_mixer::api::apply(&app, ramp, |_| Ok(())).await {
                 tracing::warn!("preview: re-staging the plan failed ({})", r.status());
             }
         }

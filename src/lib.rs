@@ -21,6 +21,7 @@ pub mod preview_api;
 pub mod room_api;
 pub mod show_api;
 pub mod state;
+pub mod talkback_api;
 pub mod tally;
 pub mod timing;
 pub mod widgets;
