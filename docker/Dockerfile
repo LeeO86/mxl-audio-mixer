@@ -43,7 +43,9 @@ COPY src ./src
 COPY --from=web /web/dist/index.html ./web/dist/index.html
 RUN cargo build --release --locked --bins \
     && install -m 0755 target/release/mxl-audio-mixer target/release/mxl-mixer-tone \
-        target/release/mxl-mixer-probe /usr/local/bin/
+        target/release/mxl-mixer-probe /usr/local/bin/ \
+    && install -D -m 0644 "$(ls -d /opt/cargo/registry/src/*/opusic-sys-*/opus | head -1)/COPYING" \
+        /usr/local/share/doc/libopus/COPYING
 
 FROM ubuntu:24.04 AS runtime
 ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
@@ -56,6 +58,8 @@ COPY --from=build /usr/local/bin/mxl-audio-mixer /usr/local/bin/mxl-mixer-tone \
     /usr/local/bin/mxl-mixer-probe /usr/local/bin/
 COPY --from=mediamtx /opt/mediamtx/mediamtx /usr/local/bin/mediamtx
 COPY --from=mediamtx /opt/mediamtx/LICENSE /usr/share/doc/mediamtx/LICENSE
+# libopus (BSD-3-Clause) is linked statically into the mixer.
+COPY --from=build /usr/local/share/doc/libopus/COPYING /usr/share/doc/libopus/COPYING
 RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found")
 USER 1000
 # Web/API, NMOS, the built-in MediaMTX's WHEP (TCP) and ICE (UDP).
