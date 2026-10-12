@@ -295,7 +295,7 @@ None.
 | 5 | Meters | Peak per 40 ms update and RMS over 300 ms, post-fader, accepted; plus a peak hold that is cleared manually (`POST /api/v1/meters[/<id>]/clear`). |
 | 6 | Mono into 3.0 and surround | Into C (changed from the proposed front L/R pair). |
 | 7 | Published outputs | At most 128. Accepted. |
-| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. (2026-10-12: settled, the mixer is GPL-3.0-or-later; see “Licence” at the end.) |
+| 8 | Com-IS-Assist (GPLv3) in this MIT repository | Copy it. The maintainer knows its developer: either that project changes its licence or this one does. The copy comes with milestone 7 (§8.2), with attribution and its licence noted; the licence question is a release blocker for the release that contains it until it is settled. (2026-10-12: settled: the mixer stays MIT and Com-IS-Assist's core is MIT now; see “Licence” at the end.) |
 
 ## M3: EQ, filters, dynamics, delay; delay compensation; true peak and loudness
 
@@ -849,7 +849,30 @@ Maintainer, 2026-10-12: merge approved (question 5). Questions 1–4 are still o
 | 3 | Tag `mxl-nmos` v0.1.0 | Merged PRs 1–3 and released v0.1.0 with the B.3 notes. |
 | 4 | Strom PR | Delivered as patches in `mxl-nmos` `contrib/strom-switch/` (PR 4). |
 
-## Licence: GPL-3.0-or-later (maintainer, 2026-10-12)
+## Licence: MIT (maintainer, 2026-10-12)
+
+The same day, after Andy Weiss relicensed Com-IS-Assist (MIT for every crate but
+the VST3 wrapper, which stays GPL-3.0-or-later because of `vst3-sys`; commit
+`f8f6aae`), the maintainer decided to go back to MIT: audio companies shall be
+free to take from the mixer. master_me and PodcastPlugins are not copied, only
+taken as inspiration.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D85 | MIT again: the MIT `LICENSE` (as before), `license = "MIT"` in the crates, the image label, README, §3 of the spec. D84 is reverted. `main` was GPL-3.0-or-later from PR 12 to this change, with no release and no code from others in between: the author's own code, which the author licenses as MIT. | The maintainer's decision, with Com-IS-Assist's author. |
+
+- **Com-IS-Assist** (`com-is-assist-core`, MIT, Andreas Weiss): milestone 7 can
+  take its code. Copied files keep its copyright and permission notice (MIT
+  requires them in copies) and say where they come from. Its VST3 crate (GPL) and
+  the LGPL Reaper JSFX reference stay out.
+- **master_me, PodcastPlugins** (GPLv3): inspiration only. No code, and no
+  line-by-line port of their Faust DSP (that would be a derived work); the mixer
+  builds the experience from its own nodes, from the ideas and the published
+  literature. Comparing behaviour (measuring their output against ours) is fine.
+
+The GPL period, as it was decided and then taken back:
+
+### GPL-3.0-or-later (maintainer, 2026-10-12, reverted by D85)
 
 The maintainer decided with others: the mixer is open source and every fork
 shall stay so. It is licensed under the GNU General Public License, version 3 or
@@ -917,7 +940,7 @@ inspired by them and built from the mixer's own nodes:
   §8.2 auto-level controller), with Com-IS-Assist's speech/bed logic beside it.
 - **A simple view:** for such a chain, the few controls (target, amount,
   character) instead of every node's parameters; the full chain stays editable.
-- Code is taken only where ours lacks it, with its notices (GPLv3 §5a); the Faust
-  DSP is read for the algorithms, ported by hand to Rust nodes unless a module is
-  better generated (decided per module).
+- No code from master_me or PodcastPlugins (D85): the experience is built from
+  the mixer's own nodes; their behaviour is compared by measurement. Com-IS-Assist
+  (MIT) code may be taken, with its notice.
 
