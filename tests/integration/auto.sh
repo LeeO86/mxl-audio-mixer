@@ -124,7 +124,11 @@ level = end["vox"]["speech_level_dbfs"]
 print(f"vox: {onsets['vox']} onsets in 12.5 s, speech level {level} dBFS; t1: none")
 EOF
 curl -fsS "$WEB/metrics" | grep -q '^mxl_audio_mixer_vad_active{signal="vox"} [01]$' || fail "vad_active metric"
-pass "VAD: speech onsets once per period on vox, none on the tone; vad_active in the metrics"
+[[ "$(json "$WEB/api/v1/vad/vox" "d['state']['detector']")" == silero ]] || fail "the default detector is not Silero"
+api PUT /api/v1/vad/t1 '{"detector": "features"}' >/dev/null
+sleep 0.3
+[[ "$(json "$WEB/api/v1/vad/t1" "d['state']['detector']")" == features ]] || fail "the feature detector was not switched on"
+pass "VAD: speech onsets once per period on vox (Silero), none on the tone; the feature detector on request; vad_active in the metrics"
 api DELETE /api/v1/vad/t1 >/dev/null
 
 # Ducking: t1 down by 20 dB under vox's speech; t1 alone on the left of pgm.
