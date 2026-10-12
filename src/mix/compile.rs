@@ -165,6 +165,14 @@ fn build_solo_bus(
 }
 
 impl Compiler {
+    /// A compiler whose talkback slots start at engine input `talk_base`.
+    pub fn with_talk_base(talk_base: usize) -> Self {
+        Self {
+            talk_base,
+            ..Self::default()
+        }
+    }
+
     /// The node id of `key` (e.g. `strip/vox/afv`), once it has been compiled.
     pub fn node_id(&self, key: &str) -> Option<NodeId> {
         self.ids.get(key).copied()
@@ -1273,10 +1281,7 @@ mod tests {
         });
         assert_eq!(m.validate(2, 48), Ok(()));
         let slots = HashMap::from([("ifb".to_string(), 3), ("rec".to_string(), 4)]);
-        let mut compiler = Compiler {
-            talk_base: 2,
-            ..Compiler::default()
-        };
+        let mut compiler = Compiler::with_talk_base(2);
         compiler.browser_mics.insert("browser-1".into(), 0);
         // vox 0.5, dir 0.3, prod 0.2, the browser 0.05 (talkback slot 0).
         let inputs = Inputs(vec![
