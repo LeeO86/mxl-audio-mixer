@@ -4,6 +4,7 @@
 // and edit each node. The chain's response is drawn on top.
 import { computed, ref } from "vue";
 import ChainCurve from "./ChainCurve.vue";
+import SignalSettings from "./SignalSettings.vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import NodeEditor from "./NodeEditor.vue";
 import { NODE_TYPES, DYNAMICS } from "../nodes.js";
@@ -95,6 +96,7 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
     </div>
 
     <div>
+      <SignalSettings v-if="sig" :signal="sig" style="margin-bottom: 0.9rem" />
       <div v-if="chainCurve.length" class="panel" style="margin-bottom: 0.9rem">
         <h3>{{ sig.name }}: chain response</h3>
         <ChainCurve :chain="chainCurve" />

@@ -1,7 +1,9 @@
 <script setup>
 // One console strip (§12.1): name and colour, input patch, trim, polarity, the chain overview (response
 // curve, nodes with gain reduction), sends, pan and width, mute, the fader and the meter. Buses have no
-// patch, trim or pan. Every change goes to the API; the strip follows the mix pushed back.
+// patch, trim or pan. Every change goes to the API; the strip follows the mix pushed back. `compact` (the
+// strip and fader-bank widgets) keeps the name, gain reduction, mute, fader and meter. The name shows the
+// tally of the strip's index: red on air, green on preview.
 import { computed } from "vue";
 import Meter from "./Meter.vue";
 import MiniCurve from "./MiniCurve.vue";
@@ -9,13 +11,14 @@ import MiniPot from "./MiniPot.vue";
 import VFader from "./VFader.vue";
 import { dbValue, fmtPan, fmtSigned } from "../api.js";
 import { DYNAMICS } from "../nodes.js";
-import { live, patchSend, patchSignal, select, sends, signalOf } from "../store.js";
+import { live, patchSend, patchSignal, select, sends, signalOf, tallyOf } from "../store.js";
 
 const props = defineProps({
   signal: { type: Object, required: true },
   bus: { type: Boolean, default: false },
   scale: { type: String, default: "dbfs" },
   alignment: { type: Number, default: -18 },
+  compact: { type: Boolean, default: false },
 });
 const emit = defineEmits(["open"]);
 
@@ -26,6 +29,13 @@ const colour = computed(() => s.value.colour || "");
 const selected = computed(() => live.selected === s.value.id);
 const mySends = computed(() => sends.value.filter((x) => x.from === s.value.id));
 const latency = computed(() => live.latency[s.value.id] || 0);
+const tally = computed(() => tallyOf(s.value.id));
+const dynamics = computed(() => s.value.chain.filter((n) => DYNAMICS.has(n.type)));
+function open() {
+  if (props.compact) return;
+  select(s.value.id);
+  emit("open", s.value.id);
+}
 
 const inputs = computed(() => live.status?.inputs || []);
 function patchValue(p) {
@@ -64,13 +74,27 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
 </script>
 
 <template>
-  <section class="strip" :class="{ bus, selected, muted: s.mute }" :style="{ '--colour': colour || 'var(--border)' }" :data-signal="s.id">
-    <button class="sname" :title="`${s.name} (${s.id}); open its processing`" @click="select(s.id), emit('open', s.id)">
+  <section
+    class="strip"
+    :class="{ bus, compact, selected: selected && !compact, muted: s.mute, onair: tally?.on_air, preview: tally?.preview && !tally?.on_air }"
+    :style="{ '--colour': colour || 'var(--border)' }"
+    :data-signal="s.id"
+  >
+    <button class="sname" :title="compact ? `${s.name} (${s.id})` : `${s.name} (${s.id}); open its processing`" @click="open">
       <span class="nm">{{ s.name }}</span>
-      <span class="fmt">{{ typeof s.format === "string" ? s.format : "custom" }}<span v-if="s.recall_safe" class="safe" title="recall-safe"> S</span></span>
+      <span class="fmt"
+        >{{ s.format }}<span v-if="s.recall_safe" class="safe" title="recall-safe"> S</span
+        ><span v-if="tally?.afv" class="afv" :class="{ open: tally.afv_open }" :title="`audio follows video: tally ${tally.index}, ${tally.afv_open ? 'open' : 'closed'}`"> AFV</span></span
+      >
     </button>
 
-    <div class="upper">
+    <div v-if="compact" class="grlist">
+      <span v-for="n in dynamics" :key="n.id" class="node" :title="`${n.id}: gain reduction ${nodeGr(n).toFixed(1)} dB`">
+        <span class="nid">{{ n.id }}</span>
+        <span class="gr"><span :style="{ width: `${Math.min(100, (nodeGr(n) / 20) * 100)}%` }"></span></span>
+      </span>
+    </div>
+    <div v-else class="upper">
     <div v-if="!bus" class="patch">
       <select
         v-for="(p, ch) in s.patch"
@@ -103,7 +127,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       </div>
     </template>
 
-    <button class="chainview" :title="`${s.chain.length} processing nodes; open the editor`" @click="select(s.id), emit('open', s.id)">
+    <button class="chainview" :title="`${s.chain.length} processing nodes; open the editor`" @click="open">
       <MiniCurve :chain="s.chain" />
       <span v-if="!s.chain.length" class="muted small">no processing</span>
       <span v-for="n in s.chain" :key="n.id" class="node" :class="{ bypassed: n.bypass }">
@@ -128,6 +152,6 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       <VFader :value="s.fader_db" :label="`${s.name} fader`" :colour="colour" @change="(v) => patchSignal(s.id, { fader_db: v })" />
       <Meter :signal="s.id" :values="meters" :channels="channels" :scale="scale" :alignment="alignment" :marks="false" />
     </div>
-    <div class="sfoot muted small" :title="`processing latency of ${s.name} at its post-fader point`">{{ latency ? `${latency.toFixed(2)} ms` : " " }}</div>
+    <div v-if="!compact" class="sfoot muted small" :title="`processing latency of ${s.name} at its post-fader point`">{{ latency ? `${latency.toFixed(2)} ms` : " " }}</div>
   </section>
 </template>
