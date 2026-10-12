@@ -86,7 +86,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev ninja-build uuid-dev
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev ninja-build uuid-dev espeak-ng
       - name: Cache libmxl
         id: mxl-cache
         uses: actions/cache@v4
@@ -144,6 +144,11 @@ jobs:
           IT_OUT: ${{ runner.temp }}/it
       - name: tests/integration/n1.sh
         run: tests/integration/n1.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/auto.sh (VAD, auto-mix, ducking; espeak-ng speech)
+        run: tests/integration/auto.sh
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
