@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Milestone 5 (part 2): monitors in the browser
+
+- The preview contract (Appendix B.1): monitors encoded as Opus (libopus) and
+  published over RTSP (the mixer's own client) to MediaMTX, played by WHEP; a
+  built-in MediaMTX as a supervised child process (`MEDIAMTX_*`), or a shared one
+  (`PREVIEW_PUBLISH_URL`, `PREVIEW_WHEP_URL`, `MEDIAMTX_API_URL`). Streams run only
+  while someone listens. The image has MediaMTX v1.20.1.
+- Personal monitors (`MIXER_MAX_WEB_MONITORS`), `/api/v1/preview`,
+  `/api/v1/personal`; Listen on the monitor cards and "My headphones" in the
+  Control room tab; `preview_*` metrics.
+- The `second-pulse` oscillator waveform; the latency measured in headless Chrome
+  (83–99 ms to the audio output).
+- Fixed: a toggle pressed twice quickly could stay on when a mix pushed before the
+  first press arrived in between (`x-mix-revision`); at most one change per path
+  in flight.
+
 ### Milestone 5 (part 1): control room
 
 - Monitors in the show (`control_room`): source (strip, bus or input), level, dim,
