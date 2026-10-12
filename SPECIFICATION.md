@@ -14,7 +14,7 @@ Changelog:
   - a release plan (§19);
   - the platform contract G1–G14 written out in full (Appendix A), so the spec is self-contained.
 Repository: `LeeO86/mxl-audio-mixer` (name can still change)
-License: MIT (like the sibling repos; check every dependency's licence against it)
+License: GPL-3.0-or-later (the maintainer's decision of 2026-10-12, before: MIT like the sibling repos; check every dependency's licence against it)
 Aligns with: the **media function guideline G1–G14 (v1.0.0 contract, Appendix A)** and the
 sibling repos `LeeO86/mxl-decklink`, `mxl-st2110-gateway`, `mxl-fabrics-agent`,
 `mxl-multiviewer`, `mxl-webrtc-monitor`, `mxl-test-player`, `mxl-srt-gateway`,

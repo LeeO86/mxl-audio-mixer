@@ -467,10 +467,19 @@ a flow against the tone) are in the image too.
 
 ## Licence
 
-MIT. Dependencies: `mxl` / `mxl-sys` (Apache-2.0, dmf-mxl), `mxl-nmos`
-(MIT OR Apache-2.0), libopus (BSD-3-Clause, linked statically through
-`opusic-sys`; its notice is in the image under `/usr/share/doc/libopus`), and MIT
-or Apache-2.0 crates. The image also has MediaMTX (MIT, a separate executable,
-`/usr/share/doc/mediamtx`). The UI: Vue (MIT), built with
-Vite (MIT); its base styles and components come from the sibling media functions
-(MIT, same author).
+Copyright (C) 2026 Adrian Hilber and the contributors.
+
+The mixer is free software under the **GNU General Public License, version 3 or
+(at your option) any later version** (`GPL-3.0-or-later`, [`LICENSE`](LICENSE)).
+Anyone may use, study, change and share it. Whoever distributes it, changed or not
+(a binary, an image, a fork), must do so under the same licence, with its source.
+Running it, for example on a platform, is not distributing it.
+
+Dependencies, all compatible with it: `mxl` / `mxl-sys` (Apache-2.0, dmf-mxl),
+`mxl-nmos` (MIT OR Apache-2.0), libopus (BSD-3-Clause, linked statically through
+`opusic-sys`; its notice is in the image under `/usr/share/doc/libopus`), and
+crates under MIT, Apache-2.0, BSD, ISC, Zlib or Unicode-3.0 terms (aws-lc,
+through `mxl-nmos`'s HTTP client, is Apache-2.0 and ISC). The image also has
+MediaMTX (MIT, a separate executable, `/usr/share/doc/mediamtx`). The UI: Vue
+(MIT), built with Vite (MIT); its base styles and components come from the
+sibling media functions (MIT, same author).
