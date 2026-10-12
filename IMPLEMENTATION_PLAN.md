@@ -812,7 +812,8 @@ blocker for the release that contains it) still holds.
   - a browser microphone from headless Chrome by WHIP, a strip on it into an MXL
     output: a burst every second, latency (from Chrome's rendering of the burst to
     the MXL output) median 50.5 and 44.2 ms in two runs, 40.5–55.9 ms over 16
-    bursts; the mic removed 30 s after its last registration.
+    bursts (on a GitHub runner: median 46.2 ms); the mic removed 30 s after its
+    last registration.
 - `ui.sh`: a talk button latched by a short press (the monitor's talkback lamp),
   released; held, it talks only while held; listen-back from the panel.
   `widgets.sh`: the `talkback` widget framed.
