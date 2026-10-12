@@ -15,7 +15,8 @@ ducker, multiband, delay) with delay compensation and block-delay feedback;
 peak, peak hold, true peak, RMS, PPM, correlation, gain-reduction and loudness
 (BS.1770-4 / R 128) meters and an analyser; snapshots, layouts and the show
 history; the web UI (console, processing editor, routing matrix, snapshots,
-metering) with live updates over a WebSocket.
+metering) with live updates over a WebSocket; widgets for operator screens
+(`strip`, `fader-bank`, `loudness`); tally (TSL UMD 5.0) and audio-follows-video.
 
 ## Web UI
 
@@ -37,6 +38,43 @@ press within 3 s. The theme follows the system or is set light or dark (kept in
 the browser).
 
 `scripts/demo.sh` starts a tone flow, the mixer and a small show to try it.
+
+## Widgets
+
+For operator screens built by the production designer (§12.6, Appendix B.2), as
+in the sibling media functions. `GET /widgets` lists them with a JSON schema of
+their query (CORS only for the origins in `WIDGET_FRAME_ANCESTORS`, `Vary:
+Origin`). `GET /widget/<id>?<params>[&theme=dark|light|transparent]` is the page:
+the widget without the app, on the mixer's own API, with `Content-Security-Policy:
+frame-ancestors <WIDGET_FRAME_ANCESTORS>` and no `X-Frame-Options`. A bad parameter
+is 400, an unknown widget 404, another method than GET 405. The page posts
+`{type: "widget-ready"}` and `{type: "widget-size", w, h}` to its parent.
+
+| id | Params | Shows and controls | min_size |
+| --- | --- | --- | --- |
+| `strip` | `strip` (a strip or bus id) | name, tally, gain reduction per dynamics node, mute, fader, meter | 120×480 |
+| `fader-bank` | `bank` (1-based, strips in mix order) with `size` (1–32, default 8), or `strips` (ids, comma-separated, 1–32) | those strips side by side | 480×480 |
+| `loudness` | `signal` (a strip or bus id) | momentary, short-term, integrated LUFS, LRA, max true peak, the tolerance; start, stop, reset | 320×200 |
+
+`monitor` and `talkback` come with the control room (milestone 5), `vca` with
+the VCAs (milestone 6); the strip widget gets PFL then.
+
+## Tally and audio-follows-video
+
+With `TSL_ENABLE=true` the mixer receives TSL UMD 5.0 from the platform's tally
+calculator on `TSL_UDP_PORT` and `TSL_TCP_PORT` (TCP with DLE/STX framing; UTF-16
+labels), as mxl-multiviewer and mxl-webrtc-monitor do. Messages of `TSL_SCREEN`
+(−1: every screen) set the lamps of a tally index: `TSL_MAP` maps display indexes
+to tally indexes (empty: the same number; with a map, unmapped displays are
+ignored). LH lit is on air, RH lit is on preview.
+
+A strip follows a tally index (`tally_index`). With `afv` (`{"enabled", "depth_db",
+"fade_in_ms", "fade_out_ms"}`, fades 0–10 000 ms, depth `"-inf"` … 0) it is open
+while its index is on air and at `depth_db` otherwise, also before any tally has
+arrived: a gain after its fader (post-fader sends and the outputs follow it,
+pre-fader sends do not), fading in and out without a plan swap. The UI proposes
+−∞, 100 ms and 500 ms when AFV is switched on. The console lights a strip red on
+air and green on preview. `GET /api/v1/tally` lists the lamps and the strips.
 
 ## Run
 
@@ -153,6 +191,8 @@ an id gets `strip-<n>` or `bus-<n>`.
   (stereo); channels the source lacks stay silent.
 - **Mix settings:** `pan_law_db` 0, −3 (default), −4.5, −6; `mono_sum_db` −3
   (default) or −6; `loudness_target_lufs` (−23) and `loudness_tolerance_lu` (1).
+- **Tally:** `tally_index` and `afv` on strips (below, "Tally and
+  audio-follows-video").
 - **Console:** `colour` (`#rrggbb`) and `recall_safe` on strips and buses;
   `layouts`: `[{"name", "pages": [{"name", "signals": [ids]}]}]`.
 - **Snapshots** (§12.5): parameter states of every strip, bus and send (trim,
@@ -228,11 +268,13 @@ without touching the audio.
 | --- | --- | --- |
 | `WEB_PORT` | 8160 | web UI, API, events WebSocket, probes, metrics |
 | `NMOS_PORT` | 3312 | IS-04 Node API, IS-05 Connection API |
+| `TSL_UDP_PORT` (udp) | 8910 | TSL UMD 5.0 tally, only with `TSL_ENABLE=true` |
+| `TSL_TCP_PORT` (tcp) | 8911 | TSL UMD 5.0 tally (DLE/STX framing), only with `TSL_ENABLE=true` |
 
 | Exit code | Meaning |
 | --- | --- |
 | 0 | stopped by Ctrl-C |
-| 75 | a port cannot be bound, or the DSP thread cannot start |
+| 75 | a port cannot be bound (TSL ports with `TSL_ENABLE=true`), or the DSP thread cannot start |
 | 78 | invalid configuration, libmxl missing, output domain id clash |
 | 143 | SIGTERM: media stopped, MXL released, node deregistered, own domain removed with `MXL_CLEANUP_ON_EXIT=true`, within `SHUTDOWN_TIMEOUT_S` |
 
@@ -241,6 +283,7 @@ without touching the audio.
 | Method and path | |
 | --- | --- |
 | `GET /` | the web UI |
+| `GET /widgets`, `GET /widget/<id>` | operator-screen widgets (above) |
 | `GET /api/v1/events` (WebSocket) | live updates, below |
 | `GET /livez` | 200 while the process runs; never depends on the registry |
 | `GET /readyz` | 200 when the engine runs and, with a registry, the node is registered and listed by the Query API; JSON details incl. `timing_trusted` |
@@ -252,7 +295,7 @@ without touching the audio.
 | `GET /api/v1/mix` | the whole mix |
 | `GET`, `PATCH /api/v1/mix/settings` | `{"pan_law_db": …, "mono_sum_db": …}` |
 | `GET`, `POST /api/v1/strips` | list (with `patch_state`), create (`format` required) |
-| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field, `ramp_ms`; delete removes its sends |
+| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field (`tally_index` and `afv` take `null` to clear), `ramp_ms`; delete removes its sends |
 | `GET`, `POST /api/v1/buses` | list, create (`format` required) |
 | `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format`, `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `ramp_ms`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
@@ -273,6 +316,7 @@ without touching the audio.
 | `GET`, `PUT /api/v1/layouts` | the console layouts (the whole list) |
 | `GET`, `POST /api/v1/shows/history` | versions, newest first (`id`, `time_ms`, `name`, sizes); keep the current show as a named version (`{"name"}`) |
 | `GET`, `DELETE /api/v1/shows/history/<id>`, `POST …/<id>/restore` | a version's mix; delete; restore it as the show |
+| `GET /api/v1/tally` | the TSL settings, packets, every tally index's lamps (screen, display, LH, RH, label, age) and the strips that follow one (on air, preview, AFV open) |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
 | `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |
@@ -295,7 +339,7 @@ analyser. Changes go through the REST API.
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}`, `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,
-`timing_trusted`, and per input: `input_state`,
+`timing_trusted`, `tally_packets_total`, and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
 `input_effective_delay_ms`, `input_late_samples_total`,
 `input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
@@ -317,7 +361,11 @@ gain reduction, limiter ceiling and latency, loudness and its controls),
 `tests/integration/show.sh` (snapshots with filters, recall-safe and crossfade,
 layouts, show history, PPM, correlation, the analyser, the events WebSocket),
 `tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
-checked on the API and on the other client), `tests/perf/section16.sh` (the
+checked on the API and on the other client; tally and AFV),
+`tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
+closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contract
+and a framing check in headless Chrome from an allowed and a refused origin),
+`tests/perf/section16.sh` (the
 §16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
 the maintainers are in `tests/hw/`.

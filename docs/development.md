@@ -104,5 +104,5 @@ slowest histogram bucket and deadline misses.
 
 ## Added in later milestones
 
-MediaMTX (preview contract, milestone 5) and the widget framing checks (with the
-widgets) are added to this file and to CI with the milestone that needs them.
+MediaMTX (preview contract, milestone 5) is added to this file and to CI with the
+milestone that needs it.
