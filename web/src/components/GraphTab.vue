@@ -182,7 +182,7 @@ async function remove() {
     >
       <template #node-mixer="p"><GraphNode :data="p.data" /></template>
     </VueFlow>
-    <div v-if="current" class="panel sendedit" data-send-edit>
+    <div v-if="current" class="panel graphsend" data-send-edit>
       <h3>{{ signalOf(current.from)?.name || current.from }} → {{ signalOf(current.to)?.name || current.to }}</h3>
       <Pot label="Gain" unit="dB" :value="gain" :min="-80" :max="10" :def="0" :fine="0.5" @change="(v) => put({ gain_db: v <= -80 ? '-inf' : v })" />
       <div class="row">
