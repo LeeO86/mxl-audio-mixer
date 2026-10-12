@@ -1284,7 +1284,7 @@ mod tests {
             vec![vec![0.3; 48], vec![0.2; 48]],
             vec![vec![0.05; 48]],
         ]);
-        let mut level = |compiler: &mut Compiler, talking: &[(&str, &str)], mix: &Mix| {
+        let level = |compiler: &mut Compiler, talking: &[(&str, &str)], mix: &Mix| {
             compiler.talking.clear();
             for (mic, dest) in talking {
                 compiler
