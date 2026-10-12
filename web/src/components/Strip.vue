@@ -11,7 +11,7 @@ import MiniPot from "./MiniPot.vue";
 import VFader from "./VFader.vue";
 import { dbValue, fmtPan, fmtSigned } from "../api.js";
 import { DYNAMICS } from "../nodes.js";
-import { live, patchSend, patchSignal, select, sends, signalOf, tallyOf } from "../store.js";
+import { live, patchSend, patchSignal, select, sends, signalOf, soloed, tallyOf, toggleSolo } from "../store.js";
 
 const props = defineProps({
   signal: { type: Object, required: true },
@@ -146,6 +146,10 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
     </template>
     </div>
 
+    <div class="solo">
+      <button class="btn small" :class="soloed[s.id] === 'pfl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'pfl'" :aria-label="`PFL ${s.name}`" title="pre-fader listen" @click="toggleSolo(s.id, 'pfl')">PFL</button>
+      <button v-if="!compact" class="btn small" :class="soloed[s.id] === 'afl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'afl'" :aria-label="`AFL ${s.name}`" title="after-fader listen" @click="toggleSolo(s.id, 'afl')">AFL</button>
+    </div>
     <button class="btn mute" :class="s.mute ? 'danger' : 'secondary'" :aria-pressed="s.mute" @click="patchSignal(s.id, { mute: !s.mute })">Mute</button>
 
     <div class="faderrow">

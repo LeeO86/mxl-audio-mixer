@@ -184,3 +184,22 @@ main.full { max-width: none; }
 /* ---- snapshots ------------------------------------------------------------------- */
 .checks { display: flex; flex-wrap: wrap; gap: .2rem 1rem; }
 .checks label.check { margin: .15rem 0; }
+
+/* ---- solo and control room ---------------------------------------------------------- */
+.strip .solo { display: flex; gap: 2px; }
+.strip .solo .btn { flex: 1; }
+button.btn.pfl { background: #e0c23a; color: #20180a; }
+.soloed { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+.soloed .chip { background: #e0c23a; color: #20180a; border: 0; border-radius: 99px; padding: .25rem .7rem; font-weight: 700; font-size: .8rem; cursor: pointer; font-family: inherit; }
+.monitors { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); }
+.monitor .mbody { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .8rem; }
+.monitor .meter .bars { min-height: 200px; }
+.monitor .meter .bar { width: 10px; }
+.srcbuttons { display: flex; flex-wrap: wrap; gap: .3rem; margin: .3rem 0 .5rem; }
+.srcbuttons .btn { padding: .5rem .7rem; }
+.mbuttons { display: flex; flex-wrap: wrap; gap: .3rem; margin: .4rem 0; }
+.mbuttons .btn { min-width: 4.2rem; padding: .55rem .6rem; }
+button.btn.on-warn[aria-pressed="true"], button.btn.on-warn[aria-pressed="true"]:hover:not(:disabled) { background: var(--warn); color: #20180a; }
+button.btn.on-bad[aria-pressed="true"], button.btn.on-bad[aria-pressed="true"]:hover:not(:disabled) { background: var(--bad); color: #fff; }
+button.btn.pfl:hover:not(:disabled) { background: #e0c23a; }
+.widget-monitor .monitor { flex: 1; overflow: auto; }

@@ -5,10 +5,11 @@
 // on this mixer's own API (same origin). The page posts {type: "widget-ready"} and
 // {type: "widget-size", w, h} to the page that frames it.
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import MonitorCard from "./MonitorCard.vue";
 import Pill from "./Pill.vue";
 import Strip from "./Strip.vue";
 import { api } from "../api.js";
-import { act, isBus, live, signalOf, startLive, stopLive, stored, wantMeters } from "../store.js";
+import { act, isBus, live, room, signalOf, startLive, stopLive, stored, wantMeters } from "../store.js";
 
 const query = location.search;
 const params = new URLSearchParams(query);
@@ -20,7 +21,9 @@ if (theme === "transparent") document.querySelector('meta[name="color-scheme"]')
 const scale = stored("meter.scale", "dbfs");
 const alignment = Number(stored("meter.alignment", -18));
 
+const monitor = computed(() => (id === "monitor" ? room.value.monitors.find((m) => m.id === params.get("monitor")) || null : null));
 const shown = computed(() => {
+  if (id === "monitor") return monitor.value ? [monitor.value] : [];
   if (id === "strip") return [signalOf(params.get("strip"))].filter(Boolean);
   if (id === "loudness") return [signalOf(params.get("signal"))].filter(Boolean);
   if (params.get("strips")) {
@@ -36,7 +39,7 @@ const shown = computed(() => {
   const p = n >= 1 ? layout?.pages[n - 1] : layout?.pages.find((x) => x.name === page);
   return (p?.signals || []).map(signalOf).filter(Boolean);
 });
-const ids = computed(() => shown.value.map((s) => s.id));
+const ids = computed(() => (monitor.value ? [`monitor:${monitor.value.id}`] : shown.value.map((s) => s.id)));
 watch(ids, (list) => wantMeters(list.length ? list : null), { immediate: true });
 
 const signal = computed(() => shown.value[0] || null);
@@ -79,7 +82,8 @@ onUnmounted(() => {
 
 <template>
   <div ref="root" class="widget-root" :class="`widget-${id}`">
-    <template v-if="shown.length && id !== 'loudness'">
+    <MonitorCard v-if="monitor" :monitor="monitor" compact />
+    <template v-else-if="shown.length && id !== 'loudness'">
       <div class="wstrips">
         <Strip v-for="s in shown" :key="s.id" :signal="s" :bus="isBus(s.id)" :scale="scale" :alignment="alignment" compact />
       </div>

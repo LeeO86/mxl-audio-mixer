@@ -168,6 +168,7 @@ pub fn status_json(app: &App) -> Value {
             "enabled": app.config.tsl_enable,
             "state": control.tally_status(),
         },
+        "solo": control.solo(),
     })
 }
 

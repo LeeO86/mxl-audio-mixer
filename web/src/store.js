@@ -145,6 +145,21 @@ export function wantMeters(ids) {
   subscribe();
 }
 
+/** Who is soloed: { signal: "pfl" | "afl" }. */
+export const soloed = computed(() => live.status?.solo || {});
+/** Solo `id` (kind "pfl" or "afl"), or end its solo when it already is soloed so. */
+export function toggleSolo(id, kind) {
+  const on = soloed.value[id] === kind;
+  if (live.status) live.status.solo = { ...soloed.value, [id]: on ? undefined : kind };
+  return act(() => (on ? api.del(`/api/v1/solo/${encodeURIComponent(id)}`) : api.put(`/api/v1/solo/${encodeURIComponent(id)}`, { kind })));
+}
+export const clearSolo = () => act(() => api.del("/api/v1/solo"));
+export const room = computed(() => live.mix?.control_room || { monitors: [], sources: [], solo: {}, reference_spl: [] });
+export const patchMonitor = (id, body) => {
+  local(room.value.monitors.find((m) => m.id === id), body);
+  patch(`/api/v1/monitors/${encodeURIComponent(id)}`, body);
+};
+
 /** The tally of a strip: { index, on_air, preview, afv, afv_open }, or null. */
 export const tallyOf = (id) => live.status?.tally?.state?.strips?.[id] || null;
 

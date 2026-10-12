@@ -7,8 +7,8 @@
 //!   <WIDGET_FRAME_ANCESTORS>`, no `X-Frame-Options`. A bad parameter is 400, an
 //!   unknown id 404, another method than GET 405.
 //!
-//! Widgets now: `strip`, `fader-bank`, `loudness`. `monitor` and `talkback` come
-//! with the control room (M5), `vca` with the VCAs (M6).
+//! Widgets now: `strip`, `fader-bank`, `loudness`, `monitor`. `talkback` comes with
+//! talkback (M5), `vca` with the VCAs (M6).
 
 use std::collections::HashMap;
 
@@ -75,6 +75,12 @@ fn catalogue(mix: &Mix) -> Value {
         .collect();
     let signal = |title: &str| json!({"type": "string", "title": title, "enum": signals});
     let layouts: Vec<&str> = mix.layouts.iter().map(|l| l.name.as_str()).collect();
+    let monitors: Vec<&str> = mix
+        .control_room
+        .monitors
+        .iter()
+        .map(|m| m.id.as_str())
+        .collect();
     let pages: Vec<String> = mix
         .layouts
         .iter()
@@ -109,6 +115,13 @@ fn catalogue(mix: &Mix) -> Value {
             "Loudness",
             json!({"type": "object", "properties": {"signal": signal("Strip or bus")}, "required": ["signal"]}),
             320,
+            200
+        ),
+        item(
+            "monitor",
+            "Monitor",
+            json!({"type": "object", "properties": {"monitor": {"type": "string", "title": "Monitor", "enum": monitors}}, "required": ["monitor"]}),
+            360,
             200
         ),
     ])
@@ -153,6 +166,11 @@ pub fn check(mix: &Mix, id: &str, q: &HashMap<String, String>) -> Result<(), (St
     match id {
         "strip" => signal("strip"),
         "loudness" => signal("signal"),
+        "monitor" => match q.get("monitor") {
+            Some(m) if mix.control_room.monitors.iter().any(|x| &x.id == m) => Ok(()),
+            Some(m) => bad(format!("monitor {m} does not exist")),
+            None => bad("monitor is required".into()),
+        },
         "fader-bank" => {
             if let Some(list) = q.get("strips") {
                 let ids: Vec<&str> = list
@@ -281,6 +299,7 @@ mod tests {
         assert_eq!(status("fader-bank", &[("strips", "s1, s3")]), None);
         assert_eq!(status("fader-bank", &[("strips", "s1,x")]), Some(400));
         assert_eq!(status("fader-bank", &[]), Some(400));
+        assert_eq!(status("monitor", &[("monitor", "main")]), Some(400));
         assert_eq!(status("vca", &[]), Some(404));
     }
 }
