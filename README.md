@@ -276,7 +276,7 @@ without touching the audio.
 
 `/api/v1/events` sends JSON messages: `{"type": "status", "status": …}` five times a
 second (as `GET /api/v1/status`); `{"type": "mix", "revision", "mix", "latency_ms"}`
-on connect and after every change of the mix, from any client; `{"type": "meters",
+on connect and within 40 ms of every change of the mix, from any client; `{"type": "meters",
 "meters", "loudness"}` every 40 ms; and `{"type": "analysis", …}` for clients that
 asked. A client may send `{"type": "subscribe", "meters": [ids] | null, "meter_hz":
 25, "analysis": false}` to receive only some signals' meters, less often, or the

@@ -80,7 +80,18 @@ function flushKey(key) {
   if (!body) return;
   lastSend.set(key, performance.now());
   const [method, path] = key.split(" ");
-  act(() => (method === "PUT" ? api.put(path, body) : api.patch(path, body)));
+  act(() => (method === "PUT" ? api.put(path, body) : api.patch(path, body))).then((ok) => {
+    // Refused: the server's mix did not change, so take it back over the local change.
+    if (ok === undefined) refreshMix();
+  });
+}
+
+async function refreshMix() {
+  try {
+    live.mix = await api.get("/api/v1/mix");
+  } catch {
+    /* the banner tells */
+  }
 }
 
 /** PATCH (or PUT) `path` with `body`, rate-limited and merged per path. */
@@ -92,10 +103,25 @@ export function patch(path, body, method = "PATCH") {
   else if (!timers.has(key)) timers.set(key, setTimeout(() => flushKey(key), wait));
 }
 
+// Changes show at once in this client (the next mix from the server replaces them), so a toggle pressed
+// twice quickly toggles twice.
+function local(target, body) {
+  if (!target) return;
+  for (const [k, v] of Object.entries(body)) if (k !== "ramp_ms") target[k] = v;
+}
 export const signalPath = (id) => `/api/v1/${isBus(id) ? "buses" : "strips"}/${encodeURIComponent(id)}`;
-export const patchSignal = (id, body) => patch(signalPath(id), body);
-export const patchSend = (from, to, body) => patch(`/api/v1/sends/${encodeURIComponent(from)}/${encodeURIComponent(to)}`, body, "PUT");
-export const patchNode = (id, node, body) => patch(`${signalPath(id)}/chain/${encodeURIComponent(node)}`, body);
+export function patchSignal(id, body) {
+  local(signalOf(id), body);
+  patch(signalPath(id), body);
+}
+export function patchSend(from, to, body) {
+  local(sendOf(from, to), body);
+  patch(`/api/v1/sends/${encodeURIComponent(from)}/${encodeURIComponent(to)}`, body, "PUT");
+}
+export function patchNode(id, node, body) {
+  local(signalOf(id)?.chain?.find((n) => n.id === node), body);
+  patch(`${signalPath(id)}/chain/${encodeURIComponent(node)}`, body);
+}
 
 /** Send everything pending now (before an action that depends on it). */
 export function flush() {

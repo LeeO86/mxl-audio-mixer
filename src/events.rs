@@ -3,7 +3,7 @@
 //! The server sends JSON messages:
 //! - `{"type": "status", "status": …}` five times a second (as `GET /api/v1/status`);
 //! - `{"type": "mix", "revision": n, "mix": …, "latency_ms": {signal: ms}}` on connect
-//!   and after every change of the mix, from any client;
+//!   and within 40 ms of every change of the mix, from any client;
 //! - `{"type": "meters", "meters": …, "loudness": …}` at the meter rate (25 Hz,
 //!   as `GET /api/v1/meters` and `GET /api/v1/loudness`).
 //!
@@ -90,15 +90,16 @@ async fn run(mut socket: WebSocket, app: App) {
                 if !send(&mut socket, &s).await {
                     break;
                 }
-                let (rev, mix) = mix_json(&app);
-                if revision != Some(rev) {
+            }
+            _ = meter.tick() => {
+                // A changed mix goes out within one meter tick.
+                if revision != Some(app.control().revision) {
+                    let (rev, mix) = mix_json(&app);
                     revision = Some(rev);
                     if !send(&mut socket, &mix).await {
                         break;
                     }
                 }
-            }
-            _ = meter.tick() => {
                 ticks += 1;
                 if ticks.is_multiple_of(every) {
                     let m = meters_json(&app, only.as_deref());

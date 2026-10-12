@@ -54,6 +54,12 @@ try {
   await page.locator('[data-signal="vox"] .btn.mute').click();
   await until("vox unmuted", async () => (await api("/api/v1/strips/vox")).mute === false);
   pass("mute through the UI; the second client shows it");
+  // Two quick presses toggle twice, whatever the server has answered meanwhile.
+  await page.locator('[data-signal="gtr"] .btn.mute').click();
+  await page.locator('[data-signal="gtr"] .btn.mute').click();
+  await page.waitForTimeout(600);
+  if ((await api("/api/v1/strips/gtr")).mute !== false) throw new Error("two quick mute presses left gtr muted");
+  pass("two quick mute presses: unmuted again");
 
   await page.locator('[data-signal="vox"] .vtrack').focus();
   for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowDown");
