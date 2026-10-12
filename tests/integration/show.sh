@@ -83,9 +83,10 @@ for t in ppm_type1_dbfs ppm_type2_dbfs; do
 done
 [[ "$(field meters "['main'].get('correlation')")" == None ]] || fail "correlation with a silent channel"
 api PATCH /api/v1/strips/vox '{"pan": 0}' >/dev/null
-sleep 0.5
+# The 300 ms window can still hold the pan ramp when a meter tick ran late.
+steady() { r=$(field meters "['main']['correlation']") && python3 -c "exit(0 if abs($r - 1.0) < 1e-3 else 1)"; }
+wait_until 3 "correlation 1.0 with L = R" steady
 r=$(field meters "['main']['correlation']")
-python3 -c "exit(0 if abs($r - 1.0) < 1e-3 else 1)" || fail "correlation $r"
 pass "PPM Type I and II read −20 dBFS on the steady tone; correlation $r with L = R"
 
 # Analyser.
