@@ -1314,7 +1314,7 @@ mod tests {
         // Pink: −3 dB per octave, compared over two octaves of bands.
         let out = run(
             &mut proc(osc(Waveform::Pink), 1),
-            &vec![vec![0f32; 20 * 48_000]],
+            &[vec![0f32; 20 * 48_000]],
             None,
         );
         let band = |lo: f64| {
@@ -1341,7 +1341,7 @@ mod tests {
         // Sweep: peak at the level, from 20 Hz up to 20 kHz in 1 s, again.
         let out = run(
             &mut proc(osc(Waveform::Sweep), 1),
-            &vec![vec![0f32; 2 * 48_000]],
+            &[vec![0f32; 2 * 48_000]],
             None,
         );
         let peak = out[0].iter().fold(0f32, |a, x| a.max(x.abs()));
