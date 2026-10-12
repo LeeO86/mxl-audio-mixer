@@ -601,7 +601,7 @@ In three parts, each a PR:
   WHEP listening in the UI, personal monitors (`MIXER_MAX_WEB_MONITORS`), encoding
   only what someone listens to, and the latency measurement (§3: ≤ 150 ms
   glass-to-ear).
-- **M5c**: talkback (an MXL input or the browser microphone over WHIP), its
+- **M5c** (PR 11): talkback (an MXL input or the browser microphone over WHIP), its
   destinations with control-room dim, IFB/N-1 interrupt with priority, listen-back,
   the `talkback` widget.
 
@@ -761,6 +761,74 @@ maintainer and its author. Its own licensing notes say GPLv3 comes only from the
 VST3 target (`vst3-sys`) and that the core crate could be licensed separately.
 Until it is settled, no Com-IS-Assist code is copied; answer 8 of M2 (a release
 blocker for the release that contains it) still holds.
+
+### M5c: what exists
+
+- `src/mix/talkback.rs`: mics, destinations, the gains of a destination (mix,
+  interrupt, priority), validation; `control_room.talkback` in the show, the
+  monitors' `talkback_dim_db`; a strip channel's patch can be `{"talkback"}`.
+- `src/mix/compile.rs`: a mono buffer and a meter (`talkback:<id>`) per mic;
+  after a destination bus's fader, its programme gain and a send from every mic;
+  the talkback dim in the monitor level; listen-back as the source of the
+  monitors that follow solo.
+- `src/engine/talk.rs`: 16 talkback slots (engine inputs after the MXL inputs)
+  with a jitter buffer.
+- `src/preview/rtsp.rs`: an RTSP reader; `src/preview/talkback.rs`: browser mics
+  (registration, an RTSP reader and Opus decoder per mic).
+- `src/talkback_api.rs`; the talk state in the status.
+- UI: `web/src/talkback.js`, `TalkbackPanel.vue` in the Control room tab, the
+  talkback dim and lamps on the monitor cards, talkback mics in the strip patch,
+  the `talkback` widget.
+- `tests/integration/talkback.sh` with `web/tests/talkback.mjs`;
+  `mxl-mixer-probe --onsets`; talkback in `ui.mjs`, the widget in `widgets.sh`.
+
+### M5c: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D77 | Talkback mics: an MXL input channel each (level, priority 0–9, `dims_control_room`), and browser microphones as runtime mics `browser-<n>` (priority `browser_priority`, never dim). Destinations: one per bus, talk mixed in after the bus fader at the destination's level; `mix` adds it to the programme, `interrupt` takes the programme to `interrupt_db` (default `-inf`) and lets only the highest-priority talking mics through. While a mic that dims the control room talks, every control-room monitor is at its `talkback_dim_db` (default −21 dB, like the dim). | §10.2: destinations "studio, IFB/N-1 feeds, remote, auxes" are buses here (N-1s will be too, M6); "interrupt or mix into N-1 feeds, with per-feed priority" (question 1); §10.1 "talkback dim". |
+| D78 | Every mic-to-destination path is in the plan while both exist; talk only changes their gains (10 ms ramp). A new mic or destination changes the plan; pressing talk never does. | Talk must be immediate and click-free. |
+| D79 | Latching or momentary is the client's: a momentary talk is repeated every second while held; the mixer ends one not repeated within 3 s, so a client that goes away never leaves talk on. The UI: a press shorter than 400 ms latches (or releases a latch), a longer one talks while held. | §10.2 "latching or momentary". |
+| D80 | Browser talkback: a tab registers its microphone (`POST /api/v1/talkback/browser`, repeated every 5 s, removed 30 s after the last) and publishes it by WHIP as `<prefix>/talkback-<client>`. The mixer reads it over RTSP (interleaved TCP, an OPTIONS keepalive every 20 s), decodes the Opus (concealing up to 5 lost frames) to mono into an engine slot with a jitter buffer (20 ms, +10 ms per underrun, at most 100 ms; more than 50 ms over the target is dropped). In own mode the built-in MediaMTX takes publishing from the network on these paths only. The browser asks for the microphone with echo cancellation and noise suppression, without automatic gain. | §10.2, B.1; maintainer's answer 2 of M5b. The jitter buffer is the talkback signal's "own measured delay". |
+| D81 | Listen-back is runtime state: the monitors that follow solo play a destination's return (or any source) instead of their own source. | §10.1, §10.2 "listen-back of any returning feed on the monitor". |
+| D82 | A strip channel can be patched to a talkback mic, a browser's too. | §5 "talkback … every signal can feed the matrix"; §17 "WHIP talkback reaches a strip". |
+| D83 | The browser talkback's latency: Web Audio plays a burst at every wall-clock second into the published stream; `mxl-mixer-probe --onsets` finds the bursts in the mixer's MXL output; the latency is their position in the TAI second. | The mixer and the browser share the clock (as in D75). |
+
+### M5c: results (dev VM)
+
+- `cargo test`: 101 unit tests (new: talkback gains with interrupt and priority,
+  their validation, the compiled talkback paths with a browser mic, the jitter
+  buffer, the RTSP reader's SDP and RTP parsing).
+- `tests/integration/talkback.sh`, sample-exact through MXL:
+  - the IFB bus without talk: the programme; the director talking: the
+    programme cut, the director heard, the monitor at −21 dB;
+  - the director outranks the producer; the producer alone is heard and does not
+    dim the monitor;
+  - mix mode: programme and producer together (−20 dBFS RMS of two −23 dBFS
+    tones), the producer alone with the programme muted;
+  - a momentary talk not repeated ended after 3 s;
+  - listen-back of the IFB's return (input 1) on the monitor, and back;
+  - a strip on the director's mic;
+  - a browser microphone from headless Chrome by WHIP, a strip on it into an MXL
+    output: a burst every second, latency (from Chrome's rendering of the burst to
+    the MXL output) median 50.5 ms, 43.8–55.9 ms over 8 bursts; the mic removed 30
+    s after its last registration.
+- `ui.sh`: a talk button latched by a short press (the monitor's talkback lamp),
+  released; held, it talks only while held; listen-back from the panel.
+  `widgets.sh`: the `talkback` widget framed.
+- **Finding:** a centred mono strip at its post-pan tap into a mono bus has a gain
+  of 1.0012 (+0.01 dB): the pan law's −3 dB is 1/√2, the stereo-to-mono sum's
+  −3 dB is 0.7079. The tests send post-fader where they compare sample-exactly.
+
+### M5c: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | "Per-feed priority" (§10.2): a priority per mic (on an interrupting feed only the highest talking priority is heard), or a priority per mic and feed? | Per mic, as implemented; per feed later if needed. |
+| 2 | Defaults and ranges: talkback dim −21 dB, interrupt cuts (`-inf`), mode `mix`, mic and destination level −40 … +20 dB, priority 0–9, momentary hold 3 s, long press 400 ms, browser mic removed after 30 s, jitter buffer 20–100 ms, echo cancellation and noise suppression on, AGC off; at most 16 mics, 32 destinations, 16 browser mics. | As implemented; none is in the spec. |
+| 3 | One destination per bus. | Yes; N-1 feeds (M6) are buses, so they become destinations then. |
+| 4 | Talkback from browsers without authentication or roles (§20 open point): anyone who reaches the UI can talk. | Leave it for the platform's access control now. |
+| 5 | Merge M5c (PR 11)? M5 is then complete; 1.0.0 still needs M6. | Yes. |
 
 ## tests/hw scripts for the maintainers
 

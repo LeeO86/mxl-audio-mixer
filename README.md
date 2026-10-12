@@ -58,9 +58,11 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 | `fader-bank` | `layout` (a layout's name) and `page` (its name or 1-based number), or `strips` (ids, comma-separated, 1–32) | the strips and buses of that page, side by side | 480×480 |
 | `loudness` | `signal` (a strip or bus id) | momentary, short-term, integrated LUFS, LRA, max true peak, the tolerance; start, stop, reset | 320×200 |
 | `monitor` | `monitor` (a monitor id) | source buttons, level, dim, cut, mono, the meter | 360×200 |
+| `talkback` | `destinations` (ids, comma-separated; default all), `mic` (a talkback mic id; default the browser's microphone) | talk buttons (a short press latches, hold to talk), "All", the mic's meter; with the browser's microphone its on/off | 260×110 |
 
-`talkback` comes with talkback (milestone 5), `vca` with the VCAs (milestone 6).
-The strip widget has PFL.
+`vca` comes with the VCAs (milestone 6). The strip widget has PFL. The talkback
+widget's browser microphone needs an HTTPS page and a frame with
+`allow="microphone"`.
 
 ## Tally and audio-follows-video
 
@@ -109,6 +111,38 @@ The control room (§10.1) is part of the show (`control_room`); who is soloed is
   goes (sends, monitors, outputs).
 
 The UI's Control room tab has all of it; PFL and AFL are on the strips.
+
+## Talkback
+
+Talkback (§10.2) is part of the control room (`control_room.talkback`); who talks
+is not saved.
+
+- **Mics:** an MXL input channel (`input`, `channel`), with `level_db` (−40 …
+  +20), `priority` (0 … 9) and `dims_control_room` (default true): while it talks,
+  every control-room monitor is dimmed by its `talkback_dim_db` (default −21 dB).
+  A browser's microphone is a mic too (`browser-<n>`, priority
+  `browser_priority`, never dims): the browser publishes it by WHIP to MediaMTX
+  as `<PREVIEW_PATH_PREFIX>/talkback-<client>`, the mixer reads it over RTSP,
+  decodes the Opus to mono and plays it through a jitter buffer (from 20 ms,
+  growing by 10 ms on an underrun, at most 100 ms; its delay is in
+  `GET /api/v1/talkback`). Browsers give the microphone to HTTPS pages and
+  `localhost` only. The built-in MediaMTX takes publishing from the network on
+  these paths only.
+- **Destinations:** a bus each (studio, IFB/N-1, remote, aux): talk is mixed in
+  after the bus fader at `level_db`. `mode` `mix` adds it to the programme;
+  `interrupt` (IFB) takes the programme down to `interrupt_db` (default `-inf`,
+  cut) while anything talks to it, and only the highest-priority talking mics are
+  heard. A `return` (a signal or an input) is what comes back, for listen-back.
+- **Talk** is a smoothed value change (10 ms), never a plan swap: latched, or
+  momentary (repeated by the client at least every 3 s, else it ends).
+- **Listen-back:** the monitors that follow solo play a destination's return (or
+  any source) instead of their own.
+- A strip channel can be patched to a talkback mic (`{"talkback": "<mic id>"}`),
+  a browser's too.
+
+The UI's Control room tab has the talkback panel: the mic (a configured one or
+this browser's microphone), a button per destination (a short press latches, a
+long one talks while held), "All", listen-back, and the mics and destinations.
 
 ## Listening in the browser
 
@@ -399,6 +433,13 @@ without touching the audio.
 | `GET`, `POST /api/v1/personal` | personal monitors; create one (`{"source"?}`; 409 above `MIXER_MAX_WEB_MONITORS`) |
 | `GET`, `PATCH`, `DELETE /api/v1/personal/<id>` | one: `source`, `level_db`, `dim`, `cut`, `check` |
 | `PUT`, `DELETE /api/v1/personal/<id>/solo/<signal>` | its own solo (`{"kind"}`) |
+| `GET`, `PATCH /api/v1/talkback` | mics, destinations, `browser_priority`, the browser mics (state, packets, lost, delay, underruns), who talks, listen-back; PATCH `{"browser_priority"}` |
+| `GET`, `POST /api/v1/talkback/mics`, `GET`, `PATCH`, `DELETE …/mics/<id>` | talkback mics (`input` and `channel` required to create) |
+| `GET`, `POST /api/v1/talkback/destinations`, `GET`, `PATCH`, `DELETE …/destinations/<id>` | destinations (`bus` required to create; `return` takes `null` to clear) |
+| `PUT`, `DELETE /api/v1/talkback/talk/<mic>/<destination>` | talk (`{"momentary": true}`: repeat within 3 s) or stop |
+| `DELETE /api/v1/talkback/talk/<mic>`, `DELETE /api/v1/talkback/talk` | stop a mic, or every mic |
+| `POST /api/v1/talkback/browser`, `DELETE …/browser/<id>` | `{"client"}`: this browser's microphone is on (repeat within 30 s); answers `{"id", "path", "whip_url", "whip_port"}` |
+| `GET`, `PUT`, `DELETE /api/v1/listen-back` | `{"destination"}` (its return) or `{"source"}` |
 | `GET /api/v1/tally` | the TSL settings, packets, every tally index's lamps (screen, display, LH, RH, label, age) and the strips that follow one (on air, preview, AFV open) |
 | `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens |
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}` |
@@ -448,7 +489,8 @@ gain reduction, limiter ceiling and latency, loudness and its controls),
 layouts, show history, PPM, correlation, the analyser, the events WebSocket),
 `tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
 checked on the API and on the other client; tally and AFV; a toggle pressed twice
-around a late mix; listening to a monitor with `MEDIAMTX_BIN`),
+around a late mix; listening to a monitor with `MEDIAMTX_BIN`; talkback latched,
+held and listen-back),
 `tests/integration/room.sh` (a published monitor sample-exact with level, dim,
 cut and checks; PFL, AFL, interlock, solo-in-place; an input source; the
 oscillator), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
@@ -456,7 +498,10 @@ closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contr
 and a framing check in headless Chrome from an allowed and a refused origin),
 `tests/integration/preview.sh` (MediaMTX built in and shared, monitors played over
 WHEP in headless Chrome, the latency, on-demand streams, the child restarted,
-personal monitors),
+personal monitors), `tests/integration/talkback.sh` (talkback into an IFB bus
+sample-exact: interrupt, priority, mix, the control room's talkback dim, a
+momentary talk that ends, listen-back, a strip on a talkback mic; a browser's
+microphone by WHIP from headless Chrome into an MXL output, with its latency),
 `tests/perf/section16.sh` (the
 §16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
