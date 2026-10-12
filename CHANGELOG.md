@@ -21,6 +21,12 @@ Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
   voice dot and the auto gain on strips.
 - `mxl-mixer-tone --wav` (`--gap-s`, `--offset-s`): a recording instead of the
   tones.
+- After the maintainers' answers and Com-IS-Assist's measurements: the auto gain
+  is a chain node (`auto`), before the fader by default; snapshots hold the auto
+  setup (section and class `auto`, recall-safe auto-mixes and ducks); the VAD
+  and duck holds are 800 ms; a gate on the momentary loudness (`gate_lufs`,
+  −32 LUFS) against crosstalk replaces `min_level_dbfs`.
+- `docs/release-notes/1.1.0-checklist.md`: tests on recordings of productions.
 
 ## 1.0.0 (not released yet)
 

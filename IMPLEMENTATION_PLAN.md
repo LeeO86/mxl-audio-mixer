@@ -1259,3 +1259,88 @@ Milestone 7 (§19, release 1.1.0) in two parts, each a PR:
 | 7 | A 1.1.0 checklist with real microphones on the maintainers' productions (the VAD's evaluation tool on recordings, crosstalk between panel microphones, ducking music under a presenter). | Yes, with 1.1.0. |
 | 8 | Music on an analysed signal often counts as speech (voiced and modulated); v1 is meant for microphones. | A known limit of v1; a model-based detector behind the same trait later. |
 | 9 | Merge M7a into `main` after `v1.0.0` is tagged, then M7b. | Yes. |
+
+### M7a: answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Defaults and limits | Yes. |
+| 2 | The auto gain after the fader? | No: configurable like the processing chain; before the fader by default. |
+| 3–5 | Muted members leave the sharing; NOM without a switch; last-mic-hold by the VAD | OK. |
+| 6 | Auto-mixes and ducks in snapshots? | Needed: e.g. first a moderation snapshot, then a panel discussion. |
+| 7 | A 1.1.0 checklist with real microphones | With recordings of productions. |
+| 8 | Music as a known limit of v1 | Not asked on its own; see question 10 (Silero). |
+| 9 | Merge 7a after `v1.0.0`, then M7b | Yes. The release PR #16 is merged (approved the same day). |
+
+And: learn from Com-IS-Assist's voice activity detection, which its author
+tested on many recordings.
+
+### M7a: what Com-IS-Assist teaches
+
+Com-IS-Assist (Andy Weiss, MIT; `crates/com-is-assist-core`,
+`Specs/TechnicalConcept.md` §5–6) uses **Silero VAD** (a small recurrent
+network, MIT, vendored as ONNX, run with ONNX Runtime through `ort`, 16 kHz,
+32 ms chunks, threshold 0.5) and records what its tests on commentary showed:
+- **The hold must span a pause between sentences.** With 300 ms (our first
+  default) every ~1.2 s pause of real commentary dropped "voice" and the bed
+  swelled up at sentence rate. Its defaults: 0.8 s VAD hangover and a 0.8 s
+  release hold: the bed recovers after ~1.6 s of quiet.
+- **A level gate against crosstalk.** "A detector answers *is this speech?*,
+  not *is this speech on this microphone*": the programme bleeding into a
+  commentary microphone is speech, and the bed ducked against its own bleed.
+  It ignores voice while the microphone's momentary loudness (400 ms) is below
+  a gate, engaged by default at −32 LUFS (measured: commentary median
+  −26 LUFS; a −40 LUFS gate removes ~10 % of detections, the quiet tails and
+  spill). Set 20–30 dB below the talker.
+- The bed's VAD reads the dry bed, before the automix gain (no second feedback
+  path): as our tap at the auto gain's input.
+- Bed speech while the commentator is silent (an interview in the bed) releases
+  the ducking faster ("interview passthrough"): an idea for M7b, with
+  Com-IS-Assist's ratio control.
+
+**Measured here** (the VAD's evaluation, a 110 s sequence of LibriVox speech,
+Chopin piano and Brahms orchestra from Musopen (CC0), pink noise, speech over
+piano 12 dB down, a tone and silence; fraction of 10 ms frames with speech):
+
+| Segment | ours (hold 0.3 s) | Silero (0.3 s) | Silero (0.8 s) |
+| --- | --- | --- | --- |
+| speech | 0.75 | 0.78 | 0.88 |
+| piano | 0.53 | 0.00 | 0.01 |
+| orchestra | 0.16 | 0.00 | 0.00 |
+| pink noise −30 dBFS | 0.00 | 0.00 | 0.00 |
+| speech over piano | 0.63 | 0.81 | 0.87 |
+| piano | 0.30 | 0.07 | 0.11 |
+| tone, silence | 0.00 | 0.00 | 0.00 |
+
+On clean speech both agree (95 % of Silero's speech frames are ours); on music
+ours fires, Silero does not; under a music bed ours misses a quarter of the
+speech. Silero: 0.08 ms per 32 ms chunk with ONNX Runtime (0.26 % of a core per
+signal; 64 signals ~17 %). A pure-Rust engine (`tract` 0.21 and 0.23) cannot
+run the model (its `If` nodes for 8/16 kHz; folding them with onnxsim failed
+on the nested decoder `If`); ONNX Runtime through `ort`, as Com-IS-Assist,
+works (question 10).
+
+### M7a: decisions after the answers
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D102 (revised) | The auto gain is a chain node (`{"type": "auto"}`, one per chain, placed like any node; bypass: no auto gain); without one it acts after the chain, before the fader. Pre-fader sends and PFL carry it; the VAD reads at its input, so a controller never hears its own gain. | Answer 2. |
+| D101 (revised) | VAD `hold_ms` 800 (was 300), duck `hold_ms` 800 (was 500); `min_level_dbfs` (a 10 ms frame's RMS, effectively open at −60) is replaced by `gate_lufs` (−32): a frame counts as no speech while the signal's momentary loudness (K-weighted, 400 ms, BS.1770) is below it; the state shows `momentary_lufs` and `gated`. The gate delays a detection after silence by 400 ms × 10^((gate − level)/10): voiced onsets now 50 ms (median), 70 ms (90 %), 100 ms at most; ducking 81 ms to −10 dB in `auto.sh`. | Com-IS-Assist's measurements (above): sentence pauses and crosstalk. The gate acts on frames, so the hold still runs from the last speech above it. |
+| D105 (revised) | Snapshots hold the auto setup as a whole (`auto`: VAD settings, auto-mixes, ducks); section and class `auto`; a signal filter does not narrow it; recall-safe auto-mixes and ducks stay (and keep their strips); signals deleted since are dropped; snapshots without `auto` (older) leave the setup. | Answer 6: a moderation, then a panel discussion, is a whole setup. |
+| D109 | A 1.1.0 checklist on recordings of productions (`docs/release-notes/1.1.0-checklist.md`): the evaluation tool per track, multitrack playback with `mxl-mixer-tone --wav` for the auto-mix, the gate and ducking, snapshots, live microphones and the load. | Answer 7. |
+
+Results: 127 unit tests (new: the auto node before the fader, a pre-fader send
+carrying it, an explicit node moving the gain and the tap, one per chain;
+snapshots with the auto setup: moderation and panel in turn, a strips-only
+recall, recall-safe, a deleted strip, an older snapshot; the gate; the 80-frame
+hold). `auto.sh`: the auto gain before the fader (a pre-fader aux at 0.707, the
+fader on top only in the programme), snapshots switching moderation and panel;
+`ui`, `show`, `mix`, `processing`, `widgets`, `vca` unchanged.
+
+### M7a: questions after the answers
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 10 | Silero VAD as the detector (default), ours kept as the fallback (and for builds without it)? It adds ONNX Runtime (Microsoft, MIT, C++, linked statically; `ort`'s build downloads its prebuilt library once per build machine, also in CI and the image build) and the 2.3 MB model (MIT, vendored as in Com-IS-Assist); 0.26 % of a core per analysed signal. | Yes: the measurements above, and the detector Com-IS-Assist was tuned with. |
+| 11 | The gate at −32 LUFS by default (Com-IS-Assist's), set per microphone 20–30 dB below its talker. | As implemented; the checklist notes the values that work. |
+| 12 | Bed speech releasing a duck (Com-IS-Assist's interview passthrough). | With M7b (Com-IS-Assist's ratio control). |
