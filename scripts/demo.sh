@@ -83,7 +83,8 @@ api POST /api/v1/vcas '{"id": "playout", "name": "Playout", "members": ["music-l
 api POST /api/v1/mute-groups '{"id": "playout", "name": "Playout", "members": ["music-l", "music-r", "sfx", "amb"]}'
 api PUT /api/v1/layouts '[{"name": "Show", "pages": [{"name": "Talent", "signals": ["host", "guest", "phone"]}, {"name": "Playout", "signals": ["music-l", "music-r", "sfx", "amb"]}]}]'
 # With espeak-ng: host and guest speak in turns (inputs 2 and 3, a 10 s period),
-# in an auto-mix, and the music ducks under their speech (§8).
+# in an auto-mix and auto-levelled, and the music ducks under their speech to
+# a ratio of 5 LU (§8).
 if command -v espeak-ng >/dev/null; then
     espeak-ng -v en -s 165 -w "$WORK/host.wav" "Good evening, and welcome to the programme. Tonight we talk about the city."
     espeak-ng -v en+f3 -s 165 -w "$WORK/guest.wav" "Thank you. It is a pleasure to be here, and there is a lot to say."
@@ -102,7 +103,8 @@ if command -v espeak-ng >/dev/null; then
         api PATCH "/api/v1/strips/$id" "{\"patch\": [{\"input\": $input, \"channel\": 1}]}"
     done
     api POST /api/v1/automixes '{"id": "panel", "name": "Panel", "members": ["host", "guest"]}'
-    api POST /api/v1/ducks '{"id": "bed", "name": "Music under speech", "keys": ["host", "guest"], "targets": ["music-l", "music-r"], "depth_db": -12}'
+    api POST /api/v1/ducks '{"id": "bed", "name": "Music under speech", "keys": ["host", "guest"], "targets": ["music-l", "music-r"], "mode": "ratio"}'
+    for id in host guest; do api PUT "/api/v1/autolevels/$id"; done
 fi
 api POST /api/v1/snapshots '{"name": "Top of show"}'
 
