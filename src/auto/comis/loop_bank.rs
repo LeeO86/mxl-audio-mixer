@@ -1,0 +1,345 @@
+// Copied from Com-IS-Assist (https://github.com/andyweiss/Com-IS-Assist,
+// crates/com-is-assist-core, commit 5bdd96b), Copyright (c) 2026 Andreas Weiss,
+// MIT License (see src/auto/comis/LICENSE). Changed: the module path of EnvelopeDetector; formatted with the mixer's rustfmt.
+
+use super::envelope::EnvelopeDetector;
+
+/// Time constants for one stage of the cascade, in seconds at Speed = 1.0.
+#[derive(Debug, Clone, Copy)]
+struct Ballistics {
+    attack_seconds: f64,
+    release_seconds: f64,
+}
+
+/// Slow stage: carries the bulk of the reduction and sets the programme balance. Its detector is
+/// the 3s short-term window, so there is nothing to gain from moving faster than this.
+///
+/// The attack is deliberately long - 0.8s was tried first and engages too eagerly. Because the mid
+/// and fast stages already cover the first moments (together up to 10dB, within one control tick),
+/// a quick slow stage does not make the mixer more responsive; it just arrives on top of stages
+/// that are still saturated and **overshoots**. Measured on a cold start into ~18.7dB of settled
+/// reduction: at 0.8s the total peaks at the 24dB ceiling (+5.3dB of overshoot, 13 ceiling hits
+/// across the test file), at 2.5s it peaks at 20.6dB (+1.9dB, 5 hits). Onset response is
+/// identical either way (t63 = 0.1s), because the fast stages are what actually bite.
+const SLOW: Ballistics = Ballistics {
+    attack_seconds: 2.5,
+    release_seconds: 3.0,
+};
+/// Mid stage: phrase-level tracking, fed by the 400ms momentary window.
+const MID: Ballistics = Ballistics {
+    attack_seconds: 0.15,
+    release_seconds: 0.6,
+};
+/// Fast stage: transient response, fed by the short K-weighted detector and stepped at audio
+/// sub-chunk rate rather than at the control tick.
+///
+/// The release is **far** longer than the attack, and much longer than the detector window. That
+/// asymmetry is deliberate and was measured rather than assumed: with a short release the stage
+/// tracked the syllable envelope of real commentary and swung across its whole authority every
+/// tick or two, modulating the Bed at syllable rate. A transient catcher wants to grab quickly and
+/// let go slowly, so that what it responds to is *onsets* rather than the shape of every vowel.
+const FAST: Ballistics = Ballistics {
+    attack_seconds: 0.005,
+    release_seconds: 0.4,
+};
+
+/// Over how long the release eases in after ducking stops.
+///
+/// Real commentary pauses run ~1.2s, and with no resistance at all the Bed audibly swells in every
+/// inter-sentence gap and re-ducks on the next phrase (see `Specs/TechnicalConcept.md` section
+/// 5.3). This sits on top of the COM detector's own `hangover_seconds`, and the two together have
+/// to span a natural pause. Fixed rather than exposed: it is a property of speech, not a matter of
+/// taste, and having it as a user control ("Hold time") was part of what made the old surface
+/// unmanageable.
+const RELEASE_HOLD_SECONDS: f64 = 0.8;
+
+/// How much the release time constant is stretched at the very start of a release, easing back to
+/// 1x over `RELEASE_HOLD_SECONDS`.
+///
+/// This replaced a hard freeze, and the reason is worth recording. Freezing the cascade outright
+/// for the hold window and then releasing normally is trivially simple and sounds wrong: it puts a
+/// corner in the gain curve. Measured on real commentary, the gain sat at exactly +0.000 dB/tick
+/// for 0.8s and then stepped straight to -0.48 dB/tick — and a discontinuity in the *rate* of
+/// change is audible as "nothing happens, then it moves", which is precisely the hold people
+/// notice. (Freezing the stages *more* completely made it more obvious, not less: an earlier leak
+/// in the fast stage had been smearing the corner by accident.)
+///
+/// Stretching the time constant instead means recovery begins immediately but imperceptibly
+/// slowly, then accelerates smoothly to the normal rate. Short gaps still recover almost nothing,
+/// because the early rate is tiny — but there is no instant at which the behaviour switches.
+/// Interpolation is geometric rather than linear, which is the natural spacing for time constants.
+const HOLD_RELEASE_STRETCH: f64 = 60.0;
+
+/// How much faster `MixState::InterviewPassthrough` recovers than an ordinary release. Replaces the
+/// former `interview-release-ms` parameter — one fixed ratio is easier to reason about than a free
+/// time that can be set slower than the normal release by mistake.
+const INTERVIEW_RELEASE_SPEEDUP: f64 = 4.0;
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoopBankConfig {
+    /// The "Speed" macro: scales every stage's time constants together. >1 is faster, <1 calmer.
+    /// One control replaces the five separate time parameters the single-loop design needed.
+    pub speed: f64,
+    pub max_gain_reduction_db: f64,
+    /// How far the mid stage may trim the slow stage's estimate, in dB either way.
+    pub mid_authority_db: f64,
+    /// How far the fast stage may trim slow+mid. Set to 0.0 to disable the fast stage entirely.
+    pub fast_authority_db: f64,
+}
+
+impl Default for LoopBankConfig {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            max_gain_reduction_db: 24.0,
+            mid_authority_db: 6.0,
+            // Smaller than the mid stage's: this one moves in milliseconds, so the audible cost of
+            // it being wrong is higher. 4dB is enough to catch an onset before the 400ms window has
+            // noticed it, without being enough to dominate.
+            fast_authority_db: 4.0,
+        }
+    }
+}
+
+/// What each stage is currently contributing, in dB of reduction. Exposed for metering and for the
+/// offline CSV, because the single most useful question when the mix does something unexpected is
+/// "which stage did that?".
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LoopContributions {
+    pub slow_db: f64,
+    pub mid_db: f64,
+    pub fast_db: f64,
+    pub total_db: f64,
+}
+
+/// The multi-loop gain computer: three cascaded stages whose reductions add in dB (equivalently,
+/// whose gains multiply — i.e. three cascaded gain elements, the classic multi-loop topology).
+///
+/// Each stage is fed a `required` reduction derived **feed-forward** from the dry signals at its own
+/// integration time (see `Specs/TechnicalConcept.md` section 5.2). Because reducing the Bed by 1 dB
+/// raises the COM/IS ratio by exactly 1 LU, `required = target_ratio − (COM − BED)` is the complete
+/// answer at that time scale — there is no loop to converge, which is what removes the windup and
+/// pumping the earlier feedback design kept producing.
+///
+/// Stages are **hierarchical trims**, not three independent controllers: the slow stage states the
+/// answer, the mid stage corrects it by at most `mid_authority_db`, and the fast stage corrects
+/// *that* by at most `fast_authority_db`. Without the trim structure all three would act on the
+/// same error and triple-count it. Bounding each faster stage is also what makes a 5ms attack safe
+/// to have at all: the fast stage cannot run away, because it can never contribute more than its
+/// authority.
+///
+/// The adaptive ballistics the reference describes — "relatively long attack times during
+/// steady-state signal conditions but also very short attack times when there are impulsive input
+/// transients" — are an emergent property of this structure, not something configured. A transient
+/// moves only the fast stage, in milliseconds and by a bounded amount; a sustained level change
+/// moves all three, and the slow stage ends up carrying it.
+pub struct LoopBank {
+    config: LoopBankConfig,
+    slow: EnvelopeDetector,
+    mid: EnvelopeDetector,
+    fast: EnvelopeDetector,
+    /// Counts down once the cascade is asked to release; while positive, release is blocked.
+    hold_remaining_seconds: f64,
+    /// Set by the most recent update so the fast stage, which steps between control ticks, knows
+    /// whether it should be driving toward a target or toward unity.
+    releasing: bool,
+    /// Whether the interview state is driving this release (it skips the ease-in entirely).
+    interview_release: bool,
+    release_speedup: f64,
+}
+
+impl LoopBank {
+    pub fn new(config: LoopBankConfig) -> Self {
+        Self {
+            config,
+            slow: EnvelopeDetector::new(0.0),
+            mid: EnvelopeDetector::new(0.0),
+            fast: EnvelopeDetector::new(0.0),
+            hold_remaining_seconds: 0.0,
+            releasing: false,
+            interview_release: false,
+            release_speedup: 1.0,
+        }
+    }
+
+    pub fn set_config(&mut self, config: LoopBankConfig) {
+        self.config = config;
+    }
+
+    /// Attack and release times for one stage.
+    ///
+    /// **`speed` scales both sides**, and that is safe precisely because the fast-attack /
+    /// slow-release asymmetry is *structural* rather than something the control has to impose:
+    ///
+    /// - On the way down, the fast stage engages in milliseconds, mid in ~150ms and slow in ~800ms,
+    ///   so the cascade bites immediately and then firms up.
+    /// - On the way back, recovery is governed by the **slow** stage's constant alone - the whole
+    ///   cascade decays by one factor derived from `SLOW` (see `update_release`), and most of the
+    ///   reduction lives in that stage anyway - so it is ~4x longer than even the slowest attack.
+    ///
+    /// Scaling both therefore moves the whole envelope without flattening it: the release/attack
+    /// ratio is identical at every setting. Scaling only the attack was tried, and while it does
+    /// stop a high `speed` producing a quick recovery, it distorts the shape the cascade was built
+    /// to have and costs the user the single honest control.
+    fn scaled(&self, ballistics: Ballistics) -> (f64, f64) {
+        let speed = self.config.speed.max(0.01);
+        (
+            ballistics.attack_seconds / speed,
+            ballistics.release_seconds * self.release_stretch() / (speed * self.release_speedup),
+        )
+    }
+
+    /// The release ease-in factor: `HOLD_RELEASE_STRETCH` at the instant ducking stops, easing
+    /// geometrically to `1.0` over `RELEASE_HOLD_SECONDS`. See `HOLD_RELEASE_STRETCH` for why this
+    /// is a continuous stretch rather than a freeze. Interview passthrough skips it - getting back
+    /// to unity promptly is that state's entire purpose.
+    fn release_stretch(&self) -> f64 {
+        if !self.releasing || self.interview_release {
+            return 1.0;
+        }
+        let remaining = (self.hold_remaining_seconds / RELEASE_HOLD_SECONDS).clamp(0.0, 1.0);
+        HOLD_RELEASE_STRETCH.powf(remaining)
+    }
+
+    fn clamp_authority(value: f64, authority_db: f64) -> f64 {
+        value.clamp(-authority_db, authority_db)
+    }
+
+    /// Steps the slow and mid stages. Call once per control tick with the reductions required by
+    /// the 3s and 400ms measurements; `dt_seconds` is the elapsed time since the previous call.
+    ///
+    /// `None` means "that measurement is not usable this tick" (a reading at the silence sentinel,
+    /// say) and holds the stage where it is rather than letting a sentinel value propagate as a
+    /// gigantic required reduction.
+    pub fn update_slow_mid(
+        &mut self,
+        required_slow_db: Option<f64>,
+        required_mid_db: Option<f64>,
+        dt_seconds: f64,
+    ) {
+        self.releasing = false;
+        self.interview_release = false;
+        self.release_speedup = 1.0;
+        self.hold_remaining_seconds = RELEASE_HOLD_SECONDS;
+
+        if let Some(required) = required_slow_db {
+            let target = required.clamp(0.0, self.config.max_gain_reduction_db);
+            let (attack, release) = self.scaled(SLOW);
+            self.slow.process(target, attack, release, dt_seconds);
+        }
+
+        if let Some(required) = required_mid_db {
+            let target =
+                Self::clamp_authority(required - self.slow.value(), self.config.mid_authority_db);
+            let (attack, release) = self.scaled(MID);
+            self.mid.process(target, attack, release, dt_seconds);
+        }
+    }
+
+    /// Steps the fast stage. Call at audio sub-chunk rate with the reduction required by the ~30ms
+    /// detector. Trims whatever slow+mid currently contribute, within `fast_authority_db`.
+    pub fn update_fast(&mut self, required_fast_db: Option<f64>, dt_seconds: f64) {
+        let target = match (self.releasing, required_fast_db) {
+            // Releasing: head for unity at this stage's own (short) release constant. Done here
+            // rather than in `update_release` because this runs per audio sub-chunk, so a 0.4s
+            // release is actually realisable instead of being quantised to the ~100ms control tick.
+            (true, _) => 0.0,
+            (false, None) => self.fast.value(), // unusable reading: hold
+            (false, Some(required)) => {
+                // **Positive-only**, unlike the mid stage's symmetric trim. The fast stage exists to
+                // add reduction quickly when COM surges; it must never *remove* reduction the slower
+                // stages have decided on, because at this time scale a dip in the measurement is
+                // usually just a gap between syllables rather than evidence the Bed should come up.
+                // Clamping at zero instead of going negative is what turns this from an envelope
+                // follower into a transient catcher.
+                let coarse = self.slow.value() + self.mid.value();
+                (required - coarse).clamp(0.0, self.config.fast_authority_db)
+            }
+        };
+        let (attack, release) = self.scaled(FAST);
+        self.fast.process(target, attack, release, dt_seconds);
+    }
+
+    /// Asks the whole cascade to recover toward unity — `MixState::ReleaseToUnity` or
+    /// `InterviewPassthrough`. Each stage releases at its own rate, so recovery is naturally
+    /// progressive: the fast stage lets go first and the slow stage last, which is the shape a
+    /// single-envelope design could only approximate.
+    /// Recovers the cascade toward unity with **each stage releasing at its own time constant**,
+    /// so the natural multi-loop character carries through the release phase: the fast stage lets
+    /// go first, the mid stage next, and the slow stage carries the tail - which is where most of
+    /// the reduction lives anyway.
+    ///
+    /// **A negative mid trim hands its recovery to the slow stage as it goes.** This is what makes
+    /// per-stage release safe. The mid stage is a *signed* trim and is frequently negative while
+    /// ducking; a negative value decaying toward zero is a *subtraction being removed*, so on its
+    /// own it would **raise** the total - the Bed would duck harder at the exact moment the
+    /// commentator stopped (+0.6 dB measured on real commentary). Transferring exactly that much
+    /// to the slow stage each tick keeps the total monotonic while leaving the mid stage free to
+    /// decay at its own rate on the meters.
+    ///
+    /// Doing the transfer in one lump on the first release tick also works and is simpler, but it
+    /// snaps the mid readout to zero the instant the state changes, which looks like a stage having
+    /// died. Spreading it over the decay keeps every bar telling the truth.
+    ///
+    /// The fast stage is released by `update_fast` at audio sub-chunk rate rather than here, so its
+    /// short constant is actually realisable instead of being quantised to the ~100ms control tick.
+    pub fn update_release(&mut self, interview: bool, dt_seconds: f64) {
+        self.releasing = true;
+        self.interview_release = interview;
+        self.release_speedup = if interview {
+            INTERVIEW_RELEASE_SPEEDUP
+        } else {
+            1.0
+        };
+
+        // Advance the ease-in. Recovery is never blocked outright; it simply starts far too slowly
+        // to hear and accelerates from there (see `HOLD_RELEASE_STRETCH`).
+        self.hold_remaining_seconds = (self.hold_remaining_seconds - dt_seconds).max(0.0);
+
+        // Mid releases at its own constant, like every other stage.
+        let mid_before = self.mid.value();
+        let (attack, release) = self.scaled(MID);
+        let mid_after = self.mid.process(0.0, attack, release, dt_seconds);
+
+        // ...but a *negative* trim returning to zero is a subtraction being removed, which would
+        // raise the total. Hand exactly that much to the slow stage so the mid stage's recovery
+        // contributes nothing to the total, while still visibly decaying at its own rate on the
+        // meters. Positive trims are left alone - those shrink the total, which is wanted.
+        let returned_trim = (mid_after - mid_before).max(0.0);
+
+        let (attack, release) = self.scaled(SLOW);
+        self.slow.process(0.0, attack, release, dt_seconds);
+        if returned_trim > 0.0 {
+            self.slow
+                .reset((self.slow.value() - returned_trim).max(0.0));
+        }
+    }
+
+    /// Current per-stage and total reduction in dB. The total is clamped to the configured ceiling
+    /// and to zero (automix only ever reduces Bed, never boosts it).
+    pub fn contributions(&self) -> LoopContributions {
+        let slow_db = self.slow.value();
+        let mid_db = self.mid.value();
+        let fast_db = self.fast.value();
+        LoopContributions {
+            slow_db,
+            mid_db,
+            fast_db,
+            total_db: (slow_db + mid_db + fast_db).clamp(0.0, self.config.max_gain_reduction_db),
+        }
+    }
+
+    pub fn total_reduction_db(&self) -> f64 {
+        self.contributions().total_db
+    }
+
+    pub fn reset(&mut self) {
+        self.slow.reset(0.0);
+        self.mid.reset(0.0);
+        self.fast.reset(0.0);
+        self.hold_remaining_seconds = 0.0;
+        self.releasing = false;
+        self.interview_release = false;
+        self.release_speedup = 1.0;
+    }
+}

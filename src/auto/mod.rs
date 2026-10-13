@@ -7,6 +7,7 @@
 //! gains that changed (auto-mix gain × the deepest duck).
 
 pub mod automix;
+pub mod comis;
 pub mod duck;
 pub mod silero;
 pub mod vad;
