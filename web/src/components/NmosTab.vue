@@ -101,7 +101,7 @@ const confirm = (i) => act(() => api.post(`/api/v1/inputs/${i.input}/delay/confi
       <thead>
         <tr>
           <th>Input</th><th>State</th><th>Flow</th><th class="num">Channels</th><th class="num" title="arrival lag p50 / p99">Lag ms</th>
-          <th class="num" title="read offset + extra delay">Delay ms</th><th>Extra delay</th><th class="num">Late</th><th class="num">Missing</th><th></th>
+          <th class="num" title="read offset + extra delay">Delay ms</th><th>Extra delay</th><th class="num" title="the source had not written the samples yet">Late</th><th class="num" title="the ring had already overwritten the samples">Overrun</th><th class="num">Missing</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -124,6 +124,7 @@ const confirm = (i) => act(() => api.post(`/api/v1/inputs/${i.input}/delay/confi
             </button>
           </td>
           <td class="num">{{ i.late_samples }}</td>
+          <td class="num">{{ i.overrun_samples }}</td>
           <td class="num">{{ i.missing_samples }}</td>
           <td style="text-align: right; white-space: nowrap">
             <template v-if="editing === i.input">
@@ -135,7 +136,7 @@ const confirm = (i) => act(() => api.post(`/api/v1/inputs/${i.input}/delay/confi
         </tr>
       </tbody>
     </table>
-    <p class="note">Route inputs with an NMOS controller (IS-05). "auto" raises the extra delay when blocks arrive late; a larger jump is proposed and applied here.</p>
+    <p class="note">Route inputs with an NMOS controller (IS-05). "auto" raises the extra delay when blocks arrive late; a larger jump is proposed and applied here. Late is a source that had not written the samples yet. Overrun is samples the ring had already overwritten. Missing counts both, and any other failed read.</p>
   </div>
 
   <div class="panel">

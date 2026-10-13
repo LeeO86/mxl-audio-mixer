@@ -618,8 +618,10 @@ the control engine did not get), `signals`,
 connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,
 and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
-`input_effective_delay_ms`, `input_late_samples_total`,
-`input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
+`input_effective_delay_ms`, `input_late_samples_total`
+(the source had not written the samples yet), `input_overrun_samples_total`
+(the ring had already overwritten them), `input_missing_samples_total`
+(both, and any other failed read), `input_reopens_total`; `process_cpu_seconds_total`,
 `process_resident_memory_bytes`. All prefixed `mxl_audio_mixer_`.
 
 ## Tests

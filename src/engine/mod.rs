@@ -161,9 +161,11 @@ pub struct InputCounters {
     pub head_index: AtomicU64,
     /// Samples per channel read into the input buffer.
     pub read_samples: AtomicU64,
-    /// Samples that were not there yet at the read deadline (§4.2 "late").
+    /// Samples the source had not written by the read (§4.2 "late"): too early, or the wait timed out.
     pub late_samples: AtomicU64,
-    /// Samples replaced by silence after the input had started (late, too old, errors).
+    /// Samples the ring had already overwritten (too late): the reader fell behind.
+    pub overrun_samples: AtomicU64,
+    /// Samples replaced by silence after the input had started (late source, ring overrun, other errors).
     pub missing_samples: AtomicU64,
     /// The extra delay the DSP thread currently applies, in samples.
     pub delay_samples: AtomicU32,
