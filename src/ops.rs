@@ -205,6 +205,7 @@ pub fn status_json(app: &App) -> Value {
             "speech": control.auto.vads.iter().filter(|(_, v)| v.state.speech_active).map(|(s, _)| s.clone()).collect::<Vec<_>>(),
             "automixes": control.mix.automixes.len(),
             "ducks": control.mix.ducks.len(),
+            "autolevels": control.mix.autolevels.len(),
         },
         "talkback": {
             "talking": control.talking(),

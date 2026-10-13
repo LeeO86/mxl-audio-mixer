@@ -3,7 +3,9 @@
 # tones (NOM, a weight, bypass, a muted member, disabled; no plan swap); the VAD
 # on speech (espeak-ng) and not on a tone; a tone ducked under the speech
 # (depth, onset latency, release) measured on the output; an auto-mix of two
-# talkers taking turns, with last-mic-hold; deleted signals leave it all.
+# talkers taking turns, with last-mic-hold; auto-level (a tone to its target on
+# the output, the speech offset, the freeze); a ratio duck (the ratio held,
+# interview passthrough); deleted signals leave it all.
 # Needs espeak-ng.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -204,6 +206,104 @@ assert held > 0.9, ("last-mic-hold", held, quiet[:5])
 print(f"vox alone: {ok_vox:.2f}, guest alone: {ok_guest:.2f} of the polls with the talker at 0 dB and the other below −20 dB; nobody: {held:.2f} held")
 EOF
 pass "auto-mix of two talkers: the one speaking near 0 dB, the other below −20 dB; last-mic-hold keeps the last talker"
+api DELETE /api/v1/automixes/panel >/dev/null
+
+# Auto-level (§8.2): t1 (1 kHz, −23 LUFS) to −30 LUFS, instantly (attack and
+# release 0); measured on the programme's left channel.
+api PUT /api/v1/autolevels/t1 '{"target_lufs": -30, "attack_ms": 0, "release_ms": 0}' >/dev/null
+sleep 4
+"$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds 1 --dump "$WORK/level.txt" >/dev/null
+read -r LEVEL GAIN < <(json "$WEB/api/v1/autolevels/t1" "d['state']['level_lufs'], d['state']['gain_db']")
+python3 - "$WORK/level.txt" "$LEVEL" "$GAIN" <<'EOF' || fail "auto-level"
+import math, sys
+x = [float(l.split()[1]) for l in open(sys.argv[1])]
+level, gain = float(sys.argv[2]), float(sys.argv[3])
+rms = 20 * math.log10(math.sqrt(sum(v * v for v in x) / len(x)))
+# A 1 kHz tone's loudness is its RMS level (the K filter's +0.69 dB there is the −0.691).
+assert abs(level + 23.0) < 0.1, ("t1's level", level)
+assert abs(gain + 7.0) < 0.1, ("gain", gain)
+assert abs(rms + 30.0) < 0.1, ("the output", rms)
+print(f"t1 at {level} LUFS, gain {gain} dB, the output at {rms:.2f} dBFS RMS")
+EOF
+api DELETE /api/v1/autolevels/t1 >/dev/null
+# vox (speech in the first half of each 6 s period): +2 LU while it speaks,
+# frozen in the silence.
+api PUT /api/v1/autolevels/vox >/dev/null
+python3 - "$WEB" <<'EOF' || fail "auto-level on speech"
+import json, sys, time, urllib.request
+web = sys.argv[1]
+get = lambda p: json.load(urllib.request.urlopen(web + p))
+rows = []
+until = time.time() + 12.5
+while time.time() < until:
+    rows.append(get("/api/v1/autolevels/vox")["state"])
+    time.sleep(0.05)
+speech = [r for r in rows if r["speech"]]
+frozen = [r for r in rows if r["frozen"]]
+assert speech and all(r["target_lufs"] == -21.0 for r in speech), speech[:3]
+assert all(r["target_lufs"] == -23.0 for r in rows if not r["speech"])
+assert len(frozen) > 20, len(frozen)
+# Frozen stretches keep the gain.
+moved = [b["gain_db"] - a["gain_db"] for a, b in zip(rows, rows[1:]) if a["frozen"] and b["frozen"]]
+assert max(map(abs, moved)) == 0, max(map(abs, moved))
+print(f"{len(speech)} of {len(rows)} polls with speech (target −21), {len(frozen)} frozen with the gain held; last {rows[-1]}")
+EOF
+api DELETE /api/v1/autolevels/vox >/dev/null
+pass "auto-level: a tone to −30 LUFS on the output; speech gets +2 LU; the gain holds in the silence"
+
+# A ratio duck: the commentator vox over a bed of t1 (the tone) and the guest
+# (an interview in the bed, speaking in vox's pauses).
+api POST /api/v1/ducks '{"id": "com", "name": "Commentary", "keys": ["vox"], "targets": ["t1", "guest"], "mode": "ratio"}' >/dev/null
+# t1 and the guest are tapped from this plan on: 3 s until their short-term
+# loudness is there.
+sleep 3.5
+python3 - "$WEB" "$IT_OUT/auto-ratio.json" <<'EOF' || fail "ratio duck (the polls: $IT_OUT/auto-ratio.json)"
+import json, sys, time, urllib.request
+web = sys.argv[1]
+get = lambda p: json.load(urllib.request.urlopen(web + p))
+rows = []
+until = time.time() + 18.5
+while time.time() < until:
+    d = get("/api/v1/ducks/com")
+    rows.append((d["control"], d["gain_db"]))
+    time.sleep(0.05)
+json.dump(rows, open(sys.argv[2], "w"))
+c = [r[0] for r in rows]
+states = {x["state"] for x in c}
+assert {"duck", "interview"} <= states, states
+for x, g in rows:
+    assert abs(g + x["reduction_db"]) < 0.02, (g, x)
+# (Right after vox's 3.7 s pauses its short-term loudness is silence: no ratio.)
+duck = [x for x in c if x["state"] == "duck" and x["reduction_db"] > 1 and x["ratio_lu"] is not None]
+held = [x for x in duck if abs(x["ratio_lu"] - 5) < 2]
+median = sorted(x["ratio_lu"] for x in duck)[len(duck) // 2] if duck else None
+# The speech's short-term loudness builds up after each 3.7 s pause and the
+# bed's still holds the guest's last turn: the stages follow, about 1 LU over.
+assert len(duck) > 20 and abs(median - 5) < 1.5, (len(duck), median, duck[:5])
+assert max(x["reduction_db"] for x in duck) > 8, duck[:5]
+# The guest alone: back fast (interview passthrough): at the end of every
+# stretch of 2 s or more without the commentator, the guest speaking in most of it.
+ends, run = [], []
+for x in c:
+    if x["state"] in ("duck", "overvoice"):
+        if len(run) >= 40 and sum(r["state"] == "interview" for r in run) >= 30:
+            ends.append(run[-1]["reduction_db"])
+        run = []
+    else:
+        run.append(x)
+assert ends and max(ends) < 1.0, (ends, "".join(x["state"][0] for x in c))
+print(f"states {sorted(states)}; ducking: median ratio {median} LU, {len(held)} of {len(duck)} polls within 2 LU of the 5 LU target "
+      f"(reductions {min(x['reduction_db'] for x in duck)}–{max(x['reduction_db'] for x in duck)} dB); "
+      f"after the guest's turns {ends} dB")
+EOF
+api PATCH /api/v1/ducks/com '{"ratio": {"bed_voice": false}}' >/dev/null
+[[ "$(json "$WEB/api/v1/ducks/com" "d['ratio']['bed_voice'], d['ratio']['target_lu']")" == "False 5.0" ]] || fail "a partial ratio patch"
+[[ "$(json "$WEB/api/v1/vad" "'guest' in [v['signal'] for v in d]")" == False ]] || fail "the bed is still analysed"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/ducks/com" -d '{"ratio": {"target_lu": 13}}')
+[[ "$code" == 400 ]] || fail "a ratio target of 13 LU answered $code"
+api DELETE /api/v1/ducks/com >/dev/null
+api POST /api/v1/automixes '{"id": "panel", "name": "Panel", "members": ["vox", "guest"]}' >/dev/null
+pass "ratio duck: the bed held about 5 LU under the commentator; the guest speaking alone brings it back (interview passthrough); bed_voice off stops analysing the bed"
 
 # Snapshots: a moderation (the duck, no auto-mix), then the panel (the auto-mix, no duck).
 api POST /api/v1/ducks '{"id": "bed", "name": "Bed", "keys": ["vox"], "targets": ["t1"]}' >/dev/null
