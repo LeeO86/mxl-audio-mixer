@@ -19,7 +19,10 @@ TOOL="${NMOS_TESTING_DIR:-/tmp/nmos-testing}"
 PY="${NMOS_TESTING_PYTHON:-/tmp/nmos-venv/bin/python}"
 OUT="${AMWA_OUT:-$HERE/../ci-artifacts/amwa-$MODE}"
 REGISTRY_IMAGE="${NMOS_REGISTRY_IMAGE:-mirror.gcr.io/rhastie/nmos-cpp@sha256:c54c8ded3b61740dbd579c03892b0229842250417aa397d87a92e2b91ba645b8}"
-NODE_PORT=3312
+# The node's IS-04/IS-05 port and its web port (another node on the host may
+# have the defaults).
+NODE_PORT="${AMWA_NODE_PORT:-3312}"
+WEB_PORT="${AMWA_WEB_PORT:-8160}"
 # The registry's ten ports from AMWA_REGISTRY_PORT on (registration, query, its
 # WebSocket, …): another one on these ports needs another base.
 REG_PORT="${AMWA_REGISTRY_PORT:-8010}"
@@ -69,7 +72,7 @@ start_node() { # <suite>
   "buses": [{"id": "pgm", "name": "PGM", "format": "stereo", "fader_db": 0, "mute": false}],
   "outputs": [{"signal": "pgm"}]}}
 EOF
-    local env=(NMOS_SEED=amwa-ci NMOS_HOST_ADDRESS="$HOST_IP" NMOS_PORT="$NODE_PORT" HOST_ID=amwa
+    local env=(NMOS_SEED=amwa-ci NMOS_HOST_ADDRESS="$HOST_IP" NMOS_PORT="$NODE_PORT" WEB_PORT="$WEB_PORT" HOST_ID=amwa
         MXL_DOMAIN_SCAN_PATH="$root/mxl" MIXER_STATE_DIR="$root/state" MXL_CLEANUP_ON_EXIT=true)
     if [[ "$MODE" == off ]]; then
         env+=(NMOS_REGISTRY_ADDRESS="$HOST_IP" NMOS_REGISTRY_PORT="$REG_PORT")
@@ -80,6 +83,13 @@ EOF
     NODE_PID=$!
     wait_http "http://$HOST_IP:$NODE_PORT/x-nmos/node/v1.3/self" 30
 }
+
+for p in "$NODE_PORT" "$WEB_PORT"; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+        log "port $p is in use (another node?): set AMWA_NODE_PORT and AMWA_WEB_PORT to free ports"
+        exit 1
+    fi
+done
 
 if [[ "$MODE" == off ]]; then
     docker rm -f mxl-nmos-amwa-registry >/dev/null 2>&1 || true

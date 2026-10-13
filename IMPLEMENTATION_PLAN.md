@@ -1208,3 +1208,41 @@ nmos-testing clones the AMWA specifications; the runner's README says so.)
 | 1 | Re-run `LOAD_MINUTES=60 tests/hw/release/run.sh load` and the 10-min block clock on this branch (`nightly-dev` after the merge; note its `git-<sha7>`), on a production-like node if there is one. | Yes: the tag goes on that commit after a pass. |
 | 2 | The block clock on a node with a fully preemptible kernel and isolated CPUs, for a verdict on the misses. | When such a node is available; not a blocker for 1.0.0 (every sample was correct). |
 | 3 | Merge this PR into `main` (and then into milestone 7a's branch). | Yes. |
+
+### Release 1.0.0: the maintainers' re-run (2026-10-13)
+
+On `208689e`, the same host (2× Xeon Gold 6136, kernel 6.8 with voluntary
+preemption, the DSP CPU's SMT sibling outside the runner and busy with another
+tenant's video test generator). The load work holds: mean block 715 and 734 µs
+(was 1708), `dsp_load_ratio` 0.358 and 0.367 (was 0.854; expected 0.34), every
+block ≤ 3 ms, 0 meter drops; the DSP thread 36 % of its CPU, the meter thread
+16 % of another; no libm or kernel time left on the DSP thread. Registry and
+AMWA (registry on 8110) pass. The load still fails its 0-misses rule: 7090 and
+12 445 deadline misses in 60 min, 99 % of them in the seconds the DSP CPU's
+sibling was busy (its blocks 3–4 times slower; the CPU clock steady at 3.3 GHz).
+The block clock (no DSP work) passed once and failed once (9 misses, 3.9 ms),
+as the host's load changed over the day. Their points: the meter thread
+allocated per record; `ci/amwa.sh` had the node's port fixed at 3312, taken on
+their host.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D124 | Before any other thread starts, the mixer narrows its CPUs for every thread but the DSP thread to those off the DSP CPU's physical core (the CPU and its SMT siblings from sysfs), when it has CPUs on another core; else off the DSP CPU. The DSP thread's notes (`dsp.scheduling`) say "a core of its own (no SMT)", "a core of its own (its other CPUs kept free)", "its core shared with the mixer's other threads (CPU n): no other core" or "its core shared with CPU n, outside this process: another workload may slow it" (also a warning). The worker count is taken from the CPUs before. | The re-run: a busy sibling made nearly all the misses. With whole cores (the static CPU manager's `full-pcpus-only`) the pod gets the sibling, and the mixer's own threads (the meter thread at 16 % of a core, the API, the preview, from 1.1.0 Silero) would have been the ones on it. The note makes a node's layout visible in the status and the load test. |
+| D125 | The platform requirement: the DSP CPU's whole physical core (the static CPU manager with `full-pcpus-only`, or SMT off), in the README, the release notes, the deployment example and the runner's README; the load test prints the DSP thread's notes. | A shared core is a property of the node, which the mixer can see but not fix. |
+| D126 | The meter thread reads a record's header and channels into fixed arrays (no allocation per record); `ci/amwa.sh` takes the node's ports from `AMWA_NODE_PORT` (3312) and `AMWA_WEB_PORT` (8160) and checks they are free. | Their profile (about 3 % in `malloc`); their host had another node on 3312. |
+
+Checked (dev VM, no SMT): with `taskset -c 1,2,3` the DSP thread runs on CPU 3,
+the main thread, both runtime workers and the meter thread on 1–2, and the
+status says "CPU 3, a core of its own (no SMT)"; the cases with siblings (a
+whole core among others, a sibling outside the process, one core only, no
+sysfs) in a unit test. §16 load 60 s: mean block 310 µs, 0.155, as before.
+`ci/amwa.sh` with 3312 taken refuses with a message; with `AMWA_NODE_PORT=3412
+AMWA_WEB_PORT=8260 AMWA_REGISTRY_PORT=8110`: the same counts, 0 failures, 0
+warnings.
+
+### Release 1.0.0: questions after the re-run
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | The §16 rule "0 deadline misses" failed only on a shared core. Tag `v1.0.0` with the ratio passing (0.358) and the misses attributed to the shared core in the release notes (as written there), or wait for a run on a node with whole cores? | Merge this PR, then one more `load` and `block-clock` run on its merge commit (this PR changes how the threads are placed), on a whole core if the lab has one; tag on that commit when the ratio passes and the misses are explained. |
+| 2 | If no whole-core node is available: tag anyway, with the platform requirement in the notes and the verdict on the misses left to the first production node? | Yes; the work fits its budget with room (0.36 of 0.5), and every sample was correct. |

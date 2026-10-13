@@ -195,7 +195,12 @@ On the platform: the MXL root at `/Volumes/mxl` (hostPath), a writable `/config`
 the pod IP in `NMOS_HOST_ADDRESS`, the registry in `NMOS_REGISTRY_ADDRESS` /
 `NMOS_REGISTRY_PORT`, and the node's kernel TAI offset set (CLOCK_TAI = UTC + 37 s).
 Guaranteed QoS with whole CPUs for the DSP thread; `MIXER_RT_PRIORITY` (≤ 49) needs
-the `SYS_NICE` capability.
+the `SYS_NICE` capability. The DSP thread runs on the last of the pod's CPUs and
+needs its whole physical core: with SMT, the static CPU manager's
+`full-pcpus-only` (or SMT off). The mixer keeps its other threads (the meters,
+the API, the preview) off that core when it has CPUs on another one;
+`dsp.scheduling` in `GET /api/v1/status` says what the core is like, and a
+warning is logged when its sibling is outside the pod's CPUs.
 
 ## Settings
 
