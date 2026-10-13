@@ -89,8 +89,10 @@ fn main() -> ExitCode {
             config.log_level
         )))
         .init();
+    let workers = timing::worker_threads();
+    timing::reserve_dsp_core();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(timing::worker_threads())
+        .worker_threads(workers)
         .enable_all()
         .build()
     {

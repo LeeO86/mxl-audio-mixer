@@ -121,7 +121,8 @@ impl Meterer {
     }
 }
 
-/// Take every record in `ring`: `each(generation, slot, channels)`.
+/// Take every record in `ring`: `each(generation, slot, channels)`. Allocates
+/// nothing once `scratch` has grown to the largest record.
 pub fn read(
     ring: &mut rtrb::Consumer<f32>,
     scratch: &mut Vec<f32>,
@@ -189,14 +190,10 @@ pub fn spawn(
     banks: mpsc::Receiver<(u32, Arc<MeterBank>)>,
     stop: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let dsp_cpu = crate::timing::dsp_cpu();
     std::thread::Builder::new()
         .name("meters".into())
         .spawn(move || {
             crate::timing::flush_denormals();
-            if let Some(cpu) = dsp_cpu {
-                crate::timing::avoid_cpu(cpu);
-            }
             let mut meterer = Meterer::default();
             let mut scratch = Vec::new();
             while !stop.load(Ordering::Relaxed) {
