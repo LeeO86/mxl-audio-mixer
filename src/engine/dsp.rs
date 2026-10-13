@@ -84,7 +84,8 @@ struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
     loudness: &'a mut [Option<Box<SegmentMeter>>],
     analysis: &'a mut rtrb::Producer<f32>,
-    vad: &'a mut [rtrb::Producer<f32>],
+    vad: &'a mut rtrb::Producer<f32>,
+    vad_drops: &'a std::sync::atomic::AtomicU64,
     meters: &'a mut rtrb::Producer<f32>,
     meter_drops: &'a std::sync::atomic::AtomicU64,
     streams: &'a mut [Option<Box<rtrb::Producer<f32>>>],
@@ -135,14 +136,8 @@ impl OutputSink for Outputs<'_> {
         }
     }
 
-    fn vad(&mut self, slot: usize, samples: &[f32]) {
-        let Some(ring) = self.vad.get_mut(slot) else {
-            return;
-        };
-        // A whole block or nothing: the reader frames by blocks.
-        if let Ok(chunk) = ring.write_chunk_uninit(self.block) {
-            chunk.fill_from_iter(samples[..self.block].iter().copied());
-        }
+    fn vad(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
+        super::meter::write(self.vad, self.vad_drops, generation, slot as u32, chans);
     }
 
     fn meter(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
@@ -180,8 +175,8 @@ pub(super) struct Taps {
     pub meters: rtrb::Producer<f32>,
     /// The analysed signal (spectrum, goniometer).
     pub analysis: rtrb::Producer<f32>,
-    /// One per VAD tap slot.
-    pub vad: Vec<rtrb::Producer<f32>>,
+    /// Every block of the VAD taps, as records (`meter::write`).
+    pub vad: rtrb::Producer<f32>,
 }
 
 const FADE_STEP: f32 = 1.0 / FADE_SAMPLES as f32;
@@ -485,6 +480,7 @@ pub(super) fn run(
                     analysis: &mut analysis,
                     analysis_room: false,
                     vad: &mut vad,
+                    vad_drops: &counters.vad_drops,
                     meters: &mut meters,
                     meter_drops: &counters.meter_drops,
                     streams: &mut streams,

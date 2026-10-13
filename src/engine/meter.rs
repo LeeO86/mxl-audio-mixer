@@ -110,32 +110,55 @@ impl Meterer {
         while let Ok((g, bank)) = banks.try_recv() {
             self.plan(g, bank);
         }
-        while ring.slots() >= HEADER {
-            let Ok(head) = ring.read_chunk(HEADER) else {
-                break;
-            };
-            let (a, b) = head.as_slices();
-            let h: Vec<u32> = a.iter().chain(b).map(|v| v.to_bits()).collect();
-            head.commit_all();
-            let (generation, slot, channels, len) =
-                (h[0], h[1] as usize, h[2] as usize, h[3] as usize);
-            // A record is written whole: its samples are there.
-            let Ok(body) = ring.read_chunk(channels * len) else {
-                break;
-            };
-            let (a, b) = body.as_slices();
-            scratch.clear();
-            scratch.extend_from_slice(a);
-            scratch.extend_from_slice(b);
-            body.commit_all();
+        read(ring, scratch, |generation, slot, chans| {
             if !self.knows(generation) {
                 while let Ok((g, bank)) = banks.try_recv() {
                     self.plan(g, bank);
                 }
             }
-            let chans: Vec<&[f32]> = scratch.chunks(len.max(1)).take(channels).collect();
-            self.measure(generation, slot, &chans);
+            self.measure(generation, slot as usize, chans);
+        });
+    }
+}
+
+/// Take every record in `ring`: `each(generation, slot, channels)`.
+pub fn read(
+    ring: &mut rtrb::Consumer<f32>,
+    scratch: &mut Vec<f32>,
+    mut each: impl FnMut(u32, u32, &[&[f32]]),
+) {
+    use crate::engine::proc::MAX_CH;
+    while ring.slots() >= HEADER {
+        let Ok(head) = ring.read_chunk(HEADER) else {
+            break;
+        };
+        let (a, b) = head.as_slices();
+        let mut h = [0u32; HEADER];
+        for (d, v) in h.iter_mut().zip(a.iter().chain(b)) {
+            *d = v.to_bits();
         }
+        head.commit_all();
+        let [generation, slot, channels, len] = h;
+        let (channels, len) = (channels as usize, len as usize);
+        // A record is written whole: its samples are there.
+        let Ok(body) = ring.read_chunk(channels * len) else {
+            break;
+        };
+        let (a, b) = body.as_slices();
+        scratch.clear();
+        scratch.extend_from_slice(a);
+        scratch.extend_from_slice(b);
+        body.commit_all();
+        let mut chans: [&[f32]; MAX_CH] = [&[]; MAX_CH];
+        let mut n = 0;
+        for (c, x) in chans
+            .iter_mut()
+            .zip(scratch.chunks(len.max(1)).take(channels))
+        {
+            *c = x;
+            n += 1;
+        }
+        each(generation, slot, &chans[..n]);
     }
 }
 

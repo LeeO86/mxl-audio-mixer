@@ -573,7 +573,8 @@ analyser. Changes go through the REST API; every change answers with
 
 `dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`,
 `plan_swaps_total`, `plan_compile_seconds` (last compile), `meter_drops_total`
-(metered blocks the meter thread did not get), `signals`,
+(metered blocks the meter thread did not get), `vad_drops_total` (tapped blocks
+the control engine did not get), `signals`,
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}`, `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,

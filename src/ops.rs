@@ -475,6 +475,12 @@ async fn metrics(State(app): State<App>) -> Response {
         "Metered blocks the meter thread did not get (its ring was full).",
         vec![format!(" {}", c.meter_drops.load(Ordering::Relaxed))],
     );
+    metric(
+        "vad_drops_total",
+        "counter",
+        "Tapped blocks the control engine did not get (the VAD ring was full).",
+        vec![format!(" {}", c.vad_drops.load(Ordering::Relaxed))],
+    );
     let streams = control.streams.status(&control.stream_ids());
     metric(
         "preview_state",

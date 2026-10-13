@@ -27,8 +27,9 @@ pub const MAX_LOUDNESS: usize = MAX_OUTPUTS;
 pub const MAX_STREAMS: usize = 96;
 /// VAD tap slots (§8.1).
 pub const MAX_VAD: usize = crate::mix::auto::MAX_VAD;
-/// Half a second of one VAD tap.
-pub const VAD_RING: usize = 24_000;
+/// The VAD taps' ring (records as the meters'): 2^22 values, 0.68 s of 64
+/// stereo signals.
+pub const VAD_RING: usize = 1 << 22;
 
 /// Largest channel count of an input flow (§4.2).
 pub const MAX_CHANNELS: usize = 64;
@@ -195,6 +196,8 @@ pub struct EngineCounters {
     pub plan_swaps: AtomicU64,
     /// Meter records the meter ring had no room for.
     pub meter_drops: AtomicU64,
+    /// VAD tap records the VAD ring had no room for.
+    pub vad_drops: AtomicU64,
     pub running: AtomicBool,
     pub stop: AtomicBool,
     pub inputs: Vec<InputCounters>,
@@ -213,6 +216,7 @@ impl EngineCounters {
             output_blocks: AtomicU64::new(0),
             plan_swaps: AtomicU64::new(0),
             meter_drops: AtomicU64::new(0),
+            vad_drops: AtomicU64::new(0),
             running: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             inputs: (0..inputs).map(|_| InputCounters::default()).collect(),
@@ -248,8 +252,9 @@ pub struct Engine {
     /// The analysed signal: per block, channel 1 then channel 2 (a copy of
     /// channel 1 for mono).
     pub analysis: rtrb::Consumer<f32>,
-    /// Per VAD tap slot: the mean of the signal's channels before its fader.
-    pub vad: Vec<rtrb::Consumer<f32>>,
+    /// The VAD taps: every block of a tapped signal, all its channels, as a
+    /// record (`meter::write`: plan generation, tap slot, channels, length).
+    pub vad: rtrb::Consumer<f32>,
     pub scheduling: Arc<std::sync::Mutex<String>>,
     thread: Option<std::thread::JoinHandle<()>>,
     /// The meter thread (`meter`) and how it learns a new plan's meter bank.
@@ -276,9 +281,7 @@ impl Engine {
         }
         let scheduling = Arc::new(std::sync::Mutex::new(String::new()));
         let (analysis_tx, analysis) = rtrb::RingBuffer::new(ANALYSIS_RING);
-        let (vad_tx, vad): (Vec<_>, Vec<_>) = (0..MAX_VAD)
-            .map(|_| rtrb::RingBuffer::new(VAD_RING))
-            .unzip();
+        let (vad_tx, vad) = rtrb::RingBuffer::new(VAD_RING);
         let (meter_tx, meter_rx) = rtrb::RingBuffer::new(meter::METER_RING);
         let (meter_banks, banks_rx) = std::sync::mpsc::channel();
         let meter_stop = Arc::new(AtomicBool::new(false));
