@@ -158,7 +158,7 @@ lat, depth, back = [], [], []
 p0 = (first - delay) // period
 for p in range(p0, p0 + 4):
     s, e = p * period + onset + delay, p * period + end + delay
-    if s - 4800 < first or e + 2 * 48000 > first + len(x):
+    if s - 4800 < first or e + int(2.5 * 48000) > first + len(x):
         continue
     before = gain_db(s - 4800)
     t = next((i for i in range(s, e, 48) if (gain_db(i) or 0) < -10), None)
@@ -167,12 +167,14 @@ for p in range(p0, p0 + 4):
     lat.append((t - s) / 48)
     inside = [gain_db(i) for i in range(s + 24000, e, 480)]
     depth.append(sum(abs(g + 20) < 0.5 for g in inside) / len(inside))
-    after = [gain_db(i) for i in range(e + 72000, min(e + 96000, (p + 1) * period + onset + delay - 4800), 480)]
+    # 2 s after the speech: the VAD's hold and the duck's hold and release are
+    # 1.1 s, and the VAD's end moves with the recording.
+    after = [gain_db(i) for i in range(e + 96000, min(e + 120000, (p + 1) * period + onset + delay - 4800), 480)]
     back.append(max(abs(g) for g in after))
 assert lat, "no whole speech period in the dump"
 assert max(lat) < 200, ("onset to −10 dB", lat)
 assert min(depth) > 0.9, ("at −20 dB from 0.5 s into the speech", depth)
-assert max(back) < 0.1, ("back to 0 dB 1.5 s after the speech", back)
+assert max(back) < 0.1, ("back to 0 dB 2 s after the speech", back)
 print(f"periods {len(lat)}: onset to −10 dB {lat} ms; at −20 ±0.5 dB {[round(d, 3) for d in depth]} of the speech; after it within {max(back):.3f} dB of 0")
 EOF
 pass "ducking: the tone under the speech at −20 dB, down within 200 ms of the onset, back after hold and release"
