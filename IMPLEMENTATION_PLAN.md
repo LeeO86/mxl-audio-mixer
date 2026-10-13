@@ -1246,3 +1246,12 @@ warnings.
 | --- | --- | --- |
 | 1 | The §16 rule "0 deadline misses" failed only on a shared core. Tag `v1.0.0` with the ratio passing (0.358) and the misses attributed to the shared core in the release notes (as written there), or wait for a run on a node with whole cores? | Merge this PR, then one more `load` and `block-clock` run on its merge commit (this PR changes how the threads are placed), on a whole core if the lab has one; tag on that commit when the ratio passes and the misses are explained. |
 | 2 | If no whole-core node is available: tag anyway, with the platform requirement in the notes and the verdict on the misses left to the first production node? | Yes; the work fits its budget with room (0.36 of 0.5), and every sample was correct. |
+
+### Release 1.0.0: answers after the re-run (maintainer, 2026-10-13)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Tag now or wait for a run on whole cores? | Merge PR 20 (merged as `81fb8a2`); the measurements take time: tag and release now to move forward. |
+
+The release (`v1.0.0`) contains PR 20; the lab's run on `81fb8a2` goes into
+the release notes when it is in. Then M7a (PR 17) goes into `main`, then M7b.
