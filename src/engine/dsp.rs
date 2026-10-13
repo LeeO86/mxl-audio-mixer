@@ -85,6 +85,8 @@ struct Outputs<'a> {
     loudness: &'a mut [Option<Box<SegmentMeter>>],
     analysis: &'a mut rtrb::Producer<f32>,
     vad: &'a mut [rtrb::Producer<f32>],
+    meters: &'a mut rtrb::Producer<f32>,
+    meter_drops: &'a std::sync::atomic::AtomicU64,
     streams: &'a mut [Option<Box<rtrb::Producer<f32>>>],
     /// The stream ring has room for this block (checked at channel 1).
     stream_room: bool,
@@ -143,6 +145,16 @@ impl OutputSink for Outputs<'_> {
         }
     }
 
+    fn meter(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
+        super::meter::write(
+            self.meters,
+            self.meter_drops,
+            generation,
+            slot as u32,
+            chans,
+        );
+    }
+
     fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
         if let Some(Some(m)) = self.loudness.get_mut(slot) {
             m.feed(start, channel, samples);
@@ -162,8 +174,10 @@ impl OutputSink for Outputs<'_> {
     }
 }
 
-/// The rings the DSP thread copies tapped audio into for the control side.
+/// The rings the DSP thread copies audio into for the control side.
 pub(super) struct Taps {
+    /// Every metered block, as records (`meter`).
+    pub meters: rtrb::Producer<f32>,
     /// The analysed signal (spectrum, goniometer).
     pub analysis: rtrb::Producer<f32>,
     /// One per VAD tap slot.
@@ -196,6 +210,7 @@ pub(super) fn run(
     scheduling: Arc<std::sync::Mutex<String>>,
 ) {
     let Taps {
+        mut meters,
         mut analysis,
         mut vad,
     } = taps;
@@ -470,6 +485,8 @@ pub(super) fn run(
                     analysis: &mut analysis,
                     analysis_room: false,
                     vad: &mut vad,
+                    meters: &mut meters,
+                    meter_drops: &counters.meter_drops,
                     streams: &mut streams,
                     stream_room: false,
                     block,

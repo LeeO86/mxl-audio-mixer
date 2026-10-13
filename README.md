@@ -462,7 +462,10 @@ integration, 20 dB in 1.7 s; Type II: 10 ms, 24 dB in 2.8 s; a steady 1 kHz tone
 reads its peak); the phase correlation of the first two channels (300 ms); per
 processing node: gain reduction and the peaks at its input and output. The UI draws
 the PPM scales (EBU, BBC, Nordic, DIN) at an alignment level (−18 dBFS, EBU R 68,
-or −20 dBFS).
+or −20 dBFS). These meters are measured on a thread of their own from blocks the
+DSP thread hands over (a ring; a block it has no room for is counted in
+`meter_drops_total`), not on the DSP thread; loudness is measured on the DSP
+thread, block by block.
 
 The **analyser** reads one tap point at a time (`PUT /api/v1/analysis`): a
 4096-point spectrum (Hann) in 1/6-octave bands from 20 Hz to 20 kHz (the mean power
@@ -569,7 +572,8 @@ analyser. Changes go through the REST API; every change answers with
 ## Metrics
 
 `dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`,
-`plan_swaps_total`, `plan_compile_seconds` (last compile), `signals`,
+`plan_swaps_total`, `plan_compile_seconds` (last compile), `meter_drops_total`
+(metered blocks the meter thread did not get), `signals`,
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}`, `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,

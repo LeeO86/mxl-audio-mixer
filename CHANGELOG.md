@@ -35,6 +35,23 @@ Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
 The first release: milestones 0–6 (§19). Release notes:
 `docs/release-notes/1.0.0.md`.
 
+### After the first hardware round
+
+- The DSP thread's load in the §16 test: 0.854 on the maintainers' Xeon Gold
+  6136, 0.149 now on the development VM (0.378 before):
+  - the meters (peak, true peak, PPM, energy, correlation) on a meter thread of
+    their own, from blocks the DSP thread hands over (`meter_drops_total`);
+  - true peak four phases at a time (3.6× faster), skipped where it cannot
+    exceed the peak already held;
+  - the dB conversions without libm (`log2`/`exp2` by bits and series, error
+    below 1e-8 dB), the compressor and de-esser in passes over the block that
+    vectorise; biquad cascades sample by sample through all sections (the same
+    arithmetic); peak and energy sums that vectorise.
+- `tests/hw/release/run.sh`: the `amwa` row as text (no `|` in the table), the
+  node's name from `NODE_NAME` (in a container); `ci/amwa.sh`: its
+  `/dev/shm/mixer-amwa.*` folders removed, the registry's ports from
+  `AMWA_REGISTRY_PORT` (and a clear error when they are taken).
+
 ### Before the release
 
 - The routing graph (§5): a Graph tab with inputs, strips, buses, monitors and

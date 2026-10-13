@@ -18,16 +18,77 @@ use crate::config::SAMPLE_RATE;
 /// −∞ for practical purposes, in dB.
 pub const FLOOR_DB: f64 = -200.0;
 
+/// 2^52 and 1.5 · 2^52: adding and subtracting them turns floats into integers
+/// and back with plain float operations, which vectorise (AVX2 has no 64-bit
+/// float/integer conversions).
+const TWO_52: f64 = 4_503_599_627_370_496.0;
+const ROUND: f64 = 6_755_399_441_055_744.0;
+
+/// log2 of a positive, normal `x`: the exponent from the bits, the mantissa
+/// moved into [1/√2, √2) and ln of it by the series 2·atanh(z) to z⁹
+/// (|z| ≤ 0.172: the error is below 1e-9). Selects, no branches, no integer
+/// conversions: a loop over a block vectorises. The DSP thread converts per
+/// sample; libm's `log10` and `pow` were much of its time.
+#[inline(always)]
+pub fn fast_log2(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let m = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000);
+    let e = f64::from_bits((bits >> 52) | 0x4330_0000_0000_0000) - TWO_52 - 1023.0;
+    let big = m > std::f64::consts::SQRT_2;
+    let m = if big { m * 0.5 } else { m };
+    let e = if big { e + 1.0 } else { e };
+    let z = (m - 1.0) / (m + 1.0);
+    let z2 = z * z;
+    let ln = 2.0 * z * (1.0 + z2 * (1.0 / 3.0 + z2 * (1.0 / 5.0 + z2 * (1.0 / 7.0 + z2 / 9.0))));
+    e + ln * std::f64::consts::LOG2_E
+}
+
+/// 2^y for |y| < 1020: the nearest integer k into the exponent bits, 2^f for
+/// |f| ≤ ½ by its Taylor series to the 8th power (relative error below 1e-9).
+/// Vectorises like [`fast_log2`].
+#[inline(always)]
+pub fn fast_exp2(y: f64) -> f64 {
+    let y = y.clamp(-1020.0, 1020.0);
+    let k = (y + ROUND) - ROUND;
+    let t = (y - k) * std::f64::consts::LN_2;
+    let p = 1.0
+        + t * (1.0
+            + t * (1.0 / 2.0
+                + t * (1.0 / 6.0
+                    + t * (1.0 / 24.0
+                        + t * (1.0 / 120.0
+                            + t * (1.0 / 720.0 + t * (1.0 / 5040.0 + t / 40320.0)))))));
+    p * f64::from_bits((k + 1023.0 + TWO_52).to_bits() << 52)
+}
+
+/// 20 / log2(10) and log2(10) / 20.
+const DB_PER_OCTAVE: f64 = 6.020_599_913_279_624;
+const OCTAVES_PER_DB: f64 = 0.166_096_404_744_368_1;
+
+#[inline(always)]
 pub fn to_db(level: f64) -> f64 {
+    let db = DB_PER_OCTAVE * fast_log2(level.max(1e-300));
     if level > 1e-10 {
-        20.0 * level.log10()
+        db
     } else {
         FLOOR_DB
     }
 }
 
+/// A power (mean square) in dB; −200 below 1e-20.
+#[inline(always)]
+pub fn power_to_db(power: f64) -> f64 {
+    let db = 0.5 * DB_PER_OCTAVE * fast_log2(power.max(1e-300));
+    if power > 1e-20 {
+        db
+    } else {
+        FLOOR_DB
+    }
+}
+
+#[inline(always)]
 pub fn from_db(db: f64) -> f64 {
-    10f64.powf(db / 20.0)
+    fast_exp2(db * OCTAVES_PER_DB)
 }
 
 /// The per-sample coefficient of a one-pole smoother with time constant `ms`.
@@ -43,14 +104,17 @@ pub fn coefficient(ms: f64) -> f64 {
 /// `x` dB, threshold `t`, ratio `r` and knee width `w` dB.
 pub fn compressor_gain(x: f64, t: f64, r: f64, w: f64) -> f64 {
     let over = x - t;
-    let y = if 2.0 * over < -w {
-        x
-    } else if w > 0.0 && 2.0 * over.abs() <= w {
-        x + (1.0 / r - 1.0) * (over + w / 2.0).powi(2) / (2.0 * w)
-    } else {
-        t + over / r
-    };
-    (y - x).min(0.0)
+    let slope = 1.0 / r - 1.0;
+    if w <= 0.0 {
+        return (slope * over.max(0.0)).min(0.0);
+    }
+    // The knee's quadratic over [−w/2, w/2] plus the straight part above it,
+    // with clamp and max instead of branches (a signal crosses the regions
+    // from sample to sample).
+    let half = w / 2.0;
+    let o = over.clamp(-half, half);
+    let knee = slope * (o + half) * (o + half) / (2.0 * w);
+    (knee + slope * (over - half).max(0.0)).min(0.0)
 }
 
 /// Static curve of a downward expander: below the threshold the level falls `r`
@@ -206,6 +270,84 @@ impl LookaheadGain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn conversion_costs() {
+        let xs: Vec<f64> = (0..100_000).map(|i| 0.001 + i as f64 * 1e-5).collect();
+        let time = |what: &str, f: &dyn Fn(f64) -> f64| {
+            let started = std::time::Instant::now();
+            let mut acc = 0.0;
+            for _ in 0..10 {
+                for &x in &xs {
+                    acc += f(std::hint::black_box(x));
+                }
+            }
+            std::hint::black_box(acc);
+            eprintln!(
+                "{what:12} {:.2} ns",
+                started.elapsed().as_nanos() as f64 / 1e6
+            );
+        };
+        time("to_db", &|x| to_db(x));
+        time("log10", &|x| 20.0 * x.log10());
+        time("from_db", &|x| from_db(-x * 40.0));
+        time("powf", &|x| 10f64.powf(-x * 2.0));
+        let tone: Vec<f32> = (0..96_000)
+            .map(|i| {
+                (0.3 * (2.0 * std::f64::consts::PI * 997.0 * i as f64 / 48_000.0).sin()) as f32
+            })
+            .collect();
+        let b = Ballistics::new(5.0, 150.0);
+        let loop_cost = |what: &str, f: &dyn Fn(&mut [f32])| {
+            let mut buf = tone.clone();
+            let started = std::time::Instant::now();
+            for blk in buf.chunks_mut(96) {
+                f(blk);
+            }
+            eprintln!(
+                "{what:24} {:.2} ns per sample",
+                started.elapsed().as_nanos() as f64 / 96_000.0
+            );
+        };
+        loop_cost("log, curve, ballistics", &|blk| {
+            let mut env = 0.0;
+            for x in blk.iter_mut() {
+                let t = compressor_gain(to_db(f64::from(x.abs())), -26.0, 3.0, 6.0);
+                env = b.gain(env, t);
+                *x *= env as f32;
+            }
+        });
+        loop_cost("+ from_db", &|blk| {
+            let mut env = 0.0;
+            for x in blk.iter_mut() {
+                let t = compressor_gain(to_db(f64::from(x.abs())), -26.0, 3.0, 6.0);
+                env = b.gain(env, t);
+                *x *= from_db(env + 2.0) as f32;
+            }
+        });
+    }
+
+    #[test]
+    fn fast_db_conversions_match_libm() {
+        let (mut worst_db, mut worst_gain) = (0f64, 0f64);
+        let mut x = 1e-10;
+        while x < 1e4 {
+            worst_db = worst_db.max((to_db(x) - 20.0 * x.log10()).abs());
+            x *= 1.000_37;
+        }
+        let mut db = -199.0;
+        while db < 40.0 {
+            let exact = 10f64.powf(db / 20.0);
+            worst_gain = worst_gain.max((from_db(db) - exact).abs() / exact);
+            db += 0.0137;
+        }
+        assert!(worst_db < 1e-8, "to_db off by {worst_db} dB");
+        assert!(worst_gain < 1e-9, "from_db off by {worst_gain} (relative)");
+        assert!((power_to_db(0.01) + 20.0).abs() < 1e-9);
+        assert_eq!((to_db(0.0), power_to_db(0.0)), (FLOOR_DB, FLOOR_DB));
+        assert_eq!(from_db(0.0), 1.0);
+    }
 
     #[test]
     fn compressor_static_curve() {

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::dsp::biquad::{self, Coefficients, State};
 use crate::dsp::dynamics::{
-    compressor_gain, expander_gain, from_db, to_db, Ballistics, LookaheadGain,
+    compressor_gain, expander_gain, from_db, power_to_db, to_db, Ballistics, LookaheadGain,
 };
 use crate::dsp::truepeak::{self, TruePeak, PHASES, TAPS};
 use crate::mix::chain::{BandType, DeEsserMode, Detector, FilterMode, ProcKind};
@@ -211,6 +211,8 @@ pub enum Kind {
         ballistics: Ballistics,
         envelope: f64,
         mean_square: f64,
+        /// One block of levels, gains in dB and gain factors, in turn.
+        scratch: Vec<f64>,
     },
     Limiter {
         delay: Delay,
@@ -257,6 +259,7 @@ pub enum Kind {
         band: Vec<f32>,
         ballistics: Ballistics,
         envelope: f64,
+        scratch: Vec<f64>,
     },
     Ducker {
         attack: f64,
@@ -278,10 +281,6 @@ pub enum Kind {
         envelopes: Vec<f64>,
     },
     Delay(Delay),
-    TruePeak {
-        taps: Box<[[f32; TAPS]; PHASES]>,
-        channels: Vec<TruePeak>,
-    },
     /// One block of a signal, kept for the next block (a feedback send's block delay).
     Hold(Vec<f32>),
 }
@@ -369,6 +368,7 @@ impl Processor {
                 ballistics: Ballistics::new(1.0, 1.0),
                 envelope: 0.0,
                 mean_square: 0.0,
+                scratch: vec![0.0; block],
             },
             ProcKind::Limiter { true_peak, .. } => Kind::Limiter {
                 delay: Delay::new(channels, latency),
@@ -418,6 +418,7 @@ impl Processor {
                 band: vec![0.0; channels * block],
                 ballistics: Ballistics::new(1.0, 1.0),
                 envelope: 0.0,
+                scratch: vec![0.0; block],
             },
             ProcKind::Ducker { .. } => Kind::Ducker {
                 attack: 0.0,
@@ -458,8 +459,8 @@ impl Processor {
         }
     }
 
-    /// A true-peak meter state for `channels` channels (used by meter steps).
-    pub fn true_peak(id: NodeId, channels: usize) -> Self {
+    /// A one-block hold for `channels` channels.
+    pub fn hold_block(id: NodeId, channels: usize, block: usize) -> Self {
         Self {
             id,
             channels,
@@ -470,20 +471,9 @@ impl Processor {
             dry_delay: Delay::new(0, 0),
             wet: 1.0,
             meter: usize::MAX,
-            kind: Kind::TruePeak {
-                taps: Box::new(truepeak::taps()),
-                channels: vec![TruePeak::default(); channels.min(MAX_CH)],
-            },
+            kind: Kind::Hold(vec![0.0; channels * block]),
             start: 0,
         }
-    }
-
-    /// A one-block hold for `channels` channels.
-    pub fn hold_block(id: NodeId, channels: usize, block: usize) -> Self {
-        let mut p = Self::true_peak(id, 0);
-        p.channels = channels;
-        p.kind = Kind::Hold(vec![0.0; channels * block]);
-        p
     }
 
     /// Copy the held block of channel `ch` into `out`.
@@ -503,16 +493,6 @@ impl Processor {
             if (ch + 1) * n <= data.len() {
                 data[ch * n..(ch + 1) * n].copy_from_slice(samples);
             }
-        }
-    }
-
-    /// The oversampled peak of `samples` on channel `ch` (true-peak meters).
-    pub fn measure_true_peak(&mut self, ch: usize, samples: &[f32]) -> f32 {
-        match &mut self.kind {
-            Kind::TruePeak { taps, channels } => {
-                channels.get_mut(ch).map_or(0.0, |c| c.run(taps, samples))
-            }
-            _ => 0.0,
         }
     }
 
@@ -641,7 +621,7 @@ impl Processor {
                 *low = biquad::low_pass(p(1), Q_BUTTERWORTH);
                 *high = biquad::high_pass(p(1), Q_BUTTERWORTH);
             }
-            Kind::Delay(_) | Kind::Oscillator { .. } | Kind::TruePeak { .. } | Kind::Hold(_) => {}
+            Kind::Delay(_) | Kind::Oscillator { .. } | Kind::Hold(_) => {}
         }
     }
 
@@ -674,8 +654,7 @@ impl Processor {
         if let Some(m) = meter {
             let peak = io
                 .iter()
-                .flat_map(|c| c.iter())
-                .fold(0f32, |a, x| a.max(x.abs()));
+                .fold(0f32, |a, c| a.max(crate::dsp::reduce::peak(c)));
             max_into(&m.in_peak, peak);
         }
         let reduction = self.run(io, key, block);
@@ -705,8 +684,7 @@ impl Processor {
         if let Some(m) = meter {
             let peak = io
                 .iter()
-                .flat_map(|c| c.iter())
-                .fold(0f32, |a, x| a.max(x.abs()));
+                .fold(0f32, |a, c| a.max(crate::dsp::reduce::peak(c)));
             max_into(&m.out_peak, peak);
         }
     }
@@ -729,9 +707,23 @@ impl Processor {
                 states,
                 ..
             } => {
-                for (c, ch) in io.iter_mut().enumerate() {
-                    for (s, co) in coefficients.iter().enumerate() {
-                        states[s * chans + c].run(co, ch);
+                let sections = coefficients.len();
+                if sections <= biquad::CASCADE {
+                    for (c, ch) in io.iter_mut().enumerate() {
+                        let mut st = [State::default(); biquad::CASCADE];
+                        for s in 0..sections {
+                            st[s] = states[s * chans + c];
+                        }
+                        biquad::cascade(coefficients, &mut st[..sections], ch);
+                        for s in 0..sections {
+                            states[s * chans + c] = st[s];
+                        }
+                    }
+                } else {
+                    for (c, ch) in io.iter_mut().enumerate() {
+                        for (s, co) in coefficients.iter().enumerate() {
+                            states[s * chans + c].run(co, ch);
+                        }
                     }
                 }
                 0.0
@@ -775,44 +767,71 @@ impl Processor {
                 ballistics,
                 envelope,
                 mean_square,
+                scratch,
             } => {
+                // In passes over the block: only the ballistics run sample by
+                // sample; the conversions and the curve vectorise. Detection reads
+                // every sample before its gain is applied, as per sample.
                 let (threshold, ratio, knee, makeup) = (p(1), p(2), p(3), p(6));
-                let mut most = 0f64;
-                for k in 0..block {
-                    let mut peak = 0f64;
-                    let source_len = if key.is_empty() { n } else { key.len() };
-                    for c in 0..source_len {
-                        let x = if key.is_empty() {
-                            f64::from(io[c][k])
-                        } else {
-                            f64::from(key[c][k])
-                        };
-                        let x = match sidechain {
-                            Some((co, st)) => st[c.min(MAX_CH - 1)].tick(co, x),
-                            None => x,
-                        };
-                        peak = peak.max(x.abs());
-                    }
-                    let level = match detector {
-                        Detector::Peak => to_db(peak),
-                        Detector::Rms => {
-                            *mean_square = ballistics.level(*mean_square, peak * peak);
-                            if *mean_square > 1e-20 {
-                                10.0 * mean_square.log10()
-                            } else {
-                                -200.0
+                let s = &mut scratch[..block];
+                s.fill(0.0);
+                let keyed = !key.is_empty();
+                for c in 0..if keyed { key.len() } else { n } {
+                    let src: &[f32] = if keyed {
+                        &key[c][..block]
+                    } else {
+                        &io[c][..block]
+                    };
+                    match sidechain {
+                        Some((co, st)) => {
+                            let st = &mut st[c.min(MAX_CH - 1)];
+                            for (v, x) in s.iter_mut().zip(src) {
+                                *v = v.max(st.tick(co, f64::from(*x)).abs());
                             }
                         }
-                    };
-                    let target = compressor_gain(level, threshold, ratio, knee);
-                    *envelope = match detector {
-                        Detector::Peak => ballistics.gain(*envelope, target),
-                        Detector::Rms => target,
-                    };
-                    most = most.max(-*envelope);
-                    let g = from_db(*envelope + makeup) as f32;
-                    for ch in io.iter_mut() {
-                        ch[k] *= g;
+                        None => {
+                            for (v, x) in s.iter_mut().zip(src) {
+                                *v = v.max(f64::from(*x).abs());
+                            }
+                        }
+                    }
+                }
+                let rms = matches!(detector, Detector::Rms);
+                if rms {
+                    let mut ms = *mean_square;
+                    for v in s.iter_mut() {
+                        ms = ballistics.level(ms, *v * *v);
+                        *v = ms;
+                    }
+                    *mean_square = ms;
+                    for v in s.iter_mut() {
+                        *v = power_to_db(*v);
+                    }
+                } else {
+                    for v in s.iter_mut() {
+                        *v = to_db(*v);
+                    }
+                }
+                for v in s.iter_mut() {
+                    *v = compressor_gain(*v, threshold, ratio, knee);
+                }
+                if rms {
+                    *envelope = s.last().copied().unwrap_or(*envelope);
+                } else {
+                    let mut env = *envelope;
+                    for v in s.iter_mut() {
+                        env = ballistics.gain(env, *v);
+                        *v = env;
+                    }
+                    *envelope = env;
+                }
+                let most = s.iter().fold(0f64, |m, v| m.max(-v));
+                for v in s.iter_mut() {
+                    *v = from_db(*v + makeup);
+                }
+                for ch in io.iter_mut() {
+                    for (x, g) in ch.iter_mut().zip(s.iter()) {
+                        *x *= *g as f32;
                     }
                 }
                 most
@@ -832,7 +851,7 @@ impl Processor {
                     for (c, ch) in io.iter().enumerate() {
                         let x = ch[k];
                         let v = match true_peak {
-                            Some((taps, tp)) => tp[c].run(taps, &[x]),
+                            Some((taps, tp)) => tp[c].step(taps, x),
                             None => x.abs(),
                         };
                         peak = peak.max(f64::from(v));
@@ -915,6 +934,7 @@ impl Processor {
                 band,
                 ballistics,
                 envelope,
+                scratch,
             } => {
                 let (threshold, range) = (p(2), p(3));
                 // The band above the frequency (split-band: LR4 high part; wide-band:
@@ -927,35 +947,56 @@ impl Processor {
                     } else {
                         1
                     };
-                    for s in 0..sections {
-                        high_states[2 * c + s].run(&high[s], b);
-                    }
+                    biquad::cascade(
+                        &high[..sections],
+                        &mut high_states[2 * c..2 * c + sections],
+                        b,
+                    );
                     if *mode == DeEsserMode::SplitBand {
-                        for s in 0..2 {
-                            low_states[2 * c + s].run(&low[s], ch);
-                        }
+                        biquad::cascade(&low[..2], &mut low_states[2 * c..2 * c + 2], ch);
                     }
                 }
-                let mut most = 0f64;
-                for k in 0..block {
-                    let level =
-                        (0..n).fold(0f64, |a, c| a.max(f64::from(band[c * block + k]).abs()));
-                    let level = to_db(level);
-                    let target = if level > threshold {
+                // The level, its dB, the target and the gain vectorise; the
+                // ballistics run sample by sample.
+                let s = &mut scratch[..block];
+                s.fill(0.0);
+                for c in 0..n {
+                    for (v, x) in s.iter_mut().zip(&band[c * block..(c + 1) * block]) {
+                        *v = v.max(f64::from(*x).abs());
+                    }
+                }
+                for v in s.iter_mut() {
+                    let level = to_db(*v);
+                    *v = if level > threshold {
                         (threshold - level).max(-range)
                     } else {
                         0.0
                     };
-                    *envelope = ballistics.gain(*envelope, target);
-                    most = most.max(-*envelope);
-                    let g = from_db(*envelope) as f32;
-                    for (c, ch) in io.iter_mut().enumerate() {
-                        let hb = band[c * block + k];
-                        ch[k] = match (*listen, *mode) {
-                            (true, _) => hb,
-                            (false, DeEsserMode::SplitBand) => ch[k] + hb * g,
-                            (false, DeEsserMode::WideBand) => ch[k] * g,
-                        };
+                }
+                let mut env = *envelope;
+                for v in s.iter_mut() {
+                    env = ballistics.gain(env, *v);
+                    *v = env;
+                }
+                *envelope = env;
+                let most = s.iter().fold(0f64, |m, v| m.max(-v));
+                for v in s.iter_mut() {
+                    *v = from_db(*v);
+                }
+                for (c, ch) in io.iter_mut().enumerate() {
+                    let hb = &band[c * block..(c + 1) * block];
+                    match (*listen, *mode) {
+                        (true, _) => ch.copy_from_slice(hb),
+                        (false, DeEsserMode::SplitBand) => {
+                            for ((x, h), g) in ch.iter_mut().zip(hb).zip(s.iter()) {
+                                *x += h * *g as f32;
+                            }
+                        }
+                        (false, DeEsserMode::WideBand) => {
+                            for (x, g) in ch.iter_mut().zip(s.iter()) {
+                                *x *= *g as f32;
+                            }
+                        }
                     }
                 }
                 most
@@ -1161,7 +1202,7 @@ impl Processor {
                 d.run(io);
                 0.0
             }
-            Kind::TruePeak { .. } | Kind::Hold(_) => 0.0,
+            Kind::Hold(_) => 0.0,
         }
     }
 }
@@ -1179,6 +1220,102 @@ mod tests {
         let mut values = vec![1.0];
         values.extend(kind.values());
         Processor::new(0, &kind, &values, channels, B, usize::MAX)
+    }
+
+    /// Not a check: the DSP thread's hot spots per 96-sample block (the §16 load's
+    /// nodes, the meters), in ns:
+    /// `cargo test --release --lib dsp_costs -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dsp_costs() {
+        let tone: Vec<f32> = (0..B * 1000)
+            .map(|i| (0.3 * (2.0 * PI * 997.0 * i as f64 / 48_000.0).sin()) as f32)
+            .collect();
+        type Run = Box<dyn FnMut(&mut [f32])>;
+        let time = |what: &str, mut f: Run| {
+            let mut buf = vec![0f32; B];
+            let started = std::time::Instant::now();
+            for b in tone.chunks_exact(B) {
+                buf.copy_from_slice(b);
+                f(&mut buf);
+            }
+            let ns = started.elapsed().as_nanos() as f64 / 1000.0;
+            eprintln!("{what:28} {ns:8.0} ns per block");
+        };
+        let node = |kind: ProcKind| {
+            let mut p = proc(kind, 1);
+            Box::new(move |b: &mut [f32]| {
+                let mut io = [b];
+                p.process(&mut io, &[], B, &[]);
+            }) as Box<dyn FnMut(&mut [f32])>
+        };
+        let comp = |detector| ProcKind::Compressor {
+            threshold_db: -26.0,
+            ratio: 3.0,
+            knee_db: 6.0,
+            attack_ms: 5.0,
+            release_ms: 150.0,
+            makeup_db: 2.0,
+            detector,
+            sidechain_hpf_hz: None,
+            key: None,
+        };
+        time(
+            "compressor (peak)",
+            node(comp(crate::mix::chain::Detector::Peak)),
+        );
+        time(
+            "compressor (rms)",
+            node(comp(crate::mix::chain::Detector::Rms)),
+        );
+        time(
+            "de-esser (split-band)",
+            node(ProcKind::DeEsser {
+                mode: DeEsserMode::SplitBand,
+                freq_hz: 6000.0,
+                threshold_db: -30.0,
+                range_db: 6.0,
+                attack_ms: 1.0,
+                release_ms: 80.0,
+                listen: false,
+            }),
+        );
+        time(
+            "eq (4 bands)",
+            node(ProcKind::Eq {
+                bands: (0..4)
+                    .map(|k| EqBand {
+                        kind: crate::mix::chain::BandType::Bell,
+                        freq_hz: 200.0 * (k + 1) as f64,
+                        q: 1.0,
+                        gain_db: 3.0,
+                    })
+                    .collect(),
+            }),
+        );
+        // A metered channel on the meter thread: peak, energy, true peak, PPM.
+        let mut meterer = crate::engine::meter::Meterer::default();
+        meterer.plan(
+            1,
+            std::sync::Arc::new(super::super::plan::MeterBank::new(1)),
+        );
+        time(
+            "meter channel (all)",
+            Box::new(move |b: &mut [f32]| meterer.measure(1, 0, &[b])),
+        );
+        let ppm = [
+            crate::dsp::ppm::Ballistics::type_i(),
+            crate::dsp::ppm::Ballistics::type_ii(),
+        ];
+        let mut level = [0f32; 2];
+        time(
+            "ppm (both types)",
+            Box::new(move |b: &mut [f32]| {
+                let (l, m) = crate::dsp::ppm::run_pair(&ppm, level, b);
+                level = l;
+                std::hint::black_box(m);
+            }),
+        );
     }
 
     /// Run `p` over `input` (per channel) with an optional key; returns the output.

@@ -8,6 +8,7 @@
 //! never allocates, locks or does I/O other than MXL reads and writes.
 
 mod dsp;
+pub mod meter;
 pub mod plan;
 pub mod proc;
 pub mod talk;
@@ -192,6 +193,8 @@ pub struct EngineCounters {
     pub load_ppm: AtomicU32,
     pub output_blocks: AtomicU64,
     pub plan_swaps: AtomicU64,
+    /// Meter records the meter ring had no room for.
+    pub meter_drops: AtomicU64,
     pub running: AtomicBool,
     pub stop: AtomicBool,
     pub inputs: Vec<InputCounters>,
@@ -209,6 +212,7 @@ impl EngineCounters {
             load_ppm: AtomicU32::new(0),
             output_blocks: AtomicU64::new(0),
             plan_swaps: AtomicU64::new(0),
+            meter_drops: AtomicU64::new(0),
             running: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             inputs: (0..inputs).map(|_| InputCounters::default()).collect(),
@@ -248,6 +252,10 @@ pub struct Engine {
     pub vad: Vec<rtrb::Consumer<f32>>,
     pub scheduling: Arc<std::sync::Mutex<String>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The meter thread (`meter`) and how it learns a new plan's meter bank.
+    meter_banks: std::sync::mpsc::Sender<(u32, Arc<plan::MeterBank>)>,
+    meter_stop: Arc<AtomicBool>,
+    meter_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// One second of two channels.
@@ -271,6 +279,10 @@ impl Engine {
         let (vad_tx, vad): (Vec<_>, Vec<_>) = (0..MAX_VAD)
             .map(|_| rtrb::RingBuffer::new(VAD_RING))
             .unzip();
+        let (meter_tx, meter_rx) = rtrb::RingBuffer::new(meter::METER_RING);
+        let (meter_banks, banks_rx) = std::sync::mpsc::channel();
+        let meter_stop = Arc::new(AtomicBool::new(false));
+        let meter_thread = meter::spawn(meter_rx, banks_rx, meter_stop.clone())?;
         let thread_counters = counters.clone();
         let thread_scheduling = scheduling.clone();
         let thread = std::thread::Builder::new()
@@ -283,6 +295,7 @@ impl Engine {
                     returned_tx,
                     lag_tx,
                     dsp::Taps {
+                        meters: meter_tx,
                         analysis: analysis_tx,
                         vad: vad_tx,
                     },
@@ -298,7 +311,16 @@ impl Engine {
             vad,
             scheduling,
             thread: Some(thread),
+            meter_banks,
+            meter_stop,
+            meter_thread: Some(meter_thread),
         })
+    }
+
+    /// Tell the meter thread plan `generation`'s meter bank; before the plan is
+    /// sent, so that its first records find it.
+    pub fn meter_plan(&mut self, generation: u32, bank: Arc<plan::MeterBank>) {
+        let _ = self.meter_banks.send((generation, bank));
     }
 
     /// Send a command; the ring is large enough that a full ring is a bug.
@@ -342,6 +364,10 @@ impl Engine {
     pub fn stop(&mut self) {
         self.counters.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.meter_stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.meter_thread.take() {
             let _ = thread.join();
         }
         self.collect();

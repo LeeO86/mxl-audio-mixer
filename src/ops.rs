@@ -469,6 +469,12 @@ async fn metrics(State(app): State<App>) -> Response {
             .map(|(s, v)| format!("{{signal=\"{s}\"}} {}", u8::from(v.state.speech_active)))
             .collect(),
     );
+    metric(
+        "meter_drops_total",
+        "counter",
+        "Metered blocks the meter thread did not get (its ring was full).",
+        vec![format!(" {}", c.meter_drops.load(Ordering::Relaxed))],
+    );
     let streams = control.streams.status(&control.stream_ids());
     metric(
         "preview_state",
