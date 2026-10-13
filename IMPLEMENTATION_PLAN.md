@@ -1510,3 +1510,17 @@ loudness normaliser for outputs (D40).
 | 5 | The VAD's gate now reads BS.1770 loudness over a signal's channels: for a stereo microphone or a stereo bed that is up to 3 dB more than M7a's mean of the channels. | As implemented (it is what LUFS means); the checklist notes gate values per microphone. |
 | 6 | The 1.1.0 checklist now has the ratio duck (a commentary over a bed with an interview, a 5.1 bed with the LFE held) and the auto-level (a quiet and a loud guest, with the auto-mix). Anything to add? | As written. |
 | 7 | Merge order: M7a after `v1.0.0`, then this PR, then the rest of M7b (comparison, presets, simple view, output normaliser). | Yes. |
+
+### M7b: answers (maintainer, 2026-10-13)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Auto-level defaults (±12 dB, 1 s / 3 s, freeze below −50 LUFS) | Yes. |
+| 2 | Short-term loudness over the frames with signal | OK. |
+| 4 | Several keys as one dialogue, several targets as one bed; a mono target takes the centre share | Yes. |
+| 5 | The VAD's gate on BS.1770 loudness over a signal's channels | Yes. |
+| 6 | Anything to add to the 1.1.0 checklist? | No. |
+| 7 | Merge order | As answered before (M7a answer 9): M7a after `v1.0.0`, then M7b. |
+
+Question 3 (Com-IS-Assist's ratio defaults and ballistics unchanged) stays open;
+they stay as implemented until then.
