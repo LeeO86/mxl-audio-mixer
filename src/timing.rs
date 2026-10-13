@@ -79,7 +79,7 @@ pub fn affinity_cpus() -> Vec<usize> {
 /// Worker threads for the non-real-time pools: the cgroup limit (or the affinity
 /// mask) minus one core for the DSP thread, at least one (§2).
 pub fn worker_threads() -> usize {
-    let cpus = affinity_cpus().len().max(1);
+    let cpus = process_cpus().len().max(1);
     let limit = cgroup_cpu_limit()
         .map(|c| c.floor() as usize)
         .unwrap_or(cpus)
@@ -87,14 +87,119 @@ pub fn worker_threads() -> usize {
     limit.saturating_sub(1).max(1)
 }
 
-/// The CPU the DSP thread is pinned to: the last one of the affinity mask, so the
-/// tokio workers (first CPUs) and the DSP thread rarely share one.
+/// The process's CPUs as at the first call (before [`reserve_dsp_core`]
+/// narrows the threads started after it).
+fn process_cpus() -> &'static [usize] {
+    static CPUS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    CPUS.get_or_init(affinity_cpus)
+}
+
+/// The CPU the DSP thread is pinned to: the last one of the process's CPUs.
 pub fn dsp_cpu() -> Option<usize> {
-    let cpus = affinity_cpus();
+    let cpus = process_cpus();
     if cpus.len() > 1 {
         cpus.last().copied()
     } else {
         None
+    }
+}
+
+/// A CPU list as in sysfs ("3,27", "0-1").
+fn parse_cpu_list(s: &str) -> Vec<usize> {
+    s.trim()
+        .split(',')
+        .filter(|p| !p.is_empty())
+        .flat_map(|p| match p.split_once('-') {
+            Some((a, b)) => match (a.parse::<usize>(), b.parse::<usize>()) {
+                (Ok(a), Ok(b)) if a <= b => (a..=b).collect(),
+                _ => Vec::new(),
+            },
+            None => p.parse().ok().into_iter().collect(),
+        })
+        .collect()
+}
+
+/// The other hardware threads of `cpu`'s core (SMT siblings); `None` when sysfs
+/// does not say.
+pub fn smt_siblings(cpu: usize) -> Option<Vec<usize>> {
+    let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+    let list = std::fs::read_to_string(path).ok()?;
+    Some(
+        parse_cpu_list(&list)
+            .into_iter()
+            .filter(|c| *c != cpu)
+            .collect(),
+    )
+}
+
+/// The CPUs the other threads may use and what that means for the DSP thread's
+/// core, from the process's CPUs, the DSP CPU and its siblings.
+fn plan_cpus(cpus: &[usize], dsp: usize, siblings: Option<&[usize]>) -> (Vec<usize>, String) {
+    let Some(siblings) = siblings else {
+        let rest = cpus.iter().copied().filter(|c| *c != dsp).collect();
+        return (rest, "its core's other CPUs unknown".into());
+    };
+    let core: Vec<usize> = std::iter::once(dsp)
+        .chain(siblings.iter().copied())
+        .collect();
+    let rest: Vec<usize> = cpus.iter().copied().filter(|c| !core.contains(c)).collect();
+    let outside: Vec<String> = siblings
+        .iter()
+        .filter(|s| !cpus.contains(s))
+        .map(|s| s.to_string())
+        .collect();
+    let note = if siblings.is_empty() {
+        "a core of its own (no SMT)".to_string()
+    } else if outside.is_empty() && !rest.is_empty() {
+        "a core of its own (its other CPUs kept free)".to_string()
+    } else if outside.is_empty() {
+        format!(
+            "its core shared with the mixer's other threads (CPU {}): no other core",
+            join(siblings)
+        )
+    } else {
+        format!(
+            "its core shared with CPU {}, outside this process: another workload may slow it",
+            outside.join(",")
+        )
+    };
+    if rest.is_empty() {
+        return (cpus.iter().copied().filter(|c| *c != dsp).collect(), note);
+    }
+    (rest, note)
+}
+
+/// What the DSP thread's core is like (for its scheduling notes).
+fn core_note(dsp: usize) -> String {
+    plan_cpus(process_cpus(), dsp, smt_siblings(dsp).as_deref()).1
+}
+
+fn join(cpus: &[usize]) -> String {
+    cpus.iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Keep every thread started after this (the runtime's workers, the meters,
+/// the preview, the control side) off the DSP thread's core: its CPU and that
+/// CPU's SMT siblings, when the process has CPUs on other cores; else off the
+/// DSP CPU. Call before starting any thread.
+pub fn reserve_dsp_core() {
+    let Some(dsp) = dsp_cpu() else {
+        return;
+    };
+    let (rest, _) = plan_cpus(process_cpus(), dsp, smt_siblings(dsp).as_deref());
+    if rest.is_empty() {
+        return;
+    }
+    // SAFETY: a CPU set built and applied to the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for c in rest {
+            libc::CPU_SET(c, &mut set);
+        }
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
     }
 }
 
@@ -122,23 +227,6 @@ pub fn flush_denormals() -> Option<&'static str> {
     None
 }
 
-/// Keep the calling thread off `cpu` (the DSP thread's), when the process may
-/// run on other CPUs too.
-pub fn avoid_cpu(cpu: usize) {
-    let others: Vec<usize> = affinity_cpus().into_iter().filter(|c| *c != cpu).collect();
-    if others.is_empty() {
-        return;
-    }
-    // SAFETY: a CPU set built and applied to the calling thread.
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        for c in others {
-            libc::CPU_SET(c, &mut set);
-        }
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-    }
-}
-
 /// Set up the calling thread as the DSP thread. Returns a description.
 pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> String {
     let mut notes = Vec::new();
@@ -154,7 +242,11 @@ pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> String
             let mut set: libc::cpu_set_t = std::mem::zeroed();
             libc::CPU_SET(cpu, &mut set);
             if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0 {
-                notes.push(format!("CPU {cpu}"));
+                let core = core_note(cpu);
+                if core.contains("outside this process") {
+                    tracing::warn!("DSP thread on CPU {cpu}: {core}");
+                }
+                notes.push(format!("CPU {cpu}, {core}"));
             }
         }
         match rt_priority {
@@ -213,6 +305,28 @@ mod tests {
         assert!(time_of(i) <= t && time_of(i + 1) > t);
         assert_eq!(index_at(time_of(i)), i);
         assert_eq!(time_of(48_000), NANOS);
+    }
+
+    #[test]
+    fn the_dsp_core_is_kept_free() {
+        assert_eq!(parse_cpu_list("3,27\n"), [3, 27]);
+        assert_eq!(parse_cpu_list("0-2,8"), [0, 1, 2, 8]);
+        assert!(parse_cpu_list("").is_empty());
+        // A whole core (CPU 7 and 3) among others: the rest keep off both.
+        let (rest, note) = plan_cpus(&[0, 1, 2, 3, 4, 5, 6, 7], 7, Some(&[3]));
+        assert_eq!(rest, [0, 1, 2, 4, 5, 6]);
+        assert!(note.contains("its other CPUs kept free"), "{note}");
+        // The sibling is not ours (the first hardware round's node).
+        let (rest, note) = plan_cpus(&[20, 21, 22, 23], 23, Some(&[47]));
+        assert_eq!(rest, [20, 21, 22]);
+        assert!(note.contains("CPU 47, outside this process"), "{note}");
+        // Only one core: the other threads share it, off the DSP CPU.
+        let (rest, note) = plan_cpus(&[3, 7], 7, Some(&[3]));
+        assert_eq!(rest, [3]);
+        assert!(note.contains("no other core"), "{note}");
+        // No SMT, or no sysfs.
+        assert!(plan_cpus(&[0, 1], 1, Some(&[])).1.contains("no SMT"));
+        assert_eq!(plan_cpus(&[0, 1], 1, None).0, [0]);
     }
 
     #[test]
