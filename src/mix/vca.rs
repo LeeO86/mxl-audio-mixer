@@ -167,7 +167,7 @@ impl Mix {
     }
 }
 
-fn check_id(what: &str, id: &str) -> Result<(), String> {
+pub(crate) fn check_id(what: &str, id: &str) -> Result<(), String> {
     let ok = !id.is_empty()
         && id.len() <= 32
         && !id.starts_with('-')
@@ -183,7 +183,7 @@ fn check_id(what: &str, id: &str) -> Result<(), String> {
     }
 }
 
-fn check_name(what: &str, name: &str) -> Result<(), String> {
+pub(crate) fn check_name(what: &str, name: &str) -> Result<(), String> {
     if name.trim().is_empty() || name.chars().count() > 64 {
         Err(format!("{what}: a name has 1 to 64 characters"))
     } else {

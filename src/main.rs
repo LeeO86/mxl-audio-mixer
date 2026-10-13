@@ -215,6 +215,8 @@ async fn run(config: Config) -> ExitCode {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let mut meter_tick = tokio::time::interval(METER_TICK);
+        let mut auto_tick = tokio::time::interval(mxl_audio_mixer::auto::TICK);
+        auto_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let lock = || ticking.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             tokio::select! {
@@ -228,6 +230,7 @@ async fn run(config: Config) -> ExitCode {
                 },
                 _ = tick.tick() => lock().tick(),
                 _ = meter_tick.tick() => lock().meter_tick(),
+                _ = auto_tick.tick() => lock().auto_tick(),
             }
         }
     });

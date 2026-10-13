@@ -1158,6 +1158,220 @@ patch, monitor and output edges. The check now passes edges with an id.
 | 1 | Noise: independent channels and the level as RMS. | As implemented. |
 | 2 | The UI page is 439 kB (141 kB compressed) with Vue Flow. | Fine for an embedded UI. |
 
+## M7a: voice activity detection, auto-mix, ducking
+
+Milestone 7 (§19, release 1.1.0) in two parts, each a PR:
+- **M7a** (PR 17, on the release branch until `v1.0.0` is tagged, then into
+  `main`): VAD (§8.1), the gain-sharing auto-mixer (§8.3), ducking by speech
+  (§8.4).
+- **M7b**: the speech-aware auto-level (§8.2) with Com-IS-Assist's core (MIT, its
+  notice kept), the master_me / PodcastPlugins comparison, chain presets, the
+  simple view and the loudness normaliser for outputs (D40), as planned above;
+  and a duck released by speech in its own target (Com-IS-Assist's interview
+  passthrough, answer 12).
+
+### M7a: what exists
+
+- `src/mix/auto.rs`: `vad` (per-signal settings), `automixes`, `ducks` in the mix;
+  the analysed signals (own settings, auto-mix members, duck keys), the signals
+  with an auto gain (members, targets), validation; references follow deletes,
+  links and unlinks.
+- `src/engine`: 64 VAD tap slots, each a ring of 0.5 s allocated with the engine;
+  `Step::Vad` writes the mean of a signal's channels before its fader.
+- `src/mix/compile.rs`: the auto gain node (`strip/<id>/auto`, `bus/<id>/auto`)
+  after the fader (after AFV; on a bus before talkback), the VAD tap.
+- `src/auto/`: `vad.rs` (the detector, the `Detector` trait, hysteresis, hold,
+  outputs, an evaluation tool), `automix.rs`, `duck.rs`, `mod.rs` (slots, the
+  10 ms tick, the gains); `Control::auto_tick`.
+- `src/auto_api.rs`: `/api/v1/vad`, `/api/v1/automixes`, `/api/v1/ducks`; the
+  VAD state and auto gains in the meters message; `vad_active{signal}`; `auto`
+  in the status.
+- `src/wav.rs`, `mxl-mixer-tone --wav --gap-s --offset-s`.
+- UI: `AutomationPanel.vue` (console toolbar "Auto"), the voice dot and the auto
+  gain on strips.
+- `tests/integration/auto.sh`; `ui.mjs` (auto-mix and duck from the panel);
+  `scripts/demo.sh` (two synthetic voices in turns, an auto-mix, the music
+  ducked).
+
+### M7a: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D99 | The VAD runs on the control side on a tap before the fader: the DSP thread copies the mean of the signal's channels into one of 64 rings (0.5 s each, allocated with the engine, never by the DSP thread); a 10 ms tick takes the rings, runs the VADs and the controllers, and sends changed gains, ramped over 10 ms. A slot given to another signal drops what its ring holds once the DSP thread runs the new plan. | §8.1 "runs on the control side from tapped audio"; §2 real time. Before the fader, so the operator's fader and the auto gain do not change what is detected (an auto-mix would otherwise follow its own gain). The mean keeps a centred stereo talker at its level. |
+| D100 | v1's detector, per 10 ms frame: the 250 Hz–4 kHz band's power over a minimum-statistics noise floor (smoothed, eight 250 ms windows); voicing (the largest normalised autocorrelation for 80–400 Hz on that band low-passed at 1 kHz and decimated to 6 kHz, 40 ms window); modulation (standard deviation of the band power over 400 ms); pure-tone rejection (an autocorrelation reaching −0.93). Probability = energy × modulation × (0.3 + 0.7 × voicing), each a smoothstep between two values; voicing and the tone count only when the voicing window's halves are within 10 dB. Behind a `Detector` trait. | §8.1 "lightweight, CPU-cheap (spectral and energy features with hysteresis); the interface allows a model-based detector later". Tones (line-up, idents, beeps, sweeps) are a broadcast mixer's daily signals and must never be speech. 0.09 % of a core per analysed signal (64: 6 %). The feature values were set on synthetic speech, noise and tones, and checked on espeak-ng speech and LibriVox readings (question 8). |
+| D101 | Speech starts when the smoothed probability (rising 0.5, falling 0.2 per frame) reaches `threshold` and ends `hold_ms` after it fell below `threshold` − 0.15; nothing below `min_level_dbfs` is speech. Outputs: `speech_active`, `speech_probability`, `speech_level_dbfs` (power mean of the speech frames, 1 s), `level_dbfs`, onset and offset counts, the features. Detection latency, measured: a voiced onset in 30 ms (median), 40 ms (90 %), 100 ms at most (words starting with a fricative); the tick adds up to 10 ms. | §8.1 outputs and "documented detection latency". Counts for onsets and offsets so that the logic (M8) can trigger on their change. |
+| D102 | One auto gain node per signal after its fader (strip: after AFV, before the panner; bus: before talkback), present while the signal is an auto-mix member or a duck target: the auto-mix gain × the deepest duck. Changing a gain never swaps the plan; adding or removing a member or target does. | §8.3 "a controller producing gains for the matrix/fader nodes, so operator fader moves combine with it (auto-mix gain × operator gain)"; §8.2 "drives a gain node, not hard-coded DSP". As AFV does. Pre-fader sends do not get it (question 2). |
+| D103 | Gain sharing: g_i = √(w_i L_i / Σ w_j L_j); L the frame's mean square, rising at once, falling with 100 ms; w = 10^(weight_db/10), with VAD weighting × (p + 0.1 (1 − p)). NOM attenuation is the sharing itself (N equal members: −10·log10 N). Bypassed members: 0 dB, out; muted members (mute, VCA, mute group, fader at −∞): out, gain kept; a member shares from its first measured frame. Last-mic-hold: while no sharing member's VAD reports speech, the gains stay. | §8.3 "each channel's gain follows its share of the total level, with last-mic-hold, NOM attenuation, per-channel weight and bypass; optional VAD weighting". The powers add up to one open microphone, as in Dugan's design (questions 3–5). |
+| D104 | Ducking: while a key speaks (its VAD), the targets go linearly in dB to `depth_db` in `attack_ms`, stay `hold_ms` after the last speech, come back in `release_ms`; −∞ ramps as −120 dB. A target of several ducks takes the deepest; a key is never its own target. Speech priority is a duck from a presenter to the guests. | §8.4 "duck any signal under speech detected on other signals, with depth, attack, hold, release". Linear in dB over a time as AFV's fades; the DSP ducker (D29) keeps its time constants. |
+| D105 | VAD settings, auto-mixes and ducks are in the mix (show file, history), not in snapshots. In the API a bare member id keeps that member's weight and bypass, an object sets them. Limits: 64 analysed signals, 16 auto-mixes, 32 ducks. | Snapshots: question 6. Bare ids let a UI add and remove members without losing their settings. |
+| D106 | Test speech is synthesised at test time with espeak-ng (CI installs it) and played into MXL by `mxl-mixer-tone --wav`; no recording is committed. Real recordings (LibriVox, public domain) were used only locally, with the evaluation tool (`docs/development.md`). | Licence-clean and reproducible; the maintainers' own recordings are the better check (question 7). |
+
+### M7a: results (dev VM)
+
+- `cargo test`: 126 unit tests (new: the VAD on silence, pink noise, sines of
+  200 Hz, 1 kHz and 3 kHz, beeps and a 20 Hz–20 kHz sweep (never speech), on
+  synthetic speech (every word detected, ≤ 60 ms, > 95 % of the speech frames,
+  > 99 % of the pauses free) and on speech in pink noise 15 dB lower; hold,
+  threshold, level; gain sharing (NOM, a talker, weights, bypass, mutes,
+  disabled, the 100 ms fall, last-mic-hold, a new member, VAD weighting); duck
+  ballistics; slots; the compiled auto node and tap; the WAV reader; the model).
+- `tests/integration/auto.sh` through MXL:
+  - two equal tones in an auto-mix: 0.70710677 each (−3.01 dB), sample-exact; a
+    weight of +6 dB: 0.89400 and 0.44806; bypass: both 0 dB; a muted member out
+    of the sharing; disabled: 0 dB; none of it swapped the plan;
+  - the VAD on espeak-ng speech: one onset per 6 s period, speech level
+    −22.5 dBFS; on a 1 kHz tone: none;
+  - a tone ducked under the speech by −20 dB: 75–85 ms from the speech onset to
+    −10 dB (detection, the tick, half the 50 ms attack; four periods in three
+    runs), 99.5–100 % of the speech at −20 ± 0.5 dB, back to 0 dB 1.5 s after it;
+  - two talkers in turns with last-mic-hold: the one speaking above −1 dB and
+    the other below −20 dB in 100 % of the polls; with nobody speaking, the last
+    talker held.
+- `ui.sh`: an auto-mix and a duck made in the Auto panel; the strips show the
+  shares (their powers add up to 1) on both clients, a weight moves them.
+- All 15 integration suites pass on release binaries (the demo stopped; `tally.sh`
+  once only on the second try, its input late on this VM).
+
+**Findings:**
+- A member added to an auto-mix got 0 and last-mic-hold kept it there: its tap
+  starts with the next plan, and before it, a missing level counted as silence.
+  A member now shares from its first measured frame.
+- The UI built member lists from the last pushed mix; two quick clicks lost the
+  first. The panel's changes now go through the store's local changes (as
+  faders do).
+- With the processing of the UI test (an EQ boost near Vox's tone) Vox gets the
+  larger share: the sharing reads after the chain, as intended.
+- The Auto panel read the live VAD state, so the meters (25 Hz) re-rendered it,
+  and Vue set every input back to its value: typing a weight was undone within
+  40 ms (CI failed once on it). The live readouts are a component of their own
+  (`AutoLive.vue`), and the numbers are fields that keep what is typed while
+  they have the focus (`NumberField.vue`, also against a mix pushed meanwhile);
+  `ui.mjs` types at a person's pace.
+
+### M7a: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Defaults and limits: VAD threshold 0.5, hold 300 ms, minimum level −60 dBFS; duck depth −12 dB, attack 50 ms, hold 500 ms, release 1000 ms; weights −30 … +10 dB; 64 analysed signals, 16 auto-mixes, 32 ducks. | As implemented. |
+| 2 | The auto gain sits after the fader: pre-fader sends (auxes, IFBs) are neither auto-mixed nor ducked. Before the fader (like an insert) they would be. | After the fader, as implemented: foldback stays as the operator set it. |
+| 3 | A muted member (also a fader at −∞) leaves the sharing. | As implemented. |
+| 4 | NOM attenuation is the sharing itself, no switch of its own. | As implemented. |
+| 5 | Last-mic-hold uses the members' VAD (hold while nobody speaks). | As implemented. |
+| 6 | Auto-mixes and ducks in snapshots (on/off, weights, depths)? | Not now; a section `auto` later if wanted. |
+| 7 | A 1.1.0 checklist with real microphones on the maintainers' productions (the VAD's evaluation tool on recordings, crosstalk between panel microphones, ducking music under a presenter). | Yes, with 1.1.0. |
+| 8 | Music on an analysed signal often counts as speech (voiced and modulated); v1 is meant for microphones. | A known limit of v1; a model-based detector behind the same trait later. |
+| 9 | Merge M7a into `main` after `v1.0.0` is tagged, then M7b. | Yes. |
+
+### M7a: answers (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Defaults and limits | Yes. |
+| 2 | The auto gain after the fader? | No: configurable like the processing chain; before the fader by default. |
+| 3–5 | Muted members leave the sharing; NOM without a switch; last-mic-hold by the VAD | OK. |
+| 6 | Auto-mixes and ducks in snapshots? | Needed: e.g. first a moderation snapshot, then a panel discussion. |
+| 7 | A 1.1.0 checklist with real microphones | With recordings of productions. |
+| 8 | Music as a known limit of v1 | Not asked on its own; see question 10 (Silero). |
+| 9 | Merge 7a after `v1.0.0`, then M7b | Yes. The release PR #16 is merged (approved the same day). |
+
+And: learn from Com-IS-Assist's voice activity detection, which its author
+tested on many recordings.
+
+### M7a: what Com-IS-Assist teaches
+
+Com-IS-Assist (Andy Weiss, MIT; `crates/com-is-assist-core`,
+`Specs/TechnicalConcept.md` §5–6) uses **Silero VAD** (a small recurrent
+network, MIT, vendored as ONNX, run with ONNX Runtime through `ort`, 16 kHz,
+32 ms chunks, threshold 0.5) and records what its tests on commentary showed:
+- **The hold must span a pause between sentences.** With 300 ms (our first
+  default) every ~1.2 s pause of real commentary dropped "voice" and the bed
+  swelled up at sentence rate. Its defaults: 0.8 s VAD hangover and a 0.8 s
+  release hold: the bed recovers after ~1.6 s of quiet.
+- **A level gate against crosstalk.** "A detector answers *is this speech?*,
+  not *is this speech on this microphone*": the programme bleeding into a
+  commentary microphone is speech, and the bed ducked against its own bleed.
+  It ignores voice while the microphone's momentary loudness (400 ms) is below
+  a gate, engaged by default at −32 LUFS (measured: commentary median
+  −26 LUFS; a −40 LUFS gate removes ~10 % of detections, the quiet tails and
+  spill). Set 20–30 dB below the talker.
+- The bed's VAD reads the dry bed, before the automix gain (no second feedback
+  path): as our tap at the auto gain's input.
+- Bed speech while the commentator is silent (an interview in the bed) releases
+  the ducking faster ("interview passthrough"): an idea for M7b, with
+  Com-IS-Assist's ratio control.
+
+**Measured here** (the VAD's evaluation, a 110 s sequence of LibriVox speech,
+Chopin piano and Brahms orchestra from Musopen (CC0), pink noise, speech over
+piano 12 dB down, a tone and silence; fraction of 10 ms frames with speech):
+
+| Segment | ours (hold 0.3 s) | Silero (0.3 s) | Silero (0.8 s) |
+| --- | --- | --- | --- |
+| speech | 0.75 | 0.78 | 0.88 |
+| piano | 0.53 | 0.00 | 0.01 |
+| orchestra | 0.16 | 0.00 | 0.00 |
+| pink noise −30 dBFS | 0.00 | 0.00 | 0.00 |
+| speech over piano | 0.63 | 0.81 | 0.87 |
+| piano | 0.30 | 0.07 | 0.11 |
+| tone, silence | 0.00 | 0.00 | 0.00 |
+
+On clean speech both agree (95 % of Silero's speech frames are ours); on music
+ours fires, Silero does not; under a music bed ours misses a quarter of the
+speech. Silero: 0.08 ms per 32 ms chunk with ONNX Runtime (0.26 % of a core per
+signal; 64 signals ~17 %). A pure-Rust engine (`tract` 0.21 and 0.23) cannot
+run the model (its `If` nodes for 8/16 kHz; folding them with onnxsim failed
+on the nested decoder `If`); ONNX Runtime through `ort`, as Com-IS-Assist,
+works (question 10).
+
+### M7a: decisions after the answers
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D102 (revised) | The auto gain is a chain node (`{"type": "auto"}`, one per chain, placed like any node; bypass: no auto gain); without one it acts after the chain, before the fader. Pre-fader sends and PFL carry it; the VAD reads at its input, so a controller never hears its own gain. | Answer 2. |
+| D101 (revised) | VAD `hold_ms` 800 (was 300), duck `hold_ms` 800 (was 500); `min_level_dbfs` (a 10 ms frame's RMS, effectively open at −60) is replaced by `gate_lufs` (−32): a frame counts as no speech while the signal's momentary loudness (K-weighted, 400 ms, BS.1770) is below it; the state shows `momentary_lufs` and `gated`. The gate delays a detection after silence by 400 ms × 10^((gate − level)/10): voiced onsets now 50 ms (median), 70 ms (90 %), 100 ms at most; ducking 81 ms to −10 dB in `auto.sh`. | Com-IS-Assist's measurements (above): sentence pauses and crosstalk. The gate acts on frames, so the hold still runs from the last speech above it. |
+| D105 (revised) | Snapshots hold the auto setup as a whole (`auto`: VAD settings, auto-mixes, ducks); section and class `auto`; a signal filter does not narrow it; recall-safe auto-mixes and ducks stay (and keep their strips); signals deleted since are dropped; snapshots without `auto` (older) leave the setup. | Answer 6: a moderation, then a panel discussion, is a whole setup. |
+| D109 | A 1.1.0 checklist on recordings of productions (`docs/release-notes/1.1.0-checklist.md`): the evaluation tool per track, multitrack playback with `mxl-mixer-tone --wav` for the auto-mix, the gate and ducking, snapshots, live microphones and the load. | Answer 7. |
+
+Results: 127 unit tests (new: the auto node before the fader, a pre-fader send
+carrying it, an explicit node moving the gain and the tap, one per chain;
+snapshots with the auto setup: moderation and panel in turn, a strips-only
+recall, recall-safe, a deleted strip, an older snapshot; the gate; the 80-frame
+hold). `auto.sh`: the auto gain before the fader (a pre-fader aux at 0.707, the
+fader on top only in the programme), snapshots switching moderation and panel;
+`ui`, `show`, `mix`, `processing`, `widgets`, `vca` unchanged.
+
+### M7a: questions after the answers
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 10 | Silero VAD as the detector (default), ours kept as the fallback (and for builds without it)? It adds ONNX Runtime (Microsoft, MIT, C++, linked statically; `ort`'s build downloads its prebuilt library once per build machine, also in CI and the image build) and the 2.3 MB model (MIT, vendored as in Com-IS-Assist); 0.26 % of a core per analysed signal. | Yes: the measurements above, and the detector Com-IS-Assist was tuned with. |
+| 11 | The gate at −32 LUFS by default (Com-IS-Assist's), set per microphone 20–30 dB below its talker. | As implemented; the checklist notes the values that work. |
+| 12 | Bed speech releasing a duck (Com-IS-Assist's interview passthrough). | With M7b (Com-IS-Assist's ratio control). |
+
+### M7a: answers 10–12 (maintainer, 2026-10-12)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 10 | Silero VAD as the default detector | Yes. |
+| 11 | The gate at −32 LUFS | To be tried (the 1.1.0 checklist). |
+| 12 | Bed speech releasing a duck (interview passthrough) | With M7b, as proposed. |
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D110 | Silero VAD (`assets/silero_vad.onnx`, upstream `bfdc019`, sha256 `1a153a22…`, unchanged, MIT; the file Com-IS-Assist vendors) is the default detector (`detector: "silero"`), the feature detector stays (`"features"`, and the fallback when ONNX Runtime cannot load the model: a warning, `state.detector` tells). The 48 kHz frames are decimated by 3 (a 95-tap Blackman windowed sinc at 7.2 kHz: −60 dB from 9 kHz) into 512-sample chunks with 64 samples of context and the recurrent state per signal; a frame's probability is the last chunk's; the smoothing, threshold, gate and hold are the VAD's, as for the feature detector. One ONNX Runtime session for every signal, one intra- and one inter-op thread: inference runs on the control side's thread, never as a thread pool next to the DSP thread. ONNX Runtime 1.31 through `ort` 2.0.0-rc.14 (MIT OR Apache-2.0), linked statically; `download-binaries` fetches the prebuilt library once per build machine (CI and the image build too). The image carries ONNX Runtime's licence and third-party notices (Eigen MPL-2.0 among them) and Silero's licence. | Answer 10; the comparison above. |
+
+Results (dev VM): Silero in the mixer, on the same 110 s sequence with the
+defaults (hold 0.8 s, gate −32 LUFS): speech 0.86 (features 0.85), piano 0.00
+(0.69), orchestra 0.00 (0.23), speech over piano 0.86 (0.79), the second piano
+piece 0.13 (0.46), noise, tone, silence 0.00. Cost: 0.83 % of a core per
+analysed signal (one thread; 64 signals about half a core). On the synthetic
+words of the unit tests (formant tones, not speech) it misses some and is late:
+those tests stay with the feature detector; Silero's own tests: silence, pink
+noise and tones never above 0.5, the decimator (±0.1 dB at 1 kHz, below −60 dB
+from 9 kHz). `auto.sh` with Silero as the default: the espeak speech detected
+once per period, the tone never, ducking 81–91 ms from the onset to −10 dB,
+the two talkers 98–100 %; `ui.sh` passes. The binary now needs `libstdc++`
+(installed in the image, checked with `ldd`).
+
 ### Release 1.0.0: the maintainers' hardware tests (2026-10-13)
 
 On `f31a5dd` (2× Xeon Gold 6136, kernel 6.8 with voluntary preemption, no

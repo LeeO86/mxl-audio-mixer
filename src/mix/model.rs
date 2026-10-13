@@ -420,6 +420,15 @@ pub struct Mix {
     pub vcas: Vec<super::vca::Vca>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mute_groups: Vec<super::vca::MuteGroup>,
+    /// Voice activity detector settings (§8.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vad: Vec<super::auto::VadSettings>,
+    /// Gain-sharing auto-mixers (§8.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automixes: Vec<super::auto::Automix>,
+    /// Ducking by speech (§8.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ducks: Vec<super::auto::Duck>,
 }
 
 /// What a signal id names.
@@ -520,6 +529,7 @@ impl Mix {
         super::show::validate(self)?;
         super::room::validate(self, inputs)?;
         super::vca::validate(self)?;
+        super::auto::validate(self)?;
         for s in &self.strips {
             check_name(&s.name)?;
             if let Some(a) = &s.afv {
@@ -839,6 +849,7 @@ impl Mix {
         for g in &mut self.mute_groups {
             g.members.retain(|m| m != id);
         }
+        self.remove_from_auto(id);
         self.remove_from_layouts(id);
     }
 

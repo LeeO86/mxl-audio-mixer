@@ -40,6 +40,7 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-to
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY src ./src
+COPY assets ./assets
 COPY --from=web /web/dist/index.html ./web/dist/index.html
 RUN cargo build --release --locked --bins \
     && install -m 0755 target/release/mxl-audio-mixer target/release/mxl-mixer-tone \
@@ -50,7 +51,7 @@ RUN cargo build --release --locked --bins \
 FROM ubuntu:24.04 AS runtime
 ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 ARG VERSION=dev
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /config && chown 1000:1000 /config
 COPY --from=mxl /opt/mxl/lib/libmxl.so* /usr/local/lib/
@@ -58,9 +59,14 @@ COPY --from=build /usr/local/bin/mxl-audio-mixer /usr/local/bin/mxl-mixer-tone \
     /usr/local/bin/mxl-mixer-probe /usr/local/bin/
 COPY --from=mediamtx /opt/mediamtx/mediamtx /usr/local/bin/mediamtx
 COPY --from=mediamtx /opt/mediamtx/LICENSE /usr/share/doc/mediamtx/LICENSE
-# libopus (BSD-3-Clause) is linked statically into the mixer.
+# libopus (BSD-3-Clause) and ONNX Runtime (MIT, with its third-party notices)
+# are linked statically into the mixer; the Silero VAD model (MIT) is in it.
 COPY --from=build /usr/local/share/doc/libopus/COPYING /usr/share/doc/libopus/COPYING
-RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found")
+COPY assets/onnxruntime.LICENSE /usr/share/doc/onnxruntime/LICENSE
+COPY assets/onnxruntime.ThirdPartyNotices.txt /usr/share/doc/onnxruntime/ThirdPartyNotices.txt
+COPY assets/silero_vad.LICENSE /usr/share/doc/silero-vad/LICENSE
+RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found") \
+    && ldd /usr/local/bin/mxl-audio-mixer | (! grep -q "not found")
 USER 1000
 # Web/API, NMOS, the built-in MediaMTX's WHEP (TCP) and ICE (UDP).
 EXPOSE 8160 3312 8599 8199/udp

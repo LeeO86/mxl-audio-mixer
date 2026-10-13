@@ -2,6 +2,8 @@
 
 pub mod analysis;
 pub mod api;
+pub mod auto;
+pub mod auto_api;
 pub mod config;
 pub mod control;
 pub mod dsp;
@@ -26,4 +28,5 @@ pub mod state;
 pub mod talkback_api;
 pub mod tally;
 pub mod timing;
+pub mod wav;
 pub mod widgets;

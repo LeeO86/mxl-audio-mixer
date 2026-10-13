@@ -88,6 +88,7 @@ pub fn router(app: App) -> Router {
         .merge(crate::talkback_api::routes())
         .merge(crate::group_api::routes())
         .merge(crate::operations_api::routes())
+        .merge(crate::auto_api::routes())
         .merge(crate::widgets::routes())
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
@@ -199,6 +200,12 @@ pub fn status_json(app: &App) -> Value {
             "state": control.tally_status(),
         },
         "solo": control.solo(),
+        "auto": {
+            "vad_signals": control.auto.vads.len(),
+            "speech": control.auto.vads.iter().filter(|(_, v)| v.state.speech_active).map(|(s, _)| s.clone()).collect::<Vec<_>>(),
+            "automixes": control.mix.automixes.len(),
+            "ducks": control.mix.ducks.len(),
+        },
         "talkback": {
             "talking": control.talking(),
             "listen_back": control.listen_back(),
@@ -450,6 +457,17 @@ async fn metrics(State(app): State<App>) -> Response {
         "counter",
         "Execution plans swapped in by the DSP thread.",
         vec![format!(" {}", c.plan_swaps.load(Ordering::Relaxed))],
+    );
+    metric(
+        "vad_active",
+        "gauge",
+        "Per analysed signal: 1 while its VAD detects speech.",
+        control
+            .auto
+            .vads
+            .iter()
+            .map(|(s, v)| format!("{{signal=\"{s}\"}} {}", u8::from(v.state.speech_active)))
+            .collect(),
     );
     metric(
         "meter_drops_total",

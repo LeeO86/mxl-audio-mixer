@@ -84,6 +84,7 @@ struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
     loudness: &'a mut [Option<Box<SegmentMeter>>],
     analysis: &'a mut rtrb::Producer<f32>,
+    vad: &'a mut [rtrb::Producer<f32>],
     meters: &'a mut rtrb::Producer<f32>,
     meter_drops: &'a std::sync::atomic::AtomicU64,
     streams: &'a mut [Option<Box<rtrb::Producer<f32>>>],
@@ -134,6 +135,16 @@ impl OutputSink for Outputs<'_> {
         }
     }
 
+    fn vad(&mut self, slot: usize, samples: &[f32]) {
+        let Some(ring) = self.vad.get_mut(slot) else {
+            return;
+        };
+        // A whole block or nothing: the reader frames by blocks.
+        if let Ok(chunk) = ring.write_chunk_uninit(self.block) {
+            chunk.fill_from_iter(samples[..self.block].iter().copied());
+        }
+    }
+
     fn meter(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
         super::meter::write(
             self.meters,
@@ -169,6 +180,8 @@ pub(super) struct Taps {
     pub meters: rtrb::Producer<f32>,
     /// The analysed signal (spectrum, goniometer).
     pub analysis: rtrb::Producer<f32>,
+    /// One per VAD tap slot.
+    pub vad: Vec<rtrb::Producer<f32>>,
 }
 
 const FADE_STEP: f32 = 1.0 / FADE_SAMPLES as f32;
@@ -199,6 +212,7 @@ pub(super) fn run(
     let Taps {
         mut meters,
         mut analysis,
+        mut vad,
     } = taps;
     let notes = crate::timing::set_up_dsp_thread(config.rt_priority, config.cpu);
     tracing::info!("DSP thread: {notes}");
@@ -470,6 +484,7 @@ pub(super) fn run(
                     loudness: &mut loudness,
                     analysis: &mut analysis,
                     analysis_room: false,
+                    vad: &mut vad,
                     meters: &mut meters,
                     meter_drops: &counters.meter_drops,
                     streams: &mut streams,

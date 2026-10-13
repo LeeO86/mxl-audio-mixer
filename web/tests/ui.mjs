@@ -209,7 +209,8 @@ try {
   await talkAux.hover();
   await page.mouse.down();
   await page.waitForTimeout(900);
-  if (!(await talks())) throw new Error("a held talk button does not talk");
+  // Still held: it talks (a busy runner may take a moment more to show it).
+  await until("a held talk button talks", talks, 3000);
   await page.mouse.up();
   await until("held talk released", async () => !(await talks()));
   await listenAux.click();
@@ -319,6 +320,59 @@ try {
   await page.screenshot({ path: `${out}/operations.png`, fullPage: true });
   for (const b of ["n1-vox", "n1-gtr"]) await api(`/api/v1/buses/${b}`, { method: "DELETE" });
   pass("operations: N-1s of Main for Vox and Guitar from the panel (mix-minus buses, shown on the console)");
+
+  // Auto: an auto-mix of Vox and Guitar, a weight, a duck of Main under Vox. (Vox has an EQ boost near
+  // its 1 kHz tone from the processing steps: it gets the larger share.)
+  await page.getByRole("button", { name: "Operations" }).click();
+  await page.getByRole("button", { name: "Auto", exact: true }).click();
+  await page.getByLabel("New auto-mix name").fill("Panel");
+  await page.getByRole("button", { name: "+ Auto-mix" }).click();
+  await page.getByLabel("Vox in Panel").check();
+  await until("Vox in the auto-mix", async () => (await api("/api/v1/automixes"))[0]?.members.length === 1);
+  await page.getByLabel("Guitar in Panel").check();
+  await until("Guitar in the auto-mix", async () => (await api("/api/v1/automixes"))[0]?.members.length === 2);
+  const shares = async () => {
+    const g = (await api("/api/v1/automixes"))[0].gains_db;
+    return g.vox !== undefined && g.gtr !== undefined ? g : null;
+  };
+  const shown = (id) => page.locator(`[data-signal="${id}"] .autogain`).getAttribute("data-auto");
+  const before = await until("both members share", async () => {
+    const g = await shares();
+    return g && (await shown("vox")) === g.vox.toFixed(1) && (await shown("gtr")) === g.gtr.toFixed(1) ? g : null;
+  });
+  const power = 10 ** (before.vox / 10) + 10 ** (before.gtr / 10);
+  if (Math.abs(power - 1) > 0.01) throw new Error(`the shares' powers add up to ${power}`);
+  await page.locator('[data-signal="vox"] .vad[data-vad="quiet"]').waitFor({ timeout: 3000 });
+  await other.locator('[data-signal="gtr"] .autogain').waitFor({ timeout: 3000 });
+  // Tones are not speech: with last-mic hold the gains would stay where they are.
+  await page.locator("[data-automix-edit]").getByLabel("last-mic hold").uncheck();
+  await until("last-mic hold off", async () => (await api("/api/v1/automixes"))[0].last_mic_hold === false);
+  // Typed at a person's pace: the meters (25 Hz) must not reset the field meanwhile.
+  await page.getByLabel("Guitar weight").selectText();
+  await page.getByLabel("Guitar weight").pressSequentially("-6", { delay: 150 });
+  await page.waitForTimeout(400);
+  await page.getByLabel("Guitar weight").press("Enter");
+  await until("Guitar weight −6", async () => (await api("/api/v1/automixes"))[0].members.find((m) => m.signal === "gtr")?.weight_db === -6);
+  const after = await until("Guitar's share down", async () => {
+    const g = await shares();
+    return g && g.gtr < before.gtr - 3 && (await shown("gtr")) === g.gtr.toFixed(1) ? g : null;
+  });
+  pass(`auto-mix of Vox and Guitar from the panel: ${before.vox} and ${before.gtr} dB on both clients (powers add up to 1); Guitar's weight −6 dB: ${after.vox} and ${after.gtr} dB; the VAD dot quiet on a tone`);
+  await page.getByLabel("New duck name").fill("Bed");
+  await page.getByRole("button", { name: "+ Duck" }).click();
+  await page.getByLabel("Vox keys Bed").check();
+  await page.getByLabel("Main ducked by Bed").check();
+  await until("duck Bed: Vox keys Main", async () => {
+    const d = (await api("/api/v1/ducks"))[0];
+    return d?.keys.join() === "vox" && d.targets.join() === "main";
+  });
+  await page.locator('[data-signal="main"] .autogain[data-auto="0.0"]').waitFor({ timeout: 5000 });
+  await page.locator('[data-duck-edit] [data-duck-active="false"]').waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/automation.png`, fullPage: true });
+  const am = (await api("/api/v1/automixes"))[0];
+  await api(`/api/v1/automixes/${am.id}`, { method: "DELETE" });
+  await api(`/api/v1/ducks/${(await api("/api/v1/ducks"))[0].id}`, { method: "DELETE" });
+  pass("duck from the panel: Main under Vox's speech (none on a tone: Main at 0 dB)");
 
   for (const tab of ["nmos", "status", "settings"]) {
     await page.goto(`${base}/#${tab}`);

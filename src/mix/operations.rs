@@ -273,6 +273,7 @@ fn replace_refs(mix: &mut Mix, old: &[String], new: &[String]) {
     for g in &mut mix.mute_groups {
         swap(&mut g.members);
     }
+    mix.replace_auto_refs(old, new);
     let first = new.first().cloned();
     let fix = |s: &mut Option<Source>| {
         if let (Some(Source::Signal(id)), Some(n)) = (s.as_ref(), &first) {

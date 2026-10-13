@@ -441,6 +441,8 @@ impl Processor {
                 }
             }
             ProcKind::Delay { .. } => Kind::Delay(Delay::new(channels, kind.delay_samples())),
+            // The compiler makes the auto node a gain step; a processor of it passes through.
+            ProcKind::Auto {} => Kind::Delay(Delay::new(channels, 0)),
         };
         Self {
             id,

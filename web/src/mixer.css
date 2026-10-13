@@ -235,6 +235,25 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .groups .members { display: flex; flex-wrap: wrap; gap: .2rem .7rem; margin-top: .3rem; font-size: .8rem; }
 .groups input[type="color"] { width: 2.4rem; padding: 0; }
 
+/* Auto-mix, ducking, voice detection (§8) */
+.vad { color: var(--muted); }
+.vad.on { color: var(--ok); }
+.strip.onair .sname .vad.on { color: #fff; }
+.autogain { display: flex; align-items: center; justify-content: center; gap: .25rem; font-variant-numeric: tabular-nums; }
+.automation .amtable { width: 100%; border-collapse: collapse; margin-top: .3rem; font-size: .8rem; }
+.automation .amtable th { text-align: left; font-weight: 600; color: var(--muted); padding: .1rem .3rem; }
+.automation .amtable td { padding: .1rem .3rem; }
+.automation .amtable input[type="number"] { width: 4.5rem; }
+.automation .num { font-variant-numeric: tabular-nums; }
+.automation .prob { display: inline-block; width: 70px; height: 7px; background: var(--chip); border-radius: 2px; overflow: hidden; vertical-align: middle; }
+.automation .prob span { display: block; height: 100%; background: var(--muted); }
+.automation .prob span.on { background: var(--ok); }
+.automation .duckparams label { display: flex; align-items: center; gap: .25rem; font-size: .8rem; }
+.automation .duckparams input { width: 4.5rem; }
+.automation .duckstate { font-size: .75rem; color: var(--muted); min-width: 3.5rem; }
+.automation .duckstate.on { color: var(--ok); font-weight: 600; }
+.automation .row select { width: auto; }
+
 /* Operations (§5) */
 .operations .members { display: flex; flex-wrap: wrap; gap: .2rem .8rem; font-size: .82rem; }
 .operations .row { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }

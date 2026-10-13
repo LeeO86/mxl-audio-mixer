@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.0 (in progress, after 1.0.0)
+
+Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
+
+### Milestone 7 (part 1): voice detection, auto-mix, ducking
+
+- Voice activity detection (§8.1) on the control side: per analysed signal
+  (before its fader) speech active, probability, speech level, onsets and
+  offsets; band energy over the noise floor, voicing, modulation and tone
+  rejection on 10 ms frames, threshold with hysteresis and hold. `/api/v1/vad`,
+  `vad_active{signal}`.
+- Gain-sharing auto-mixer (§8.3, after Dugan): NOM attenuation, weights, bypass,
+  last-mic-hold, VAD weighting; muted members leave the sharing.
+  `/api/v1/automixes`.
+- Ducking by speech (§8.4): targets down by a depth while a key speaks, with
+  attack, hold and release; also speech priority. `/api/v1/ducks`.
+- An auto gain after the fader of auto-mix members and duck targets; the VAD
+  state and the auto gains in the meters message; the console's Auto panel, a
+  voice dot and the auto gain on strips.
+- `mxl-mixer-tone --wav` (`--gap-s`, `--offset-s`): a recording instead of the
+  tones.
+- After the maintainers' answers and Com-IS-Assist's measurements: the auto gain
+  is a chain node (`auto`), before the fader by default; snapshots hold the auto
+  setup (section and class `auto`, recall-safe auto-mixes and ducks); the VAD
+  and duck holds are 800 ms; a gate on the momentary loudness (`gate_lufs`,
+  −32 LUFS) against crosstalk replaces `min_level_dbfs`.
+- `docs/release-notes/1.1.0-checklist.md`: tests on recordings of productions.
+- Silero VAD (ONNX Runtime, the model vendored, MIT) is the default detector;
+  the feature detector stays, per signal (`detector`) and as the fallback.
+
 ## 1.0.0 (2026-10-13)
 
 The first release: milestones 0–6 (§19). Release notes:

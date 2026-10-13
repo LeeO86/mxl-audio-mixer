@@ -53,6 +53,10 @@ pub struct Compiler {
     pub analysis: Option<(String, Tap)>,
     /// The gain of each AFV strip's AFV node (1 open, its depth closed).
     pub afv: HashMap<String, f32>,
+    /// The gain of each auto node (auto-mix × ducking, §8; 1 when absent).
+    pub auto: HashMap<String, f32>,
+    /// The VAD tap slot of each analysed signal (§8.1).
+    pub vad_slots: HashMap<String, usize>,
     /// Who is soloed, and how (the control room's runtime state).
     pub solo: std::collections::BTreeMap<String, SoloKind>,
     /// The stream slot of each monitor (by id) someone listens to.
@@ -335,6 +339,38 @@ impl Build<'_> {
         index
     }
 
+    /// The auto gain node `key` of `signal` on `src`; returns its output.
+    fn auto_node(
+        &mut self,
+        key: &str,
+        signal: &str,
+        format: Format,
+        chain: u64,
+        src: Span,
+    ) -> Span {
+        let g = self.compiler.auto.get(signal).copied().unwrap_or(1.0);
+        let n = format.channels();
+        let node = self.node(key.to_string(), (format_name(format), chain), vec![g; n]);
+        let dst = self.b.buffers(n);
+        self.b.step(Step::Gain { node, src, dst });
+        dst
+    }
+
+    /// Copy the mean of `src`'s channels to `signal`'s VAD tap slot, if it has one.
+    fn vad_tap(&mut self, signal: &str, src: Span) {
+        let Some(&slot) = self.compiler.vad_slots.get(signal) else {
+            return;
+        };
+        (signal, "vad", slot).hash(&mut self.structure);
+        let dst = self.b.buffers(1);
+        let dst = self.b.buffer(dst, 0);
+        self.b.step(Step::Vad {
+            src,
+            dst,
+            slot: slot as u32,
+        });
+    }
+
     fn single(&self, span: Span, i: usize) -> Span {
         Span {
             start: span.start + i as u32,
@@ -343,7 +379,10 @@ impl Build<'_> {
     }
 
     /// Emit a signal's chain on `input` (`n` channels); returns the taps it
-    /// defines: (after each node, the named taps, the output with its latency).
+    /// defines: (after each node, the named taps, the output with its latency)
+    /// and where its VAD reads. With `auto` (the node key, format and chain hash
+    /// of a signal with an auto gain) the gain goes where the chain's `auto`
+    /// node is, or after the chain; the VAD reads at its input.
     #[allow(clippy::type_complexity)]
     fn chain(
         &mut self,
@@ -352,15 +391,26 @@ impl Build<'_> {
         input: Span,
         n: usize,
         taps: &HashMap<String, Taps>,
+        auto: Option<(String, Format, u64)>,
     ) -> (
         Vec<(String, Span, usize)>,
         [(Span, usize); 4],
         (Span, usize),
+        Span,
     ) {
         let mut cur = input;
         let mut latency = 0;
         let mut after = Vec::new();
+        let mut vad = None;
         for p in chain {
+            if p.kind == (ProcKind::Auto {}) {
+                if let (Some((key, format, sig)), false) = (&auto, p.bypass) {
+                    vad = Some(cur);
+                    cur = self.auto_node(key, signal, *format, *sig, cur);
+                }
+                after.push((p.id.clone(), cur, latency));
+                continue;
+            }
             let key = p
                 .kind
                 .key()
@@ -387,6 +437,11 @@ impl Build<'_> {
             after.push((p.id.clone(), dst, latency));
             cur = dst;
         }
+        let explicit = chain.iter().any(|p| p.kind == (ProcKind::Auto {}));
+        if let (Some((key, format, sig)), false) = (&auto, explicit) {
+            vad = Some(cur);
+            cur = self.auto_node(key, signal, *format, *sig, cur);
+        }
         let at = |pos: usize| -> (Span, usize) {
             if pos == 0 {
                 (input, 0)
@@ -397,7 +452,7 @@ impl Build<'_> {
         let (fe, le) = Mix::category_span(chain, Category::Eq);
         let (fd, ld) = Mix::category_span(chain, Category::Dynamics);
         let named = [at(fe), at(le), at(fd), at(ld)];
-        (after, named, (cur, latency))
+        (after, named, (cur, latency), vad.unwrap_or(cur))
     }
 }
 
@@ -460,6 +515,7 @@ impl Compiler {
         let vca_effects = mix.vca_effects();
         let grouped = mix.group_muted();
         let soloed_signals = expand_solo(mix, &c.compiler.solo);
+        let auto_signals = mix.auto_signals();
 
         // Every send, the mix-minus buses' mirrored ones too (§5).
         let all_sends = mix.all_sends();
@@ -536,7 +592,12 @@ impl Compiler {
                         dst: chain_in,
                     });
                     let chain_sig = chain_hash(&s.chain);
-                    let (after, named, pre) = c.chain(&s.id, &s.chain, chain_in, n, &taps);
+                    let auto = auto_signals
+                        .contains(&s.id)
+                        .then(|| (format!("strip/{}/auto", s.id), s.format, chain_sig));
+                    let (after, named, pre, vad) =
+                        c.chain(&s.id, &s.chain, chain_in, n, &taps, auto);
+                    c.vad_tap(&s.id, vad);
                     let sip_muted = mix.control_room.solo.sip
                         && !soloed_signals.is_empty()
                         && !soloed_signals.contains_key(&s.id)
@@ -704,7 +765,12 @@ impl Compiler {
                         });
                     }
                     let chain_sig = chain_hash(&bus.chain);
-                    let (after, named, pre) = c.chain(&bus.id, &bus.chain, sum, n, &taps);
+                    let auto = auto_signals
+                        .contains(&bus.id)
+                        .then(|| (format!("bus/{}/auto", bus.id), bus.format, chain_sig));
+                    let (after, named, pre, vad) =
+                        c.chain(&bus.id, &bus.chain, sum, n, &taps, auto);
+                    c.vad_tap(&bus.id, vad);
                     let pre = (pre.0, pre.1 + most);
                     let shift = |(s, l): (Span, usize)| (s, l + most);
                     let fader =
@@ -948,7 +1014,7 @@ impl Compiler {
                 src: cur,
                 dst: level,
             });
-            let (_, _, out) = c.chain(&key, &m.chain, level, n, &taps);
+            let (_, _, out, _) = c.chain(&key, &m.chain, level, n, &taps, None);
             cur = out.0;
             if let (Some(b), Some(lfe)) = (m.bass_management.filter(|b| b.enabled), m.lfe()) {
                 let kind = ProcKind::BassManagement {
@@ -1392,6 +1458,118 @@ mod tests {
         with.strips[0].afv.as_mut().unwrap().enabled = false;
         let c = compile(&mut compiler, &with, 48);
         assert_eq!(gains(&c), gains(&a));
+    }
+
+    #[derive(Default)]
+    struct Taps(HashMap<usize, Vec<f32>>);
+    impl OutputSink for Taps {
+        fn write(&mut self, _: usize, _: usize, _: usize, _: &[f32]) {}
+        fn vad(&mut self, slot: usize, samples: &[f32]) {
+            self.0.entry(slot).or_default().extend_from_slice(samples);
+        }
+    }
+
+    #[test]
+    fn auto_node_before_the_fader_or_where_the_chain_has_it() {
+        let mut compiler = Compiler::default();
+        let mut m = mix();
+        m.strips[0].fader_db = Db(-6.0);
+        m.automixes.push(crate::mix::auto::Automix {
+            id: "am".into(),
+            name: "am".into(),
+            enabled: true,
+            last_mic_hold: true,
+            vad_weighting: false,
+            members: vec![crate::mix::auto::AutomixMember::new("vox")],
+            recall_safe: false,
+        });
+        let mut d = crate::mix::auto::Duck::new("bed");
+        d.keys = vec!["vox".into()];
+        d.targets = vec!["main".into()];
+        m.ducks.push(d);
+        assert_eq!(m.validate(2, 48), Ok(()));
+        compiler.vad_slots = HashMap::from([("vox".to_string(), 5)]);
+        compiler.auto = HashMap::from([("vox".to_string(), 0.5), ("main".to_string(), 0.25)]);
+        let mut c = compile(&mut compiler, &m, 48);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 1);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // vox: fader −6 dB × auto 0.5, panned; the bus × 0.25.
+        let want = (0.5 * 0.501_187_2 * 0.5 * h + 0.1) * 0.25;
+        assert!((out.0[&3][0][0] - want).abs() < 1e-6, "{}", out.0[&3][0][0]);
+        let mut taps = Taps::default();
+        c.plan.process(0, &inputs, &mut taps);
+        assert_eq!(taps.0[&5], vec![0.5; 48], "the VAD reads before the fader");
+        // The stereo music strip's tap is the mean of its channels.
+        compiler.vad_slots.insert("music".into(), 6);
+        let structure = c.structure;
+        let mut c = compile(&mut compiler, &m, 48);
+        assert_ne!(c.structure, structure, "a new tap is a new plan");
+        let mut taps = Taps::default();
+        c.plan.process(0, &inputs, &mut taps);
+        assert!((taps.0[&6][0] - 0.15).abs() < 1e-7);
+        // Another gain is a value change.
+        compiler.auto.insert("vox".into(), 1.0);
+        let d = compile(&mut compiler, &m, 48);
+        assert_eq!(d.structure, c.structure);
+        let id = compiler.node_id("strip/vox/auto").unwrap();
+        assert_eq!(d.nodes[&id].values, vec![1.0]);
+        assert!(compiler.node_id("bus/main/auto").is_some());
+
+        // Before the fader: a pre-fader send carries the auto gain.
+        compiler.auto.insert("vox".into(), 0.5);
+        let mut pre = m.clone();
+        pre.buses.push(bus("aux", Format::Mono));
+        pre.sends.push(send("vox", "aux", Tap::PreFader));
+        pre.outputs.push(Output {
+            signal: "aux".into(),
+            format: None,
+            commit_samples: None,
+        });
+        let aux_slots = HashMap::from([("aux".to_string(), 4)]);
+        let mut c = compiler.compile(&pre, 48, 0, &aux_slots, &HashMap::new());
+        let out = run(&mut c, &inputs, 1);
+        assert!((out.0[&4][0][0] - 0.25).abs() < 1e-6, "{}", out.0[&4][0][0]);
+        // An auto node first in the chain: the gain and the VAD tap move there,
+        // before a +6 dB EQ.
+        pre.strips[0].chain = vec![
+            crate::mix::chain::Proc {
+                id: "auto".into(),
+                bypass: false,
+                kind: ProcKind::Auto {},
+            },
+            crate::mix::chain::Proc {
+                id: "eq".into(),
+                bypass: false,
+                kind: ProcKind::Eq {
+                    bands: vec![crate::mix::chain::EqBand {
+                        kind: crate::mix::chain::BandType::LowShelf,
+                        freq_hz: 20_000.0,
+                        q: 0.7,
+                        gain_db: 6.0,
+                    }],
+                },
+            },
+        ];
+        assert_eq!(pre.validate(2, 48), Ok(()));
+        let mut c = compiler.compile(&pre, 48, 0, &aux_slots, &HashMap::new());
+        let mut taps = Taps::default();
+        c.plan.process(0, &inputs, &mut taps);
+        assert_eq!(
+            taps.0[&5],
+            vec![0.5; 48],
+            "the VAD reads before the auto node"
+        );
+        let mut twice = pre.clone();
+        twice.strips[0].chain.push(crate::mix::chain::Proc {
+            id: "auto-2".into(),
+            bypass: false,
+            kind: ProcKind::Auto {},
+        });
+        assert!(twice.validate(2, 48).is_err(), "one auto node per chain");
     }
 
     #[test]

@@ -159,6 +159,8 @@ pub enum Step {
     Analyse { src: Span },
     /// A stereo `src` to stream slot `slot` (a monitor heard in the browser).
     Stream { src: Span, slot: u32 },
+    /// `dst` ← the mean of `src`'s channels, to VAD tap slot `slot` (§8.1).
+    Vad { src: Span, dst: u32, slot: u32 },
 }
 
 impl Step {
@@ -176,6 +178,7 @@ impl Step {
             Step::Loudness { .. } => "loudness",
             Step::Analyse { .. } => "analyse",
             Step::Stream { .. } => "stream",
+            Step::Vad { .. } => "vad",
         }
     }
 }
@@ -391,6 +394,11 @@ pub trait OutputSink {
     /// Channel `channel` (0 or 1) of stream slot `slot`.
     fn stream(&mut self, slot: usize, channel: usize, samples: &[f32]) {
         let _ = (slot, channel, samples);
+    }
+
+    /// A block of VAD tap slot `slot` (mono).
+    fn vad(&mut self, slot: usize, samples: &[f32]) {
+        let _ = (slot, samples);
     }
 
     /// A block of meter channels `slot …` of plan `generation`.
@@ -623,6 +631,25 @@ impl Plan {
                         let range = self.buf(self.indices[src.start as usize + c]);
                         outputs.analyse(c, n, &self.buffers[range]);
                     }
+                }
+                Step::Vad { src, dst, slot } => {
+                    let n = src.len as usize;
+                    let scale = 1.0 / n.max(1) as f32;
+                    for c in 0..n {
+                        let s = self.indices[src.start as usize + c];
+                        let (x, y) = self.pair(s, dst);
+                        if c == 0 {
+                            for k in 0..block {
+                                y[k] = x[k] * scale;
+                            }
+                        } else {
+                            for k in 0..block {
+                                y[k] += x[k] * scale;
+                            }
+                        }
+                    }
+                    let range = self.buf(dst);
+                    outputs.vad(slot as usize, &self.buffers[range]);
                 }
                 Step::Process {
                     proc,
