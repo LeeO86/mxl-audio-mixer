@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 (not released yet)
+## 1.0.0 (2026-10-13)
 
 The first release: milestones 0–6 (§19). Release notes:
 `docs/release-notes/1.0.0.md`.

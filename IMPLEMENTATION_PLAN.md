@@ -1255,3 +1255,9 @@ warnings.
 
 The release (`v1.0.0`) contains PR 20; the lab's run on `81fb8a2` goes into
 the release notes when it is in. Then M7a (PR 17) goes into `main`, then M7b.
+
+**Released** 2026-10-13: tag `v1.0.0` on `14e9487`, image
+`ghcr.io/leeo86/mxl-audio-mixer:1.0.0` (`1.0`, `1`), digest
+`sha256:74753add488e4002a236555f15a943cd75d98bc50d3211b6c1f87241c3bf3f6f`
+(labels checked: version 1.0.0, revision `14e9487`, MIT, uid 1000), the GitHub
+release with `docs/release-notes/1.0.0.md`. Open: the lab's run on `81fb8a2`.
