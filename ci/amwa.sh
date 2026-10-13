@@ -20,8 +20,11 @@ PY="${NMOS_TESTING_PYTHON:-/tmp/nmos-venv/bin/python}"
 OUT="${AMWA_OUT:-$HERE/../ci-artifacts/amwa-$MODE}"
 REGISTRY_IMAGE="${NMOS_REGISTRY_IMAGE:-mirror.gcr.io/rhastie/nmos-cpp@sha256:c54c8ded3b61740dbd579c03892b0229842250417aa397d87a92e2b91ba645b8}"
 NODE_PORT=3312
-REG_PORT=8010
-QUERY_PORT=8011
+# The registry's ten ports from AMWA_REGISTRY_PORT on (registration, query, its
+# WebSocket, …): another one on these ports needs another base.
+REG_PORT="${AMWA_REGISTRY_PORT:-8010}"
+QUERY_PORT=$((REG_PORT + 1))
+ROOTS=()
 HOST_IP="${HOST_IP:-$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')}"
 mkdir -p "$OUT"
 NODE_PID=""
@@ -51,12 +54,14 @@ cleanup() {
         docker logs mxl-nmos-amwa-registry >"$OUT/registry.log" 2>&1 || true
         docker rm -f mxl-nmos-amwa-registry >/dev/null 2>&1 || true
     fi
+    for r in "${ROOTS[@]}"; do rm -rf "$r"; done
 }
 trap cleanup EXIT
 
 start_node() { # <suite>
     local root
     root=$(mktemp -d /dev/shm/mixer-amwa.XXXXXX)
+    ROOTS+=("$root")
     mkdir -p "$root/mxl" "$root/state"
     # One published stereo bus, so the sender tests have a sender.
     cat >"$root/state/mix.json" <<'EOF'
@@ -78,8 +83,23 @@ EOF
 
 if [[ "$MODE" == off ]]; then
     docker rm -f mxl-nmos-amwa-registry >/dev/null 2>&1 || true
+    for p in $(seq "$REG_PORT" $((REG_PORT + 9))); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+            log "port $p is in use (another registry?): set AMWA_REGISTRY_PORT to the first of ten free ports"
+            exit 1
+        fi
+    done
+    python3 - "$HERE/registry.json" "$REG_PORT" >"$OUT/registry.json" <<'EOF'
+import json, sys
+c = json.load(open(sys.argv[1]))
+base = int(sys.argv[2])
+for k, name in enumerate(["registration_port", "query_port", "query_ws_port", "node_port", "system_port",
+                          "settings_port", "logging_port", "admin_port", "mdns_port", "schemas_port"]):
+    c[name] = base + k
+print(json.dumps(c, indent=2))
+EOF
     docker run -d --name mxl-nmos-amwa-registry --network host \
-        -v "$HERE/registry.json:/home/registry.json:ro" "$REGISTRY_IMAGE" >/dev/null
+        -v "$OUT/registry.json:/home/registry.json:ro" "$REGISTRY_IMAGE" >/dev/null
     wait_http "http://$HOST_IP:$QUERY_PORT/x-nmos/query/v1.3/nodes" 60
     cat >"$TOOL/nmostesting/UserConfig.py" <<EOF
 from . import Config as CONFIG

@@ -34,9 +34,21 @@ RESULTS="$OUT/results.md"
 ROWS=()
 
 log() { echo "[release] $*"; }
-row() { # <item> <PASS|FAIL|SKIP> <details>
-    ROWS+=("| $1 | $2 | $3 |")
+row() { # <item> <PASS|FAIL|SKIP> <details> (a "|" in the details would split the cell)
+    ROWS+=("| $1 | $2 | ${3//|/\\|} |")
     log "$1: $2 — $3"
+}
+
+# The node's name: NODE_NAME (the Kubernetes downward API, or set by hand), else
+# the host name; in a container the host name is the container's.
+host_name() {
+    if [[ -n "${NODE_NAME:-}" ]]; then
+        echo "$NODE_NAME"
+    elif [[ -f /.dockerenv || -f /run/.containerenv ]] || grep -qE 'docker|kubepods|containerd' /proc/1/cgroup 2>/dev/null; then
+        echo "$(hostname) (a container; set NODE_NAME to the node's name)"
+    else
+        hostname
+    fi
 }
 
 cgroup_stat() { # nr_throttled of this cgroup (v2), or "n/a"
@@ -58,7 +70,7 @@ item_env() {
     limit=$(cat "/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)/cpu.max" 2>/dev/null || echo "n/a")
     sha=$(git -C "$ROOT" rev-parse --short=7 HEAD 2>/dev/null || echo "?")
     {
-        echo "- host: $(hostname), kernel $(uname -r), $(nproc) CPUs ($cpu)"
+        echo "- host: $(host_name), kernel $(uname -r), $(nproc) CPUs ($cpu)"
         echo "- cgroup cpu.max: $limit"
         echo "- kernel TAI offset: $offset s"
         echo "- commit: $sha (image git-$sha)"
@@ -193,7 +205,8 @@ item_amwa() {
         return
     fi
     if AMWA_OUT="$OUT/amwa" "$ROOT/ci/amwa.sh" off "$BIN/mxl-audio-mixer" >"$OUT/amwa.log" 2>&1; then
-        row amwa PASS "$(grep -E '^\| (IS|BCP)' "$OUT/amwa/summary.md" 2>/dev/null | tr '\n' ' ')"
+        row amwa PASS "$(grep -E '^\| (IS|BCP)' "$OUT/amwa/summary.md" 2>/dev/null |
+            sed -E 's/^\| *([^|]*[^| ]) *\| *(.*[^| ]) *\|$/\1: \2/' | paste -sd ';' - | sed 's/;/; /g')"
     else
         row amwa FAIL "see amwa.log"
     fi
@@ -213,7 +226,7 @@ for item in "${ITEMS[@]}"; do
 done
 
 {
-    echo "# Release tests on $(hostname), $(date -u +%Y-%m-%dT%H:%MZ)"
+    echo "# Release tests on $(host_name), $(date -u +%Y-%m-%dT%H:%MZ)"
     echo
     [[ -f "$OUT/env.md" ]] && cat "$OUT/env.md" && echo
     echo "| Item | Result | Details |"
