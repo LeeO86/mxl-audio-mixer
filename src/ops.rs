@@ -451,6 +451,12 @@ async fn metrics(State(app): State<App>) -> Response {
         "Execution plans swapped in by the DSP thread.",
         vec![format!(" {}", c.plan_swaps.load(Ordering::Relaxed))],
     );
+    metric(
+        "meter_drops_total",
+        "counter",
+        "Metered blocks the meter thread did not get (its ring was full).",
+        vec![format!(" {}", c.meter_drops.load(Ordering::Relaxed))],
+    );
     let streams = control.streams.status(&control.stream_ids());
     metric(
         "preview_state",

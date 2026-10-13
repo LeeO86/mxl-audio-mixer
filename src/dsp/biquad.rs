@@ -186,6 +186,27 @@ impl State {
     }
 }
 
+/// The most sections [`cascade`] runs at once.
+pub const CASCADE: usize = 8;
+
+/// Filter `samples` in place through the sections `c` with their states, every
+/// sample through all of them in turn. The same arithmetic as section after
+/// section over the block, but the sections' recursions overlap in the CPU
+/// instead of waiting on one another. At most [`CASCADE`] sections.
+pub fn cascade(c: &[Coefficients], states: &mut [State], samples: &mut [f32]) {
+    let n = c.len().min(states.len()).min(CASCADE);
+    let mut st = [State::default(); CASCADE];
+    st[..n].copy_from_slice(&states[..n]);
+    for s in samples.iter_mut() {
+        let mut v = f64::from(*s);
+        for k in 0..n {
+            v = st[k].tick(&c[k], v);
+        }
+        *s = v as f32;
+    }
+    states[..n].copy_from_slice(&st[..n]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

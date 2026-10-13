@@ -98,16 +98,16 @@ pub fn dsp_cpu() -> Option<usize> {
     }
 }
 
-/// Set up the calling thread as the DSP thread. Returns a description.
-pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> String {
-    let mut notes = Vec::new();
+/// Flush denormals to zero on the calling thread (decaying meters and filters
+/// reach them, and they are slow). Returns what was set.
+pub fn flush_denormals() -> Option<&'static str> {
     #[cfg(target_arch = "x86_64")]
     // SAFETY: setting FTZ (bit 15) and DAZ (bit 6) in MXCSR only changes how
     // denormals are handled on this thread.
     unsafe {
         #[allow(deprecated)]
         std::arch::x86_64::_mm_setcsr(std::arch::x86_64::_mm_getcsr() | 0x8040);
-        notes.push("FTZ/DAZ".to_string());
+        return Some("FTZ/DAZ");
     }
     #[cfg(target_arch = "aarch64")]
     // SAFETY: setting FPCR.FZ only changes denormal handling on this thread.
@@ -116,7 +116,34 @@ pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> String
         std::arch::asm!("mrs {}, fpcr", out(reg) fpcr);
         fpcr |= 1 << 24;
         std::arch::asm!("msr fpcr, {}", in(reg) fpcr);
-        notes.push("FZ".to_string());
+        return Some("FZ");
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Keep the calling thread off `cpu` (the DSP thread's), when the process may
+/// run on other CPUs too.
+pub fn avoid_cpu(cpu: usize) {
+    let others: Vec<usize> = affinity_cpus().into_iter().filter(|c| *c != cpu).collect();
+    if others.is_empty() {
+        return;
+    }
+    // SAFETY: a CPU set built and applied to the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for c in others {
+            libc::CPU_SET(c, &mut set);
+        }
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+    }
+}
+
+/// Set up the calling thread as the DSP thread. Returns a description.
+pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> String {
+    let mut notes = Vec::new();
+    if let Some(f) = flush_denormals() {
+        notes.push(f.to_string());
     }
     // SAFETY: plain prctl/sched calls on the current thread.
     unsafe {

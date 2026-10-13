@@ -450,15 +450,8 @@ impl Compiler {
             });
             (&m.info.id, m.input, m.channel).hash(&mut c.structure);
             let key = format!("talkback:{}", m.info.id);
-            let tp = c.state(format!("meter/{key}"), 1, |pid| {
-                Processor::true_peak(pid, 1)
-            });
             let slot = c.b.meter(1);
-            c.b.step(Step::Meter {
-                src: dst,
-                slot,
-                proc: tp,
-            });
+            c.b.step(Step::Meter { src: dst, slot });
             meters.push((key, slot, 1));
             mic_bufs.insert(m.info.id.clone(), dst);
         }
@@ -791,13 +784,8 @@ impl Compiler {
             };
             let (_, format) = mix.signal(id).expect("signal exists");
             let n = format.channels();
-            let tp = c.state(format!("meter/{id}"), n, |pid| Processor::true_peak(pid, n));
             let slot = c.b.meter(n);
-            c.b.step(Step::Meter {
-                src: t.post,
-                slot,
-                proc: tp,
-            });
+            c.b.step(Step::Meter { src: t.post, slot });
             meters.push((id.clone(), slot, n));
             if let Some(&slot) = loudness.get(id) {
                 c.b.step(Step::Loudness {
@@ -814,13 +802,8 @@ impl Compiler {
         let soloed = c.compiler.solo.clone();
         let solo_bus = build_solo_bus(&mut c, mix, &taps, &soloed, room.solo.pfl_trim_db, "solo");
         if let Some(bus) = solo_bus {
-            let tp = c.state("meter/solo".into(), 2, |pid| Processor::true_peak(pid, 2));
             let slot = c.b.meter(2);
-            c.b.step(Step::Meter {
-                src: bus,
-                slot,
-                proc: tp,
-            });
+            c.b.step(Step::Meter { src: bus, slot });
             meters.push(("solo".into(), slot, 2));
         }
         // Monitor paths: the control room's, then the personal ones (each with its
@@ -1001,15 +984,8 @@ impl Compiler {
                 });
                 cur = dst;
             }
-            let tp = c.state(format!("meter/{key}"), n, |pid| {
-                Processor::true_peak(pid, n)
-            });
             let slot = c.b.meter(n);
-            c.b.step(Step::Meter {
-                src: cur,
-                slot,
-                proc: tp,
-            });
+            c.b.step(Step::Meter { src: cur, slot });
             meters.push((key.clone(), slot, n));
             if let Some(slot) = stream {
                 let src = if m.format == Format::Stereo {
