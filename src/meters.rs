@@ -212,6 +212,17 @@ impl Meters {
         }
     }
 
+    /// The loudest channel's peak since the last meter tick, dBFS (−200 for
+    /// silence).
+    pub fn peak_dbfs(&self, signal: &str) -> Option<f64> {
+        let (_, first, n) = self.signals.iter().find(|(s, _, _)| s == signal)?;
+        let peak = self.channels[*first as usize..*first as usize + n]
+            .iter()
+            .map(|c| c.peak)
+            .fold(0.0f32, f32::max);
+        Some(dbfs(f64::from(peak)).0)
+    }
+
     pub fn values(&self) -> BTreeMap<String, MeterValues> {
         self.signals
             .iter()

@@ -418,6 +418,10 @@ impl Mix {
         for s in implied {
             out.entry(s.clone()).or_insert_with(|| VadSettings::new(s));
         }
+        for s in self.logic_vad_signals() {
+            out.entry(s.to_string())
+                .or_insert_with(|| VadSettings::new(s));
+        }
         out
     }
 

@@ -402,6 +402,32 @@ try {
   await api("/api/v1/autolevels/gtr", { method: "DELETE" });
   pass(`auto-level from the panel: Guitar at ${level.level_lufs} LUFS to −30, gain ${level.gain_db} dB, shown on its strip`);
 
+  // Logic: a constant 1 wired to "set mute" mutes Guitar.
+  await page.goto(`${base}/#logic`);
+  await page.getByLabel("New logic graph name").fill("Keys");
+  await page.getByRole("button", { name: "+ Graph" }).click();
+  await page.getByLabel("Block type").waitFor({ timeout: 5000 });
+  const graph = await until("graph Keys", async () => (await api("/api/v1/logic")).find((g) => g.name === "Keys"));
+  await page.getByLabel("Block type").selectOption("const");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await page.getByLabel("Block type").selectOption("set-mute");
+  await page.getByLabel("Block signal").selectOption("gtr");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("two blocks", async () => (await api(`/api/v1/logic/${graph.id}`)).blocks.length === 2);
+  await until("the set-mute block is listed", async () => (await page.getByLabel("Wire to").innerHTML()).includes("set-mute-1"));
+  await page.getByLabel("const-1 value").fill("1");
+  await page.getByLabel("const-1 value").press("Enter");
+  await until("const is 1", async () => (await api(`/api/v1/logic/${graph.id}`)).blocks.find((b) => b.id === "const-1").value === 1);
+  await page.getByLabel("Wire from").selectOption("const-1");
+  await page.getByLabel("Wire to").selectOption("set-mute-1");
+  await page.getByRole("button", { name: "+ Wire" }).click();
+  await until("Guitar muted by the logic", async () => (await api("/api/v1/strips/gtr")).mute === true);
+  await page.locator('[data-value="const-1"]').waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/logic.png`, fullPage: true });
+  await api(`/api/v1/logic/${graph.id}`, { method: "DELETE" });
+  await api("/api/v1/strips/gtr", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
+  pass("logic: a constant wired to set-mute mutes Guitar");
+
   for (const tab of ["nmos", "status", "settings"]) {
     await page.goto(`${base}/#${tab}`);
     await page.waitForTimeout(400);

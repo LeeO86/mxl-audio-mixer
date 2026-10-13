@@ -86,6 +86,8 @@ pub struct Control {
     pub step_counts: BTreeMap<&'static str, usize>,
     /// VAD, auto-levels, auto-mixes and ducks (§8).
     pub auto: crate::auto::Auto,
+    /// Logic graphs (§11).
+    pub logic: crate::logic::Logic,
 }
 
 impl Control {
@@ -126,6 +128,69 @@ impl Control {
             compile_seconds: 0.0,
             step_counts: BTreeMap::new(),
             auto: crate::auto::Auto::new(),
+            logic: crate::logic::Logic::default(),
+        }
+    }
+
+    /// Logic graphs (§11.2), on the same 10 ms tick as the auto engine.
+    pub fn logic_tick(&mut self) {
+        use crate::mix::logic::BlockKind;
+        let speech: std::collections::BTreeMap<String, bool> = self
+            .auto
+            .vads
+            .iter()
+            .map(|(s, v)| (s.clone(), v.state.speech_active))
+            .collect();
+        let mut level_db = std::collections::BTreeMap::new();
+        for g in &self.mix.logic {
+            for b in &g.blocks {
+                if let BlockKind::Level { signal } = &b.kind {
+                    if let Some(db) = self.meters.peak_dbfs(signal) {
+                        level_db.insert(signal.clone(), db);
+                    }
+                }
+            }
+        }
+        let actions = self.logic.tick(&crate::logic::Readings {
+            mix: &self.mix,
+            speech: &speech,
+            level_db: &level_db,
+        });
+        if actions.is_empty() {
+            return;
+        }
+        let mut next = self.mix.clone();
+        for a in actions {
+            let fader = a.fader_db.map(crate::logic::clamp_fader);
+            for s in next.strips.iter_mut().filter(|s| s.id == a.signal) {
+                if let Some(m) = a.mute {
+                    s.mute = m;
+                }
+                if let Some(db) = fader {
+                    s.fader_db = db;
+                }
+            }
+            for b in next.buses.iter_mut().filter(|b| b.id == a.signal) {
+                if let Some(m) = a.mute {
+                    b.mute = m;
+                }
+                if let Some(db) = fader {
+                    b.fader_db = db;
+                }
+            }
+        }
+        if next == self.mix {
+            return;
+        }
+        match self.stage(next, crate::engine::FADE_SAMPLES) {
+            Ok(Staged::Done) => {}
+            Ok(Staged::Swap { .. }) => {
+                tracing::warn!(
+                    "logic asked for a change that rewires the plan; it was not applied"
+                );
+                self.pending = None;
+            }
+            Err(e) => tracing::warn!("logic: {e}"),
         }
     }
 

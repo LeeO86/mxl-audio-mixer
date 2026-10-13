@@ -432,6 +432,9 @@ pub struct Mix {
     /// Speech-aware loudness (§8.2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub autolevels: Vec<super::auto::AutoLevel>,
+    /// Logic graphs (§11).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logic: Vec<super::logic::Graph>,
 }
 
 /// What a signal id names.
@@ -533,6 +536,7 @@ impl Mix {
         super::room::validate(self, inputs)?;
         super::vca::validate(self)?;
         super::auto::validate(self)?;
+        super::logic::validate(self)?;
         for s in &self.strips {
             check_name(&s.name)?;
             if let Some(a) = &s.afv {
@@ -853,6 +857,7 @@ impl Mix {
             g.members.retain(|m| m != id);
         }
         self.remove_from_auto(id);
+        self.remove_from_logic(id);
         self.remove_from_layouts(id);
     }
 

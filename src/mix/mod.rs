@@ -4,6 +4,7 @@ pub mod auto;
 pub mod chain;
 pub mod compile;
 pub mod format;
+pub mod logic;
 pub mod model;
 pub mod operations;
 pub mod room;

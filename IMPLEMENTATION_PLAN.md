@@ -1577,3 +1577,27 @@ the release notes when it is in. Then M7a (PR 17) goes into `main`, then M7b.
 `sha256:74753add488e4002a236555f15a943cd75d98bc50d3211b6c1f87241c3bf3f6f`
 (labels checked: version 1.0.0, revision `14e9487`, MIT, uid 1000), the GitHub
 release with `docs/release-notes/1.0.0.md`. Open: the lab's run on `81fb8a2`.
+
+## M8a: logic graphs
+
+Milestone 8 (§19, release 1.2.0) in parts. This part: graphs of blocks in the
+show, evaluated at 100 Hz, with the blocks a show needs first and a list
+editor. The cable canvas and the remaining block types follow.
+
+### M8a: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D127 | A logic graph is blocks and wires in the show (`logic`), at most 32 graphs of 64 blocks. A value is a number; a boolean is 0 or 1. Ports are fixed per block type; a wire goes from an output to an input and an input takes one wire. A loop is rejected unless it passes through an `edge` or a `latch`: those publish last tick's value, so what follows them is one tick behind. | §11.1 "typed ports"; §11.2 "combinational loops are rejected unless they contain a latch/delay". |
+| D128 | The blocks: `const`, `button` (a soft key, held in the runtime, not the show), `mute`, `fader`, `vad`, `level` (a signal's mute, fader dB, voice and peak dBFS), `and`, `or`, `not`, `compare` (`gt`, `lt`, `eq`), `edge` (1 for the tick its input rose), `latch` (set/reset, reset wins), `set-mute`, `set-fader`. A `vad` block analyses its signal like an auto-level does. | §11.1's list, the part that drives a show: "while the host speaks, mute the music bed", "below −40 dBFS, close the fader". Tally, timers, schedules, NMOS state, webhooks, snapshot recall and math follow (question 2). |
+| D129 | Evaluation is on the control engine's 10 ms tick (100 Hz, §11.2's default). Actions run when their input changed, ramped over 10 ms, and never while `dry_run` is set. A fader they ask for is clamped to the fader range. Deleting a signal removes the blocks that name it. | The tick already exists. Acting on every tick would fight the operator; acting on change does what the graph says once. |
+| D130 | The Logic tab is a list: graphs, blocks, wires by their ports, live values, the soft keys. Positions (`x`, `y`) are stored for the canvas. | The canvas (drag, cables, zoom) is the larger piece and comes next (question 1); the runtime is what a show runs on. |
+
+### M8a: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | The cable canvas (Vue Flow, as the routing graph) as the next part, the list editor staying for now. | Yes. |
+| 2 | Next blocks: tally on air, a timer, compare against a meter with hysteresis, snapshot recall. Webhooks and schedules after those. | In that order. |
+| 3 | Logic stays out of snapshots (it is the show, not a parameter state). | Yes. |
+| 4 | 100 Hz on the existing tick, not a thread of its own. | As implemented. |

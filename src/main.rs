@@ -230,7 +230,11 @@ async fn run(config: Config) -> ExitCode {
                 },
                 _ = tick.tick() => lock().tick(),
                 _ = meter_tick.tick() => lock().meter_tick(),
-                _ = auto_tick.tick() => lock().auto_tick(),
+                _ = auto_tick.tick() => {
+                    let mut c = lock();
+                    c.auto_tick();
+                    c.logic_tick();
+                }
             }
         }
     });
