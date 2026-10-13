@@ -281,16 +281,24 @@ median = sorted(x["ratio_lu"] for x in duck)[len(duck) // 2] if duck else None
 # bed's still holds the guest's last turn: the stages follow, about 1 LU over.
 assert len(duck) > 20 and abs(median - 5) < 1.5, (len(duck), median, duck[:5])
 assert max(x["reduction_db"] for x in duck) > 8, duck[:5]
-# The guest alone: back fast (interview passthrough): at the end of every
-# stretch of 2 s or more without the commentator, the guest speaking in most of it.
-ends, run = [], []
+# The guest alone: back fast (interview passthrough). A turn is the guest's
+# speech: the interview polls, a new turn after a second or more without one (a
+# flicker of the commentator's VAD does not split it). In every turn of 1.5 s
+# or more the bed must have come back below 1 dB.
+turns, cur, gap = [], [], 0
 for x in c:
-    if x["state"] in ("duck", "overvoice"):
-        if len(run) >= 40 and sum(r["state"] == "interview" for r in run) >= 30:
-            ends.append(run[-1]["reduction_db"])
-        run = []
+    if x["state"] == "interview":
+        cur.append(x)
+        gap = 0
     else:
-        run.append(x)
+        gap += 1
+        if gap >= 20 and cur:
+            turns.append(cur)
+            cur = []
+if cur:
+    turns.append(cur)
+long = [t for t in turns if len(t) >= 30]
+ends = [round(min(x["reduction_db"] for x in t), 2) for t in long]
 assert ends and max(ends) < 1.0, (ends, "".join(x["state"][0] for x in c))
 print(f"states {sorted(states)}; ducking: median ratio {median} LU, {len(held)} of {len(duck)} polls within 2 LU of the 5 LU target "
       f"(reductions {min(x['reduction_db'] for x in duck)}–{max(x['reduction_db'] for x in duck)} dB); "
