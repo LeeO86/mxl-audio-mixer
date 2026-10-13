@@ -1601,3 +1601,14 @@ editor. The cable canvas and the remaining block types follow.
 | 2 | Next blocks: tally on air, a timer, compare against a meter with hysteresis, snapshot recall. Webhooks and schedules after those. | In that order. |
 | 3 | Logic stays out of snapshots (it is the show, not a parameter state). | Yes. |
 | 4 | 100 Hz on the existing tick, not a thread of its own. | As implemented. |
+
+### M8a: answers (maintainer, 2026-10-13)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | The cable canvas next, the list editor staying | Yes. |
+| 2 | Next blocks: tally, a timer, meter hysteresis, snapshot recall | In that order. |
+| 3 | Logic stays out of snapshots | Yes. |
+| 4 | 100 Hz on the existing tick | As implemented. |
+
+The canvas is on the Logic tab (Vue Flow, the blocks' `x` and `y`): draw a cable from an output to an input, Delete removes it, dragging a block remembers where it was put. The list under it edits the same graph.

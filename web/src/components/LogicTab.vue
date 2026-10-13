@@ -1,10 +1,15 @@
 <script setup>
-// Logic graphs (§11): blocks wired together, evaluated at 100 Hz. This is the list editor; the
-// cable canvas comes with the rest of the block types. Live values are polled while the tab is open.
-import { computed, onMounted, onUnmounted, ref } from "vue";
+// Logic graphs (§11): blocks wired together, evaluated at 100 Hz. The canvas draws the cables; the
+// list under it edits the same graph. Live values are polled while the tab is open.
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { VueFlow, useVueFlow } from "@vue-flow/core";
+import "@vue-flow/core/dist/style.css";
 import ConfirmButton from "./ConfirmButton.vue";
+import LogicNode from "./LogicNode.vue";
 import { api } from "../api.js";
 import { act, live, signals } from "../store.js";
+
+const { applyNodeChanges, applyEdgeChanges, fitView } = useVueFlow({ id: "logic" });
 
 const graphs = computed(() => live.mix?.logic || []);
 const selected = ref("");
@@ -78,7 +83,7 @@ function addBlock() {
   change((g) => {
     const ids = new Set(g.blocks.map((b) => b.id));
     const id = [...Array(100)].map((_, i) => `${type}-${i + 1}`).find((x) => !ids.has(x));
-    const block = { id, type, x: 40 + g.blocks.length * 16, y: 40 };
+    const block = { id, type, x: 40 + g.blocks.length * 220, y: 80 };
     if (withSignal.includes(type)) block.signal = signal;
     if (type === "const") block.value = 0;
     if (type === "compare") block.op = "gt";
@@ -133,11 +138,87 @@ function press(block, pressed) {
   return act(() => api.put(`/api/v1/logic/${g.id}/buttons/${block.id}`, { pressed }));
 }
 
+const nodes = ref([]);
+const edges = ref([]);
 const NUMERIC = new Set(["const", "fader", "level", "set-fader"]);
 function shown(b) {
   const v = values.value[b.id];
   if (v === undefined || v === null) return "";
   return NUMERIC.has(b.type) ? Number(v).toFixed(1) : v >= 0.5 ? "on" : "off";
+}
+
+function labelOf(b) {
+  const type = TYPES.find((t) => t[0] === b.type)?.[1] || b.type;
+  const who = b.signal ? signals.value.find((s) => s.id === b.signal)?.name || b.signal : "";
+  return who ? `${type}: ${who}` : type;
+}
+
+function rebuild() {
+  const g = graph.value;
+  if (!g) {
+    nodes.value = [];
+    edges.value = [];
+    return;
+  }
+  nodes.value = g.blocks.map((b) => ({
+    id: b.id,
+    type: "logic",
+    position: { x: b.x || 40, y: b.y || 40 },
+    data: {
+      id: b.id,
+      label: labelOf(b),
+      note: b.id,
+      inputs: inputsOf[b.type] || [],
+      output: !["set-mute", "set-fader"].includes(b.type),
+      live: shown(b),
+    },
+  }));
+  const drawn = g.wires.map((w) => ({
+    id: `${w.from_block}>${w.to_block}.${w.to_port}`,
+    source: w.from_block,
+    target: w.to_block,
+    sourceHandle: "out",
+    targetHandle: w.to_port,
+    label: w.to_port,
+    data: w,
+  }));
+  nextTick(() => (edges.value = drawn));
+}
+
+watch(() => (graph.value ? JSON.stringify({ b: graph.value.blocks, w: graph.value.wires }) : ""), rebuild, { immediate: true });
+watch(values, () => {
+  for (const n of nodes.value) {
+    const b = graph.value?.blocks.find((x) => x.id === n.id);
+    if (b) n.data = { ...n.data, live: shown(b), label: labelOf(b) };
+  }
+});
+
+function onNodesChange(changes) {
+  applyNodeChanges(changes.filter((c) => c.type !== "remove"));
+}
+function onDragStop({ node }) {
+  change((g) => ({
+    blocks: g.blocks.map((b) => (b.id === node.id ? { ...b, x: Math.round(node.position.x), y: Math.round(node.position.y) } : b)),
+  }));
+}
+function isValidConnection(c) {
+  if (c.id) return true;
+  const ports = inputsOf[graph.value?.blocks.find((b) => b.id === c.target)?.type] || [];
+  return c.source !== c.target && ports.includes(c.targetHandle) && (c.sourceHandle === "out" || !c.sourceHandle);
+}
+function onConnect(c) {
+  if (!isValidConnection(c) || c.id) return;
+  change((g) => {
+    const wires = g.wires.filter((w) => !(w.to_block === c.target && w.to_port === c.targetHandle));
+    return { wires: [...wires, { from_block: c.source, from_port: "out", to_block: c.target, to_port: c.targetHandle }] };
+  });
+}
+function onEdgesChange(changes) {
+  applyEdgeChanges(changes.filter((c) => c.type !== "remove"));
+  for (const c of changes.filter((x) => x.type === "remove")) {
+    const edge = edges.value.find((e) => e.id === c.id);
+    if (edge?.data) removeWire(edge.data);
+  }
 }
 
 onMounted(() => {
@@ -166,6 +247,27 @@ onUnmounted(() => clearInterval(timer));
         <label class="check"><input type="checkbox" :checked="graph.enabled" @change="patch({ enabled: $event.target.checked })" /> on</label>
         <label class="check" title="values are computed, actions do not run"><input type="checkbox" :checked="graph.dry_run" @change="patch({ dry_run: $event.target.checked })" /> dry run</label>
         <ConfirmButton label="Remove" small @confirm="act(() => api.del(`/api/v1/logic/${graph.id}`))" />
+        <button class="btn small secondary" @click="fitView()">Fit</button>
+      </div>
+
+      <div class="graphwrap logiccanvas">
+        <VueFlow
+          id="logic"
+          v-model:nodes="nodes"
+          :edges="edges"
+          :apply-default="false"
+          :is-valid-connection="isValidConnection"
+          :delete-key-code="['Delete', 'Backspace']"
+          :min-zoom="0.3"
+          fit-view-on-init
+          class="graph"
+          @nodes-change="onNodesChange"
+          @edges-change="onEdgesChange"
+          @node-drag-stop="onDragStop"
+          @connect="onConnect"
+        >
+          <template #node-logic="p"><LogicNode :data="p.data" /></template>
+        </VueFlow>
       </div>
 
       <table class="amtable" style="margin-top: 0.6rem">

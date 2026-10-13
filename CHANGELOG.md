@@ -11,7 +11,7 @@ Milestone 8 (§19: the logic editor).
   `set-mute`, `set-fader`) wired port to port. A loop is allowed only through
   an `edge` or a `latch`. Evaluated at 100 Hz; actions run when their input
   changes; `dry_run` computes without acting. `/api/v1/logic`. The Logic tab
-  is the list editor; the cable canvas follows.
+  draws the cables and lists the same graph under them.
 
 ## 1.1.0 (in progress, after 1.0.0)
 

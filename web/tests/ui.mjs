@@ -414,19 +414,28 @@ try {
   await page.getByLabel("Block signal").selectOption("gtr");
   await page.getByRole("button", { name: "+ Block" }).click();
   await until("two blocks", async () => (await api(`/api/v1/logic/${graph.id}`)).blocks.length === 2);
-  await until("the set-mute block is listed", async () => (await page.getByLabel("Wire to").innerHTML()).includes("set-mute-1"));
   await page.getByLabel("const-1 value").fill("1");
   await page.getByLabel("const-1 value").press("Enter");
   await until("const is 1", async () => (await api(`/api/v1/logic/${graph.id}`)).blocks.find((b) => b.id === "const-1").value === 1);
-  await page.getByLabel("Wire from").selectOption("const-1");
-  await page.getByLabel("Wire to").selectOption("set-mute-1");
-  await page.getByRole("button", { name: "+ Wire" }).click();
-  await until("Guitar muted by the logic", async () => (await api("/api/v1/strips/gtr")).mute === true);
-  await page.locator('[data-value="const-1"]').waitFor({ timeout: 3000 });
+  await page.locator('.vue-flow__node[data-id="set-mute-1"]').waitFor({ timeout: 5000 });
+  await page.getByRole("button", { name: "Fit" }).click();
+  await page.waitForTimeout(400);
+  const cableFrom = await center('.vue-flow__node[data-id="const-1"] .vue-flow__handle.source');
+  const cableTo = await center('.vue-flow__node[data-id="set-mute-1"] .vue-flow__handle.target');
+  await page.mouse.move(cableFrom.x, cableFrom.y);
+  await page.mouse.down();
+  await page.mouse.move(cableTo.x, cableTo.y, { steps: 12 });
+  await page.mouse.up();
+  await until("Guitar muted by the cable", async () => (await api("/api/v1/strips/gtr")).mute === true);
   await page.screenshot({ path: `${out}/logic.png`, fullPage: true });
+  const cable = page.locator(".vue-flow__edge").first();
+  const cableBox = await cable.locator(".vue-flow__edge-interaction").boundingBox();
+  await page.mouse.click(cableBox.x + cableBox.width / 2, cableBox.y + cableBox.height / 2);
+  await page.keyboard.press("Delete");
+  await until("the cable removed", async () => (await api(`/api/v1/logic/${graph.id}`)).wires.length === 0);
   await api(`/api/v1/logic/${graph.id}`, { method: "DELETE" });
   await api("/api/v1/strips/gtr", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
-  pass("logic: a constant wired to set-mute mutes Guitar");
+  pass("logic: a cable drawn from a constant to set-mute mutes Guitar, and Delete removes it");
 
   for (const tab of ["nmos", "status", "settings"]) {
     await page.goto(`${base}/#${tab}`);
