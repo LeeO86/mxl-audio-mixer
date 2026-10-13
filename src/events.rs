@@ -100,7 +100,8 @@ fn meters_json(app: &App, only: Option<&[String]>) -> Value {
         .iter()
         .filter_map(|d| {
             let r = control.auto.duck_status(&d.id).ratio?;
-            let wanted = only.is_none_or(|o| d.targets.iter().chain(&d.keys).any(|s| o.contains(s)));
+            let wanted =
+                only.is_none_or(|o| d.targets.iter().chain(&d.keys).any(|s| o.contains(s)));
             wanted.then(|| (d.id.clone(), json!(r)))
         })
         .collect();

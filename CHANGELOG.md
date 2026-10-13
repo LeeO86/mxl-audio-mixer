@@ -30,6 +30,26 @@ Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
 - Silero VAD (ONNX Runtime, the model vendored, MIT) is the default detector;
   the feature detector stays, per signal (`detector`) and as the fallback.
 
+### Milestone 7 (part 2): auto-level and ratio ducks
+
+- Com-IS-Assist's control core (Andreas Weiss, MIT) copied into
+  `src/auto/comis/` with its notice: the four-state machine, the slow, mid and
+  fast stages, the automix engine, their tests.
+- The VAD taps carry every channel (records in one ring, `vad_drops_total`);
+  BS.1770 loudness per tapped signal on the control side (momentary,
+  short-term, a fast 50 ms reading, the channel weights); the VAD's gate uses
+  it, and its state shows `short_term_lufs`.
+- Auto-level (§8.2): `/api/v1/autolevels/<signal>`: a target (−23 LUFS
+  short-term), a speech offset (+2 LU while the VAD speaks), a range (±12 dB),
+  attack and release (1 s, 3 s), a freeze below −50 LUFS.
+- Ratio ducks (`mode: "ratio"`): Com-IS-Assist's control, the keys held 5 LU
+  above the targets (13 LU over-voice), interview passthrough when only the
+  targets speak, at most 24 dB, a speed. Channel depth groups for both modes
+  (front, centre, LFE, surround) and per-channel auto gains.
+- Auto-levels in snapshots (the `auto` section, recall-safe); the meters
+  message carries the auto-levels' and ratio ducks' states; the Auto panel
+  edits both; the demo ducks its music to a ratio and auto-levels its voices.
+
 ## 1.0.0 (not released yet)
 
 The first release: milestones 0–6 (§19). Release notes:

@@ -62,7 +62,7 @@ pub struct Snapshot {
     pub time: u64,
     pub signals: BTreeMap<String, SignalState>,
     pub sends: Vec<SendState>,
-    /// VAD settings, auto-mixes and ducks (§8), as a whole; absent in snapshots
+    /// VAD settings, auto-mixes, ducks and auto-levels (§8), as a whole; absent in snapshots
     /// taken before they existed (a recall leaves them then).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<AutoState>,
@@ -94,7 +94,7 @@ pub enum Class {
     /// The parameters (and bypass) of chain nodes.
     Chain,
     Sends,
-    /// VAD settings, auto-mixes and ducks.
+    /// VAD settings, auto-mixes, ducks and auto-levels.
     Auto,
 }
 
@@ -105,7 +105,7 @@ pub enum Section {
     Buses,
     /// VCA faders and mutes (§9).
     Vcas,
-    /// VAD settings, auto-mixes and ducks (§8), as a whole; a signal filter does
+    /// VAD settings, auto-mixes, ducks and auto-levels (§8), as a whole; a signal filter does
     /// not narrow them.
     Auto,
 }

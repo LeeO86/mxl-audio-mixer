@@ -327,11 +327,12 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Snapshots** (§12.5): parameter states of every strip, bus, send and VCA (trim,
   polarity, fader, mute, pan, width, every chain node's parameters and bypass,
   send gain, mute and phase; VCA fader and mute), and the auto setup as a whole
-  (VAD settings, auto-mixes, ducks: a moderation, then a panel discussion). A
+  (VAD settings, auto-mixes, ducks, auto-levels: a moderation, then a panel
+  discussion). A
   recall takes `signals`, `sections` (`strips`, `buses`, `vcas`, `auto`) and
   `classes` (`trim`, `fader`, `mute`, `pan`, `chain`, `sends`, `auto`), all
   optional (everything), and `crossfade_ms` (the ramp of every value); it never
-  touches recall-safe signals, auto-mixes and ducks, nor signals, sends and nodes
+  touches recall-safe signals, auto-mixes, ducks and auto-levels, nor signals, sends and nodes
   that no longer exist (or whose node type changed; a recalled auto-mix or duck
   drops the signals that are gone). The auto setup comes back when both its
   section and its class are wanted; a signal filter does not narrow it.
@@ -369,17 +370,21 @@ High-level operations make ordinary buses and sends (editable afterwards), each
 
 The console's Operations panel runs them on a selection of strips.
 
-### Voice detection, auto-mix and ducking (§8)
+### Voice detection, auto-level, auto-mix and ducking (§8)
 
 The control side runs them every 10 ms; they drive one gain per strip or bus
-(its *auto gain*): where its chain has an `auto` node (placed like any
-processing node, one per chain), else after the chain, before the fader. Pre-fader
-sends carry it; the operator's fader multiplies with it. They are part of the mix
-(`vad`, `automixes`, `ducks`), the show file and snapshots (section `auto`); they
-change gains, never the plan (adding or removing a member or target does).
+and channel (its *auto gain*: auto-level × auto-mix × each channel's deepest
+duck): where its chain has an `auto` node (placed like any processing node, one
+per chain), else after the chain, before the fader. Pre-fader sends carry it;
+the operator's fader multiplies with it. They are part of the mix (`vad`,
+`automixes`, `ducks`, `autolevels`), the show file and snapshots (section
+`auto`); they change gains, never the plan (adding or removing a member, target
+or auto-level does). Every analysed signal is tapped at its auto gain's input,
+all channels (`vad_drops_total` counts blocks the control side did not get),
+and measured there: BS.1770 loudness over its channels (momentary 400 ms,
+short-term 3 s, a fast 50 ms reading), the VAD on the mean of its channels.
 
-- **Voice activity detection** analyses a signal at its auto gain's input (or
-  before its fader without one; the mean of its channels) in 10 ms frames: the 250 Hz–4 kHz band's power over its noise
+- **Voice activity detection** analyses a signal in 10 ms frames: the 250 Hz–4 kHz band's power over its noise
   floor (minimum over 2 s), voicing (a pitch of 80–400 Hz by autocorrelation),
   the modulation of syllables, and the rejection of pure tones (line-up, idents,
   sweeps): the `features` detector. By default (`detector: "silero"`) it runs
@@ -389,16 +394,24 @@ change gains, never the plan (adding or removing a member or target does).
   and 0.23), at about 0.8 % of a core per signal; without ONNX Runtime it falls
   back to the feature detector. Speech starts above `threshold` (default 0.5) and ends `hold_ms`
   (800: a pause between sentences is still talking) after the probability fell
-  below it (minus 0.15). While the signal's momentary loudness (K-weighted,
-  400 ms) is below `gate_lufs` (−32), nothing is speech: crosstalk from other
+  below it (minus 0.15). While the signal's momentary loudness is below
+  `gate_lufs` (−32), nothing is speech: crosstalk from other
   talkers is speech too, but quieter (set it 20–30 dB below the talker). A voiced
   onset is detected after about 50–70 ms. Its state per signal:
   `speech_active`, `speech_probability`, `speech_level_dbfs` (the mean of the
-  speech frames, 1 s), `level_dbfs`, `momentary_lufs`, `gated`, onsets and
+  speech frames, 1 s), `level_dbfs`, `momentary_lufs`, `short_term_lufs`,
+  `gated`, onsets and
   offsets, and the frame's features. Hold and gate after Com-IS-Assist's
-  measurements on commentary. Members of an auto-mix and keys of a
-  duck are analysed with the defaults unless they have settings of their own;
-  at most 64 signals.
+  measurements on commentary. Members of an auto-mix, keys of a duck, targets
+  of a ratio duck that hears them, and auto-levelled signals are analysed with
+  the defaults unless they have settings of their own; at most 64 signals.
+- **Auto-level** (`autolevels`, per strip or bus): the gain rides the signal's
+  short-term loudness to `target_lufs` (−23), `speech_offset_lu` (+2) higher
+  while its VAD reports speech, within `min_gain_db` … `max_gain_db` (−12 …
+  +12), as a one-pole in dB: `attack_ms` (1000) down, `release_ms` (3000) up.
+  While the momentary loudness is below `freeze_lufs` (−50) there is no signal:
+  the gain holds, and the pause (also the 400 ms that led to the freeze) is not
+  measured. Feed-forward: it reads the signal before its gain.
 - **Auto-mix** (gain sharing after Dugan) over strips: each member's gain is
   √(its weighted level / the sum), so one talker is at 0 dB, two equal ones at
   −3 dB each, and N members with equal noise at −10·log10(N) dB (the NOM
@@ -408,15 +421,31 @@ change gains, never the plan (adding or removing a member or target does).
   leave the sharing. `last_mic_hold` (default on): while no member speaks, the
   gains stay. `vad_weighting`: a member without speech counts 10 dB less. A
   strip is in at most one auto-mix.
-- **Ducks**: `targets` (strips, buses) go down by `depth_db` (default −12, down
-  to `-inf`) while one of the `keys` speaks; linear in dB over `attack_ms` (50),
-  back over `release_ms` (1000) after `hold_ms` (800). A target of several ducks
-  takes the deepest; a key cannot be its own target. A duck from the presenter
-  to the guests is speech priority.
+- **Ducks**: `targets` (strips, buses) go down while one of the `keys` speaks.
+  `mode: "fixed"` (the default): by `depth_db` (default −12, down to `-inf`),
+  linear in dB over `attack_ms` (50), back over `release_ms` (1000) after
+  `hold_ms` (800). `mode: "ratio"`: Com-IS-Assist's control (its code, MIT): as
+  far down as keeps the keys' short-term loudness `ratio.target_lu` (5) above
+  the targets'; `ratio.overvoice_lu` (13) while a target speaks too; when only
+  a target speaks (an interview in the bed) back four times faster and without
+  the ease-in that otherwise spans a pause between sentences; at most
+  `ratio.max_reduction_db` (24); `ratio.speed` (1) scales every stage. Three
+  stages, each `target − (keys − targets)` at its time scale: the bed's
+  short-term loudness (2.5 s attack), its momentary loudness (±6 dB on top) and
+  its fast reading (up to 4 dB more), all against the keys' short-term
+  loudness, measured dry (several keys or targets count as one, their powers
+  added; an auto-level's gain counted). `ratio.bed_voice: false` ignores the
+  targets' speech (and stops analysing them). `channel_depth` (both modes):
+  the share of the dB each channel group of a target takes, 0 … 1: `front`
+  (L, R), `center` (C, and a mono target), `lfe`, `surround` (every other
+  channel). A target of several ducks takes the deepest per channel; a key
+  cannot be its own target. A duck from the presenter to the guests is speech
+  priority.
 
 The console's Auto panel edits them, with the live speech probability, the
-ducks' state and each member's gain; strips show a voice dot (green: speech) and
-their auto gain.
+auto-levels' gain and level, the ducks' state (a ratio duck's state, reduction
+and ratio held) and each member's gain; strips show a voice dot (green:
+speech) and their auto gain (its deepest channel).
 
 ### Processing nodes (§6)
 
@@ -440,7 +469,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `multiband` | `crossovers_hz` (2–4, rising; Linkwitz-Riley 24 dB/oct, sum flat), `bands` (one more: `{threshold_db, ratio, attack_ms, release_ms, makeup_db}`) |
 | `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
-| `auto` | no parameters: where the auto gain (auto-mix and ducking, below) acts, at most one per chain; bypass: none |
+| `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
 ±24 dB, a chain at most 32 nodes. A key is another signal's tap; its signal is
@@ -536,7 +565,8 @@ without touching the audio.
 | `GET`, `POST /api/v1/mute-groups`, `GET`, `PATCH`, `DELETE /api/v1/mute-groups/<id>` | mute groups (`active`, `members`, `name`) |
 | `GET /api/v1/vad`, `GET`, `PUT`, `DELETE /api/v1/vad/<signal>` | every analysed signal: settings (`own`: its own, else the defaults) and `state`; PUT sets its own (`threshold`, `hold_ms`, `gate_lufs`, `detector`: `silero` or `features`) and analyses it; DELETE removes them |
 | `GET`, `POST /api/v1/automixes`, `GET`, `PATCH`, `DELETE /api/v1/automixes/<id>` | auto-mixes (`name`, `enabled`, `last_mic_hold`, `vad_weighting`, `members`: strip ids, which keep a member's settings, or `{signal, weight_db, bypass}`); GET adds `gains_db` |
-| `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/<id>` | ducks (`name`, `enabled`, `keys`, `targets`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms`); GET adds `active`, `gain_db` |
+| `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/<id>` | ducks (`name`, `enabled`, `keys`, `targets`, `mode`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms`, `ratio` {`target_lu`, `overvoice_lu`, `max_reduction_db`, `speed`, `bed_voice`}, `channel_depth` {`front`, `center`, `lfe`, `surround`}, `recall_safe`; the fields of `ratio` and `channel_depth` given are set, the others kept); GET adds `active`, `gain_db` and for a ratio duck `control` (`state`: `release`, `duck`, `interview`, `overvoice`; `reduction_db`, `slow_db`, `mid_db`, `fast_db`, `target_lu`, `ratio_lu`, `dialogue_lufs`, `bed_lufs`) |
+| `GET /api/v1/autolevels`, `GET`, `PUT`, `DELETE /api/v1/autolevels/<signal>` | auto-levels (`enabled`, `target_lufs`, `speech_offset_lu`, `max_gain_db`, `min_gain_db`, `attack_ms`, `release_ms`, `freeze_lufs`, `recall_safe`; PUT sets the fields given, the others kept or the defaults); GET adds `state` (`gain_db`, `level_lufs`, `target_lufs`, `frozen`, `speech`) |
 | `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
 | `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
 | `GET /api/v1/preview` | the preview: `mode` (`own`, `shared`), the built-in MediaMTX (`child`: running, pid, restarts, last exit), `whep_url` or `whep_port`, every stream (path, state, frames, connects, error, readers, last listen) |
@@ -562,8 +592,9 @@ without touching the audio.
 `/api/v1/events` sends JSON messages: `{"type": "status", "status": …}` five times a
 second (as `GET /api/v1/status`); `{"type": "mix", "revision", "mix", "latency_ms"}`
 on connect and within 40 ms of every change of the mix, from any client; `{"type": "meters",
-"meters", "loudness", "vad", "auto_db"}` every 40 ms (`vad`: per analysed signal
-`active` and `probability`; `auto_db`: every auto gain, `null` for −∞); and `{"type": "analysis", …}` for clients that
+"meters", "loudness", "vad", "auto_db", "autolevels", "ducks"}` every 40 ms (`vad`: per analysed signal
+`active` and `probability`; `auto_db`: every auto gain, its deepest channel, `null` for −∞;
+`autolevels`: every auto-level's `state`; `ducks`: every ratio duck's `control`); and `{"type": "analysis", …}` for clients that
 asked. A client may send `{"type": "subscribe", "meters": [ids] | null, "meter_hz":
 25, "analysis": false}` to receive only some signals' meters, less often, or the
 analyser. Changes go through the REST API; every change answers with
@@ -642,7 +673,9 @@ Apache-2.0; its components' notices, among them Eigen under MPL-2.0, are in
 [`assets/onnxruntime.ThirdPartyNotices.txt`](assets/onnxruntime.ThirdPartyNotices.txt)
 and in the image under `/usr/share/doc/onnxruntime`), the Silero VAD model (MIT,
 Silero Team, in the binary; [`assets/silero_vad.LICENSE`](assets/silero_vad.LICENSE)),
-and crates under MIT, Apache-2.0, BSD, ISC, Zlib or Unicode-3.0 terms (aws-lc,
+Com-IS-Assist's control core (MIT, Andreas Weiss, copied into `src/auto/comis/`
+with its notice; [`src/auto/comis/LICENSE`](src/auto/comis/LICENSE), in the
+image under `/usr/share/doc/com-is-assist`), and crates under MIT, Apache-2.0, BSD, ISC, Zlib or Unicode-3.0 terms (aws-lc,
 through `mxl-nmos`'s HTTP client, is Apache-2.0 and ISC). The image also has
 MediaMTX (MIT, a separate executable, `/usr/share/doc/mediamtx`). The UI: Vue
 (MIT) and Vue Flow (MIT, the routing graph), built with Vite (MIT); its base styles and components come from the

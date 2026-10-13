@@ -60,11 +60,13 @@ COPY --from=build /usr/local/bin/mxl-audio-mixer /usr/local/bin/mxl-mixer-tone \
 COPY --from=mediamtx /opt/mediamtx/mediamtx /usr/local/bin/mediamtx
 COPY --from=mediamtx /opt/mediamtx/LICENSE /usr/share/doc/mediamtx/LICENSE
 # libopus (BSD-3-Clause) and ONNX Runtime (MIT, with its third-party notices)
-# are linked statically into the mixer; the Silero VAD model (MIT) is in it.
+# are linked statically into the mixer; the Silero VAD model (MIT) and
+# Com-IS-Assist's control core (MIT) are in it.
 COPY --from=build /usr/local/share/doc/libopus/COPYING /usr/share/doc/libopus/COPYING
 COPY assets/onnxruntime.LICENSE /usr/share/doc/onnxruntime/LICENSE
 COPY assets/onnxruntime.ThirdPartyNotices.txt /usr/share/doc/onnxruntime/ThirdPartyNotices.txt
 COPY assets/silero_vad.LICENSE /usr/share/doc/silero-vad/LICENSE
+COPY src/auto/comis/LICENSE /usr/share/doc/com-is-assist/LICENSE
 RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found") \
     && ldd /usr/local/bin/mxl-audio-mixer | (! grep -q "not found")
 USER 1000

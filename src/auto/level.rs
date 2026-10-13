@@ -156,6 +156,25 @@ mod tests {
         );
     }
 
+    /// `cargo test --release --lib level_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn level_cost() {
+        let x = sine(480, 1000.0, 0.1);
+        let mut l = Level::new(weights(&["L", "R"]));
+        let n = 20_000;
+        let start = std::time::Instant::now();
+        let mut sum = 0.0;
+        for _ in 0..n {
+            sum += l.frame(&[&x, &x]).short_term;
+        }
+        let per = start.elapsed().as_nanos() as f64 / f64::from(n);
+        println!(
+            "a stereo signal's loudness: {per:.0} ns per 10 ms frame, {:.2} % of a core ({sum:.0})",
+            per / 1e5
+        );
+    }
+
     #[test]
     fn windows_and_the_fast_detector() {
         let tone = sine(480 * 400, 1000.0, 0.1);
