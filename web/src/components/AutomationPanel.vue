@@ -1,13 +1,28 @@
 <script setup>
-// The control engine (§8): gain-sharing auto-mixes over strips (weight, bypass, last-mic-hold, VAD
-// weighting), ducks (keys, targets, depth, attack, hold, release) and the voice activity detection of
-// every analysed signal, each with its live state.
+// The control engine (§8): auto-levels (target, speech offset, range, ballistics, freeze), gain-sharing
+// auto-mixes over strips (weight, bypass, last-mic-hold, VAD weighting), ducks (keys, targets; fixed:
+// depth, attack, hold, release; ratio: Com-IS-Assist's control; the channel groups' shares) and the
+// voice activity detection of every analysed signal, each with its live state.
 import { computed, ref } from "vue";
 import AutoLive from "./AutoLive.vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import NumberField from "./NumberField.vue";
 import { api, dbValue } from "../api.js";
-import { act, automixOf, automixes, buses, ducks, live, patchAutomix as patchAm, patchDuck as patchDk, signalOf, strips, vadSignals } from "../store.js";
+import {
+  act,
+  autolevels,
+  automixOf,
+  automixes,
+  buses,
+  ducks,
+  live,
+  patchAutomix as patchAm,
+  patchDuck as patchDk,
+  putAutolevel,
+  signalOf,
+  strips,
+  vadSignals,
+} from "../store.js";
 
 const emit = defineEmits(["close"]);
 const nameOf = (id) => signalOf(id)?.name || id;
@@ -48,6 +63,20 @@ const depthValue = (d) => {
   return Number.isFinite(v) ? v : -120;
 };
 const setDepth = (d, v) => patchDuck(d, { depth_db: Number(v) <= -120 ? "-inf" : Number(v) });
+const GROUPS = [
+  ["front", "L/R"],
+  ["center", "C/M"],
+  ["lfe", "LFE"],
+  ["surround", "Surround"],
+];
+
+// Auto-levels.
+const levelable = computed(() => [...strips.value, ...buses.value].filter((x) => !autolevels.value.some((l) => l.signal === x.id)));
+const addLevelSignal = ref("");
+async function addLevel() {
+  if (!addLevelSignal.value) return;
+  if (await act(() => api.put(`/api/v1/autolevels/${addLevelSignal.value}`, {}), "Auto-level on.")) addLevelSignal.value = "";
+}
 
 // Voice detection.
 const own = computed(() => Object.fromEntries((live.mix?.vad || []).map((v) => [v.signal, v])));
@@ -64,7 +93,7 @@ async function addVad() {
 
 <template>
   <div class="panel groups automation">
-    <h3>Auto-mix, ducking and voice detection <span class="spacer"></span><button class="btn small secondary" @click="emit('close')">Close</button></h3>
+    <h3>Auto-level, auto-mix, ducking and voice detection <span class="spacer"></span><button class="btn small secondary" @click="emit('close')">Close</button></h3>
     <div class="grid two">
       <div>
         <div class="caption">Auto-mixes (gain sharing)</div>
@@ -100,6 +129,52 @@ async function addVad() {
           <input v-model="amForm.id" placeholder="id (automatic)" aria-label="New auto-mix id" />
           <input v-model="amForm.name" placeholder="name" aria-label="New auto-mix name" />
           <button class="btn small" @click="addAutomix">+ Auto-mix</button>
+        </div>
+
+        <div class="caption" style="margin-top: 0.8rem">Auto-level (speech-aware loudness)</div>
+        <table v-if="autolevels.length" class="amtable leveltable">
+          <thead>
+            <tr>
+              <th>Signal</th>
+              <th title="the gain and the short-term loudness of the signal (before the gain)">Gain · level</th>
+              <th title="short-term loudness the gain rides to">Target LUFS</th>
+              <th title="added to the target while the signal speaks (its voice detection)">Speech LU</th>
+              <th title="the gain's range">Min / max dB</th>
+              <th title="time constants of the gain going down and up">Attack / release ms</th>
+              <th title="below this momentary loudness there is no signal: the gain stays">Freeze LUFS</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="l in autolevels" :key="l.signal" :data-level-row="l.signal">
+              <td>
+                <label class="check"><input type="checkbox" :checked="l.enabled" :aria-label="`${nameOf(l.signal)} auto-level on`" @change="putAutolevel(l.signal, { enabled: $event.target.checked })" /> {{ nameOf(l.signal) }}</label>
+              </td>
+              <td><AutoLive kind="level" :id="l.signal" /></td>
+              <td><NumberField :min="-40" :max="0" :step="1" :value="l.target_lufs" :aria-label="`${nameOf(l.signal)} target`" @change="(v) => putAutolevel(l.signal, { target_lufs: v })" /></td>
+              <td><NumberField :min="-10" :max="10" :step="0.5" :value="l.speech_offset_lu" :aria-label="`${nameOf(l.signal)} speech offset`" @change="(v) => putAutolevel(l.signal, { speech_offset_lu: v })" /></td>
+              <td>
+                <NumberField :min="-24" :max="0" :step="1" :value="l.min_gain_db" :aria-label="`${nameOf(l.signal)} min gain`" @change="(v) => putAutolevel(l.signal, { min_gain_db: v })" />
+                <NumberField :min="0" :max="24" :step="1" :value="l.max_gain_db" :aria-label="`${nameOf(l.signal)} max gain`" @change="(v) => putAutolevel(l.signal, { max_gain_db: v })" />
+              </td>
+              <td>
+                <NumberField :min="0" :max="60000" :step="100" :value="l.attack_ms" :aria-label="`${nameOf(l.signal)} attack`" @change="(v) => putAutolevel(l.signal, { attack_ms: v })" />
+                <NumberField :min="0" :max="60000" :step="100" :value="l.release_ms" :aria-label="`${nameOf(l.signal)} release`" @change="(v) => putAutolevel(l.signal, { release_ms: v })" />
+              </td>
+              <td><NumberField :min="-70" :max="0" :step="1" :value="l.freeze_lufs" :aria-label="`${nameOf(l.signal)} freeze`" @change="(v) => putAutolevel(l.signal, { freeze_lufs: v })" /></td>
+              <td>
+                <label class="check" title="a snapshot's recall leaves it"><input type="checkbox" :checked="l.recall_safe" :aria-label="`${nameOf(l.signal)} auto-level recall-safe`" @change="putAutolevel(l.signal, { recall_safe: $event.target.checked })" /> safe</label>
+                <ConfirmButton label="Remove" small @confirm="act(() => api.del(`/api/v1/autolevels/${l.signal}`))" />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="row">
+          <select v-model="addLevelSignal" aria-label="Signal to auto-level">
+            <option value="">signal…</option>
+            <option v-for="x in levelable" :key="x.id" :value="x.id">{{ x.name }}</option>
+          </select>
+          <button class="btn small" :disabled="!addLevelSignal" @click="addLevel">+ Auto-level</button>
         </div>
 
         <div class="caption" style="margin-top: 0.8rem">Voice detection</div>
@@ -140,14 +215,34 @@ async function addVad() {
             <input :value="d.name" aria-label="Duck name" @change="patchDuck(d, { name: $event.target.value })" />
             <label class="check"><input type="checkbox" :checked="d.enabled" @change="patchDuck(d, { enabled: $event.target.checked })" /> on</label>
             <label class="check" title="a snapshot's recall leaves it"><input type="checkbox" :checked="d.recall_safe" @change="patchDuck(d, { recall_safe: $event.target.checked })" /> recall-safe</label>
-            <AutoLive kind="duck" :duck="d" />
+            <select :value="d.mode" :aria-label="`${d.name} mode`" title="fixed: down by the depth while a key speaks; ratio: as far down as keeps the keys a ratio above the targets" @change="patchDuck(d, { mode: $event.target.value })">
+              <option value="fixed">Fixed depth</option>
+              <option value="ratio">Ratio</option>
+            </select>
+            <AutoLive v-if="d.mode === 'ratio'" kind="ratio" :duck="d" />
+            <AutoLive v-else kind="duck" :duck="d" />
             <ConfirmButton label="Remove" small @confirm="act(() => api.del(`/api/v1/ducks/${d.id}`))" />
           </div>
-          <div class="row duckparams">
+          <div v-if="d.mode === 'ratio'" class="row duckparams">
+            <label title="how far the keys sit above the targets while a key speaks">Ratio <NumberField :min="0" :max="12" :step="1" :value="d.ratio.target_lu" :aria-label="`${d.name} ratio`" @change="(v) => patchDuck(d, { ratio: { target_lu: v } })" /> LU</label>
+            <label title="the ratio while the targets speak too">Over-voice <NumberField :min="0" :max="24" :step="1" :value="d.ratio.overvoice_lu" :aria-label="`${d.name} over-voice`" @change="(v) => patchDuck(d, { ratio: { overvoice_lu: v } })" /> LU</label>
+            <label>Max <NumberField :min="0" :max="48" :step="1" :value="d.ratio.max_reduction_db" :aria-label="`${d.name} max reduction`" @change="(v) => patchDuck(d, { ratio: { max_reduction_db: v } })" /> dB</label>
+            <label title="scales every stage's attack and release">Speed <NumberField :min="0.25" :max="8" :step="0.25" :value="d.ratio.speed" :aria-label="`${d.name} speed`" @change="(v) => patchDuck(d, { ratio: { speed: v } })" /> ×</label>
+            <label class="check" title="the targets' speech counts: alone it brings them back fast (interview), with a key's the over-voice ratio applies"
+              ><input type="checkbox" :checked="d.ratio.bed_voice" :aria-label="`${d.name} bed voice`" @change="patchDuck(d, { ratio: { bed_voice: $event.target.checked } })" /> bed voice</label
+            >
+          </div>
+          <div v-else class="row duckparams">
             <label>Depth <NumberField :min="-120" :max="0" :step="1" :value="depthValue(d)" :aria-label="`${d.name} depth`" @change="(v) => setDepth(d, v)" /> dB</label>
             <label>Attack <NumberField :min="0" :max="10000" :step="10" :value="d.attack_ms" :aria-label="`${d.name} attack`" @change="(v) => patchDuck(d, { attack_ms: v })" /> ms</label>
             <label>Hold <NumberField :min="0" :max="10000" :step="50" :value="d.hold_ms" :aria-label="`${d.name} hold`" @change="(v) => patchDuck(d, { hold_ms: v })" /> ms</label>
             <label>Release <NumberField :min="0" :max="10000" :step="50" :value="d.release_ms" :aria-label="`${d.name} release`" @change="(v) => patchDuck(d, { release_ms: v })" /> ms</label>
+          </div>
+          <div class="row duckparams" title="the share of the duck's dB each channel group of a target takes (1: all of it, 0: none)">
+            <span class="muted small">Channel share</span>
+            <label v-for="[k, label] in GROUPS" :key="k"
+              >{{ label }} <NumberField :min="0" :max="1" :step="0.1" :value="d.channel_depth[k]" :aria-label="`${d.name} ${label} share`" @change="(v) => patchDuck(d, { channel_depth: { [k]: v } })"
+            /></label>
           </div>
           <div class="muted small">Keys (their speech ducks)</div>
           <div class="members">

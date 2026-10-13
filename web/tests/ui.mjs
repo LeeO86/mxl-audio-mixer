@@ -368,11 +368,39 @@ try {
   });
   await page.locator('[data-signal="main"] .autogain[data-auto="0.0"]').waitFor({ timeout: 5000 });
   await page.locator('[data-duck-edit] [data-duck-active="false"]').waitFor({ timeout: 3000 });
+  pass("duck from the panel: Main under Vox's speech (none on a tone: Main at 0 dB)");
+  // The duck as a ratio duck (Com-IS-Assist's control), a ratio of 8 LU, the LFE's share 0.
+  await page.getByLabel("Bed mode").selectOption("ratio");
+  await page.getByLabel("Bed ratio", { exact: true }).fill("8");
+  await page.getByLabel("Bed ratio", { exact: true }).press("Enter");
+  await page.getByLabel("Bed LFE share").fill("0");
+  await page.getByLabel("Bed LFE share").press("Enter");
+  const ratio = await until("Bed: ratio 8 LU, LFE 0", async () => {
+    const d = (await api("/api/v1/ducks"))[0];
+    return d.mode === "ratio" && d.ratio.target_lu === 8 && d.ratio.overvoice_lu === 13 && d.channel_depth.lfe === 0 && d.channel_depth.front === 1 ? d : null;
+  });
+  await page.locator('[data-duck-edit] [data-duck-state="release"]').waitFor({ timeout: 3000 });
   await page.screenshot({ path: `${out}/automation.png`, fullPage: true });
   const am = (await api("/api/v1/automixes"))[0];
   await api(`/api/v1/automixes/${am.id}`, { method: "DELETE" });
-  await api(`/api/v1/ducks/${(await api("/api/v1/ducks"))[0].id}`, { method: "DELETE" });
-  pass("duck from the panel: Main under Vox's speech (none on a tone: Main at 0 dB)");
+  await api(`/api/v1/ducks/${ratio.id}`, { method: "DELETE" });
+  pass("the duck as a ratio duck from the panel: ratio 8 LU (over-voice kept at 13), the LFE's share 0; released on a tone");
+  // Auto-level Guitar to −30 LUFS; the strip shows the gain the controller reports.
+  await page.getByLabel("Signal to auto-level").selectOption("gtr");
+  await page.getByRole("button", { name: "+ Auto-level" }).click();
+  await page.getByLabel("Guitar target").selectText();
+  await page.getByLabel("Guitar target").pressSequentially("-30", { delay: 150 });
+  await page.getByLabel("Guitar target").press("Enter");
+  const level = await until("Guitar auto-levelled to −30", async () => {
+    const l = await api("/api/v1/autolevels/gtr").catch(() => null);
+    if (l?.target_lufs !== -30 || l.state?.level_lufs === null || l.state?.level_lufs === undefined) return null;
+    const want = Math.max(l.min_gain_db, Math.min(l.max_gain_db, -30 - l.state.level_lufs));
+    return Math.abs(l.state.gain_db - want) < 0.3 && (await shown("gtr")) === l.state.gain_db.toFixed(1) ? l.state : null;
+  }, 20000);
+  await page.locator('[data-level="gtr"]').waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/autolevel.png`, fullPage: true });
+  await api("/api/v1/autolevels/gtr", { method: "DELETE" });
+  pass(`auto-level from the panel: Guitar at ${level.level_lufs} LUFS to −30, gain ${level.gain_db} dB, shown on its strip`);
 
   for (const tab of ["nmos", "status", "settings"]) {
     await page.goto(`${base}/#${tab}`);

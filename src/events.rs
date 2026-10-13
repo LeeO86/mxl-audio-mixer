@@ -5,9 +5,11 @@
 //! - `{"type": "mix", "revision": n, "mix": …, "latency_ms": {signal: ms}}` on connect
 //!   and within 40 ms of every change of the mix, from any client;
 //! - `{"type": "meters", "meters": …, "loudness": …, "vad": {signal: {"active",
-//!   "probability"}}, "auto_db": {signal: dB}}` at the meter rate (25 Hz, as
-//!   `GET /api/v1/meters` and `GET /api/v1/loudness`; `vad` and `auto_db` are the
-//!   analysed signals and the auto nodes' gains, §8).
+//!   "probability"}}, "auto_db": {signal: dB}, "autolevels": {signal: state},
+//!   "ducks": {id: control}}` at the meter rate (25 Hz, as `GET /api/v1/meters`
+//!   and `GET /api/v1/loudness`; `vad`, `auto_db`, `autolevels` and `ducks` are
+//!   the analysed signals, the auto nodes' gains (the deepest channel's), the
+//!   auto-levels' and the ratio ducks' states, §8).
 //!
 //! - `{"type": "analysis", …}` with the meters, for clients that subscribed to it
 //!   (as `values` of `GET /api/v1/analysis`).
@@ -76,13 +78,33 @@ fn meters_json(app: &App, only: Option<&[String]>) -> Value {
         })
         .collect();
     let mut auto_db = control.auto.gains_db();
+    let mut autolevels: serde_json::Map<String, Value> = control
+        .mix
+        .autolevels
+        .iter()
+        .filter_map(|l| {
+            let s = control.auto.autolevel_status(&l.signal)?;
+            Some((l.signal.clone(), json!(s)))
+        })
+        .collect();
     if let Some(only) = only {
         meters.retain(|s, _| only.contains(s));
         loudness.retain(|s, _| only.contains(s));
         vad.retain(|s, _| only.contains(s));
         auto_db.retain(|s, _| only.contains(s));
+        autolevels.retain(|s, _| only.contains(s));
     }
-    json!({"type": "meters", "meters": meters, "loudness": loudness, "vad": vad, "auto_db": auto_db})
+    let ducks: serde_json::Map<String, Value> = control
+        .mix
+        .ducks
+        .iter()
+        .filter_map(|d| {
+            let r = control.auto.duck_status(&d.id).ratio?;
+            let wanted = only.is_none_or(|o| d.targets.iter().chain(&d.keys).any(|s| o.contains(s)));
+            wanted.then(|| (d.id.clone(), json!(r)))
+        })
+        .collect();
+    json!({"type": "meters", "meters": meters, "loudness": loudness, "vad": vad, "auto_db": auto_db, "autolevels": autolevels, "ducks": ducks})
 }
 
 async fn send(socket: &mut WebSocket, value: &Value) -> bool {
