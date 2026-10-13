@@ -1,7 +1,9 @@
 # G12 example: the pod network, the standard environment names, probes, the MXL
 # root hostPath and a writable /config. Pin the image by a tag that exists (and by
 # digest on the platform). Guaranteed QoS with whole CPUs is the supported way to
-# run the DSP thread (§18); SYS_NICE only when MIXER_RT_PRIORITY is set.
+# run the DSP thread (§18), on nodes whose kubelet has the static CPU manager with
+# full-pcpus-only (or SMT off): the DSP thread needs its CPU's whole core.
+# SYS_NICE only when MIXER_RT_PRIORITY is set.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

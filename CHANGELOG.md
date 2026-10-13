@@ -30,10 +30,20 @@ Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
 - Silero VAD (ONNX Runtime, the model vendored, MIT) is the default detector;
   the feature detector stays, per signal (`detector`) and as the fallback.
 
-## 1.0.0 (not released yet)
+## 1.0.0 (2026-10-13)
 
 The first release: milestones 0–6 (§19). Release notes:
 `docs/release-notes/1.0.0.md`.
+
+### After the hardware re-run
+
+- The mixer keeps its other threads off the DSP thread's core (its CPU and that
+  CPU's SMT siblings) and says in `dsp.scheduling` whether the core is shared
+  (a warning when a sibling is outside its CPUs); the platform must give the
+  DSP thread a whole physical core (`full-pcpus-only`, or SMT off).
+- The meter thread no longer allocates per block.
+- `ci/amwa.sh`: the node's ports from `AMWA_NODE_PORT` and `AMWA_WEB_PORT`;
+  the load test prints the DSP thread's core.
 
 ### After the first hardware round
 
