@@ -1157,3 +1157,54 @@ patch, monitor and output edges. The check now passes edges with an id.
 | --- | --- | --- |
 | 1 | Noise: independent channels and the level as RMS. | As implemented. |
 | 2 | The UI page is 439 kB (141 kB compressed) with Vue Flow. | Fine for an embedded UI. |
+
+### Release 1.0.0: the maintainers' hardware tests (2026-10-13)
+
+On `f31a5dd` (2× Xeon Gold 6136, kernel 6.8 with voluntary preemption, no
+isolated CPUs, other real-time load on the host; the runner on 9 CPUs, the DSP
+thread at SCHED_FIFO 49): env, the 10-min block clock, the platform registry,
+AMWA and the API checks pass; **the §16 load fails** (`dsp_load_ratio` 0.854,
+mean block 1708 µs, 237 432 deadline misses in 60 min; 0.851 again on a quieter
+host). Their profile of the DSP thread: true peak 27 %, `pow` 17 % and `log10`
+11 % (compressors, de-essers), biquads 12 %, PPM 6 %. The 30- and 60-min block
+clock runs missed 3 and 6 deadlines (up to 2.9 ms): the host, not the mixer. The
+tag waits for the load re-run.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D111 | The signal meters (peak, true peak, PPM, energy, correlation) move to a meter thread. The DSP thread's `Meter` step writes each block as a record (plan generation, slot, channels, length, samples) into one engine-lifetime ring of 2^22 values (half a second of 160 channels); a record that does not fit is dropped and counted (`meter_drops_total`). The meter thread (FTZ/DAZ, off the DSP thread's CPU when there are others) takes the ring every 2 ms and writes the plan's `MeterBank` atomics, which the control side reads as before; the control side gives it a plan's bank before the plan is sent. Loudness stays on the DSP thread. | About a third of the DSP thread's time with every signal metered; §7 asks for the meters at 25 Hz, not on the real-time thread (the analyser was already on the control side). Loudness must not lose a block. |
+| D112 | dB conversions without libm: `log2` from the exponent bits and the series 2·atanh to z⁹ on the mantissa in [1/√2, √2), `exp2` by the nearest integer into the exponent and the Taylor series to t⁸ (errors below 1e-8 dB and 1e-9 relative, tested against libm), with float tricks instead of integer conversions so that they vectorise. The compressor and the de-esser run in passes over the block (level, dB, curve, ballistics, gain), only the ballistics sample by sample; detection still reads every sample before its gain, so the result is that of per sample. The compressor's soft knee is computed with clamp and max. | `pow` and `log10` per sample were 28 % on their host; a block's conversions vectorise when they do not wait on the envelope. |
+| D113 | True peak: the four phases at once per sample (one 4-wide multiply-add per tap), the same sums in the same order (bit-identical to the first version, tested); a block whose largest |sample| (with the 11 before it) × the interpolator's largest Σ|h| cannot exceed the peak held since the last meter tick is not oversampled. | 3.6× faster per channel; the skip is exact (and helps on quiet passages, not on a steady tone). |
+| D114 | Biquad chains (EQ, filters, the de-esser's split) run every sample through all their sections in turn instead of section after section over the block: the same arithmetic, the sections' recursions overlap in the CPU. Peaks and sums of squares over a block are reduced in eight lanes. | The EQ 1.9× faster; a fold with `f32::max` or an f64 sum is one dependency chain the compiler may not reorder. |
+| D115 | The build stays generic x86-64; `target-cpu=x86-64-v3` (the platform's minimum) gained 10–20 % in the compressor and true peak alone but under 2 % on the §16 load. | Not worth a binary that refuses older CPUs, now. |
+
+**Measured** (development VM, release build, SCHED_OTHER, the demo stopped;
+`cargo test --release --lib dsp_costs -- --ignored --nocapture` for the nodes):
+
+| Per 96-sample block | Before | After |
+| --- | --- | --- |
+| compressor (peak / RMS) | 2801 / 2916 ns | 1130 / 1120 ns |
+| de-esser (split-band) | 2707 ns | 1780 ns |
+| EQ, 4 bands | 1043 ns | 550 ns |
+| true peak, one channel | 1440 ns | 400 ns (on the meter thread) |
+| PPM, both types | 393 ns | 380 ns (on the meter thread) |
+| §16 load: mean block, `dsp_load_ratio` | 755 µs, 0.378 | 298 µs, 0.149 (twice), every block ≤ 1.5 ms, 0 missing samples, 0 meter drops |
+
+Scaled by their host's ratio to this VM (0.854 / 0.378), the §16 load would be
+about 0.34 there.
+
+**Their test-script points**, fixed: `results.md`'s `amwa` row is text ("IS-04-01:
+Pass 39, …; …"), and a `|` in any row is escaped; the host name is `NODE_NAME`
+when set (the Kubernetes downward API), and in a container the report says it
+is one; `ci/amwa.sh` removes its `/dev/shm/mixer-amwa.*` folders and takes the
+registry's ten ports from `AMWA_REGISTRY_PORT` (default 8010), failing with a
+clear message when one is taken. (Its first failure without internet access:
+nmos-testing clones the AMWA specifications; the runner's README says so.)
+
+### Release 1.0.0: questions after the hardware tests
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Re-run `LOAD_MINUTES=60 tests/hw/release/run.sh load` and the 10-min block clock on this branch (`nightly-dev` after the merge; note its `git-<sha7>`), on a production-like node if there is one. | Yes: the tag goes on that commit after a pass. |
+| 2 | The block clock on a node with a fully preemptible kernel and isolated CPUs, for a verdict on the misses. | When such a node is available; not a blocker for 1.0.0 (every sample was correct). |
+| 3 | Merge this PR into `main` (and then into milestone 7a's branch). | Yes. |
