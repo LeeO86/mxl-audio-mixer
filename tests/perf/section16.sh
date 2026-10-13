@@ -96,6 +96,7 @@ value() { sed -n "s/^mxl_audio_mixer_$1 \(.*\)/\1/p"; }
 before=$(metrics)
 sleep "$SECONDS_RUN"
 after=$(metrics)
+echo "dsp thread: $(curl -fsS "$WEB/api/v1/status" | python3 -c "import json, sys; print(json.load(sys.stdin)['dsp']['scheduling'])")"
 python3 - "$before" "$after" "$SECONDS_RUN" <<'EOF'
 import re, sys
 def parse(t):

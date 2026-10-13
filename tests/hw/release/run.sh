@@ -92,11 +92,12 @@ item_block_clock() {
 }
 
 item_load() {
-    local minutes="${LOAD_MINUTES:-60}" before after line
+    local minutes="${LOAD_MINUTES:-60}" before after line dsp
     before=$(cgroup_stat)
     SECONDS=$((minutes * 60)) BIN="$BIN" "$ROOT/tests/perf/section16.sh" >"$OUT/load.log" 2>&1
     after=$(cgroup_stat)
     line=$(grep -m1 '^blocks ' "$OUT/load.log")
+    dsp=$(sed -n 's/^dsp thread: //p' "$OUT/load.log" | head -1)
     if [[ -z "$line" ]]; then
         row load FAIL "no result; see load.log"
         return
@@ -110,9 +111,9 @@ ratio = float(re.search(r"load ratio ([0-9.]+)", l)[1])
 misses = int(re.search(r"deadline misses (\d+)", l)[1])
 sys.exit(0 if ratio < 0.5 and misses == 0 else 1)
 EOF
-        row load PASS "$minutes min: $line; nr_throttled +$throttled"
+        row load PASS "$minutes min: $line; nr_throttled +$throttled; DSP thread: $dsp"
     else
-        row load FAIL "$minutes min: $line; nr_throttled +$throttled"
+        row load FAIL "$minutes min: $line; nr_throttled +$throttled; DSP thread: $dsp"
     fi
 }
 

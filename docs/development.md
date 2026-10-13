@@ -129,6 +129,7 @@ ports 8964, 8609 and 8209 (UDP), so they do not collide with a mixer on the
 defaults; `preview.sh` runs a shared MediaMTX on 8974 (RTSP), 8619 (WHEP), 8219
 (ICE) and 8977 (API).
 
-Every mixer pins its DSP thread to the last CPU it may use: a second mixer on the
-same machine (a demo) shares that core and its inputs come late, which fails the
+Every mixer pins its DSP thread to the last CPU it may use (and keeps its other
+threads off that CPU's core): a second mixer on the same machine (a demo) shares
+that core and its inputs come late, which fails the
 sample-exact probes. Stop it, or start the tests with `taskset` on other CPUs.
