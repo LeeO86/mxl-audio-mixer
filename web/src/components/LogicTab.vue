@@ -133,8 +133,11 @@ function press(block, pressed) {
   return act(() => api.put(`/api/v1/logic/${g.id}/buttons/${block.id}`, { pressed }));
 }
 
-function shown(v) {
-  return v === undefined || v === null ? "" : Math.abs(v) >= 0.5 && Math.abs(v) <= 1 ? (v >= 0.5 ? "on" : "off") : Number(v).toFixed(1);
+const NUMERIC = new Set(["const", "fader", "level", "set-fader"]);
+function shown(b) {
+  const v = values.value[b.id];
+  if (v === undefined || v === null) return "";
+  return NUMERIC.has(b.type) ? Number(v).toFixed(1) : v >= 0.5 ? "on" : "off";
 }
 
 onMounted(() => {
@@ -182,7 +185,7 @@ onUnmounted(() => clearInterval(timer));
                 {{ buttons.includes(b.id) ? "Pressed" : "Press" }}
               </button>
             </td>
-            <td class="num" :data-value="b.id">{{ shown(values[b.id]) }}</td>
+            <td class="num" :data-value="b.id">{{ shown(b) }}</td>
             <td><button class="btn small secondary" :aria-label="`Remove ${b.id}`" @click="removeBlock(b.id)">×</button></td>
           </tr>
         </tbody>
