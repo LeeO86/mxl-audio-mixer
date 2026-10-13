@@ -1,5 +1,5 @@
 //! Voice activity detection (§8.1), on the control side from a signal's tapped
-//! audio (the mean of its channels before the fader, 48 kHz).
+//! audio (the mean of its channels before its auto gain, 48 kHz).
 //!
 //! A [`Detector`] turns each 10 ms frame into a speech probability; [`Vad`] adds
 //! the smoothing, the threshold with hysteresis, the hold, and the outputs
@@ -32,7 +32,7 @@
 //! values.
 //!
 //! **The gate** (as Com-IS-Assist's guard band): while the signal's momentary
-//! loudness (K-weighted, 400 ms) is below `gate_lufs`, a frame counts as no
+//! loudness (BS.1770 over its channels, 400 ms) is below `gate_lufs`, a frame counts as no
 //! speech. A detector hears crosstalk of other talkers into a microphone as
 //! speech, rightly; it is quieter than the microphone's own talker.
 //!
@@ -46,7 +46,6 @@
 use std::collections::VecDeque;
 
 use crate::dsp::biquad::{self, Coefficients, State};
-use crate::dsp::loudness::{K_HIGH_PASS, K_SHELF};
 
 /// 10 ms at 48 kHz.
 pub const FRAME: usize = 480;
@@ -61,8 +60,6 @@ const FLOOR_WINDOW: usize = 25;
 const FLOOR_WINDOWS: usize = 8;
 /// Frames of the modulation measure (400 ms).
 const MODULATION_FRAMES: usize = 40;
-/// The gate's momentary loudness: 400 ms.
-const MOMENTARY_FRAMES: usize = 40;
 /// Below this the band power counts as this (dB).
 const SILENCE_DB: f64 = -120.0;
 
@@ -270,10 +267,12 @@ pub struct VadState {
     pub speech_level_dbfs: Option<f64>,
     /// The last frame's RMS level, dBFS.
     pub level_dbfs: f64,
-    /// The momentary loudness (400 ms, K-weighted), LUFS, and whether it is
-    /// below the gate (nothing is speech then).
+    /// The momentary loudness (BS.1770 over the signal's channels, 400 ms),
+    /// LUFS, and whether it is below the gate (nothing is speech then).
     pub momentary_lufs: f64,
     pub gated: bool,
+    /// The short-term loudness (3 s), LUFS.
+    pub short_term_lufs: f64,
     /// Onsets and offsets so far.
     pub speech_onsets: u64,
     pub speech_offsets: u64,
@@ -313,10 +312,8 @@ pub struct Vad {
     hold: u32,
     speech_power: Option<f64>,
     buffer: Vec<f32>,
-    /// K-weighting (BS.1770) and the K-weighted mean square of the last 40
-    /// frames: the momentary loudness of the gate.
-    k: [State; 2],
-    loudness: VecDeque<f64>,
+    /// The loudness of a mono signal given to [`Vad::push`].
+    level: super::level::Level,
 }
 
 impl Default for Vad {
@@ -365,8 +362,7 @@ impl Vad {
             hold: 0,
             speech_power: None,
             buffer: Vec::with_capacity(FRAME),
-            k: Default::default(),
-            loudness: VecDeque::with_capacity(MOMENTARY_FRAMES),
+            level: super::level::Level::new(vec![1.0]),
         }
     }
 
@@ -375,8 +371,7 @@ impl Vad {
         self.hold = 0;
         self.buffer.clear();
         self.speech_power = None;
-        self.k = Default::default();
-        self.loudness.clear();
+        self.level = super::level::Level::new(vec![1.0]);
         self.state = VadState {
             level_dbfs: SILENCE_DB,
             detector: self.state.detector,
@@ -386,25 +381,10 @@ impl Vad {
         };
     }
 
-    /// Analyse one complete frame with `settings`.
-    pub fn frame(&mut self, x: &[f32], settings: &crate::mix::auto::VadSettings) {
+    /// Analyse one complete frame (the mean of the signal's channels) with
+    /// `settings`; `momentary` is the signal's momentary loudness, LUFS.
+    pub fn frame(&mut self, x: &[f32], momentary: f64, settings: &crate::mix::auto::VadSettings) {
         let f = self.detector.frame(x);
-        let mut energy = 0.0;
-        for &v in x {
-            let y = self.k[0].tick(&K_SHELF, f64::from(v));
-            let y = self.k[1].tick(&K_HIGH_PASS, y);
-            energy += y * y;
-        }
-        if self.loudness.len() == MOMENTARY_FRAMES {
-            self.loudness.pop_front();
-        }
-        self.loudness.push_back(energy / x.len().max(1) as f64);
-        let mean = self.loudness.iter().sum::<f64>() / MOMENTARY_FRAMES as f64;
-        let momentary = if mean > 0.0 {
-            (-0.691 + 10.0 * mean.log10()).max(SILENCE_DB)
-        } else {
-            SILENCE_DB
-        };
         let gated = momentary < settings.gate_lufs;
         let probability = if gated { 0.0 } else { f.probability };
         let s = &mut self.state;
@@ -443,8 +423,8 @@ impl Vad {
         }
     }
 
-    /// Take `samples` (any length); analyse every frame they complete and call
-    /// `each` after it.
+    /// Take `samples` of a mono signal (any length); analyse every frame they
+    /// complete and call `each` after it.
     pub fn push(
         &mut self,
         samples: &[f32],
@@ -458,7 +438,9 @@ impl Vad {
             rest = &rest[take..];
             if self.buffer.len() == FRAME {
                 let frame = std::mem::take(&mut self.buffer);
-                self.frame(&frame, settings);
+                let r = self.level.frame(&[&frame]);
+                self.frame(&frame, r.momentary, settings);
+                self.state.short_term_lufs = (r.short_term * 10.0).round() / 10.0;
                 self.buffer = frame;
                 self.buffer.clear();
                 each(&self.state);

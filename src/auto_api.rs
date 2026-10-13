@@ -11,8 +11,20 @@
 //!   bare id keeps that member's weight and bypass, an object sets them);
 //!   GET adds `gains_db`;
 //! - `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/{id}`
-//!   (`name`, `enabled`, `keys`, `targets`, `depth_db`, `attack_ms`, `hold_ms`,
-//!   `release_ms`, `recall_safe`); GET adds `active` and `gain_db`.
+//!   (`name`, `enabled`, `keys`, `targets`, `mode`: `fixed` or `ratio`;
+//!   fixed: `depth_db`, `attack_ms`, `hold_ms`, `release_ms`; ratio: `ratio`
+//!   {`target_lu`, `overvoice_lu`, `max_reduction_db`, `speed`, `bed_voice`};
+//!   `channel_depth` {`front`, `center`, `lfe`, `surround`}; `recall_safe`;
+//!   the fields of `ratio` and `channel_depth` given are set, the others
+//!   kept); GET adds `active`, `gain_db` and for a ratio duck `control` (its
+//!   state, the stages' reductions, the ratio aimed at and held, the
+//!   loudness of dialogue and bed);
+//! - `GET /api/v1/autolevels`, `GET`, `PUT`, `DELETE
+//!   /api/v1/autolevels/{signal}` (`enabled`, `target_lufs`,
+//!   `speech_offset_lu`, `max_gain_db`, `min_gain_db`, `attack_ms`,
+//!   `release_ms`, `freeze_lufs`, `recall_safe`; `PUT` sets the fields given,
+//!   the others kept or the defaults); GET adds `state` (the gain, the level,
+//!   the target in force, frozen, speech).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -24,7 +36,7 @@ use serde_json::{json, Value};
 
 use crate::api::{apply, bad, body, conflict, not_found, ApiResult};
 use crate::engine::FADE_SAMPLES;
-use crate::mix::auto::{Automix, AutomixMember, Duck, VadSettings};
+use crate::mix::auto::{AutoLevel, Automix, AutomixMember, Duck, DuckMode, VadSettings};
 use crate::mix::model::Db;
 use crate::ops::App;
 
@@ -44,6 +56,11 @@ pub fn routes() -> Router<App> {
         .route(
             "/api/v1/ducks/{id}",
             get(duck).patch(patch_duck).delete(delete_duck),
+        )
+        .route("/api/v1/autolevels", get(autolevels))
+        .route(
+            "/api/v1/autolevels/{signal}",
+            get(autolevel).put(put_autolevel).delete(delete_autolevel),
         )
 }
 
@@ -299,6 +316,9 @@ fn duck_json(app: &App, d: &Duck) -> Value {
     let s = app.control().auto.duck_status(&d.id);
     j["active"] = json!(s.active);
     j["gain_db"] = json!(s.gain_db);
+    if let Some(r) = s.ratio {
+        j["control"] = json!(r);
+    }
     j
 }
 
@@ -329,29 +349,48 @@ struct DuckBody {
     enabled: Option<bool>,
     keys: Option<Vec<String>>,
     targets: Option<Vec<String>>,
+    mode: Option<DuckMode>,
     depth_db: Option<Db>,
     attack_ms: Option<f64>,
     hold_ms: Option<f64>,
     release_ms: Option<f64>,
+    ratio: Option<RatioBody>,
+    channel_depth: Option<DepthBody>,
     recall_safe: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RatioBody {
+    target_lu: Option<f64>,
+    overvoice_lu: Option<f64>,
+    max_reduction_db: Option<f64>,
+    speed: Option<f64>,
+    bed_voice: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DepthBody {
+    front: Option<f64>,
+    center: Option<f64>,
+    lfe: Option<f64>,
+    surround: Option<f64>,
+}
+
+macro_rules! set {
+    ($from:expr, $to:expr; $($f:ident),*) => { $(if let Some(x) = $from.$f { $to.$f = x; })* };
 }
 
 impl DuckBody {
     fn apply(self, d: &mut Duck) {
-        macro_rules! set {
-            ($($f:ident),*) => { $(if let Some(x) = self.$f { d.$f = x; })* };
+        set!(self, d; name, enabled, keys, targets, mode, depth_db, attack_ms, hold_ms, release_ms, recall_safe);
+        if let Some(r) = self.ratio {
+            set!(r, d.ratio; target_lu, overvoice_lu, max_reduction_db, speed, bed_voice);
         }
-        set!(
-            name,
-            enabled,
-            keys,
-            targets,
-            depth_db,
-            attack_ms,
-            hold_ms,
-            release_ms,
-            recall_safe
-        );
+        if let Some(c) = self.channel_depth {
+            set!(c, d.channel_depth; front, center, lfe, surround);
+        }
     }
 }
 
@@ -408,6 +447,112 @@ async fn patch_duck(
         })
         .await?;
         Ok(Json(one_duck(&app, &id).unwrap_or_default()).into_response())
+    })
+    .await
+}
+
+fn autolevel_json(app: &App, signal: &str) -> Option<Value> {
+    let c = app.control();
+    let l = c.mix.autolevel(signal)?;
+    let mut j = json!(l);
+    j["state"] = json!(c.auto.autolevel_status(signal));
+    Some(j)
+}
+
+async fn autolevels(State(app): State<App>) -> Json<Value> {
+    let signals: Vec<String> = app
+        .control()
+        .mix
+        .autolevels
+        .iter()
+        .map(|l| l.signal.clone())
+        .collect();
+    Json(Value::Array(
+        signals
+            .iter()
+            .filter_map(|s| autolevel_json(&app, s))
+            .collect(),
+    ))
+}
+
+async fn autolevel(State(app): State<App>, Path(signal): Path<String>) -> Response {
+    match autolevel_json(&app, &signal) {
+        Some(v) => Json(v).into_response(),
+        None => *not_found(format!("{signal} has no auto-level")),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AutoLevelBody {
+    enabled: Option<bool>,
+    target_lufs: Option<f64>,
+    speech_offset_lu: Option<f64>,
+    max_gain_db: Option<f64>,
+    min_gain_db: Option<f64>,
+    attack_ms: Option<f64>,
+    release_ms: Option<f64>,
+    freeze_lufs: Option<f64>,
+    recall_safe: Option<bool>,
+}
+
+async fn put_autolevel(
+    State(app): State<App>,
+    Path(signal): Path<String>,
+    bytes: axum::body::Bytes,
+) -> Response {
+    run(async {
+        let b: AutoLevelBody = if bytes.is_empty() {
+            AutoLevelBody::default()
+        } else {
+            body(&bytes)?
+        };
+        let mut created = false;
+        apply(&app, FADE_SAMPLES, |mix| {
+            if mix.kind(&signal).is_none() {
+                return Err(not_found(format!("signal {signal} does not exist")));
+            }
+            let mut l = mix
+                .autolevel(&signal)
+                .cloned()
+                .unwrap_or_else(|| AutoLevel::new(&signal));
+            set!(b, l; enabled, target_lufs, speech_offset_lu, max_gain_db, min_gain_db, attack_ms, release_ms, freeze_lufs, recall_safe);
+            match mix.autolevels.iter_mut().find(|x| x.signal == signal) {
+                Some(x) => *x = l,
+                None => {
+                    created = true;
+                    mix.autolevels.push(l);
+                }
+            }
+            Ok(())
+        })
+        .await?;
+        let status = if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        };
+        Ok((
+            status,
+            Json(autolevel_json(&app, &signal).unwrap_or_default()),
+        )
+            .into_response())
+    })
+    .await
+}
+
+async fn delete_autolevel(State(app): State<App>, Path(signal): Path<String>) -> Response {
+    run(async {
+        apply(&app, FADE_SAMPLES, |mix| {
+            let before = mix.autolevels.len();
+            mix.autolevels.retain(|l| l.signal != signal);
+            if mix.autolevels.len() == before {
+                return Err(not_found(format!("{signal} has no auto-level")));
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(StatusCode::NO_CONTENT.into_response())
     })
     .await
 }

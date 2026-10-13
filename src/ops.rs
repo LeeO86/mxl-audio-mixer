@@ -205,6 +205,7 @@ pub fn status_json(app: &App) -> Value {
             "speech": control.auto.vads.iter().filter(|(_, v)| v.state.speech_active).map(|(s, _)| s.clone()).collect::<Vec<_>>(),
             "automixes": control.mix.automixes.len(),
             "ducks": control.mix.ducks.len(),
+            "autolevels": control.mix.autolevels.len(),
         },
         "talkback": {
             "talking": control.talking(),
@@ -474,6 +475,12 @@ async fn metrics(State(app): State<App>) -> Response {
         "counter",
         "Metered blocks the meter thread did not get (its ring was full).",
         vec![format!(" {}", c.meter_drops.load(Ordering::Relaxed))],
+    );
+    metric(
+        "vad_drops_total",
+        "counter",
+        "Tapped blocks the control engine did not get (the VAD ring was full).",
+        vec![format!(" {}", c.vad_drops.load(Ordering::Relaxed))],
     );
     let streams = control.streams.status(&control.stream_ids());
     metric(

@@ -84,10 +84,8 @@ pub struct Control {
     pub compile_seconds: f64,
     /// Steps of the running plan by type (§15 `nodes{type}`).
     pub step_counts: BTreeMap<&'static str, usize>,
-    /// VAD, auto-mixes and ducks (§8).
+    /// VAD, auto-levels, auto-mixes and ducks (§8).
     pub auto: crate::auto::Auto,
-    /// The plan swap count at which the VAD slots of the last swap are live.
-    auto_swap_at: Option<u64>,
 }
 
 impl Control {
@@ -128,42 +126,30 @@ impl Control {
             compile_seconds: 0.0,
             step_counts: BTreeMap::new(),
             auto: crate::auto::Auto::new(),
-            auto_swap_at: None,
         }
     }
 
     /// The control engine's tick (§8, every [`crate::auto::TICK`]): VADs,
-    /// auto-mixes and ducks; changed gains ramp over one frame.
+    /// auto-levels, auto-mixes and ducks; changed gains ramp over one frame.
     pub fn auto_tick(&mut self) {
         let c = &mut *self;
-        if let Some(n) = c.auto_swap_at {
-            if c.engine
-                .counters
-                .plan_swaps
-                .load(std::sync::atomic::Ordering::Relaxed)
-                >= n
-            {
-                c.auto.swapped(&mut c.engine.vad);
-                c.auto_swap_at = None;
-            }
-        }
         let changed = c.auto.tick(&mut c.engine.vad, &c.mix);
         for (signal, g) in changed {
-            c.compiler.auto.insert(signal.clone(), g);
             let key = match c.mix.kind(&signal) {
                 Some(Kind::Bus) => format!("bus/{signal}/auto"),
                 _ => format!("strip/{signal}/auto"),
             };
-            let Some(node) = c.compiler.node_id(&key) else {
+            let node = c.compiler.node_id(&key);
+            c.compiler.auto.insert(signal, g.clone());
+            let Some(l) = node.and_then(|n| c.layout.get_mut(&n).map(|l| (n, l))) else {
                 continue;
             };
-            let Some(l) = c.layout.get_mut(&node) else {
+            let (node, l) = l;
+            if g.len() != l.values.len() {
                 continue;
-            };
-            let values = vec![g; l.values.len()];
-            c.engine
-                .param(node, &values, crate::auto::vad::FRAME as u32);
-            l.values = values;
+            }
+            c.engine.param(node, &g, crate::auto::vad::FRAME as u32);
+            l.values = g;
         }
     }
 
@@ -636,7 +622,6 @@ impl Control {
             }
             self.layout = compiled.nodes;
             self.procs = compiled.procs;
-            self.auto.swapped(&mut self.engine.vad);
             let renamed = self.specs(&next) != self.specs(&self.mix);
             self.mix = next;
             if renamed {
@@ -704,14 +689,8 @@ impl Control {
         );
         self.engine
             .meter_plan(compiled.plan.generation, compiled.plan.meters.clone());
+        self.auto.planned(compiled.plan.generation);
         self.engine.send(Command::SetPlan(Box::new(compiled.plan)));
-        self.auto_swap_at = Some(
-            self.engine
-                .counters
-                .plan_swaps
-                .load(std::sync::atomic::Ordering::Relaxed)
-                + 1,
-        );
         self.layout = compiled.nodes;
         self.procs = compiled.procs;
         self.latency = compiled.latency;

@@ -1423,6 +1423,108 @@ nmos-testing clones the AMWA specifications; the runner's README says so.)
 | 2 | The block clock on a node with a fully preemptible kernel and isolated CPUs, for a verdict on the misses. | When such a node is available; not a blocker for 1.0.0 (every sample was correct). |
 | 3 | Merge this PR into `main` (and then into milestone 7a's branch). | Yes. |
 
+## M7b: auto-level and ratio ducks (Com-IS-Assist's control)
+
+Milestone 7, part 2 (PR 19). `v1.0.0` is tagged and M7a is in `main`. This part:
+the speech-aware auto-level
+(§8.2) and Com-IS-Assist's ratio control as a duck mode, with the interview
+passthrough (M7a answer 12). Still to come in M7b (a PR of its own): the
+master_me / PodcastPlugins comparison, chain presets, the simple view and the
+loudness normaliser for outputs (D40).
+
+### M7b: what exists
+
+- `src/auto/comis/`: Com-IS-Assist's control core, copied (below).
+- The VAD taps carry every channel: `Step::Vad` writes each block as a record
+  into one ring (`engine::meter::write`/`read`, as the meters);
+  `Auto::planned(generation)` makes a reassigned slot's records count from the
+  plan that has it.
+- `src/auto/level.rs`: BS.1770 loudness per tapped signal on the control side.
+- `src/auto/autolevel.rs`, `src/auto/ratio.rs`: the controllers; `src/auto/mod.rs`
+  cuts the records into frames and combines the gains per channel.
+- `src/mix/auto.rs`: `autolevels`, a duck's `mode`, `ratio`, `channel_depth`;
+  validation, references, snapshots (`auto` section).
+- `src/auto_api.rs`: `/api/v1/autolevels`, the ducks' new fields (partial
+  updates of `ratio` and `channel_depth`) and `control`; the meters message's
+  `autolevels` and `ducks`; `vad_drops_total`; the status's `autolevels`.
+- UI: the Auto panel's auto-level table, a duck's mode, ratio settings, live
+  control and channel shares.
+- `tests/integration/auto.sh` (auto-level, ratio duck), `ui.mjs`, the demo.
+
+### M7b: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D116 | Com-IS-Assist's control core is copied, not depended on: `mix_state.rs`, `envelope_detector.rs`, `loop_bank.rs`, `automix_engine.rs` and their tests from `crates/com-is-assist-core` at commit `5bdd96b` into `src/auto/comis/`, each with a header (source, copyright, MIT, what changed) and its `LICENSE`, in the image under `/usr/share/doc/com-is-assist`. Changed: the silence sentinel is the mixer's (−100 LUFS, no `ebur128`), `DuckDepth::per_channel` maps channel labels (L/R front, C/M centre, LFE, everything else surround); formatted with the mixer's rustfmt. Not copied: its `ebur128` meters, its Silero wrapper and its VST3/offline wrappers (the mixer has its own). | §8.2 "integrate the following function from this repo"; MIT allows it with the notice. The crate is not published and pulls `ebur128` and its own ONNX wrapper. |
+| D117 | The VAD taps are records in one ring of 2^22 values (0.68 s of 64 stereo signals) with the plan generation, instead of 64 mono rings of the channels' mean; a record that does not fit is counted (`vad_drops_total`). A slot given to another signal counts records from the plan that has it (`Auto::planned`). | A bed's loudness needs every channel with its weight (BS.1770); the generation replaces the plan-swap counter the mono rings needed, and the shared ring holds wider signals without 64 large rings. |
+| D118 | Each tapped signal's loudness on the control side, per 10 ms frame: K-weighting per channel, the BS.1770 channel weights by label, momentary (40 frames) and short-term (300 frames), and a fast exponential mean square (50 ms, Com-IS-Assist's `FAST_WINDOW_SECONDS`) on the same scale. The VAD's gate reads this momentary loudness. Cost: 3.2 µs per 10 ms frame of a stereo signal (0.03 % of a core; 64 signals 2 %). | One measurement for the gate, the auto-level and the ratio ducks. For a stereo signal the gate now reads the BS.1770 sum (a centred talker 3 dB above the mean the gate read in M7a; question 5). |
+| D119 | Auto-level, per frame: while the momentary loudness is below `freeze_lufs` the gain holds and nothing is measured; entering the freeze takes the last 400 ms (the pause that led to it) back out. The level is the mean power of the last 300 frames with signal (short-term loudness over the signal, pauses under 400 ms included); the target is `target_lufs` + `speech_offset_lu` while the VAD speaks; the gain goes to target − level within the range, a one-pole in dB (`attack_ms` down, `release_ms` up). Defaults: −23 LUFS, +2 LU (§8.2's examples), ±12 dB, 1 s / 3 s, −50 LUFS (question 1). Feed-forward: it reads before its own gain. | §8.2: "a loudness target (e.g. −23 LUFS short-term) and a configurable speech offset (e.g. +2 LU) while speech is active; attack/release and max gain range; freeze when no signal". Without taking the pause back out, every pause would pull the level down by up to 400 ms of silence. |
+| D120 | A ratio duck (`mode: "ratio"`) runs one Com-IS-Assist `AutomixEngine` per duck: COM voice = a key's VAD (with its gate, Com-IS-Assist's guard band), IS voice = a target's VAD (`bed_voice`, default on); dialogue = the keys' short-term loudness, bed = the targets' short-term, momentary and fast loudness, powers added over several keys or targets, each with its auto-level's gain; each 10 ms frame steps the slow/mid stages and the fast stage once (Com-IS-Assist: 100 ms and 64 samples; its stages are one-pole filters over the elapsed time, so only the fast stage's resolution changes, and the gain ramps over 10 ms anyway). Settings and ranges are its plugin's: ratio 5 LU (0–12), over-voice 13 (0–24), at most 24 dB (0–48), speed 1 (0.25–8). The engine's ballistics, ease-in and interview speed-up are its own, unchanged. | Answer 12 ("interview passthrough with Com-IS-Assist's ratio control"); its author tuned these on commentary. A duck mode, so keys, targets, snapshots and the UI are those of ducks. |
+| D121 | Channel depth groups (`channel_depth`: front, centre, LFE, surround; 0–1 of the dB) for fixed and ratio ducks; the auto gain is per channel: auto-level × auto-mix × each channel's deepest duck. The meters message's `auto_db` is the deepest channel. | Com-IS-Assist's duck depth: a surround bed keeps its atmosphere and LFE while the front ducks. |
+| D122 | An auto-mix shares the members' levels with their auto-level's gain (power × gain²). | Gain sharing is about the levels as they reach the mix; an auto-levelled quiet microphone would otherwise get too small a share. |
+| D123 | Auto-levels are in snapshots (the `auto` section as a whole; recall-safe ones stay); `PUT /api/v1/autolevels/<signal>` sets the fields given; a duck's `ratio` and `channel_depth` take partial objects. | As the VAD settings and ducks (D105). |
+
+### M7b: results (dev VM)
+
+- `cargo test`: 171 unit tests (new: loudness against EBU Tech 3341 case 1
+  (−23.0 LUFS), the LFE and surround weights, the windows and the fast
+  detector; the auto-level's target, speech offset, range, ballistics, freeze
+  and a pause taken out; the ratio control's target (8 dB for 3 LU under),
+  over-voice (16 dB), ceiling, ease-in, interview (more than 3× faster back),
+  bed voice off, silence, disabled, speed; a 5.1 bed under synthetic speech
+  with the LFE's share 0 and the surrounds' 0.5: front and centre at the
+  reduction, surrounds at half, LFE at 0 dB; tap records and plan generations;
+  the model, references, snapshots, older ducks reading as fixed).
+- `tests/integration/auto.sh` through MXL, four runs in a row:
+  - auto-level: a 1 kHz tone at −23.0 LUFS to a target of −30: gain −7.0 dB,
+    the programme at −30.01 dBFS RMS; on speech (espeak, 6 s periods) the
+    target −21 in the speech polls, the gain unchanged in the frozen ones;
+  - a ratio duck of the commentator over a bed of a tone and a guest speaking
+    in his pauses: every state seen; while ducking the median ratio 5.9–6.0 LU
+    (reductions 4.9–12 dB); at the end of each of the guest's turns
+    0.03–0.1 dB (interview passthrough); a partial `ratio` patch; a ratio of
+    13 LU refused.
+- `ui.sh`: an auto-level from the panel (Guitar to −30 LUFS, the gain the
+  controller reports shown on its strip); the duck switched to ratio, 8 LU,
+  the LFE's share 0.
+- The demo: the music ducks to a ratio of 5 LU under host and guest (measured
+  5.6 LU, 10.4 dB), both auto-levelled.
+
+**Findings:**
+- The ratio held while ducking is about 1 LU over the target on the test's
+  speech: after each 3.7 s pause the commentator's short-term loudness builds up
+  again from silence (the first frames ask for the most), and the bed's window
+  still holds the guest's last turn. Com-IS-Assist's commentary pauses are
+  about 1.2 s; on such speech the 3 s window does not empty.
+- A signal tapped from a new plan needs 3 s for its short-term loudness; the
+  ratio test waits for it.
+
+### M7b: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | Auto-level defaults: range ±12 dB, attack 1 s (down) and release 3 s (up), freeze below −50 LUFS momentary (target −23 and offset +2 are §8.2's examples). | As implemented; the 1.1.0 checklist tries them on productions. |
+| 2 | The auto-level measures short-term loudness over the frames with signal (pauses under 400 ms count, longer ones not). Or plain short-term (every pause pulls the level down, then the gain up), or gated like integrated loudness? | As implemented. |
+| 3 | Ratio ducks: Com-IS-Assist's defaults and ranges unchanged (5 / 13 LU, 24 dB, speed 1), its ballistics and ease-in fixed as there. | As implemented. |
+| 4 | Several keys count as one dialogue and several targets as one bed (powers added); a mono target takes the centre group's share. | As implemented. |
+| 5 | The VAD's gate now reads BS.1770 loudness over a signal's channels: for a stereo microphone or a stereo bed that is up to 3 dB more than M7a's mean of the channels. | As implemented (it is what LUFS means); the checklist notes gate values per microphone. |
+| 6 | The 1.1.0 checklist now has the ratio duck (a commentary over a bed with an interview, a 5.1 bed with the LFE held) and the auto-level (a quiet and a loud guest, with the auto-mix). Anything to add? | As written. |
+| 7 | Merge order: M7a after `v1.0.0`, then this PR, then the rest of M7b (comparison, presets, simple view, output normaliser). | Yes. |
+
+### M7b: answers (maintainer, 2026-10-13)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Auto-level defaults (±12 dB, 1 s / 3 s, freeze below −50 LUFS) | Yes. |
+| 2 | Short-term loudness over the frames with signal | OK. |
+| 4 | Several keys as one dialogue, several targets as one bed; a mono target takes the centre share | Yes. |
+| 5 | The VAD's gate on BS.1770 loudness over a signal's channels | Yes. |
+| 6 | Anything to add to the 1.1.0 checklist? | No. |
+| 7 | Merge order | As answered before (M7a answer 9): M7a after `v1.0.0`, then M7b. |
+
+Question 3 (Com-IS-Assist's ratio defaults and ballistics unchanged) stays open;
+they stay as implemented until then.
+
 ### Release 1.0.0: the maintainers' re-run (2026-10-13)
 
 On `208689e`, the same host (2× Xeon Gold 6136, kernel 6.8 with voluntary

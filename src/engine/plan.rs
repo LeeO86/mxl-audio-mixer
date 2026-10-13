@@ -159,8 +159,8 @@ pub enum Step {
     Analyse { src: Span },
     /// A stereo `src` to stream slot `slot` (a monitor heard in the browser).
     Stream { src: Span, slot: u32 },
-    /// `dst` ← the mean of `src`'s channels, to VAD tap slot `slot` (§8.1).
-    Vad { src: Span, dst: u32, slot: u32 },
+    /// `src`'s channels to VAD tap slot `slot` (§8.1).
+    Vad { src: Span, slot: u32 },
 }
 
 impl Step {
@@ -396,9 +396,9 @@ pub trait OutputSink {
         let _ = (slot, channel, samples);
     }
 
-    /// A block of VAD tap slot `slot` (mono).
-    fn vad(&mut self, slot: usize, samples: &[f32]) {
-        let _ = (slot, samples);
+    /// A block of VAD tap slot `slot`'s channels, of plan `generation`.
+    fn vad(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
+        let _ = (generation, slot, chans);
     }
 
     /// A block of meter channels `slot …` of plan `generation`.
@@ -632,24 +632,13 @@ impl Plan {
                         outputs.analyse(c, n, &self.buffers[range]);
                     }
                 }
-                Step::Vad { src, dst, slot } => {
-                    let n = src.len as usize;
-                    let scale = 1.0 / n.max(1) as f32;
-                    for c in 0..n {
-                        let s = self.indices[src.start as usize + c];
-                        let (x, y) = self.pair(s, dst);
-                        if c == 0 {
-                            for k in 0..block {
-                                y[k] = x[k] * scale;
-                            }
-                        } else {
-                            for k in 0..block {
-                                y[k] += x[k] * scale;
-                            }
-                        }
+                Step::Vad { src, slot } => {
+                    let n = (src.len as usize).min(MAX_CH);
+                    let mut chans: [&[f32]; MAX_CH] = [&[]; MAX_CH];
+                    for (c, ch) in chans.iter_mut().enumerate().take(n) {
+                        *ch = &self.buffers[self.buf(self.indices[src.start as usize + c])];
                     }
-                    let range = self.buf(dst);
-                    outputs.vad(slot as usize, &self.buffers[range]);
+                    outputs.vad(self.generation, slot as usize, &chans[..n]);
                 }
                 Step::Process {
                     proc,

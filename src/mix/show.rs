@@ -62,7 +62,7 @@ pub struct Snapshot {
     pub time: u64,
     pub signals: BTreeMap<String, SignalState>,
     pub sends: Vec<SendState>,
-    /// VAD settings, auto-mixes and ducks (§8), as a whole; absent in snapshots
+    /// VAD settings, auto-mixes, ducks and auto-levels (§8), as a whole; absent in snapshots
     /// taken before they existed (a recall leaves them then).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<AutoState>,
@@ -77,6 +77,8 @@ pub struct AutoState {
     pub automixes: Vec<super::auto::Automix>,
     #[serde(default)]
     pub ducks: Vec<super::auto::Duck>,
+    #[serde(default)]
+    pub autolevels: Vec<super::auto::AutoLevel>,
 }
 
 /// Parameter classes a recall can be limited to.
@@ -92,7 +94,7 @@ pub enum Class {
     /// The parameters (and bypass) of chain nodes.
     Chain,
     Sends,
-    /// VAD settings, auto-mixes and ducks.
+    /// VAD settings, auto-mixes, ducks and auto-levels.
     Auto,
 }
 
@@ -103,7 +105,7 @@ pub enum Section {
     Buses,
     /// VCA faders and mutes (§9).
     Vcas,
-    /// VAD settings, auto-mixes and ducks (§8), as a whole; a signal filter does
+    /// VAD settings, auto-mixes, ducks and auto-levels (§8), as a whole; a signal filter does
     /// not narrow them.
     Auto,
 }
@@ -196,6 +198,7 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
             vad: mix.vad.clone(),
             automixes: mix.automixes.clone(),
             ducks: mix.ducks.clone(),
+            autolevels: mix.autolevels.clone(),
         }),
     }
 }
@@ -247,9 +250,21 @@ fn recall_auto(mix: &mut Mix, saved: &AutoState) {
         .filter(|v| exists(mix, &v.signal))
         .cloned()
         .collect();
+    let mut autolevels: Vec<_> = mix
+        .autolevels
+        .iter()
+        .filter(|l| l.recall_safe)
+        .cloned()
+        .collect();
+    for l in &saved.autolevels {
+        if exists(mix, &l.signal) && !autolevels.iter().any(|x| x.signal == l.signal) {
+            autolevels.push(l.clone());
+        }
+    }
     mix.vad = vad;
     mix.automixes = automixes;
     mix.ducks = ducks;
+    mix.autolevels = autolevels;
 }
 
 /// Apply `snap` to `mix` within `filter`, leaving recall-safe signals alone. Only
@@ -644,5 +659,31 @@ mod tests {
         old.auto = None;
         recall(&mut m, &old, &Filter::default());
         assert_eq!(m.automixes.len(), 1);
+    }
+
+    #[test]
+    fn auto_levels_in_snapshots() {
+        use crate::mix::auto::AutoLevel;
+        let mut m = mix();
+        let (a, b) = (m.strips[0].id.clone(), m.strips[1].id.clone());
+        m.autolevels.push(AutoLevel::new(&a));
+        let one = capture(&m, "s1".into(), "One".into(), 1);
+        m.autolevels.clear();
+        let mut safe = AutoLevel::new(&b);
+        safe.recall_safe = true;
+        safe.target_lufs = -20.0;
+        m.autolevels.push(safe.clone());
+        recall(&mut m, &one, &Filter::default());
+        assert_eq!(
+            m.autolevels
+                .iter()
+                .map(|l| (l.signal.as_str(), l.target_lufs))
+                .collect::<Vec<_>>(),
+            [(b.as_str(), -20.0), (a.as_str(), -23.0)],
+            "the recall-safe one stays"
+        );
+        m.remove_signal(&a);
+        recall(&mut m, &one, &Filter::default());
+        assert_eq!(m.autolevels, [safe], "a deleted strip's is dropped");
     }
 }

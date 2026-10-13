@@ -429,6 +429,9 @@ pub struct Mix {
     /// Ducking by speech (§8.4).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ducks: Vec<super::auto::Duck>,
+    /// Speech-aware loudness (§8.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autolevels: Vec<super::auto::AutoLevel>,
 }
 
 /// What a signal id names.
