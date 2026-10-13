@@ -137,9 +137,9 @@ pub enum Step {
         dst: Span,
         coefficients: Span,
     },
-    /// Peak, true peak (processor `proc`) and energy of `src` into meter channels
-    /// `slot …`.
-    Meter { src: Span, slot: u32, proc: u32 },
+    /// `src` to the meters (peak, true peak, energy, PPM, correlation of meter
+    /// channels `slot …`), measured on the meter thread (`engine::meter`).
+    Meter { src: Span, slot: u32 },
     /// `src` to output slot `slot`.
     Output { src: Span, slot: u32 },
     /// `dst` ← processor `proc` applied to `src`, keyed by `key` (empty: none).
@@ -217,6 +217,8 @@ impl MeterBank {
 /// A compiled plan.
 pub struct Plan {
     pub block: usize,
+    /// Unique per plan: the meter thread finds its meter bank by it.
+    pub generation: u32,
     buffers: Vec<f32>,
     indices: Vec<u32>,
     coefficients: Vec<f32>,
@@ -248,6 +250,7 @@ impl PlanBuilder {
         Self {
             plan: Plan {
                 block,
+                generation: 0,
                 buffers: Vec::new(),
                 indices: Vec::new(),
                 coefficients: Vec::new(),
@@ -336,6 +339,8 @@ impl PlanBuilder {
     }
 
     pub fn finish(mut self) -> Plan {
+        static GENERATIONS: AtomicU32 = AtomicU32::new(1);
+        self.plan.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
         self.plan.buffers = vec![0.0; self.buffers as usize * self.plan.block];
         self.plan.meters = Arc::new(MeterBank::new(self.meters as usize));
         self.plan.lookup = self
@@ -386,6 +391,11 @@ pub trait OutputSink {
     /// Channel `channel` (0 or 1) of stream slot `slot`.
     fn stream(&mut self, slot: usize, channel: usize, samples: &[f32]) {
         let _ = (slot, channel, samples);
+    }
+
+    /// A block of meter channels `slot …` of plan `generation`.
+    fn meter(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
+        let _ = (generation, slot, chans);
     }
 }
 
@@ -580,52 +590,13 @@ impl Plan {
                     }
                     self.nodes[node as usize].finish_block(block);
                 }
-                Step::Meter { src, slot, proc } => {
-                    for c in 0..src.len as usize {
-                        let range = self.buf(self.indices[src.start as usize + c]);
-                        let mut peak = 0f32;
-                        let mut energy = 0f64;
-                        for &x in &self.buffers[range.clone()] {
-                            peak = peak.max(x.abs());
-                            energy += f64::from(x) * f64::from(x);
-                        }
-                        let tp = match self.procs.get_mut(proc as usize) {
-                            Some(p) => p.measure_true_peak(c, &self.buffers[range]),
-                            None => peak,
-                        };
-                        if let Some(m) = self.meters.channels.get(slot as usize + c) {
-                            m.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
-                            m.true_peak.fetch_max(tp.to_bits(), Ordering::Relaxed);
-                            let total = f64::from_bits(m.energy.load(Ordering::Relaxed)) + energy;
-                            m.energy.store(total.to_bits(), Ordering::Relaxed);
-                            m.samples.fetch_add(block as u64, Ordering::Relaxed);
-                            let range = self.buf(self.indices[src.start as usize + c]);
-                            let level =
-                                [0, 1].map(|k| f32::from_bits(m.ppm[k].load(Ordering::Relaxed)));
-                            let (level, max) = crate::dsp::ppm::run_pair(
-                                &self.meters.ppm,
-                                level,
-                                &self.buffers[range],
-                            );
-                            for k in 0..2 {
-                                m.ppm[k].store(level[k].to_bits(), Ordering::Relaxed);
-                                m.ppm_max[k].fetch_max(max[k].to_bits(), Ordering::Relaxed);
-                            }
-                        }
+                Step::Meter { src, slot } => {
+                    let n = (src.len as usize).min(MAX_CH);
+                    let mut chans: [&[f32]; MAX_CH] = [&[]; MAX_CH];
+                    for (c, ch) in chans.iter_mut().enumerate().take(n) {
+                        *ch = &self.buffers[self.buf(self.indices[src.start as usize + c])];
                     }
-                    if src.len >= 2 {
-                        let a = self.buf(self.indices[src.start as usize]);
-                        let b = self.buf(self.indices[src.start as usize + 1]);
-                        let cross: f64 = self.buffers[a]
-                            .iter()
-                            .zip(&self.buffers[b])
-                            .map(|(x, y)| f64::from(*x) * f64::from(*y))
-                            .sum();
-                        if let Some(m) = self.meters.channels.get(slot as usize) {
-                            let total = f64::from_bits(m.cross.load(Ordering::Relaxed)) + cross;
-                            m.cross.store(total.to_bits(), Ordering::Relaxed);
-                        }
-                    }
+                    outputs.meter(self.generation, slot as usize, &chans[..n]);
                 }
                 Step::Output { src, slot } => {
                     let channels = src.len as usize;
@@ -934,12 +905,23 @@ mod tests {
         b.step(Step::Meter {
             src: bus,
             slot: meter,
-            proc: u32::MAX,
         });
         let mut plan = b.finish();
         let inputs = TestInputs(vec![vec![vec![0.25; block]], vec![vec![0.5; block]]]);
-        let mut out = TestOutputs::default();
-        plan.process(0, &inputs, &mut out);
+        struct Metered(TestOutputs, crate::engine::meter::Meterer);
+        impl OutputSink for Metered {
+            fn write(&mut self, slot: usize, channel: usize, channels: usize, samples: &[f32]) {
+                self.0.write(slot, channel, channels, samples);
+            }
+            fn meter(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
+                self.1.measure(generation, slot, chans);
+            }
+        }
+        let mut meterer = crate::engine::meter::Meterer::default();
+        meterer.plan(plan.generation, plan.meters.clone());
+        let mut metered = Metered(TestOutputs::default(), meterer);
+        plan.process(0, &inputs, &mut metered);
+        let out = metered.0;
         // L = 0.25·0.5 − 0.5·0.5 = −0.125; R = −0.25.
         assert!(out.0[0][0].iter().all(|x| (*x + 0.125).abs() < 1e-7));
         assert!(out.0[0][1].iter().all(|x| (*x + 0.25).abs() < 1e-7));

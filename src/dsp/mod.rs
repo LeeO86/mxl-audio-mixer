@@ -6,4 +6,5 @@ pub mod dynamics;
 pub mod fft;
 pub mod loudness;
 pub mod ppm;
+pub mod reduce;
 pub mod truepeak;

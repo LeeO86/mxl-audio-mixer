@@ -26,3 +26,9 @@ fails. `results.md` goes into the release notes ("Tested", on hardware); the
 checklist's manual items are not in it. Run it as root (or with `CAP_SYS_NICE`)
 for SCHED_FIFO (`MIXER_RT_PRIORITY`, default 49); in a pod, Guaranteed QoS with
 whole CPUs.
+
+`amwa` needs internet access (nmos-testing clones the AMWA specification
+repositories) and the registry's ten ports from `AMWA_REGISTRY_PORT` (default
+8010); with a registry already on them, set another base. In a container, set
+`NODE_NAME` to the node's name for `env` (else the container's host name is
+reported).

@@ -84,6 +84,8 @@ struct Outputs<'a> {
     slots: &'a mut [Option<Box<OutputWriter>>],
     loudness: &'a mut [Option<Box<SegmentMeter>>],
     analysis: &'a mut rtrb::Producer<f32>,
+    meters: &'a mut rtrb::Producer<f32>,
+    meter_drops: &'a std::sync::atomic::AtomicU64,
     streams: &'a mut [Option<Box<rtrb::Producer<f32>>>],
     /// The stream ring has room for this block (checked at channel 1).
     stream_room: bool,
@@ -132,6 +134,16 @@ impl OutputSink for Outputs<'_> {
         }
     }
 
+    fn meter(&mut self, generation: u32, slot: usize, chans: &[&[f32]]) {
+        super::meter::write(
+            self.meters,
+            self.meter_drops,
+            generation,
+            slot as u32,
+            chans,
+        );
+    }
+
     fn loudness(&mut self, slot: usize, start: u64, channel: usize, samples: &[f32]) {
         if let Some(Some(m)) = self.loudness.get_mut(slot) {
             m.feed(start, channel, samples);
@@ -149,6 +161,14 @@ impl OutputSink for Outputs<'_> {
         o.staging[at..at + self.block].copy_from_slice(&samples[..self.block]);
         o.staged = true;
     }
+}
+
+/// The rings the DSP thread copies audio into for the control side.
+pub(super) struct Taps {
+    /// Every metered block, as records (`meter`).
+    pub meters: rtrb::Producer<f32>,
+    /// The analysed signal (spectrum, goniometer).
+    pub analysis: rtrb::Producer<f32>,
 }
 
 const FADE_STEP: f32 = 1.0 / FADE_SAMPLES as f32;
@@ -173,9 +193,13 @@ pub(super) fn run(
     mut commands: rtrb::Consumer<Command>,
     mut returned: rtrb::Producer<Returned>,
     mut lags: Vec<rtrb::Producer<u32>>,
-    mut analysis: rtrb::Producer<f32>,
+    taps: Taps,
     scheduling: Arc<std::sync::Mutex<String>>,
 ) {
+    let Taps {
+        mut meters,
+        mut analysis,
+    } = taps;
     let notes = crate::timing::set_up_dsp_thread(config.rt_priority, config.cpu);
     tracing::info!("DSP thread: {notes}");
     if let Ok(mut s) = scheduling.lock() {
@@ -446,6 +470,8 @@ pub(super) fn run(
                     loudness: &mut loudness,
                     analysis: &mut analysis,
                     analysis_room: false,
+                    meters: &mut meters,
+                    meter_drops: &counters.meter_drops,
                     streams: &mut streams,
                     stream_room: false,
                     block,

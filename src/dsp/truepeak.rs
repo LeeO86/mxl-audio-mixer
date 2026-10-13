@@ -48,28 +48,103 @@ pub fn taps() -> [[f32; TAPS]; PHASES] {
     out
 }
 
-/// One channel's interpolator history.
+/// The most an interpolator output can exceed the largest |sample| of its
+/// window: the largest sum of |taps| over the phases (rounded up a little).
+pub fn bound(taps: &[[f32; TAPS]; PHASES]) -> f32 {
+    let most = taps
+        .iter()
+        .map(|p| p.iter().map(|h| h.abs()).sum::<f32>())
+        .fold(0f32, f32::max);
+    most * 1.0001
+}
+
+/// Samples per pass of [`TruePeak::run`] (a buffer on the stack).
+const CHUNK: usize = 64;
+
+/// The phases side by side: `transposed(t)[m][p]` = `t[p][m]`, so that one tap
+/// of all four phases is one 4-wide multiply-add.
+fn transposed(taps: &[[f32; TAPS]; PHASES]) -> [[f32; PHASES]; TAPS] {
+    let mut out = [[0f32; PHASES]; TAPS];
+    for (p, row) in taps.iter().enumerate() {
+        for (m, h) in row.iter().enumerate() {
+            out[m][p] = *h;
+        }
+    }
+    out
+}
+
+/// One channel's interpolator history: the last `TAPS − 1` samples, oldest
+/// first, and their largest |value|.
 #[derive(Debug, Clone, Default)]
 pub struct TruePeak {
-    history: [f32; TAPS],
-    at: usize,
+    tail: [f32; TAPS - 1],
+    tail_peak: f32,
 }
 
 impl TruePeak {
-    /// The largest |value| of the oversampled `samples`.
+    /// The largest |value| of the oversampled `samples`: per sample the four
+    /// phases at once, tap by tap (the same sums, in the same order, as phase
+    /// by phase).
     pub fn run(&mut self, taps: &[[f32; TAPS]; PHASES], samples: &[f32]) -> f32 {
-        let mut peak = 0f32;
-        for &x in samples {
-            self.at = (self.at + TAPS - 1) % TAPS;
-            self.history[self.at] = x;
-            for phase in taps {
-                let mut y = 0f32;
-                for (m, h) in phase.iter().enumerate() {
-                    y += h * self.history[(self.at + m) % TAPS];
+        let ht = transposed(taps);
+        let mut lanes = [0f32; PHASES];
+        let mut buf = [0f32; TAPS - 1 + CHUNK];
+        for chunk in samples.chunks(CHUNK) {
+            let len = chunk.len();
+            buf[..TAPS - 1].copy_from_slice(&self.tail);
+            buf[TAPS - 1..TAPS - 1 + len].copy_from_slice(chunk);
+            for n in 0..len {
+                let mut y = [0f32; PHASES];
+                for (m, h) in ht.iter().enumerate() {
+                    let v = buf[TAPS - 1 + n - m];
+                    for k in 0..PHASES {
+                        y[k] += h[k] * v;
+                    }
                 }
-                peak = peak.max(y.abs());
+                for k in 0..PHASES {
+                    lanes[k] = lanes[k].max(y[k].abs());
+                }
             }
+            self.tail.copy_from_slice(&buf[len..len + TAPS - 1]);
         }
+        self.tail_peak = super::reduce::peak(&self.tail);
+        lanes.iter().fold(0f32, |a, b| a.max(*b))
+    }
+
+    /// As [`run`](Self::run), but only when the block can raise `floor` (a peak
+    /// already held): an interpolated value is at most `bound` × the largest
+    /// |sample| of its window (the samples and the tail before them). Otherwise
+    /// the history is kept up to date and the block's sample peak returned.
+    pub fn run_above(
+        &mut self,
+        taps: &[[f32; TAPS]; PHASES],
+        bound: f32,
+        samples: &[f32],
+        floor: f32,
+    ) -> f32 {
+        let sample_peak = super::reduce::peak(samples);
+        if sample_peak.max(self.tail_peak) * bound > floor || samples.len() < TAPS - 1 {
+            return self.run(taps, samples);
+        }
+        self.tail
+            .copy_from_slice(&samples[samples.len() - (TAPS - 1)..]);
+        self.tail_peak = super::reduce::peak(&self.tail);
+        sample_peak
+    }
+
+    /// One sample (a limiter's detector): the largest |value| of its four
+    /// interpolated values.
+    pub fn step(&mut self, taps: &[[f32; TAPS]; PHASES], x: f32) -> f32 {
+        let mut peak = 0f32;
+        for phase in taps {
+            let mut y = phase[0] * x;
+            for (m, h) in phase.iter().enumerate().skip(1) {
+                y += h * self.tail[TAPS - 1 - m];
+            }
+            peak = peak.max(y.abs());
+        }
+        self.tail.copy_within(1.., 0);
+        self.tail[TAPS - 2] = x;
         peak
     }
 }
@@ -126,6 +201,94 @@ mod tests {
         let x = sine(12_000.0, half, 45.0, 4800);
         let sample = x.iter().fold(0f32, |m, v| m.max(v.abs()));
         assert!((db(sample) + 9.0).abs() < 0.1);
+    }
+
+    /// The interpolator as first written: per sample, the history read modulo.
+    fn reference(taps: &[[f32; TAPS]; PHASES], x: &[f32]) -> Vec<f32> {
+        let mut history = [0f32; TAPS];
+        let mut at = 0;
+        x.iter()
+            .map(|&v| {
+                at = (at + TAPS - 1) % TAPS;
+                history[at] = v;
+                taps.iter()
+                    .map(|phase| {
+                        let mut y = 0f32;
+                        for (m, h) in phase.iter().enumerate() {
+                            y += h * history[(at + m) % TAPS];
+                        }
+                        y.abs()
+                    })
+                    .fold(0f32, f32::max)
+            })
+            .collect()
+    }
+
+    fn noise(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed.max(1);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                (f64::from(s) / f64::from(u32::MAX) * 2.0 - 1.0) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn blocks_steps_and_the_skip_match_the_reference() {
+        let t = taps();
+        let x = noise(4800, 9);
+        let want = reference(&t, &x);
+        for block in [1, 7, 11, 12, 64, 96, 100, 480] {
+            let mut tp = TruePeak::default();
+            for (k, b) in x.chunks(block).enumerate() {
+                let got = tp.run(&t, b);
+                let w = want[k * block..k * block + b.len()]
+                    .iter()
+                    .fold(0f32, |a, v| a.max(*v));
+                assert_eq!(got, w, "block {block}, chunk {k}");
+            }
+        }
+        let mut tp = TruePeak::default();
+        for (k, v) in x.iter().enumerate() {
+            assert_eq!(tp.step(&t, *v), want[k], "step {k}");
+        }
+        // The held maximum over 20 blocks of 96 (a meter tick), with the skip,
+        // equals the one computed on every block: on noise, on a loud burst
+        // after quiet blocks, on the EBU fs/4 sines.
+        let g = bound(&t);
+        let mut burst = noise(1920, 3).iter().map(|v| v * 0.01).collect::<Vec<_>>();
+        burst[1000..1100].copy_from_slice(&noise(100, 4));
+        let half = 10f64.powf(-6.0 / 20.0);
+        for signal in [x.clone(), burst, sine(12_000.0, half, 45.0, 1920)] {
+            let (mut full, mut fast) = (TruePeak::default(), TruePeak::default());
+            let (mut held_full, mut held_fast) = (0f32, 0f32);
+            for b in signal.chunks(96) {
+                held_full = held_full.max(full.run(&t, b));
+                held_fast = held_fast.max(fast.run_above(&t, g, b, held_fast));
+            }
+            assert_eq!(held_fast, held_full);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn cost() {
+        let t = taps();
+        let x = noise(96 * 2000, 5);
+        let mut tp = TruePeak::default();
+        let started = std::time::Instant::now();
+        let mut p = 0f32;
+        for b in x.chunks(96) {
+            p = p.max(tp.run(&t, std::hint::black_box(b)));
+        }
+        std::hint::black_box(p);
+        eprintln!(
+            "run: {:.0} ns per block",
+            started.elapsed().as_nanos() as f64 / 2000.0
+        );
     }
 
     #[test]

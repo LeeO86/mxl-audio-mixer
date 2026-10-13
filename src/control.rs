@@ -658,6 +658,8 @@ impl Control {
             compiled.plan.node_meters.clone(),
             compiled.node_meters.clone(),
         );
+        self.engine
+            .meter_plan(compiled.plan.generation, compiled.plan.meters.clone());
         self.engine.send(Command::SetPlan(Box::new(compiled.plan)));
         self.layout = compiled.nodes;
         self.procs = compiled.procs;
