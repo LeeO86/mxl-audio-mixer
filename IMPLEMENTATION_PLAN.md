@@ -1641,3 +1641,33 @@ those changes, so that stays a possibility, not a finding.
 | # | Question | Proposal |
 | --- | --- | --- |
 | 1 | The lab's verdict was to hold the 1.0.0 tag for a whole-core run and for an answer on the missing samples. The tag is already on `14e9487`. | Leave it. The ratio passes (0.342) and the misses match the shared sibling, which this host cannot give up. A whole-core run remains the check of the 0-misses rule. D131 is what the next load prints; it does not move the tag. |
+
+### Release 1.0.0: the split run (2026-10-14)
+
+On `7ea4077` (PR 24), the same host (`NODE_NAME=lab-xeon-6136`, DSP thread on
+CPU 45 at SCHED_FIFO 49, sibling CPU 21 outside the runner). `env` passed
+(TAI +37 s). The 60 min load: mean block 712 µs, `dsp_load_ratio` 0.356, every
+block ≤ 3 ms, 1963 deadline misses, 0 meter drops, not throttled. Missing
+input samples **15 840, all late source** (ring overrun 0, other 0): 165 failed
+reads. The tone writers of the load test share the runner's CPUs at normal
+priority. The reader on the DSP thread did not fall out of the ring, which is
+what the earlier 51 168 could not show.
+
+The misses again track the sibling: 12 in 1869 s while it was idle (0–3 %).
+The 10–20 % band had 1690 misses in 473 s; the ≥ 20 % band had 8 in 679 s (a
+steady neighbour that did not disturb the thread).
+
+Building that commit behind a TLS-inspecting proxy failed in `ort-sys`:
+`download-binaries` with `tls-rustls` uses its own root store and rejected the
+proxy certificate. The archive they fetched by hand is a raw LZMA2 stream
+(`xz --format=raw --lzma2=dict=64MiB`), not a `.tar.xz`.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D132 | The ONNX Runtime download uses the system certificate store (`tls-native` instead of `tls-rustls`). `ORT_LIB_LOCATION` still skips the download: it is the directory that contains `libonnxruntime.a` after the raw LZMA2 archive is extracted. The README says both. | Their build of this commit. A proxy CA in the system store is then trusted. The two TLS features cannot both be on. |
+
+### Release 1.0.0: question after the split run
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | The §16 tone writers run at normal priority in the runner's CPU set, and every missing sample on this run was a late source. Give those writers a real-time priority, or pin them off the DSP core, so the load numbers are not the writers'? | Yes, in the load script, once a whole-core node is the one being measured. On this host the writers and the other tenants share the same CPUs either way. |

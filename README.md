@@ -186,6 +186,21 @@ LD_LIBRARY_PATH=/opt/mxl/lib NMOS_HOST_ADDRESS=192.0.2.10 MXL_DOMAIN_SCAN_PATH=/
     MIXER_STATE_DIR=/tmp/mixer target/release/mxl-audio-mixer
 ```
 
+The Silero VAD build downloads a prebuilt ONNX Runtime. That download uses the
+system certificate store. Behind a TLS-inspecting proxy, install the proxy's CA
+in the system store first. To skip the download, fetch the archive for this
+target (ort 2.0.0-rc.14, the `x86_64-unknown-linux-gnu` file with no extra
+features: `https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-unknown-linux-gnu.tar.lzma2`)
+with a client that trusts the proxy, and extract it. The file is a raw LZMA2
+stream, not a `.tar.xz`:
+
+```sh
+xz --format=raw --lzma2=dict=64MiB -dc x86_64-unknown-linux-gnu.tar.lzma2 | tar -x -C /opt/ort
+ORT_LIB_LOCATION=/opt/ort cargo build --release
+```
+
+`ORT_LIB_LOCATION` is that directory (the one that contains `libonnxruntime.a`).
+
 The image is `ghcr.io/leeo86/mxl-audio-mixer` (uid 1000; tags `X.Y.Z`, `X.Y`, `X`,
 `git-<sha7>`, `nightly-dev`). `deploy/k8s/deployment.yaml` shows the platform
 conventions; `deploy/grafana/` has a dashboard. The development set-up is in

@@ -28,8 +28,10 @@ uuid = { version = "1.23", features = ["v4", "v5", "serde"] }
 opus = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 # Silero VAD (§8.1) on ONNX Runtime (MIT), linked statically; the build fetches
-# the prebuilt runtime once per machine (as Com-IS-Assist does).
-ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+# the prebuilt runtime once per machine (as Com-IS-Assist does). tls-native uses
+# the system certificate store, so a TLS-inspecting proxy whose CA is installed
+# there can fetch it. Set ORT_LIB_LOCATION to skip the download (see the README).
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "tls-native"] }
 
 [dev-dependencies]
 hound = "3.5"
