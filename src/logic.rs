@@ -1,7 +1,7 @@
 //! The logic runtime (§11.2): every 10 ms (100 Hz, the control engine's tick)
 //! each enabled graph is evaluated in order. A block that remembers (`edge`,
-//! `latch`) publishes the value it computed last tick, which is what lets a
-//! loop through one be deterministic. Actions run when their input changed,
+//! `latch`, `timer`) publishes the value it computed last tick, which is what
+//! lets a loop through one be deterministic. Actions run when their input changed,
 //! and not at all while the graph is in dry-run.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,7 +132,7 @@ impl Logic {
                 BlockKind::SetMute { .. } | BlockKind::SetFader { .. } => {
                     input(b, b.kind.ports().1.first().copied().unwrap_or("in"), &out)
                 }
-                BlockKind::Edge | BlockKind::Latch => 0.0,
+                BlockKind::Edge | BlockKind::Latch | BlockKind::Timer { .. } => 0.0,
             };
             out.insert(b.id.clone(), v);
         }
@@ -157,6 +157,24 @@ impl Logic {
                         held = 1.0;
                     }
                     held
+                }
+                BlockKind::Timer { ms } => {
+                    let key_in = format!("in:{}", b.id);
+                    let key_left = format!("left:{}", b.id);
+                    let was = memory.get(&key_in).copied().unwrap_or(0.0);
+                    let cur = input(b, "in", &out);
+                    memory.insert(key_in, cur);
+                    let mut left = if on(cur) && !on(was) {
+                        pulse_ticks(*ms)
+                    } else {
+                        memory.get(&key_left).copied().unwrap_or(0.0)
+                    };
+                    let running = left > 0.0;
+                    if left > 0.0 {
+                        left -= 1.0;
+                    }
+                    memory.insert(key_left, left);
+                    f64::from(u8::from(running))
                 }
                 _ => 0.0,
             };
@@ -200,6 +218,16 @@ impl Logic {
 
 fn on(v: f64) -> bool {
     v >= 0.5
+}
+
+/// Ticks of 10 ms a pulse lasts. Rounded up, so it is at least `ms` and at
+/// most one tick longer. Zero stays zero. One day is the longest.
+fn pulse_ticks(ms: f64) -> f64 {
+    if !ms.is_finite() || ms <= 0.0 {
+        0.0
+    } else {
+        (ms / 10.0).ceil().min(8_640_000.0)
+    }
 }
 
 fn muted(mix: &Mix, signal: &str) -> bool {
@@ -475,5 +503,48 @@ mod tests {
         let dark = logic.tick(&readings(&mix, &speech, &level, &off));
         assert_eq!(logic.values["g"]["t"], 0.0);
         assert_eq!(dark[0].mute, Some(false));
+    }
+
+    #[test]
+    fn a_timer_holds_after_its_input_rises_and_a_new_rise_restarts_it() {
+        let mut mix = Mix::default();
+        mix.logic.push(Graph {
+            id: "g".into(),
+            name: "G".into(),
+            description: String::new(),
+            enabled: true,
+            dry_run: true,
+            blocks: vec![
+                block("b", BlockKind::Button),
+                block("t", BlockKind::Timer { ms: 30.0 }),
+            ],
+            wires: vec![wire("b", "t", "in")],
+        });
+        let mut logic = Logic::default();
+        let speech = BTreeMap::new();
+        let level = BTreeMap::new();
+        let on_air = BTreeSet::new();
+        let tick = |logic: &mut Logic, mix: &Mix| {
+            logic.tick(&readings(mix, &speech, &level, &on_air));
+            logic.values["g"]["t"]
+        };
+        assert_eq!(tick(&mut logic, &mix), 0.0);
+        logic.set_button("g", "b", true);
+        assert_eq!(tick(&mut logic, &mix), 1.0);
+        assert_eq!(tick(&mut logic, &mix), 1.0);
+        logic.set_button("g", "b", false);
+        assert_eq!(tick(&mut logic, &mix), 1.0, "the pulse outlasts the input");
+        assert_eq!(tick(&mut logic, &mix), 0.0);
+        logic.set_button("g", "b", true);
+        assert_eq!(tick(&mut logic, &mix), 1.0);
+        logic.set_button("g", "b", false);
+        assert_eq!(tick(&mut logic, &mix), 1.0);
+        logic.set_button("g", "b", true);
+        assert_eq!(tick(&mut logic, &mix), 1.0, "a rise starts the 30 ms again");
+        assert_eq!(tick(&mut logic, &mix), 1.0);
+        assert_eq!(tick(&mut logic, &mix), 1.0);
+        assert_eq!(tick(&mut logic, &mix), 0.0);
+        assert_eq!(pulse_ticks(0.0), 0.0);
+        assert_eq!(pulse_ticks(11.0), 2.0);
     }
 }

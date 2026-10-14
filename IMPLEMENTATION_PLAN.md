@@ -1620,3 +1620,11 @@ A `tally` block takes a TSL tally index (the same number a strip's `tally_index`
 | # | Decision | Reason |
 | --- | --- | --- |
 | D131 | The block is on air only (the left lamp), not preview. The index is 0–65535, stored on the block. | Answer 2: tally on air is the next block. Preview is the right lamp; AFV does not use it either (§10.3). |
+
+### M8a: a timer
+
+A `timer` block is the pulse in §11.1. `out` is 1 for `ms` milliseconds after `in` rises, then 0. The length is rounded up to the 10 ms tick, so it is at least the duration asked and at most one tick longer. A rise while it is still on starts the duration again. It remembers, so a loop may pass through it. Zero stays off. The longest duration is one day.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D132 | The timer is a pulse on the rising edge, not an off-delay and not a clock. `ms` is 0 to 86 400 000, rounded up to ticks of the existing 10 ms evaluation. | Answer 2: a timer is the block after tally. §11.1 lists timer/pulse under logic, and schedules after these blocks. The tick is already 10 ms (D129). |

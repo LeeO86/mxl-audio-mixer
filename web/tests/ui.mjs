@@ -441,9 +441,17 @@ try {
     return b?.index === 5 ? b : null;
   });
   await page.locator('.vue-flow__node[data-id="tally-1"]').getByText("On air: 5").waitFor({ timeout: 5000 });
+  await page.getByLabel("Block type").selectOption("timer");
+  await page.getByLabel("Timer milliseconds").fill("500");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("timer 500 ms", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "timer");
+    return b?.ms === 500 ? b : null;
+  });
+  await page.locator('.vue-flow__node[data-id="timer-1"]').getByText("Timer: 500 ms").waitFor({ timeout: 5000 });
   await api(`/api/v1/logic/${graph.id}`, { method: "DELETE" });
   await api("/api/v1/strips/gtr", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
-  pass("logic: a cable drawn from a constant to set-mute mutes Guitar, and Delete removes it");
+  pass("logic: a cable drawn from a constant to set-mute mutes Guitar, Delete removes it, and on-air and timer blocks take an index and a duration");
 
   for (const tab of ["nmos", "status", "settings"]) {
     await page.goto(`${base}/#${tab}`);

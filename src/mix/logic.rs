@@ -3,8 +3,8 @@
 //!
 //! A value is a number; a boolean is 0 or 1. A wire's two ports must be the
 //! same kind of port (an output into an input) and a port takes one wire.
-//! A loop is allowed only through a block that remembers (`edge`, `latch`):
-//! those publish last tick's value, so the loop is not combinational.
+//! A loop is allowed only through a block that remembers (`edge`, `latch`,
+//! `timer`): those publish last tick's value, so the loop is not combinational.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -79,6 +79,11 @@ pub enum BlockKind {
     Tally {
         index: u16,
     },
+    /// 1 for `ms` milliseconds after `in` rises, rounded up to the 10 ms tick.
+    /// A rise while it is still on starts the duration again.
+    Timer {
+        ms: f64,
+    },
     And,
     Or,
     Not,
@@ -128,7 +133,7 @@ impl BlockKind {
             | Self::Level { .. }
             | Self::Tally { .. } => (&["out"], &[]),
             Self::And | Self::Or | Self::Compare { .. } => (&["out"], &["a", "b"]),
-            Self::Not | Self::Edge => (&["out"], &["in"]),
+            Self::Not | Self::Edge | Self::Timer { .. } => (&["out"], &["in"]),
             Self::Latch => (&["out"], &["set", "reset"]),
             Self::SetMute { .. } => (&[], &["in"]),
             Self::SetFader { .. } => (&[], &["level"]),
@@ -137,7 +142,7 @@ impl BlockKind {
 
     /// Remembers, so a loop through it is not combinational.
     pub fn remembers(&self) -> bool {
-        matches!(self, Self::Edge | Self::Latch)
+        matches!(self, Self::Edge | Self::Latch | Self::Timer { .. })
     }
 
     pub fn signal(&self) -> Option<&str> {
@@ -255,6 +260,14 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
                     ));
                 }
             }
+            if let BlockKind::Timer { ms } = b.kind {
+                if !ms.is_finite() || !(0.0..=86_400_000.0).contains(&ms) {
+                    return Err(format!(
+                        "logic {}: timer {} must be 0 to 86400000 ms",
+                        g.id, b.id
+                    ));
+                }
+            }
         }
         let mut taken = BTreeSet::new();
         for w in &g.wires {
@@ -291,7 +304,7 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
         }
         if combinational_loop(&g.blocks, &g.wires) {
             return Err(format!(
-                "logic {}: a loop needs an edge or a latch in it",
+                "logic {}: a loop needs an edge, a latch or a timer in it",
                 g.id
             ));
         }
@@ -422,5 +435,30 @@ mod tests {
                 to_port: "a".into(),
             });
         }));
+        assert!(bad(&|m| m.logic[0]
+            .blocks
+            .push(block("t", BlockKind::Timer { ms: -1.0 }))));
+        let mut timed = Mix::default();
+        timed.logic.push(graph(
+            vec![
+                block("t", BlockKind::Timer { ms: 10.0 }),
+                block("n", BlockKind::Not),
+            ],
+            vec![
+                Wire {
+                    from_block: "t".into(),
+                    from_port: "out".into(),
+                    to_block: "n".into(),
+                    to_port: "in".into(),
+                },
+                Wire {
+                    from_block: "n".into(),
+                    from_port: "out".into(),
+                    to_block: "t".into(),
+                    to_port: "in".into(),
+                },
+            ],
+        ));
+        assert_eq!(validate(&timed), Ok(()));
     }
 }
