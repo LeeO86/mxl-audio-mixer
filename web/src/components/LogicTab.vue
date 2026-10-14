@@ -26,6 +26,7 @@ const TYPES = [
   ["fader", "Fader"],
   ["vad", "Voice"],
   ["level", "Level"],
+  ["tally", "On air"],
   ["and", "AND"],
   ["or", "OR"],
   ["not", "NOT"],
@@ -49,6 +50,7 @@ const inputsOf = {
 
 const addType = ref("const");
 const addSignal = ref("");
+const addIndex = ref("");
 const wire = ref({ from: "", to: "", port: "in" });
 
 // One change at a time, each read from the server first: two quick adds would
@@ -79,12 +81,15 @@ async function addGraph() {
 function addBlock() {
   const type = addType.value;
   const signal = addSignal.value;
+  const index = Math.round(Number(addIndex.value));
   if (withSignal.includes(type) && !signal) return;
+  if (type === "tally" && (!Number.isInteger(index) || index < 0 || index > 65535)) return;
   change((g) => {
     const ids = new Set(g.blocks.map((b) => b.id));
     const id = [...Array(100)].map((_, i) => `${type}-${i + 1}`).find((x) => !ids.has(x));
     const block = { id, type, x: 40 + g.blocks.length * 220, y: 80 };
     if (withSignal.includes(type)) block.signal = signal;
+    if (type === "tally") block.index = index;
     if (type === "const") block.value = 0;
     if (type === "compare") block.op = "gt";
     return { blocks: [...g.blocks, block] };
@@ -100,6 +105,12 @@ function removeBlock(id) {
 
 function setConst(b, value) {
   change((g) => ({ blocks: g.blocks.map((x) => (x.id === b.id ? { ...x, value: Number(value) } : x)) }));
+}
+
+function setIndex(b, index) {
+  const n = Math.round(Number(index));
+  if (!Number.isInteger(n) || n < 0 || n > 65535) return;
+  change((g) => ({ blocks: g.blocks.map((x) => (x.id === b.id ? { ...x, index: n } : x)) }));
 }
 
 function patch(body) {
@@ -149,6 +160,7 @@ function shown(b) {
 
 function labelOf(b) {
   const type = TYPES.find((t) => t[0] === b.type)?.[1] || b.type;
+  if (b.type === "tally") return `${type}: ${b.index}`;
   const who = b.signal ? signals.value.find((s) => s.id === b.signal)?.name || b.signal : "";
   return who ? `${type}: ${who}` : type;
 }
@@ -282,6 +294,9 @@ onUnmounted(() => clearInterval(timer));
               <template v-if="b.type === 'const'">
                 <input type="number" :value="b.value" :aria-label="`${b.id} value`" style="width: 5rem" @change="setConst(b, $event.target.value)" />
               </template>
+              <template v-else-if="b.type === 'tally'">
+                <input type="number" min="0" max="65535" :value="b.index" :aria-label="`${b.id} index`" style="width: 5rem" @change="setIndex(b, $event.target.value)" />
+              </template>
               <template v-else-if="b.signal">{{ signals.find((s) => s.id === b.signal)?.name || b.signal }}</template>
               <button v-else-if="b.type === 'button'" class="btn small" :class="{ primary: buttons.includes(b.id) }" :aria-pressed="buttons.includes(b.id)" @click="press(b, !buttons.includes(b.id))">
                 {{ buttons.includes(b.id) ? "Pressed" : "Press" }}
@@ -301,6 +316,7 @@ onUnmounted(() => clearInterval(timer));
           <option value="">signal…</option>
           <option v-for="s in signals" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
+        <input v-if="addType === 'tally'" v-model="addIndex" type="number" min="0" max="65535" placeholder="index" aria-label="Tally index" style="width: 5rem" />
         <button class="btn small" @click="addBlock">+ Block</button>
       </div>
 

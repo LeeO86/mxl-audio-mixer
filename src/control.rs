@@ -151,10 +151,12 @@ impl Control {
                 }
             }
         }
+        let on_air = self.tally.on_air_indexes();
         let actions = self.logic.tick(&crate::logic::Readings {
             mix: &self.mix,
             speech: &speech,
             level_db: &level_db,
+            on_air: &on_air,
         });
         if actions.is_empty() {
             return;

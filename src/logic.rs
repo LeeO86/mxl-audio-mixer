@@ -4,7 +4,7 @@
 //! loop through one be deterministic. Actions run when their input changed,
 //! and not at all while the graph is in dry-run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::mix::logic::{Block, BlockKind, CompareOp, Graph};
 use crate::mix::model::Db;
@@ -15,6 +15,8 @@ pub struct Readings<'a> {
     pub mix: &'a Mix,
     pub speech: &'a BTreeMap<String, bool>,
     pub level_db: &'a BTreeMap<String, f64>,
+    /// Tally indexes whose left lamp is on. Empty before any tally.
+    pub on_air: &'a BTreeSet<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +112,7 @@ impl Logic {
                 BlockKind::Level { signal } => {
                     readings.level_db.get(signal).copied().unwrap_or(-200.0)
                 }
+                BlockKind::Tally { index } => f64::from(u8::from(readings.on_air.contains(index))),
                 BlockKind::And => {
                     f64::from(u8::from(on(input(b, "a", &out)) && on(input(b, "b", &out))))
                 }
@@ -286,11 +289,13 @@ mod tests {
         mix: &'a Mix,
         speech: &'a BTreeMap<String, bool>,
         level: &'a BTreeMap<String, f64>,
+        on_air: &'a BTreeSet<u16>,
     ) -> Readings<'a> {
         Readings {
             mix,
             speech,
             level_db: level,
+            on_air,
         }
     }
 
@@ -323,10 +328,11 @@ mod tests {
         });
         let mut logic = Logic::default();
         let level = BTreeMap::new();
+        let on_air = BTreeSet::new();
         let mut speech = BTreeMap::from([("vox".to_string(), false)]);
         // The first tick applies what the graph says now.
         assert_eq!(
-            logic.tick(&readings(&mix, &speech, &level)),
+            logic.tick(&readings(&mix, &speech, &level, &on_air)),
             vec![Action {
                 signal: "music".into(),
                 mute: Some(false),
@@ -334,19 +340,23 @@ mod tests {
             }]
         );
         assert!(
-            logic.tick(&readings(&mix, &speech, &level)).is_empty(),
+            logic
+                .tick(&readings(&mix, &speech, &level, &on_air))
+                .is_empty(),
             "not again"
         );
         speech.insert("vox".into(), true);
         assert_eq!(
-            logic.tick(&readings(&mix, &speech, &level)),
+            logic.tick(&readings(&mix, &speech, &level, &on_air)),
             vec![Action {
                 signal: "music".into(),
                 mute: Some(true),
                 fader_db: None
             }]
         );
-        assert!(logic.tick(&readings(&mix, &speech, &level)).is_empty());
+        assert!(logic
+            .tick(&readings(&mix, &speech, &level, &on_air))
+            .is_empty());
     }
 
     #[test]
@@ -368,16 +378,17 @@ mod tests {
         let mut logic = Logic::default();
         let speech = BTreeMap::new();
         let level = BTreeMap::new();
-        logic.tick(&readings(&mix, &speech, &level));
+        let on_air = BTreeSet::new();
+        logic.tick(&readings(&mix, &speech, &level, &on_air));
         logic.set_button("g", "b", true);
-        logic.tick(&readings(&mix, &speech, &level));
+        logic.tick(&readings(&mix, &speech, &level, &on_air));
         // The edge publishes one tick later; the latch takes it the tick after.
         assert_eq!(logic.values["g"]["e"], 1.0);
-        logic.tick(&readings(&mix, &speech, &level));
+        logic.tick(&readings(&mix, &speech, &level, &on_air));
         assert_eq!(logic.values["g"]["l"], 1.0);
         assert_eq!(logic.values["g"]["e"], 0.0, "the edge lasts one tick");
         logic.set_button("g", "b", false);
-        logic.tick(&readings(&mix, &speech, &level));
+        logic.tick(&readings(&mix, &speech, &level, &on_air));
         assert_eq!(logic.values["g"]["l"], 1.0, "the latch holds");
     }
 
@@ -419,10 +430,50 @@ mod tests {
         let mut logic = Logic::default();
         let speech = BTreeMap::new();
         let level = BTreeMap::new();
-        let a = logic.tick(&readings(&mix, &speech, &level));
+        let on_air = BTreeSet::new();
+        let a = logic.tick(&readings(&mix, &speech, &level, &on_air));
         assert_eq!(logic.values["g"]["cmp"], 1.0);
         assert_eq!(a[0].fader_db, Some(1.0));
         assert_eq!(clamp_fader(f64::NEG_INFINITY).0, f64::NEG_INFINITY);
         assert_eq!(clamp_fader(30.0).0, crate::mix::model::MAX_FADER_DB);
+    }
+
+    #[test]
+    fn tally_on_air_mutes_when_the_lamp_is_lit() {
+        let mut mix = Mix::default();
+        mix.strips.push(strip("music", Format::Mono));
+        mix.logic.push(Graph {
+            id: "g".into(),
+            name: "G".into(),
+            description: String::new(),
+            enabled: true,
+            dry_run: false,
+            blocks: vec![
+                block("t", BlockKind::Tally { index: 5 }),
+                block(
+                    "m",
+                    BlockKind::SetMute {
+                        signal: "music".into(),
+                    },
+                ),
+            ],
+            wires: vec![wire("t", "m", "in")],
+        });
+        let mut logic = Logic::default();
+        let speech = BTreeMap::new();
+        let level = BTreeMap::new();
+        let off = BTreeSet::new();
+        let on = BTreeSet::from([5]);
+        assert_eq!(logic.values.get("g"), None);
+        let first = logic.tick(&readings(&mix, &speech, &level, &off));
+        assert_eq!(logic.values["g"]["t"], 0.0);
+        assert_eq!(first[0].mute, Some(false));
+        let lit = logic.tick(&readings(&mix, &speech, &level, &on));
+        assert_eq!(logic.values["g"]["t"], 1.0);
+        assert_eq!(lit[0].mute, Some(true));
+        assert!(logic.tick(&readings(&mix, &speech, &level, &on)).is_empty());
+        let dark = logic.tick(&readings(&mix, &speech, &level, &off));
+        assert_eq!(logic.values["g"]["t"], 0.0);
+        assert_eq!(dark[0].mute, Some(false));
     }
 }

@@ -6,7 +6,7 @@
 //! Lamp values: 0 off, 1 red, 2 green, 3 amber. LH (left) lit is on air, RH
 //! (right) lit is on preview.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -218,6 +218,15 @@ impl Tally {
 
     pub fn on_air(&self, index: u16) -> bool {
         self.lamps.get(&index).is_some_and(|(l, _)| l.lh != 0)
+    }
+
+    /// Tally indexes whose left lamp is lit.
+    pub fn on_air_indexes(&self) -> BTreeSet<u16> {
+        self.lamps
+            .iter()
+            .filter(|(_, (l, _))| l.lh != 0)
+            .map(|(i, _)| *i)
+            .collect()
     }
 
     pub fn preview(&self, index: u16) -> bool {

@@ -433,6 +433,14 @@ try {
   await page.mouse.click(cableBox.x + cableBox.width / 2, cableBox.y + cableBox.height / 2);
   await page.keyboard.press("Delete");
   await until("the cable removed", async () => (await api(`/api/v1/logic/${graph.id}`)).wires.length === 0);
+  await page.getByLabel("Block type").selectOption("tally");
+  await page.getByLabel("Tally index").fill("5");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("tally index 5", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "tally");
+    return b?.index === 5 ? b : null;
+  });
+  await page.locator('.vue-flow__node[data-id="tally-1"]').getByText("On air: 5").waitFor({ timeout: 5000 });
   await api(`/api/v1/logic/${graph.id}`, { method: "DELETE" });
   await api("/api/v1/strips/gtr", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
   pass("logic: a cable drawn from a constant to set-mute mutes Guitar, and Delete removes it");

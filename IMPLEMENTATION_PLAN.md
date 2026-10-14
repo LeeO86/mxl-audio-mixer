@@ -1612,3 +1612,11 @@ editor. The cable canvas and the remaining block types follow.
 | 4 | 100 Hz on the existing tick | As implemented. |
 
 The canvas is on the Logic tab (Vue Flow, the blocks' `x` and `y`): draw a cable from an output to an input, Delete removes it, dragging a block remembers where it was put. The list under it edits the same graph.
+
+### M8a: tally on air
+
+A `tally` block takes a TSL tally index (the same number a strip's `tally_index` uses, after `TSL_MAP`). Its output is 1 while that index's left lamp is lit, and 0 before any tally and while the lamp is off. The last lamp stays when packets stop, as audio-follows-video does (D58).
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D131 | The block is on air only (the left lamp), not preview. The index is 0–65535, stored on the block. | Answer 2: tally on air is the next block. Preview is the right lamp; AFV does not use it either (§10.3). |

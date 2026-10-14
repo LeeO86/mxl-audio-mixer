@@ -75,6 +75,10 @@ pub enum BlockKind {
     Level {
         signal: String,
     },
+    /// 1 while TSL tally `index` is on air (the left lamp).
+    Tally {
+        index: u16,
+    },
     And,
     Or,
     Not,
@@ -121,7 +125,8 @@ impl BlockKind {
             | Self::Mute { .. }
             | Self::Fader { .. }
             | Self::Vad { .. }
-            | Self::Level { .. } => (&["out"], &[]),
+            | Self::Level { .. }
+            | Self::Tally { .. } => (&["out"], &[]),
             Self::And | Self::Or | Self::Compare { .. } => (&["out"], &["a", "b"]),
             Self::Not | Self::Edge => (&["out"], &["in"]),
             Self::Latch => (&["out"], &["set", "reset"]),
