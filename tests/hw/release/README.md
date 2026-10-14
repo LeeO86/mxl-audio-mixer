@@ -40,6 +40,6 @@ the deadline misses.
 `amwa` needs internet access (nmos-testing clones the AMWA specification
 repositories), the registry's ten ports from `AMWA_REGISTRY_PORT` (default
 8010; with a registry already on them, set another base), and the node's ports
-`AMWA_NODE_PORT` (3312) and `AMWA_WEB_PORT` (8160), which it checks are free. In a container, set
+`AMWA_NODE_PORT` (3342) and `AMWA_WEB_PORT` (8190), which it checks are free. In a container, set
 `NODE_NAME` to the node's name for `env` (else the container's host name is
 reported).

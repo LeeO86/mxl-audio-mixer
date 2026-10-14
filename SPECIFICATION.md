@@ -616,7 +616,7 @@ labels, real-time) in **Appendix B**. These appendices are the contract. In part
 - G3 NMOS identity (`NMOS_SEED` UUIDv5 for all resources, `NMOS_LABEL`, `NMOS_TAGS`,
   group hints);
 - G4 static registry, `NMOS_DNS_SD=false` by default; G5 `NMOS_HOST_ADDRESS` (pod IP);
-- G6 ports by env: `WEB_PORT` default **8160**, `NMOS_PORT` default **3312** (+1 for
+- G6 ports by env: `WEB_PORT` default **8190**, `NMOS_PORT` default **3342** (+1 for
   the events WebSocket if used). The built-in MediaMTX (only when `PREVIEW_PUBLISH_URL`
   is unset, Appendix B.1) uses its own port block:
   - `MEDIAMTX_RTSP_PORT` 8954 (127.0.0.1);

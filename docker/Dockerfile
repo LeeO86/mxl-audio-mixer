@@ -71,7 +71,7 @@ RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found") \
     && ldd /usr/local/bin/mxl-audio-mixer | (! grep -q "not found")
 USER 1000
 # Web/API, NMOS, the built-in MediaMTX's WHEP (TCP) and ICE (UDP).
-EXPOSE 8160 3312 8599 8199/udp
+EXPOSE 8190 3342 8599 8199/udp
 LABEL org.opencontainers.image.source="https://github.com/LeeO86/mxl-audio-mixer" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \

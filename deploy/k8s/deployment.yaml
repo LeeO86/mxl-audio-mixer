@@ -35,9 +35,9 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - name: web
-              containerPort: 8160
+              containerPort: 8190
             - name: nmos
-              containerPort: 3312
+              containerPort: 3342
             - name: tsl-udp
               containerPort: 8910
               protocol: UDP
@@ -71,9 +71,9 @@ spec:
             - name: NMOS_DNS_SD
               value: "false"
             - name: WEB_PORT
-              value: "8160"
+              value: "8190"
             - name: NMOS_PORT
-              value: "3312"
+              value: "3342"
             - name: MXL_DOMAIN_SCAN_PATH
               value: /Volumes/mxl
             - name: MXL_OUTPUT_DOMAIN_DIR
@@ -162,10 +162,10 @@ spec:
     app: mxl-audio-mixer
   ports:
     - name: web
-      port: 8160
+      port: 8190
       targetPort: web
     - name: nmos
-      port: 3312
+      port: 3342
       targetPort: nmos
     - name: tsl-udp
       port: 8910

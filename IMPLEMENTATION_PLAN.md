@@ -1577,3 +1577,14 @@ the release notes when it is in. Then M7a (PR 17) goes into `main`, then M7b.
 `sha256:74753add488e4002a236555f15a943cd75d98bc50d3211b6c1f87241c3bf3f6f`
 (labels checked: version 1.0.0, revision `14e9487`, MIT, uid 1000), the GitHub
 release with `docs/release-notes/1.0.0.md`. Open: the lab's run on `81fb8a2`.
+
+### Ports (maintainers, 2026-10-14)
+
+`WEB_PORT` 8160 and `NMOS_PORT` 3312 are another function's ports on the same
+nodes. There is no Compose file in this repo (the spec's Compose demo is still
+listed under deployment, not written); the Kubernetes example and the image
+`EXPOSE` are the examples that exist.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D127 | Defaults become `WEB_PORT` 8190 and `NMOS_PORT` 3342 (events WebSocket 3343). Called out as a breaking default in the 1.1.0 notes, the changelog, the README and the specification. The §16 load keeps 8180/3332. | Both are free on the target nodes, and they do not meet the load test's ports. 1.0.0's numbers stay in that release's notes. |

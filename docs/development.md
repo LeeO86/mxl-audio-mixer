@@ -84,11 +84,11 @@ note), so build the UI before `cargo build`:
 ```sh
 cd web && npm ci && npm run build && cd -
 cargo build --release --bins
-scripts/demo.sh                 # tone flow, mixer on :8160 and a demo show
+scripts/demo.sh                 # tone flow, mixer on :8190 and a demo show
 ```
 
 While working on the UI, `cd web && npx vite` serves it with hot reload on
-http://127.0.0.1:5175/ and proxies `/api` (WebSocket included) to the mixer on 8160.
+http://127.0.0.1:5175/ and proxies `/api` (WebSocket included) to the mixer on 8190.
 
 `tests/integration/ui.sh` runs `web/tests/ui.mjs` in headless Chrome
 (`playwright-core`, no browser download; `CHROME`, default `/usr/bin/google-chrome`)
