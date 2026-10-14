@@ -24,6 +24,8 @@ pub struct Action {
     pub signal: String,
     pub mute: Option<bool>,
     pub fader_db: Option<f64>,
+    /// Recall this snapshot. Set on a rising edge only.
+    pub recall: Option<String>,
 }
 
 #[derive(Default)]
@@ -113,6 +115,24 @@ impl Logic {
                     readings.level_db.get(signal).copied().unwrap_or(-200.0)
                 }
                 BlockKind::Tally { index } => f64::from(u8::from(readings.on_air.contains(index))),
+                BlockKind::Above {
+                    signal,
+                    threshold_db,
+                    hysteresis_db,
+                } => {
+                    let level = readings.level_db.get(signal).copied().unwrap_or(-200.0);
+                    let key = format!("above:{}", b.id);
+                    let mut held = memory.get(&key).copied().unwrap_or(0.0);
+                    if held < 0.5 {
+                        if level >= *threshold_db {
+                            held = 1.0;
+                        }
+                    } else if level < *threshold_db - *hysteresis_db {
+                        held = 0.0;
+                    }
+                    memory.insert(key, held);
+                    held
+                }
                 BlockKind::And => {
                     f64::from(u8::from(on(input(b, "a", &out)) && on(input(b, "b", &out))))
                 }
@@ -129,7 +149,9 @@ impl Logic {
                     };
                     f64::from(u8::from(r))
                 }
-                BlockKind::SetMute { .. } | BlockKind::SetFader { .. } => {
+                BlockKind::SetMute { .. }
+                | BlockKind::SetFader { .. }
+                | BlockKind::Recall { .. } => {
                     input(b, b.kind.ports().1.first().copied().unwrap_or("in"), &out)
                 }
                 BlockKind::Edge | BlockKind::Latch | BlockKind::Timer { .. } => 0.0,
@@ -197,6 +219,7 @@ impl Logic {
                             signal: signal.clone(),
                             mute: Some(on(v)),
                             fader_db: None,
+                            recall: None,
                         });
                     }
                     BlockKind::SetFader { signal } if last.is_none_or(|p| (p - v).abs() > 0.05) => {
@@ -205,7 +228,24 @@ impl Logic {
                             signal: signal.clone(),
                             mute: None,
                             fader_db: Some(v),
+                            recall: None,
                         });
+                    }
+                    BlockKind::Recall { snapshot } => {
+                        let was = last.unwrap_or(v);
+                        if last.is_none() {
+                            applied.insert(b.id.clone(), v);
+                        } else if on(v) && !on(was) {
+                            applied.insert(b.id.clone(), v);
+                            actions.push(Action {
+                                signal: String::new(),
+                                mute: None,
+                                fader_db: None,
+                                recall: Some(snapshot.clone()),
+                            });
+                        } else if on(v) != on(was) {
+                            applied.insert(b.id.clone(), v);
+                        }
                     }
                     _ => {}
                 }
@@ -364,7 +404,8 @@ mod tests {
             vec![Action {
                 signal: "music".into(),
                 mute: Some(false),
-                fader_db: None
+                fader_db: None,
+                recall: None
             }]
         );
         assert!(
@@ -379,7 +420,8 @@ mod tests {
             vec![Action {
                 signal: "music".into(),
                 mute: Some(true),
-                fader_db: None
+                fader_db: None,
+                recall: None
             }]
         );
         assert!(logic
@@ -546,5 +588,81 @@ mod tests {
         assert_eq!(tick(&mut logic, &mix), 0.0);
         assert_eq!(pulse_ticks(0.0), 0.0);
         assert_eq!(pulse_ticks(11.0), 2.0);
+    }
+
+    #[test]
+    fn above_holds_until_the_level_falls_by_the_hysteresis() {
+        let mut mix = Mix::default();
+        mix.strips.push(strip("vox", Format::Mono));
+        mix.logic.push(Graph {
+            id: "g".into(),
+            name: "G".into(),
+            description: String::new(),
+            enabled: true,
+            dry_run: true,
+            blocks: vec![block(
+                "a",
+                BlockKind::Above {
+                    signal: "vox".into(),
+                    threshold_db: -40.0,
+                    hysteresis_db: 6.0,
+                },
+            )],
+            wires: vec![],
+        });
+        let mut logic = Logic::default();
+        let speech = BTreeMap::new();
+        let on_air = BTreeSet::new();
+        let tick = |logic: &mut Logic, db: f64| {
+            let level = BTreeMap::from([("vox".into(), db)]);
+            logic.tick(&readings(&mix, &speech, &level, &on_air));
+            logic.values["g"]["a"]
+        };
+        assert_eq!(tick(&mut logic, -50.0), 0.0);
+        assert_eq!(tick(&mut logic, -40.0), 1.0);
+        assert_eq!(tick(&mut logic, -45.0), 1.0, "still inside the hysteresis");
+        assert_eq!(tick(&mut logic, -46.0), 1.0, "the floor still holds");
+        assert_eq!(tick(&mut logic, -47.0), 0.0);
+        assert_eq!(tick(&mut logic, -40.0), 1.0);
+    }
+
+    #[test]
+    fn a_recall_fires_when_its_input_rises() {
+        let mut mix = Mix::default();
+        mix.logic.push(Graph {
+            id: "g".into(),
+            name: "G".into(),
+            description: String::new(),
+            enabled: true,
+            dry_run: false,
+            blocks: vec![
+                block("b", BlockKind::Button),
+                block(
+                    "r",
+                    BlockKind::Recall {
+                        snapshot: "show".into(),
+                    },
+                ),
+            ],
+            wires: vec![wire("b", "r", "in")],
+        });
+        let mut logic = Logic::default();
+        let speech = BTreeMap::new();
+        let level = BTreeMap::new();
+        let on_air = BTreeSet::new();
+        let tick = |logic: &mut Logic| logic.tick(&readings(&mix, &speech, &level, &on_air));
+        assert!(
+            tick(&mut logic).is_empty(),
+            "off at the start does not recall"
+        );
+        logic.set_button("g", "b", true);
+        let rose = tick(&mut logic);
+        assert_eq!(rose.len(), 1);
+        assert_eq!(rose[0].recall.as_deref(), Some("show"));
+        assert!(tick(&mut logic).is_empty(), "holding does not recall again");
+        logic.set_button("g", "b", false);
+        assert!(tick(&mut logic).is_empty());
+        logic.set_button("g", "b", true);
+        assert_eq!(tick(&mut logic)[0].recall.as_deref(), Some("show"));
     }
 }

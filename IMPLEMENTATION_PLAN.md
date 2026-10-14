@@ -1628,3 +1628,14 @@ A `timer` block is the pulse in §11.1. `out` is 1 for `ms` milliseconds after `
 | # | Decision | Reason |
 | --- | --- | --- |
 | D132 | The timer is a pulse on the rising edge, not an off-delay and not a clock. `ms` is 0 to 86 400 000, rounded up to ticks of the existing 10 ms evaluation. | Answer 2: a timer is the block after tally. §11.1 lists timer/pulse under logic, and schedules after these blocks. The tick is already 10 ms (D129). |
+
+### M8a: meter hysteresis and snapshot recall
+
+An `above` block reads a signal's peak (dBFS). Its output becomes 1 when the peak reaches `threshold_db` (−120 to 20) and stays 1 until the peak falls below that by `hysteresis_db` (0 to 60). Silence, and a signal with no meter yet, read as −200 dBFS, so the block stays off.
+
+A `recall` block names a snapshot. It runs that snapshot when its input rises. The first tick records the input and does not recall, so a graph that loads with the input already on does not recall by itself. The ramp is the same 10 ms as the other logic actions. Recall-safe signals stay as they are. A missing snapshot is left alone and logged. If the recall rewires the plan, the nodes fade out and the plan swaps on a later tick.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D133 | Hysteresis is a threshold and a gap below it, on the signal's peak, in its own block. It turns on at the threshold and off `hysteresis_db` lower. | Answer 2: compare against a meter with hysteresis. A plain compare chatters on a noisy meter. The raw `level` block stays, for a number. |
+| D134 | Recall fires on a rising edge only, after the first tick has been seen. It recalls the whole snapshot (recall-safe signals excepted) over the 10 ms logic ramp. | Answer 2: snapshot recall is the action. Recalling because a constant was already 1 when the mixer started would change a show unasked. |

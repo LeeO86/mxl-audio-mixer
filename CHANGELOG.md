@@ -7,11 +7,14 @@ Milestone 8 (§19: the logic editor).
 ### Milestone 8 (part 1): logic graphs
 
 - Logic graphs in the show (§11): blocks (`const`, `button`, a signal's mute,
-  fader, voice and level, tally on air, a timer, `and`, `or`, `not`, `compare`,
+  fader, voice and level, tally on air, a timer, a meter with hysteresis,
+  snapshot recall, `and`, `or`, `not`, `compare`,
   `edge`, `latch`, `set-mute`, `set-fader`) wired port to port. A loop is allowed
   only through an `edge`, a `latch` or a `timer`. A timer stays on for its
   duration after its input rises (rounded up to the 10 ms tick); a new rise
-  starts it again. Evaluated at 100 Hz; actions run when their input
+  starts it again. Above turns on when a signal's peak reaches a threshold and
+  stays on until the peak falls by the hysteresis. Recall runs a snapshot when
+  its input rises (not when the graph first loads). Evaluated at 100 Hz; actions run when their input
   changes; `dry_run` computes without acting. `/api/v1/logic`. The Logic tab
   draws the cables and lists the same graph under them.
 

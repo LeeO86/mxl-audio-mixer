@@ -28,6 +28,8 @@ const TYPES = [
   ["level", "Level"],
   ["tally", "On air"],
   ["timer", "Timer"],
+  ["above", "Above"],
+  ["recall", "Recall"],
   ["and", "AND"],
   ["or", "OR"],
   ["not", "NOT"],
@@ -37,7 +39,8 @@ const TYPES = [
   ["set-mute", "Set mute"],
   ["set-fader", "Set fader"],
 ];
-const withSignal = ["mute", "fader", "vad", "level", "set-mute", "set-fader"];
+const withSignal = ["mute", "fader", "vad", "level", "above", "set-mute", "set-fader"];
+const sinks = ["set-mute", "set-fader", "recall"];
 const inputsOf = {
   and: ["a", "b"],
   or: ["a", "b"],
@@ -46,6 +49,7 @@ const inputsOf = {
   edge: ["in"],
   latch: ["set", "reset"],
   timer: ["in"],
+  recall: ["in"],
   "set-mute": ["in"],
   "set-fader": ["level"],
 };
@@ -54,6 +58,10 @@ const addType = ref("const");
 const addSignal = ref("");
 const addIndex = ref("");
 const addMs = ref("");
+const addThreshold = ref("");
+const addHysteresis = ref("");
+const addSnapshot = ref("");
+const snapshots = computed(() => live.mix?.snapshots || []);
 const wire = ref({ from: "", to: "", port: "in" });
 
 // One change at a time, each read from the server first: two quick adds would
@@ -86,9 +94,13 @@ function addBlock() {
   const signal = addSignal.value;
   const index = Math.round(Number(addIndex.value));
   const ms = Number(addMs.value);
+  const threshold = Number(addThreshold.value);
+  const hysteresis = Number(addHysteresis.value);
   if (withSignal.includes(type) && !signal) return;
   if (type === "tally" && (!Number.isInteger(index) || index < 0 || index > 65535)) return;
   if (type === "timer" && !(Number.isFinite(ms) && ms >= 0 && ms <= 86400000)) return;
+  if (type === "above" && !(Number.isFinite(threshold) && threshold >= -120 && threshold <= 20 && Number.isFinite(hysteresis) && hysteresis >= 0 && hysteresis <= 60)) return;
+  if (type === "recall" && !addSnapshot.value) return;
   change((g) => {
     const ids = new Set(g.blocks.map((b) => b.id));
     const id = [...Array(100)].map((_, i) => `${type}-${i + 1}`).find((x) => !ids.has(x));
@@ -96,6 +108,11 @@ function addBlock() {
     if (withSignal.includes(type)) block.signal = signal;
     if (type === "tally") block.index = index;
     if (type === "timer") block.ms = ms;
+    if (type === "above") {
+      block.threshold_db = threshold;
+      block.hysteresis_db = hysteresis;
+    }
+    if (type === "recall") block.snapshot = addSnapshot.value;
     if (type === "const") block.value = 0;
     if (type === "compare") block.op = "gt";
     return { blocks: [...g.blocks, block] };
@@ -123,6 +140,18 @@ function setMs(b, ms) {
   const n = Number(ms);
   if (!(Number.isFinite(n) && n >= 0 && n <= 86400000)) return;
   change((g) => ({ blocks: g.blocks.map((x) => (x.id === b.id ? { ...x, ms: n } : x)) }));
+}
+
+function setAbove(b, field, value) {
+  const n = Number(value);
+  const ok = field === "threshold_db" ? Number.isFinite(n) && n >= -120 && n <= 20 : Number.isFinite(n) && n >= 0 && n <= 60;
+  if (!ok) return;
+  change((g) => ({ blocks: g.blocks.map((x) => (x.id === b.id ? { ...x, [field]: n } : x)) }));
+}
+
+function setSnapshot(b, snapshot) {
+  if (!snapshot) return;
+  change((g) => ({ blocks: g.blocks.map((x) => (x.id === b.id ? { ...x, snapshot } : x)) }));
 }
 
 function patch(body) {
@@ -174,6 +203,7 @@ function labelOf(b) {
   const type = TYPES.find((t) => t[0] === b.type)?.[1] || b.type;
   if (b.type === "tally") return `${type}: ${b.index}`;
   if (b.type === "timer") return `${type}: ${b.ms} ms`;
+  if (b.type === "recall") return `${type}: ${snapshots.value.find((s) => s.id === b.snapshot)?.name || b.snapshot}`;
   const who = b.signal ? signals.value.find((s) => s.id === b.signal)?.name || b.signal : "";
   return who ? `${type}: ${who}` : type;
 }
@@ -194,7 +224,7 @@ function rebuild() {
       label: labelOf(b),
       note: b.id,
       inputs: inputsOf[b.type] || [],
-      output: !["set-mute", "set-fader"].includes(b.type),
+      output: !sinks.includes(b.type),
       live: shown(b),
     },
   }));
@@ -256,7 +286,7 @@ onUnmounted(() => clearInterval(timer));
 <template>
   <div class="panel">
     <h3>Logic</h3>
-    <p class="muted">Blocks run 100 times a second. A loop is allowed when an edge, a latch or a timer is in it, because those remember. Actions run when their input changes. A timer stays on for its duration after its input rises, and a new rise starts that duration again.</p>
+    <p class="muted">Blocks run 100 times a second. A loop is allowed when an edge, a latch or a timer is in it, because those remember. Actions run when their input changes. A timer stays on for its duration after its input rises. Above stays on until the level falls by its hysteresis. Recall runs a snapshot when its input rises.</p>
     <div class="row">
       <select :value="graph?.id || ''" aria-label="Logic graph" @change="selected = $event.target.value">
         <option value="">graph…</option>
@@ -313,6 +343,16 @@ onUnmounted(() => clearInterval(timer));
               <template v-else-if="b.type === 'timer'">
                 <input type="number" min="0" max="86400000" :value="b.ms" :aria-label="`${b.id} milliseconds`" style="width: 6rem" @change="setMs(b, $event.target.value)" />
               </template>
+              <template v-else-if="b.type === 'above'">
+                {{ signals.find((s) => s.id === b.signal)?.name || b.signal }}
+                <input type="number" min="-120" max="20" :value="b.threshold_db" :aria-label="`${b.id} threshold`" style="width: 5rem" @change="setAbove(b, 'threshold_db', $event.target.value)" />
+                <input type="number" min="0" max="60" :value="b.hysteresis_db" :aria-label="`${b.id} hysteresis`" style="width: 4rem" @change="setAbove(b, 'hysteresis_db', $event.target.value)" />
+              </template>
+              <template v-else-if="b.type === 'recall'">
+                <select :value="b.snapshot" :aria-label="`${b.id} snapshot`" @change="setSnapshot(b, $event.target.value)">
+                  <option v-for="s in snapshots" :key="s.id" :value="s.id">{{ s.name }}</option>
+                </select>
+              </template>
               <template v-else-if="b.signal">{{ signals.find((s) => s.id === b.signal)?.name || b.signal }}</template>
               <button v-else-if="b.type === 'button'" class="btn small" :class="{ primary: buttons.includes(b.id) }" :aria-pressed="buttons.includes(b.id)" @click="press(b, !buttons.includes(b.id))">
                 {{ buttons.includes(b.id) ? "Pressed" : "Press" }}
@@ -334,6 +374,14 @@ onUnmounted(() => clearInterval(timer));
         </select>
         <input v-if="addType === 'tally'" v-model="addIndex" type="number" min="0" max="65535" placeholder="index" aria-label="Tally index" style="width: 5rem" />
         <input v-if="addType === 'timer'" v-model="addMs" type="number" min="0" max="86400000" placeholder="ms" aria-label="Timer milliseconds" style="width: 6rem" />
+        <template v-if="addType === 'above'">
+          <input v-model="addThreshold" type="number" min="-120" max="20" placeholder="dB" aria-label="Threshold dB" style="width: 5rem" />
+          <input v-model="addHysteresis" type="number" min="0" max="60" placeholder="hyst" aria-label="Hysteresis dB" style="width: 4rem" />
+        </template>
+        <select v-if="addType === 'recall'" v-model="addSnapshot" aria-label="Snapshot">
+          <option value="">snapshot…</option>
+          <option v-for="s in snapshots" :key="s.id" :value="s.id">{{ s.name }}</option>
+        </select>
         <button class="btn small" @click="addBlock">+ Block</button>
       </div>
 
@@ -345,7 +393,7 @@ onUnmounted(() => clearInterval(timer));
       <div class="row">
         <select v-model="wire.from" aria-label="Wire from">
           <option value="">from…</option>
-          <option v-for="b in graph.blocks.filter((b) => !['set-mute', 'set-fader'].includes(b.type))" :key="b.id" :value="b.id">{{ b.id }}</option>
+          <option v-for="b in graph.blocks.filter((b) => !sinks.includes(b.type))" :key="b.id" :value="b.id">{{ b.id }}</option>
         </select>
         <select v-model="wire.to" aria-label="Wire to" @change="wire.port = portsOf(wire.to)[0] || ''">
           <option value="">to…</option>

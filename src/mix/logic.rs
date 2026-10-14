@@ -84,6 +84,17 @@ pub enum BlockKind {
     Timer {
         ms: f64,
     },
+    /// 1 once the signal's peak reaches `threshold_db`, until it falls below
+    /// that by `hysteresis_db`.
+    Above {
+        signal: String,
+        threshold_db: f64,
+        hysteresis_db: f64,
+    },
+    /// Recalls snapshot `snapshot` when `in` rises.
+    Recall {
+        snapshot: String,
+    },
     And,
     Or,
     Not,
@@ -131,11 +142,12 @@ impl BlockKind {
             | Self::Fader { .. }
             | Self::Vad { .. }
             | Self::Level { .. }
-            | Self::Tally { .. } => (&["out"], &[]),
+            | Self::Tally { .. }
+            | Self::Above { .. } => (&["out"], &[]),
             Self::And | Self::Or | Self::Compare { .. } => (&["out"], &["a", "b"]),
             Self::Not | Self::Edge | Self::Timer { .. } => (&["out"], &["in"]),
             Self::Latch => (&["out"], &["set", "reset"]),
-            Self::SetMute { .. } => (&[], &["in"]),
+            Self::SetMute { .. } | Self::Recall { .. } => (&[], &["in"]),
             Self::SetFader { .. } => (&[], &["level"]),
         }
     }
@@ -152,7 +164,8 @@ impl BlockKind {
             | Self::Vad { signal }
             | Self::Level { signal }
             | Self::SetMute { signal }
-            | Self::SetFader { signal } => Some(signal),
+            | Self::SetFader { signal }
+            | Self::Above { signal, .. } => Some(signal),
             _ => None,
         }
     }
@@ -267,6 +280,28 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
                         g.id, b.id
                     ));
                 }
+            }
+            if let BlockKind::Above {
+                threshold_db,
+                hysteresis_db,
+                ..
+            } = b.kind
+            {
+                if !threshold_db.is_finite() || !(-120.0..=20.0).contains(&threshold_db) {
+                    return Err(format!(
+                        "logic {}: above {} threshold must be -120 to 20 dB",
+                        g.id, b.id
+                    ));
+                }
+                if !hysteresis_db.is_finite() || !(0.0..=60.0).contains(&hysteresis_db) {
+                    return Err(format!(
+                        "logic {}: above {} hysteresis must be 0 to 60 dB",
+                        g.id, b.id
+                    ));
+                }
+            }
+            if let BlockKind::Recall { snapshot } = &b.kind {
+                check_id(&format!("logic {} snapshot", g.id), snapshot)?;
             }
         }
         let mut taken = BTreeSet::new();
@@ -438,6 +473,24 @@ mod tests {
         assert!(bad(&|m| m.logic[0]
             .blocks
             .push(block("t", BlockKind::Timer { ms: -1.0 }))));
+        assert!(bad(&|m| {
+            m.logic[0].blocks.push(block(
+                "a",
+                BlockKind::Above {
+                    signal: "vox".into(),
+                    threshold_db: 40.0,
+                    hysteresis_db: 6.0,
+                },
+            ));
+        }));
+        assert!(bad(&|m| {
+            m.logic[0].blocks.push(block(
+                "r",
+                BlockKind::Recall {
+                    snapshot: "Show".into(),
+                },
+            ));
+        }));
         let mut timed = Mix::default();
         timed.logic.push(graph(
             vec![

@@ -449,7 +449,26 @@ try {
     return b?.ms === 500 ? b : null;
   });
   await page.locator('.vue-flow__node[data-id="timer-1"]').getByText("Timer: 500 ms").waitFor({ timeout: 5000 });
+  await api("/api/v1/snapshots", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "logic-show", name: "Logic" }) });
+  await page.getByLabel("Block type").selectOption("above");
+  await page.getByLabel("Block signal").selectOption("gtr");
+  await page.getByLabel("Threshold dB").fill("-40");
+  await page.getByLabel("Hysteresis dB").fill("6");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("above -40", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "above");
+    return b?.threshold_db === -40 && b?.hysteresis_db === 6 ? b : null;
+  });
+  await page.getByLabel("Block type").selectOption("recall");
+  await until("snapshot in the list", async () => (await page.getByLabel("Snapshot").innerHTML()).includes("logic-show"));
+  await page.getByLabel("Snapshot").selectOption("logic-show");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("recall logic-show", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "recall");
+    return b?.snapshot === "logic-show" ? b : null;
+  });
   await api(`/api/v1/logic/${graph.id}`, { method: "DELETE" });
+  await api("/api/v1/snapshots/logic-show", { method: "DELETE" });
   await api("/api/v1/strips/gtr", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
   pass("logic: a cable drawn from a constant to set-mute mutes Guitar, Delete removes it, and on-air and timer blocks take an index and a duration");
 
