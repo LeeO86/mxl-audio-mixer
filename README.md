@@ -271,6 +271,10 @@ origin. No setting is a secret.
 | `MEDIAMTX_ICE_UDP_PORT` | 8199 | WebRTC ICE UDP port of the built-in MediaMTX. |
 | `MEDIAMTX_BIN` | mediamtx | The built-in MediaMTX executable (the image has it). |
 | `MIXER_MAX_WEB_MONITORS` | 8 | Most personal monitor paths of browser clients at once. |
+| `MIXER_LINK_ROLE` | off | Remote link (§13): `off`, `master` or `slave`. |
+| `MIXER_LINK_TOKEN` | unset | Pre-shared token. Required when the role is not off. `GET /api/v1/config` shows `set`, not the token. |
+| `MIXER_LINK_PEERS` | unset | Master: 1 to 4 `ws://` or `wss://` URLs of slaves, comma-separated. |
+| `MIXER_LINK_TAKEOVER` | allow | Slave: `allow` or `deny` local changes after the master has disconnected. |
 
 Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
 group hint, default `Input <n>`) and `extra_delay` (`"auto"`, the default, or ms).
