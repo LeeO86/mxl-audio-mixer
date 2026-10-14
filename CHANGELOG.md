@@ -14,7 +14,9 @@ Milestone 8 (§19: the logic editor).
   duration after its input rises (rounded up to the 10 ms tick); a new rise
   starts it again. Above turns on when a signal's peak reaches a threshold and
   stays on until the peak falls by the hysteresis. Recall runs a snapshot when
-  its input rises (not when the graph first loads). Evaluated at 100 Hz; actions run when their input
+  its input rises (not when the graph first loads). XOR, a delayed copy, a
+  debounce, a time-of-day schedule and a webhook (POST when the input rises)
+  are blocks too. Evaluated at 100 Hz; actions run when their input
   changes; `dry_run` computes without acting. `/api/v1/logic`. The Logic tab
   draws the cables and lists the same graph under them.
 

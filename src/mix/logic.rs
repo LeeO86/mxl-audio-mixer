@@ -97,6 +97,8 @@ pub enum BlockKind {
     },
     And,
     Or,
+    /// 1 when exactly one of `a` and `b` is on.
+    Xor,
     Not,
     Compare {
         op: CompareOp,
@@ -105,6 +107,24 @@ pub enum BlockKind {
     Edge,
     /// Stays 1 after `set`, 0 after `reset` (reset wins).
     Latch,
+    /// The input, `ms` later (rounded up to the 10 ms tick).
+    Delay {
+        ms: f64,
+    },
+    /// Follows the input only after it has stayed the same for `ms`.
+    Debounce {
+        ms: f64,
+    },
+    /// 1 while the UTC minute of the day is inside `[start_minute, end_minute)`.
+    /// If `end_minute` is earlier, the window crosses midnight.
+    Schedule {
+        start_minute: u16,
+        end_minute: u16,
+    },
+    /// POST `url` when `in` rises. The body is `{"graph", "block", "value"}`.
+    Webhook {
+        url: String,
+    },
     /// Sets the signal's mute from `in`.
     SetMute {
         signal: String,
@@ -143,18 +163,58 @@ impl BlockKind {
             | Self::Vad { .. }
             | Self::Level { .. }
             | Self::Tally { .. }
-            | Self::Above { .. } => (&["out"], &[]),
-            Self::And | Self::Or | Self::Compare { .. } => (&["out"], &["a", "b"]),
-            Self::Not | Self::Edge | Self::Timer { .. } => (&["out"], &["in"]),
+            | Self::Above { .. }
+            | Self::Schedule { .. } => (&["out"], &[]),
+            Self::And | Self::Or | Self::Xor | Self::Compare { .. } => (&["out"], &["a", "b"]),
+            Self::Not
+            | Self::Edge
+            | Self::Timer { .. }
+            | Self::Delay { .. }
+            | Self::Debounce { .. } => (&["out"], &["in"]),
             Self::Latch => (&["out"], &["set", "reset"]),
-            Self::SetMute { .. } | Self::Recall { .. } => (&[], &["in"]),
+            Self::SetMute { .. } | Self::Recall { .. } | Self::Webhook { .. } => (&[], &["in"]),
             Self::SetFader { .. } => (&[], &["level"]),
         }
     }
 
     /// Remembers, so a loop through it is not combinational.
     pub fn remembers(&self) -> bool {
-        matches!(self, Self::Edge | Self::Latch | Self::Timer { .. })
+        matches!(
+            self,
+            Self::Edge
+                | Self::Latch
+                | Self::Timer { .. }
+                | Self::Delay { .. }
+                | Self::Debounce { .. }
+        )
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Const { .. } => "const",
+            Self::Button => "button",
+            Self::Mute { .. } => "mute",
+            Self::Fader { .. } => "fader",
+            Self::Vad { .. } => "vad",
+            Self::Level { .. } => "level",
+            Self::Tally { .. } => "tally",
+            Self::Timer { .. } => "timer",
+            Self::Above { .. } => "above",
+            Self::Recall { .. } => "recall",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Not => "not",
+            Self::Compare { .. } => "compare",
+            Self::Edge => "edge",
+            Self::Latch => "latch",
+            Self::Delay { .. } => "delay",
+            Self::Debounce { .. } => "debounce",
+            Self::Schedule { .. } => "schedule",
+            Self::Webhook { .. } => "webhook",
+            Self::SetMute { .. } => "set-mute",
+            Self::SetFader { .. } => "set-fader",
+        }
     }
 
     pub fn signal(&self) -> Option<&str> {
@@ -273,10 +333,35 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
                     ));
                 }
             }
-            if let BlockKind::Timer { ms } = b.kind {
+            if let BlockKind::Timer { ms } | BlockKind::Delay { ms } | BlockKind::Debounce { ms } =
+                b.kind
+            {
                 if !ms.is_finite() || !(0.0..=86_400_000.0).contains(&ms) {
                     return Err(format!(
-                        "logic {}: timer {} must be 0 to 86400000 ms",
+                        "logic {}: {} {} must be 0 to 86400000 ms",
+                        g.id,
+                        b.kind.type_name(),
+                        b.id
+                    ));
+                }
+            }
+            if let BlockKind::Schedule {
+                start_minute,
+                end_minute,
+            } = b.kind
+            {
+                if start_minute >= 1440 || end_minute >= 1440 {
+                    return Err(format!(
+                        "logic {}: schedule {} minutes must be 0 to 1439",
+                        g.id, b.id
+                    ));
+                }
+            }
+            if let BlockKind::Webhook { url } = &b.kind {
+                if !(url.starts_with("https://") || url.starts_with("http://")) || url.len() > 2000
+                {
+                    return Err(format!(
+                        "logic {}: webhook {} must be an http(s) URL",
                         g.id, b.id
                     ));
                 }
@@ -339,7 +424,7 @@ pub fn validate(mix: &Mix) -> Result<(), String> {
         }
         if combinational_loop(&g.blocks, &g.wires) {
             return Err(format!(
-                "logic {}: a loop needs an edge, a latch or a timer in it",
+                "logic {}: a loop needs an edge, a latch, a timer, a delay or a debounce in it",
                 g.id
             ));
         }

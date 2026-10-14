@@ -135,6 +135,30 @@ impl Control {
         }
     }
 
+    fn minute_of_day() -> u16 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| ((d.as_secs() / 60) % 1440) as u16)
+            .unwrap_or(0)
+    }
+
+    fn post_webhook(url: String) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build();
+                if let Ok(client) = client {
+                    let _ = client
+                        .post(url)
+                        .json(&serde_json::json!({"value": 1}))
+                        .send()
+                        .await;
+                }
+            });
+        }
+    }
+
     /// Logic graphs (§11.2), on the same 10 ms tick as the auto engine.
     pub fn logic_tick(&mut self) {
         use crate::mix::logic::BlockKind;
@@ -169,6 +193,7 @@ impl Control {
             speech: &speech,
             level_db: &level_db,
             on_air: &on_air,
+            minute_of_day: Self::minute_of_day(),
         });
         if actions.is_empty() {
             return;
@@ -176,6 +201,10 @@ impl Control {
         let mut next = self.mix.clone();
         let mut recalling = false;
         for a in actions {
+            if let Some(url) = a.webhook {
+                Self::post_webhook(url);
+                continue;
+            }
             if let Some(id) = a.recall {
                 let Some(snap) = next.snapshots.iter().find(|s| s.id == id).cloned() else {
                     tracing::warn!("logic recall: snapshot {id} does not exist");

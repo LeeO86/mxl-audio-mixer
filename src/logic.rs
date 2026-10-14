@@ -17,6 +17,8 @@ pub struct Readings<'a> {
     pub level_db: &'a BTreeMap<String, f64>,
     /// Tally indexes whose left lamp is on. Empty before any tally.
     pub on_air: &'a BTreeSet<u16>,
+    /// UTC minute of the day, 0..1440.
+    pub minute_of_day: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +28,8 @@ pub struct Action {
     pub fader_db: Option<f64>,
     /// Recall this snapshot. Set on a rising edge only.
     pub recall: Option<String>,
+    /// POST this URL. Set on a rising edge only.
+    pub webhook: Option<String>,
 }
 
 #[derive(Default)]
@@ -139,6 +143,17 @@ impl Logic {
                 BlockKind::Or => {
                     f64::from(u8::from(on(input(b, "a", &out)) || on(input(b, "b", &out))))
                 }
+                BlockKind::Xor => {
+                    f64::from(u8::from(on(input(b, "a", &out)) != on(input(b, "b", &out))))
+                }
+                BlockKind::Schedule {
+                    start_minute,
+                    end_minute,
+                } => f64::from(u8::from(in_schedule(
+                    readings.minute_of_day,
+                    *start_minute,
+                    *end_minute,
+                ))),
                 BlockKind::Not => f64::from(u8::from(!on(input(b, "in", &out)))),
                 BlockKind::Compare { op } => {
                     let (a, b2) = (input(b, "a", &out), input(b, "b", &out));
@@ -151,10 +166,15 @@ impl Logic {
                 }
                 BlockKind::SetMute { .. }
                 | BlockKind::SetFader { .. }
-                | BlockKind::Recall { .. } => {
+                | BlockKind::Recall { .. }
+                | BlockKind::Webhook { .. } => {
                     input(b, b.kind.ports().1.first().copied().unwrap_or("in"), &out)
                 }
-                BlockKind::Edge | BlockKind::Latch | BlockKind::Timer { .. } => 0.0,
+                BlockKind::Edge
+                | BlockKind::Latch
+                | BlockKind::Timer { .. }
+                | BlockKind::Delay { .. }
+                | BlockKind::Debounce { .. } => 0.0,
             };
             out.insert(b.id.clone(), v);
         }
@@ -198,6 +218,46 @@ impl Logic {
                     memory.insert(key_left, left);
                     f64::from(u8::from(running))
                 }
+                BlockKind::Delay { ms } => {
+                    let key_out = format!("delay-out:{}", b.id);
+                    let key_wait = format!("delay-wait:{}", b.id);
+                    let cur = on(input(b, "in", &out));
+                    let mut held = memory.get(&key_out).copied().unwrap_or(0.0) >= 0.5;
+                    let mut wait = memory.get(&key_wait).copied().unwrap_or(0.0);
+                    if cur == held {
+                        wait = 0.0;
+                    } else {
+                        wait += 1.0;
+                        if wait >= pulse_ticks(*ms).max(1.0) {
+                            held = cur;
+                            wait = 0.0;
+                        }
+                    }
+                    memory.insert(key_out, f64::from(u8::from(held)));
+                    memory.insert(key_wait, wait);
+                    f64::from(u8::from(held))
+                }
+                BlockKind::Debounce { ms } => {
+                    let key_out = format!("deb-out:{}", b.id);
+                    let key_in = format!("deb-in:{}", b.id);
+                    let key_n = format!("deb-n:{}", b.id);
+                    let cur = on(input(b, "in", &out));
+                    let prev = memory.get(&key_in).copied().unwrap_or(0.0) >= 0.5;
+                    let mut n = if cur == prev {
+                        memory.get(&key_n).copied().unwrap_or(0.0) + 1.0
+                    } else {
+                        1.0
+                    };
+                    let mut held = memory.get(&key_out).copied().unwrap_or(0.0) >= 0.5;
+                    if n >= pulse_ticks(*ms).max(1.0) {
+                        held = cur;
+                        n = 0.0;
+                    }
+                    memory.insert(key_in, f64::from(u8::from(cur)));
+                    memory.insert(key_n, n);
+                    memory.insert(key_out, f64::from(u8::from(held)));
+                    f64::from(u8::from(held))
+                }
                 _ => 0.0,
             };
             taken.push((b.id.clone(), now));
@@ -220,6 +280,7 @@ impl Logic {
                             mute: Some(on(v)),
                             fader_db: None,
                             recall: None,
+                            webhook: None,
                         });
                     }
                     BlockKind::SetFader { signal } if last.is_none_or(|p| (p - v).abs() > 0.05) => {
@@ -229,7 +290,25 @@ impl Logic {
                             mute: None,
                             fader_db: Some(v),
                             recall: None,
+                            webhook: None,
                         });
+                    }
+                    BlockKind::Webhook { url } => {
+                        let was = last.unwrap_or(v);
+                        if last.is_none() {
+                            applied.insert(b.id.clone(), v);
+                        } else if on(v) && !on(was) {
+                            applied.insert(b.id.clone(), v);
+                            actions.push(Action {
+                                signal: String::new(),
+                                mute: None,
+                                fader_db: None,
+                                recall: None,
+                                webhook: Some(url.clone()),
+                            });
+                        } else if on(v) != on(was) {
+                            applied.insert(b.id.clone(), v);
+                        }
                     }
                     BlockKind::Recall { snapshot } => {
                         let was = last.unwrap_or(v);
@@ -242,6 +321,7 @@ impl Logic {
                                 mute: None,
                                 fader_db: None,
                                 recall: Some(snapshot.clone()),
+                                webhook: None,
                             });
                         } else if on(v) != on(was) {
                             applied.insert(b.id.clone(), v);
@@ -258,6 +338,16 @@ impl Logic {
 
 fn on(v: f64) -> bool {
     v >= 0.5
+}
+
+fn in_schedule(minute: u16, start: u16, end: u16) -> bool {
+    if start == end {
+        false
+    } else if start < end {
+        minute >= start && minute < end
+    } else {
+        minute >= start || minute < end
+    }
 }
 
 /// Ticks of 10 ms a pulse lasts. Rounded up, so it is at least `ms` and at
@@ -364,6 +454,20 @@ mod tests {
             speech,
             level_db: level,
             on_air,
+            minute_of_day: 0,
+        }
+    }
+
+    fn readings_at<'a>(
+        mix: &'a Mix,
+        speech: &'a BTreeMap<String, bool>,
+        level: &'a BTreeMap<String, f64>,
+        on_air: &'a BTreeSet<u16>,
+        minute_of_day: u16,
+    ) -> Readings<'a> {
+        Readings {
+            minute_of_day,
+            ..readings(mix, speech, level, on_air)
         }
     }
 
@@ -405,7 +509,8 @@ mod tests {
                 signal: "music".into(),
                 mute: Some(false),
                 fader_db: None,
-                recall: None
+                recall: None,
+                webhook: None
             }]
         );
         assert!(
@@ -421,7 +526,8 @@ mod tests {
                 signal: "music".into(),
                 mute: Some(true),
                 fader_db: None,
-                recall: None
+                recall: None,
+                webhook: None
             }]
         );
         assert!(logic
@@ -664,5 +770,63 @@ mod tests {
         assert!(tick(&mut logic).is_empty());
         logic.set_button("g", "b", true);
         assert_eq!(tick(&mut logic)[0].recall.as_deref(), Some("show"));
+    }
+
+    #[test]
+    fn xor_schedule_and_a_webhook_on_the_rise() {
+        let mut mix = Mix::default();
+        mix.logic.push(Graph {
+            id: "g".into(),
+            name: "G".into(),
+            description: String::new(),
+            enabled: true,
+            dry_run: false,
+            blocks: vec![
+                block("a", BlockKind::Const { value: 1.0 }),
+                block("b", BlockKind::Const { value: 1.0 }),
+                block("x", BlockKind::Xor),
+                block(
+                    "s",
+                    BlockKind::Schedule {
+                        start_minute: 22 * 60,
+                        end_minute: 6 * 60,
+                    },
+                ),
+                block("btn", BlockKind::Button),
+                block(
+                    "w",
+                    BlockKind::Webhook {
+                        url: "https://example.test/hook".into(),
+                    },
+                ),
+            ],
+            wires: vec![
+                wire("a", "x", "a"),
+                wire("b", "x", "b"),
+                wire("btn", "w", "in"),
+            ],
+        });
+        let mut logic = Logic::default();
+        let speech = BTreeMap::new();
+        let level = BTreeMap::new();
+        let on_air = BTreeSet::new();
+        logic.tick(&readings_at(&mix, &speech, &level, &on_air, 23 * 60));
+        assert_eq!(logic.values["g"]["x"], 0.0, "both on is not xor");
+        assert_eq!(logic.values["g"]["s"], 1.0, "23:00 is inside 22:00–06:00");
+        logic.tick(&readings_at(&mix, &speech, &level, &on_air, 12 * 60));
+        assert_eq!(logic.values["g"]["s"], 0.0);
+        assert!(logic
+            .tick(&readings(&mix, &speech, &level, &on_air))
+            .iter()
+            .all(|a| a.webhook.is_none()));
+        logic.set_button("g", "btn", true);
+        let rose = logic.tick(&readings(&mix, &speech, &level, &on_air));
+        assert_eq!(
+            rose[0].webhook.as_deref(),
+            Some("https://example.test/hook")
+        );
+        assert!(in_schedule(0, 22 * 60, 6 * 60));
+        assert!(in_schedule(10 * 60, 9 * 60, 17 * 60));
+        assert!(!in_schedule(8 * 60, 9 * 60, 17 * 60));
     }
 }

@@ -32,7 +32,12 @@ const TYPES = [
   ["recall", "Recall"],
   ["and", "AND"],
   ["or", "OR"],
+  ["xor", "XOR"],
   ["not", "NOT"],
+  ["delay", "Delay"],
+  ["debounce", "Debounce"],
+  ["schedule", "Schedule"],
+  ["webhook", "Webhook"],
   ["compare", "Compare"],
   ["edge", "Rising edge"],
   ["latch", "Latch"],
@@ -40,16 +45,20 @@ const TYPES = [
   ["set-fader", "Set fader"],
 ];
 const withSignal = ["mute", "fader", "vad", "level", "above", "set-mute", "set-fader"];
-const sinks = ["set-mute", "set-fader", "recall"];
+const sinks = ["set-mute", "set-fader", "recall", "webhook"];
 const inputsOf = {
   and: ["a", "b"],
   or: ["a", "b"],
+  xor: ["a", "b"],
   compare: ["a", "b"],
   not: ["in"],
   edge: ["in"],
   latch: ["set", "reset"],
   timer: ["in"],
+  delay: ["in"],
+  debounce: ["in"],
   recall: ["in"],
+  webhook: ["in"],
   "set-mute": ["in"],
   "set-fader": ["level"],
 };
@@ -61,6 +70,9 @@ const addMs = ref("");
 const addThreshold = ref("");
 const addHysteresis = ref("");
 const addSnapshot = ref("");
+const addUrl = ref("");
+const addStart = ref("");
+const addEnd = ref("");
 const snapshots = computed(() => live.mix?.snapshots || []);
 const wire = ref({ from: "", to: "", port: "in" });
 
@@ -98,7 +110,11 @@ function addBlock() {
   const hysteresis = Number(addHysteresis.value);
   if (withSignal.includes(type) && !signal) return;
   if (type === "tally" && (!Number.isInteger(index) || index < 0 || index > 65535)) return;
-  if (type === "timer" && !(Number.isFinite(ms) && ms >= 0 && ms <= 86400000)) return;
+  if ((type === "timer" || type === "delay" || type === "debounce") && !(Number.isFinite(ms) && ms >= 0 && ms <= 86400000)) return;
+  const start = Math.round(Number(addStart.value));
+  const end = Math.round(Number(addEnd.value));
+  if (type === "schedule" && (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < 0 || start > 1439 || end > 1439)) return;
+  if (type === "webhook" && !/^https?:\/\//.test(addUrl.value)) return;
   if (type === "above" && !(Number.isFinite(threshold) && threshold >= -120 && threshold <= 20 && Number.isFinite(hysteresis) && hysteresis >= 0 && hysteresis <= 60)) return;
   if (type === "recall" && !addSnapshot.value) return;
   change((g) => {
@@ -107,7 +123,12 @@ function addBlock() {
     const block = { id, type, x: 40 + g.blocks.length * 220, y: 80 };
     if (withSignal.includes(type)) block.signal = signal;
     if (type === "tally") block.index = index;
-    if (type === "timer") block.ms = ms;
+    if (type === "timer" || type === "delay" || type === "debounce") block.ms = ms;
+    if (type === "schedule") {
+      block.start_minute = start;
+      block.end_minute = end;
+    }
+    if (type === "webhook") block.url = addUrl.value;
     if (type === "above") {
       block.threshold_db = threshold;
       block.hysteresis_db = hysteresis;
@@ -204,6 +225,9 @@ function labelOf(b) {
   if (b.type === "tally") return `${type}: ${b.index}`;
   if (b.type === "timer") return `${type}: ${b.ms} ms`;
   if (b.type === "recall") return `${type}: ${snapshots.value.find((s) => s.id === b.snapshot)?.name || b.snapshot}`;
+  if (b.type === "delay" || b.type === "debounce") return `${type}: ${b.ms} ms`;
+  if (b.type === "schedule") return `${type}: ${b.start_minute}–${b.end_minute}`;
+  if (b.type === "webhook") return type;
   const who = b.signal ? signals.value.find((s) => s.id === b.signal)?.name || b.signal : "";
   return who ? `${type}: ${who}` : type;
 }
@@ -286,7 +310,7 @@ onUnmounted(() => clearInterval(timer));
 <template>
   <div class="panel">
     <h3>Logic</h3>
-    <p class="muted">Blocks run 100 times a second. A loop is allowed when an edge, a latch or a timer is in it, because those remember. Actions run when their input changes. A timer stays on for its duration after its input rises. Above stays on until the level falls by its hysteresis. Recall runs a snapshot when its input rises.</p>
+    <p class="muted">Blocks run 100 times a second. A loop is allowed when an edge, a latch, a timer, a delay or a debounce is in it, because those remember. Actions run when their input changes. A timer stays on for its duration after its input rises. Above stays on until the level falls by its hysteresis. Recall runs a snapshot when its input rises.</p>
     <div class="row">
       <select :value="graph?.id || ''" aria-label="Logic graph" @change="selected = $event.target.value">
         <option value="">graph…</option>
@@ -373,7 +397,12 @@ onUnmounted(() => clearInterval(timer));
           <option v-for="s in signals" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
         <input v-if="addType === 'tally'" v-model="addIndex" type="number" min="0" max="65535" placeholder="index" aria-label="Tally index" style="width: 5rem" />
-        <input v-if="addType === 'timer'" v-model="addMs" type="number" min="0" max="86400000" placeholder="ms" aria-label="Timer milliseconds" style="width: 6rem" />
+        <input v-if="addType === 'timer' || addType === 'delay' || addType === 'debounce'" v-model="addMs" type="number" min="0" max="86400000" placeholder="ms" aria-label="Timer milliseconds" style="width: 6rem" />
+        <template v-if="addType === 'schedule'">
+          <input v-model="addStart" type="number" min="0" max="1439" placeholder="start min" aria-label="Schedule start minute" style="width: 6rem" />
+          <input v-model="addEnd" type="number" min="0" max="1439" placeholder="end min" aria-label="Schedule end minute" style="width: 6rem" />
+        </template>
+        <input v-if="addType === 'webhook'" v-model="addUrl" placeholder="https://…" aria-label="Webhook URL" style="width: 14rem" />
         <template v-if="addType === 'above'">
           <input v-model="addThreshold" type="number" min="-120" max="20" placeholder="dB" aria-label="Threshold dB" style="width: 5rem" />
           <input v-model="addHysteresis" type="number" min="0" max="60" placeholder="hyst" aria-label="Hysteresis dB" style="width: 4rem" />
