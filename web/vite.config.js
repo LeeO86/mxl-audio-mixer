@@ -13,11 +13,11 @@ export default defineConfig({
   server: {
     port: 5175,
     proxy: {
-      "/api": { target: "http://127.0.0.1:8160", ws: true },
-      "/metrics": "http://127.0.0.1:8160",
-      "/livez": "http://127.0.0.1:8160",
-      "/readyz": "http://127.0.0.1:8160",
-      "/x-nmos": "http://127.0.0.1:8160",
+      "/api": { target: "http://127.0.0.1:8190", ws: true },
+      "/metrics": "http://127.0.0.1:8190",
+      "/livez": "http://127.0.0.1:8190",
+      "/readyz": "http://127.0.0.1:8190",
+      "/x-nmos": "http://127.0.0.1:8190",
     },
   },
 });

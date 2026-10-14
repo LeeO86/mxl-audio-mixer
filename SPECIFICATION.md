@@ -616,7 +616,7 @@ labels, real-time) in **Appendix B**. These appendices are the contract. In part
 - G3 NMOS identity (`NMOS_SEED` UUIDv5 for all resources, `NMOS_LABEL`, `NMOS_TAGS`,
   group hints);
 - G4 static registry, `NMOS_DNS_SD=false` by default; G5 `NMOS_HOST_ADDRESS` (pod IP);
-- G6 ports by env: `WEB_PORT` default **8160**, `NMOS_PORT` default **3312** (+1 for
+- G6 ports by env: `WEB_PORT` default **8190**, `NMOS_PORT` default **3342** (+1 for
   the events WebSocket if used). The built-in MediaMTX (only when `PREVIEW_PUBLISH_URL`
   is unset, Appendix B.1) uses its own port block:
   - `MEDIAMTX_RTSP_PORT` 8954 (127.0.0.1);
@@ -649,7 +649,9 @@ Also:
 - `input_arrival_lag_ms{input}` (histogram or p50/p99/p999 gauges);
 - `input_effective_delay_ms{input}`;
 - `input_state{input}` (0 unrouted, 1 waiting, 2 running, 3 stalled);
-- `input_reopens_total{input}`, `input_missing_samples_total{input}`;
+- `input_reopens_total{input}`, `input_missing_samples_total{input}`,
+  `input_overrun_samples_total{input}` (the ring had already overwritten the
+  samples; `input_late_samples_total` is the source that had not written them);
 - `output_commit_lag_ms{output}`;
 - `timing_trusted` (0/1, §4.4);
 - `preview_state{path}` and `preview_readers{path}` (Appendix B.1);

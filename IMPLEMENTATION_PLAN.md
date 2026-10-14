@@ -1576,7 +1576,112 @@ the release notes when it is in. Then M7a (PR 17) goes into `main`, then M7b.
 `ghcr.io/leeo86/mxl-audio-mixer:1.0.0` (`1.0`, `1`), digest
 `sha256:74753add488e4002a236555f15a943cd75d98bc50d3211b6c1f87241c3bf3f6f`
 (labels checked: version 1.0.0, revision `14e9487`, MIT, uid 1000), the GitHub
-release with `docs/release-notes/1.0.0.md`. Open: the lab's run on `81fb8a2`.
+release with `docs/release-notes/1.0.0.md`. The lab's run on that tag is below.
+
+### Release 1.0.0: the scheduling run (2026-10-13/14)
+
+On `14e9487` (tag `v1.0.0`, checkout `14e9487d81e4`, `target/release` rebuilt,
+binary sha256 `e7be6cc7addbbd4f…`), the same host (`NODE_NAME=lab-xeon-6136`,
+2× Xeon Gold 6136, kernel 6.8 with voluntary preemption, no isolated CPUs, SMT
+on, other media workloads on any CPU). The runner had 9 CPUs of socket 2. The
+DSP thread was pinned to the last of them at SCHED_FIFO 49. That CPU's SMT
+sibling was not in the set, so a whole core was not available. AMWA ran in its
+own network namespace: `AMWA_NODE_PORT=3412`, `AMWA_WEB_PORT=8260`,
+`AMWA_REGISTRY_PORT=8110`.
+
+| Item | Result |
+| --- | --- |
+| env | PASS: TAI offset 37 s, commit `14e9487`, 9 CPUs |
+| block clock, 10 min | FAIL by one wake: 1 deadline miss, max wake jitter 2098 µs (limit 2000 µs); p99 31 µs, p99.9 114 µs, p99.99 767 µs |
+| §16 load, 60 min | ratio PASS, misses FAIL: 1 798 591 blocks, mean 683 µs, `dsp_load_ratio` 0.342, every block ≤ 5 ms, 1416 deadline misses, 51 168 missing input samples, 0 meter drops, `nr_throttled` +0 |
+| AMWA | PASS: IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01, 0 failures |
+
+The load row ends `DSP thread: FTZ/DAZ, timer slack 1 ns, CPU 45, its core
+shared with CPU 21, outside this process: another workload may slow it,
+SCHED_FIFO 49`. That is the note D124 describes for this host.
+
+Per-second samples of `dsp_deadline_misses_total` against the sibling's busy
+share, 3719 s:
+
+| Sibling busy | Seconds | Misses | Per second |
+| --- | --- | --- | --- |
+| 0–3 % | 1996 | 10 | 0.01 |
+| 3–6 % | 277 | 40 | 0.14 |
+| 6–10 % | 240 | 89 | 0.37 |
+| 10–20 % | 1000 | 1116 | 1.12 |
+| ≥ 20 % | 206 | 161 | 0.78 |
+
+1406 of 1416 misses (99 %) fell in seconds another workload used the sibling.
+With the sibling idle, 10 misses in 1996 s. The DSP CPU averaged 40 % busy.
+198 s below 2.5 GHz carried 6 misses. Against `208689e` (7090 and 12 445
+misses) this is 5–9× fewer. The block-clock failure is one wake, 98 µs over
+the limit; earlier runs on this host passed twice and failed once. The meter
+thread's CPU was not measured (`pidstat` was missing); `meter_drops_total`
+stayed 0.
+
+Missing input samples were 960 and 1824 on `208689e` and 51 168 here (533
+failed reads: 51 168 / 96). The input read is on the DSP thread
+(`src/engine/dsp.rs`). `reserve_dsp_core` narrows threads started after it; it
+does not move that read, and the tone writers are other processes. The counter
+did not change: after an input has started, every failed `get_samples` adds
+the block (96). `input_late_samples_total` is the subset too early or timed
+out, and the load line did not print it, so this run cannot say which cause
+the 51 168 were. Fewer deadline misses with more missing samples does not fit
+"the DSP thread fell behind and the ring overwrote the samples". An automatic
+delay change can move the read index (a shorter delay reads closer to the
+head and can be too early until the writer catches up); this run did not log
+those changes, so that stays a possibility, not a finding.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D131 | `input_overrun_samples_total` counts samples the ring had already overwritten (`OutOfRangeTooLate`). `input_late_samples_total` stays the source that had not written the index (`OutOfRangeTooEarly`, or the quarter-block wait timing out). Other errors stay in `input_missing_samples_total` only. The §16 line prints missing, late source, ring overrun and the remainder. The inputs table shows overrun next to late. | The lab asked for the split. MXL has those two range errors. A wake that still finds the samples is a successful read, so there is no third counter for "reader late" apart from the overrun. |
+
+### Release 1.0.0: question after the scheduling run
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | The lab's verdict was to hold the 1.0.0 tag for a whole-core run and for an answer on the missing samples. The tag is already on `14e9487`. | Leave it. The ratio passes (0.342) and the misses match the shared sibling, which this host cannot give up. A whole-core run remains the check of the 0-misses rule. D131 is what the next load prints; it does not move the tag. |
+
+### Release 1.0.0: the split run (2026-10-14)
+
+On `7ea4077` (PR 24), the same host (`NODE_NAME=lab-xeon-6136`, DSP thread on
+CPU 45 at SCHED_FIFO 49, sibling CPU 21 outside the runner). `env` passed
+(TAI +37 s). The 60 min load: mean block 712 µs, `dsp_load_ratio` 0.356, every
+block ≤ 3 ms, 1963 deadline misses, 0 meter drops, not throttled. Missing
+input samples **15 840, all late source** (ring overrun 0, other 0): 165 failed
+reads. The tone writers of the load test share the runner's CPUs at normal
+priority. The reader on the DSP thread did not fall out of the ring, which is
+what the earlier 51 168 could not show.
+
+The misses again track the sibling: 12 in 1869 s while it was idle (0–3 %).
+The 10–20 % band had 1690 misses in 473 s; the ≥ 20 % band had 8 in 679 s (a
+steady neighbour that did not disturb the thread).
+
+Building that commit behind a TLS-inspecting proxy failed in `ort-sys`:
+`download-binaries` with `tls-rustls` uses its own root store and rejected the
+proxy certificate. The archive they fetched by hand is a raw LZMA2 stream
+(`xz --format=raw --lzma2=dict=64MiB`), not a `.tar.xz`.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D132 | The ONNX Runtime download uses the system certificate store (`tls-native` instead of `tls-rustls`). `ORT_LIB_LOCATION` still skips the download: it is the directory that contains `libonnxruntime.a` after the raw LZMA2 archive is extracted. The README says both. | Their build of this commit. A proxy CA in the system store is then trusted. The two TLS features cannot both be on. |
+
+### Release 1.0.0: question after the split run
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | The §16 tone writers run at normal priority in the runner's CPU set, and every missing sample on this run was a late source. Give those writers a real-time priority, or pin them off the DSP core, so the load numbers are not the writers'? | Yes, in the load script, once a whole-core node is the one being measured. On this host the writers and the other tenants share the same CPUs either way. |
+
+### Ports (maintainers, 2026-10-14)
+
+`WEB_PORT` 8160 and `NMOS_PORT` 3312 are another function's ports on the same
+nodes. There is no Compose file in this repo (the spec's Compose demo is still
+listed under deployment, not written); the Kubernetes example and the image
+`EXPOSE` are the examples that exist.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D133 | Defaults become `WEB_PORT` 8190 and `NMOS_PORT` 3342 (events WebSocket 3343). Called out as a breaking default in the 1.1.0 notes, the changelog, the README and the specification. The §16 load keeps 8180/3332. | Both are free on the target nodes, and they do not meet the load test's ports. 1.0.0's numbers stay in that release's notes. |
 
 ## M8a: logic graphs
 
@@ -1619,7 +1724,7 @@ A `tally` block takes a TSL tally index (the same number a strip's `tally_index`
 
 | # | Decision | Reason |
 | --- | --- | --- |
-| D131 | The block is on air only (the left lamp), not preview. The index is 0–65535, stored on the block. | Answer 2: tally on air is the next block. Preview is the right lamp; AFV does not use it either (§10.3). |
+| D134 | The block is on air only (the left lamp), not preview. The index is 0–65535, stored on the block. | Answer 2: tally on air is the next block. Preview is the right lamp; AFV does not use it either (§10.3). |
 
 ### M8a: a timer
 
@@ -1627,7 +1732,7 @@ A `timer` block is the pulse in §11.1. `out` is 1 for `ms` milliseconds after `
 
 | # | Decision | Reason |
 | --- | --- | --- |
-| D132 | The timer is a pulse on the rising edge, not an off-delay and not a clock. `ms` is 0 to 86 400 000, rounded up to ticks of the existing 10 ms evaluation. | Answer 2: a timer is the block after tally. §11.1 lists timer/pulse under logic, and schedules after these blocks. The tick is already 10 ms (D129). |
+| D135 | The timer is a pulse on the rising edge, not an off-delay and not a clock. `ms` is 0 to 86 400 000, rounded up to ticks of the existing 10 ms evaluation. | Answer 2: a timer is the block after tally. §11.1 lists timer/pulse under logic, and schedules after these blocks. The tick is already 10 ms (D129). |
 
 ### M8a: meter hysteresis and snapshot recall
 
@@ -1637,5 +1742,5 @@ A `recall` block names a snapshot. It runs that snapshot when its input rises. T
 
 | # | Decision | Reason |
 | --- | --- | --- |
-| D133 | Hysteresis is a threshold and a gap below it, on the signal's peak, in its own block. It turns on at the threshold and off `hysteresis_db` lower. | Answer 2: compare against a meter with hysteresis. A plain compare chatters on a noisy meter. The raw `level` block stays, for a number. |
-| D134 | Recall fires on a rising edge only, after the first tick has been seen. It recalls the whole snapshot (recall-safe signals excepted) over the 10 ms logic ramp. | Answer 2: snapshot recall is the action. Recalling because a constant was already 1 when the mixer started would change a show unasked. |
+| D136 | Hysteresis is a threshold and a gap below it, on the signal's peak, in its own block. It turns on at the threshold and off `hysteresis_db` lower. | Answer 2: compare against a meter with hysteresis. A plain compare chatters on a noisy meter. The raw `level` block stays, for a number. |
+| D137 | Recall fires on a rising edge only, after the first tick has been seen. It recalls the whole snapshot (recall-safe signals excepted) over the 10 ms logic ramp. | Answer 2: snapshot recall is the action. Recalling because a constant was already 1 when the mixer started would change a show unasked. |

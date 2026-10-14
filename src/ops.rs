@@ -613,13 +613,19 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "input_late_samples_total",
         "counter",
-        "Samples not there yet at their read deadline.",
+        "Samples the source had not written by the read (too early, or the wait timed out).",
         per(&|s| s.late_samples.to_string()),
+    );
+    metric(
+        "input_overrun_samples_total",
+        "counter",
+        "Samples the ring had already overwritten (too late): the reader fell behind.",
+        per(&|s| s.overrun_samples.to_string()),
     );
     metric(
         "input_missing_samples_total",
         "counter",
-        "Samples replaced by silence.",
+        "Samples replaced by silence after the input had started.",
         per(&|s| s.missing_samples.to_string()),
     );
     metric(

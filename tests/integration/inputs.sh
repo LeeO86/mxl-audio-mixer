@@ -81,6 +81,8 @@ wait_until 5 "input 1 unrouted" is_state 1 unrouted
 pass "master_enable false stops reading"
 
 curl -fsS "$WEB/metrics" | grep -q 'mxl_audio_mixer_input_state{input="3"} 2' || fail "input_state metric"
+curl -fsS "$WEB/metrics" | grep -q 'mxl_audio_mixer_input_overrun_samples_total{input="3"}' || fail "overrun metric"
+curl -fsS "$WEB/metrics" | grep -q 'mxl_audio_mixer_input_late_samples_total{input="3"}' || fail "late metric"
 rc=0
 stop_mixer || rc=$?
 [[ $rc == 143 ]] || fail "exit code $rc"

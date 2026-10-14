@@ -22,7 +22,7 @@ monitor outputs, oscillator).
 
 ## Web UI
 
-`http://<host>:8160/`: one page built into the binary (no CDN, no other files). Tabs
+`http://<host>:8190/`: one page built into the binary (no CDN, no other files). Tabs
 (the URL hash addresses them): **Console** (strips in banks or in a layout's pages:
 patch, trim, polarity, the chain overview with its response and gain reduction,
 sends, pan and width, mute, fader, meter; the buses beside them), **Processing**
@@ -186,6 +186,21 @@ LD_LIBRARY_PATH=/opt/mxl/lib NMOS_HOST_ADDRESS=192.0.2.10 MXL_DOMAIN_SCAN_PATH=/
     MIXER_STATE_DIR=/tmp/mixer target/release/mxl-audio-mixer
 ```
 
+The Silero VAD build downloads a prebuilt ONNX Runtime. That download uses the
+system certificate store. Behind a TLS-inspecting proxy, install the proxy's CA
+in the system store first. To skip the download, fetch the archive for this
+target (ort 2.0.0-rc.14, the `x86_64-unknown-linux-gnu` file with no extra
+features: `https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-unknown-linux-gnu.tar.lzma2`)
+with a client that trusts the proxy, and extract it. The file is a raw LZMA2
+stream, not a `.tar.xz`:
+
+```sh
+xz --format=raw --lzma2=dict=64MiB -dc x86_64-unknown-linux-gnu.tar.lzma2 | tar -x -C /opt/ort
+ORT_LIB_LOCATION=/opt/ort cargo build --release
+```
+
+`ORT_LIB_LOCATION` is that directory (the one that contains `libonnxruntime.a`).
+
 The image is `ghcr.io/leeo86/mxl-audio-mixer` (uid 1000; tags `X.Y.Z`, `X.Y`, `X`,
 `git-<sha7>`, `nightly-dev`). `deploy/k8s/deployment.yaml` shows the platform
 conventions; `deploy/grafana/` has a dashboard. The development set-up is in
@@ -212,8 +227,8 @@ origin. No setting is a secret.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `HOST_ID` | the host name | Instance name; the default node label and the start of the default NMOS seed. |
-| `WEB_PORT` | 8160 | Port of the web UI, the API, /livez, /readyz and /metrics. |
-| `NMOS_PORT` | 3312 | Port of the IS-04 Node API and the IS-05 Connection API. |
+| `WEB_PORT` | 8190 | Port of the web UI, the API, /livez, /readyz and /metrics. 1.0.0 used 8160. |
+| `NMOS_PORT` | 3342 | Port of the IS-04 Node API and the IS-05 Connection API. The events WebSocket is the next port (3343). 1.0.0 used 3312. |
 | `NMOS_SEED` | <HOST_ID>-mixer | Seed of every NMOS id, the output domain id and the MXL flow ids (UUIDv5). |
 | `NMOS_LABEL` | <HOST_ID> | Node label; the Device is "<label> Audio Mixer". |
 | `NMOS_TAGS` | {} | JSON object of tag name to string arrays, on the Node and the Device. |
@@ -511,8 +526,8 @@ without touching the audio.
 
 | Port | Default | |
 | --- | --- | --- |
-| `WEB_PORT` | 8160 | web UI, API, events WebSocket, probes, metrics |
-| `NMOS_PORT` | 3312 | IS-04 Node API, IS-05 Connection API |
+| `WEB_PORT` | 8190 | web UI, API, events WebSocket, probes, metrics |
+| `NMOS_PORT` | 3342 | IS-04 Node API, IS-05 Connection API (events WebSocket on 3343) |
 | `TSL_UDP_PORT` (udp) | 8910 | TSL UMD 5.0 tally, only with `TSL_ENABLE=true` |
 | `TSL_TCP_PORT` (tcp) | 8911 | TSL UMD 5.0 tally (DLE/STX framing), only with `TSL_ENABLE=true` |
 | `MEDIAMTX_RTSP_PORT` | 8954 | the built-in MediaMTX's RTSP, on 127.0.0.1 (without `PREVIEW_PUBLISH_URL`) |
@@ -620,8 +635,10 @@ the control engine did not get), `signals`,
 connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,
 and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
-`input_effective_delay_ms`, `input_late_samples_total`,
-`input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
+`input_effective_delay_ms`, `input_late_samples_total`
+(the source had not written the samples yet), `input_overrun_samples_total`
+(the ring had already overwritten them), `input_missing_samples_total`
+(both, and any other failed read), `input_reopens_total`; `process_cpu_seconds_total`,
 `process_resident_memory_bytes`. All prefixed `mxl_audio_mixer_`.
 
 ## Tests

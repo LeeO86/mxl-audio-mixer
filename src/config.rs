@@ -22,8 +22,8 @@ pub struct Setting {
 /// described in words.
 pub const SETTINGS: &[Setting] = &[
     Setting { name: "HOST_ID", default: "the host name", description: "Instance name; the default node label and the start of the default NMOS seed." },
-    Setting { name: "WEB_PORT", default: "8160", description: "Port of the web UI, the API, /livez, /readyz and /metrics." },
-    Setting { name: "NMOS_PORT", default: "3312", description: "Port of the IS-04 Node API and the IS-05 Connection API." },
+    Setting { name: "WEB_PORT", default: "8190", description: "Port of the web UI, the API, /livez, /readyz and /metrics." },
+    Setting { name: "NMOS_PORT", default: "3342", description: "Port of the IS-04 Node API and the IS-05 Connection API." },
     Setting { name: "NMOS_SEED", default: "<HOST_ID>-mixer", description: "Seed of every NMOS id, the output domain id and the MXL flow ids (UUIDv5)." },
     Setting { name: "NMOS_LABEL", default: "<HOST_ID>", description: "Node label; the Device is \"<label> Audio Mixer\"." },
     Setting { name: "NMOS_TAGS", default: "{}", description: "JSON object of tag name to string arrays, on the Node and the Device." },
@@ -294,8 +294,8 @@ impl Parser<'_> {
             .map(|(v, _)| v)
             .or_else(hostname)
             .unwrap_or_else(|| "mixer".to_string());
-        let web_port: u16 = self.int("WEB_PORT", 8160, 1, 65535)?;
-        let nmos_port: u16 = self.int("NMOS_PORT", 3312, 1, 65535)?;
+        let web_port: u16 = self.int("WEB_PORT", 8190, 1, 65535)?;
+        let nmos_port: u16 = self.int("NMOS_PORT", 3342, 1, 65535)?;
         if web_port == nmos_port {
             return err("WEB_PORT and NMOS_PORT must differ");
         }
@@ -707,8 +707,8 @@ mod tests {
     #[test]
     fn defaults() {
         let c = load_vars(&[("HOST_ID", "studio-a")]).unwrap();
-        assert_eq!(c.web_port, 8160);
-        assert_eq!(c.nmos_port, 3312);
+        assert_eq!(c.web_port, 8190);
+        assert_eq!(c.nmos_port, 3342);
         assert_eq!(c.nmos_seed, "studio-a-mixer");
         assert_eq!(c.nmos_label, "studio-a");
         assert_eq!(c.input_flows, 16);
@@ -776,7 +776,7 @@ mod tests {
             ("PREVIEW_WHEP_URL", "media.example"),
             ("PREVIEW_PATH_PREFIX", "a b"),
             ("PREVIEW_PATH_PREFIX", "a//b"),
-            ("MEDIAMTX_WHEP_PORT", "8160"),
+            ("MEDIAMTX_WHEP_PORT", "8190"),
             ("MIXER_MAX_WEB_MONITORS", "65"),
         ] {
             assert!(load_vars(&[(k, v)]).is_err(), "{k}={v}");
@@ -805,7 +805,7 @@ mod tests {
         ] {
             assert!(load_vars(&[(k, v)]).is_err(), "{k}={v}");
         }
-        assert!(load_vars(&[("TSL_ENABLE", "true"), ("TSL_UDP_PORT", "8160")]).is_err());
+        assert!(load_vars(&[("TSL_ENABLE", "true"), ("TSL_UDP_PORT", "8190")]).is_err());
     }
 
     #[test]
@@ -884,7 +884,7 @@ mod tests {
         std::fs::write(&unknown, r#"{"NOPE": 1}"#).unwrap();
         for vars in [
             vec![("WEB_PORT", "0")],
-            vec![("WEB_PORT", "3312")],
+            vec![("WEB_PORT", "3342")],
             vec![("MIXER_BLOCK_SAMPLES", "100")],
             vec![("MIXER_INPUT_FLOWS", "0")],
             vec![("MIXER_RT_PRIORITY", "50")],
