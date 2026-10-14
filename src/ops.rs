@@ -36,6 +36,8 @@ pub struct App {
     pub started: std::time::Instant,
     /// The built-in MediaMTX child (unused with a shared one).
     pub mediamtx: Arc<crate::preview::mediamtx::Child>,
+    /// Remote-link peers (§13).
+    pub link: Arc<tokio::sync::Mutex<crate::link::Peers>>,
 }
 
 impl App {
@@ -91,6 +93,7 @@ pub fn router(app: App) -> Router {
         .merge(crate::auto_api::routes())
         .merge(crate::logic_api::routes())
         .merge(crate::widgets::routes())
+        .merge(crate::link::routes())
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
             mix_revision,
@@ -402,6 +405,10 @@ async fn confirm_delay(State(app): State<App>, Path(input): Path<usize>) -> Resp
 
 /// Prometheus text, prefix `mxl_audio_mixer_` (G7, §15).
 async fn metrics(State(app): State<App>) -> Response {
+    let link_lines = {
+        let peers = app.link.lock().await;
+        crate::link::metrics(&peers)
+    };
     let mut out = String::new();
     let p = "mxl_audio_mixer_";
     let mut metric = |name: &str, kind: &str, help: &str, lines: Vec<String>| {
@@ -679,5 +686,8 @@ async fn metrics(State(app): State<App>) -> Response {
         "Resident memory of the process.",
         vec![format!(" {}", timing::process_resident_bytes())],
     );
+    for line in link_lines {
+        let _ = writeln!(out, "mxl_audio_mixer_{line}");
+    }
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }

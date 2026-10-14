@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0 (in progress)
+
+Milestone 9 (§13: master/slave remote link).
+
+- A slave accepts a master on `/api/v1/link` (WebSocket, pre-shared `MIXER_LINK_TOKEN`). The master connects to up to four `MIXER_LINK_PEERS`. Commands are mute, fader and snapshot recall. The slave holds its mix when the master disconnects; `MIXER_LINK_TAKEOVER=deny` then refuses local changes. `GET /api/v1/remotes` lists peers. `remote_link_up` and `remote_link_rtt_ms`.
+
 ## 1.2.0 (in progress)
 
 Milestone 8 (§19: the logic editor).

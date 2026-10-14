@@ -310,7 +310,16 @@ async fn run(config: Config) -> ExitCode {
         timing_trusted,
         started: Instant::now(),
         mediamtx: mediamtx.clone(),
+        link: Arc::new(tokio::sync::Mutex::new(
+            mxl_audio_mixer::link::Peers::default(),
+        )),
     };
+    if config.link_role == mxl_audio_mixer::config::LinkRole::Master {
+        for url in config.link_peers.clone() {
+            let app = app.clone();
+            tokio::spawn(async move { mxl_audio_mixer::link::master(app, url).await });
+        }
+    }
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let app_for_preview = app.clone();
     let mut web_stop = stop_rx.clone();

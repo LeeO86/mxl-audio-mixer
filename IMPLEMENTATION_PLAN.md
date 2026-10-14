@@ -1744,3 +1744,11 @@ A `recall` block names a snapshot. It runs that snapshot when its input rises. T
 | --- | --- | --- |
 | D136 | Hysteresis is a threshold and a gap below it, on the signal's peak, in its own block. It turns on at the threshold and off `hysteresis_db` lower. | Answer 2: compare against a meter with hysteresis. A plain compare chatters on a noisy meter. The raw `level` block stays, for a number. |
 | D137 | Recall fires on a rising edge only, after the first tick has been seen. It recalls the whole snapshot (recall-safe signals excepted) over the 10 ms logic ramp. | Answer 2: snapshot recall is the action. Recalling because a constant was already 1 when the mixer started would change a show unasked. |
+
+### Milestone 9: remote link (first slice)
+
+One master, up to four slaves, on the mixer's own web port (`/api/v1/link`), token in the first message (not shown by `GET /api/v1/config`). The slave sends its revision and the faders and mutes it is on. The master queues mute, fader, recall and a push of those levels. Audio stays on MXL. When the master drops, the slave keeps the mix; with takeover `deny`, local changes are refused until the master is back (after it had connected once, so start-up still loads the show).
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D138 | The link is a WebSocket on `WEB_PORT`, not a second listener. Up to 4 peers. Takeover deny blocks `stage` only after a master has connected and then gone. | §13.3 "one master, up to 4 slaves", "holds its last state", "local takeover allowed/denied". TLS is the platform's in front of the web port. |
