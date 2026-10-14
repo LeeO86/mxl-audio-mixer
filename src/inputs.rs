@@ -187,6 +187,8 @@ pub struct InputStatus {
     pub lag_ms: f64,
     pub arrival_lag_ms: Option<ArrivalLag>,
     pub late_samples: u64,
+    /// Samples the ring had already overwritten.
+    pub overrun_samples: u64,
     pub missing_samples: u64,
     pub reopens: u64,
 }
@@ -572,6 +574,7 @@ impl Inputs {
                     lag_ms: ms(s.last_lag),
                     arrival_lag_ms: lag,
                     late_samples: c.late_samples.load(Ordering::Relaxed),
+                    overrun_samples: c.overrun_samples.load(Ordering::Relaxed),
                     missing_samples: c.missing_samples.load(Ordering::Relaxed),
                     reopens: s.reopens,
                 }

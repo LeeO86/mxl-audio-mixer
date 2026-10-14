@@ -33,7 +33,7 @@ RUN npm run build
 
 FROM ubuntu:24.04 AS build
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential cmake curl ca-certificates git pkg-config clang libclang-dev \
+        build-essential cmake curl ca-certificates git pkg-config clang libclang-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
@@ -51,7 +51,7 @@ RUN cargo build --release --locked --bins \
 FROM ubuntu:24.04 AS runtime
 ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 ARG VERSION=dev
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libstdc++6 libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /config && chown 1000:1000 /config
 COPY --from=mxl /opt/mxl/lib/libmxl.so* /usr/local/lib/

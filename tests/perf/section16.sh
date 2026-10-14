@@ -114,9 +114,12 @@ buckets = sorted((float(re.search(r'le="([^"]+)"', k)[1]), d(k)) for k in a
                  if k.startswith("dsp_block_seconds_bucket") and "+Inf" not in k)
 slowest = next((le for le, c in buckets if c >= n), float("inf"))
 steps = {k: v for k, v in a.items() if k.startswith("nodes{")}
+def samples(name):
+    return int(sum(d(k) for k in a if k == name or k.startswith(name + "{")))
+missing, late, overrun = samples("input_missing_samples_total"), samples("input_late_samples_total"), samples("input_overrun_samples_total")
 print(f"blocks {int(n)} in {secs} s; mean block {mean * 1e6:.0f} µs; load ratio {mean / 0.002:.3f}; "
       f"all blocks ≤ {slowest * 1e3:g} ms; deadline misses {int(d('dsp_deadline_misses_total'))}; "
-      f"missing input samples {int(sum(d(k) for k in a if k.startswith('input_missing_samples_total')))}; "
+      f"missing input samples {missing} (late source {late}, ring overrun {overrun}, other {missing - late - overrun}); "
       f"meter drops {int(d('meter_drops_total'))}")
 print("plan steps:", ", ".join(f"{re.search(r'type=\"([^\"]+)\"', k)[1]} {int(v)}" for k, v in sorted(steps.items())))
 EOF

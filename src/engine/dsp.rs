@@ -436,10 +436,7 @@ pub(super) fn run(
                 Err(error) => {
                     c.ok.store(false, Ordering::Relaxed);
                     if input.started {
-                        c.missing_samples.fetch_add(b, Ordering::Relaxed);
-                        if matches!(error, MxlError::OutOfRangeTooEarly | MxlError::Timeout) {
-                            c.late_samples.fetch_add(b, Ordering::Relaxed);
-                        }
+                        note_missing(c, b, error);
                     }
                     apply_fades(input, block, c, false);
                 }
@@ -618,6 +615,25 @@ fn commit(o: &mut OutputWriter, head: u64, counters: &super::OutputCounters) {
 
 /// Fade in after a gap or a (re)start, fade out over a gap (holding the last
 /// sample) and around a delay change, so nothing clicks.
+/// A failed read after the input has started.
+///
+/// `missing` counts every failure. Late is the source not having written the
+/// index yet. Overrun is the ring having already overwritten it. Other errors
+/// stay in `missing` only: MXL has no third range code, and a late wake that
+/// still finds the samples is a successful read.
+fn note_missing(c: &super::InputCounters, samples: u64, error: MxlError) {
+    c.missing_samples.fetch_add(samples, Ordering::Relaxed);
+    match error {
+        MxlError::OutOfRangeTooEarly | MxlError::Timeout => {
+            c.late_samples.fetch_add(samples, Ordering::Relaxed);
+        }
+        MxlError::OutOfRangeTooLate => {
+            c.overrun_samples.fetch_add(samples, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
 fn apply_fades(input: &mut Input, block: usize, c: &super::InputCounters, have_data: bool) {
     let channels = input.channels;
     if !have_data && input.fading >= 0 && input.gain > 0.0 {
@@ -655,5 +671,31 @@ fn apply_fades(input: &mut Input, block: usize, c: &super::InputCounters, have_d
                 *s = input.last[ch] * input.gain;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::note_missing;
+    use crate::engine::InputCounters;
+    use mxl::Error as MxlError;
+    use std::sync::atomic::Ordering;
+
+    fn count(error: MxlError) -> (u64, u64, u64) {
+        let c = InputCounters::default();
+        note_missing(&c, 96, error);
+        (
+            c.missing_samples.load(Ordering::Relaxed),
+            c.late_samples.load(Ordering::Relaxed),
+            c.overrun_samples.load(Ordering::Relaxed),
+        )
+    }
+
+    #[test]
+    fn missing_samples_split_by_mxl_error() {
+        assert_eq!(count(MxlError::OutOfRangeTooEarly), (96, 96, 0));
+        assert_eq!(count(MxlError::Timeout), (96, 96, 0));
+        assert_eq!(count(MxlError::OutOfRangeTooLate), (96, 0, 96));
+        assert_eq!(count(MxlError::FlowNotFound), (96, 0, 0));
     }
 }
