@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A demo for trying the console or developing the UI: an 8-channel tone flow, the
-# mixer on it (web UI on http://127.0.0.1:8160/) and a small show (8 strips, a
+# mixer on it (web UI on http://127.0.0.1:8190/) and a small show (8 strips, a
 # stereo main, two auxes, processing). With espeak-ng, host and guest speak in
 # turns, in an auto-mix, with the music ducked. Stops everything on Ctrl-C.
 #
@@ -14,8 +14,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/target/release}"
 WORK="$(mktemp -d /dev/shm/mixer-demo.XXXXXX)"
-WEB="http://127.0.0.1:${WEB_PORT:-8160}"
-NMOS="http://127.0.0.1:${NMOS_PORT:-3312}"
+WEB="http://127.0.0.1:${WEB_PORT:-8190}"
+NMOS="http://127.0.0.1:${NMOS_PORT:-3342}"
 FLOW=11111111-2222-4333-8444-555555555555
 DOMAIN=66666666-7777-4888-8999-aaaaaaaaaaaa
 PIDS=()

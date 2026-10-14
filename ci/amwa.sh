@@ -21,8 +21,8 @@ OUT="${AMWA_OUT:-$HERE/../ci-artifacts/amwa-$MODE}"
 REGISTRY_IMAGE="${NMOS_REGISTRY_IMAGE:-mirror.gcr.io/rhastie/nmos-cpp@sha256:c54c8ded3b61740dbd579c03892b0229842250417aa397d87a92e2b91ba645b8}"
 # The node's IS-04/IS-05 port and its web port (another node on the host may
 # have the defaults).
-NODE_PORT="${AMWA_NODE_PORT:-3312}"
-WEB_PORT="${AMWA_WEB_PORT:-8160}"
+NODE_PORT="${AMWA_NODE_PORT:-3342}"
+WEB_PORT="${AMWA_WEB_PORT:-8190}"
 # The registry's ten ports from AMWA_REGISTRY_PORT on (registration, query, its
 # WebSocket, …): another one on these ports needs another base.
 REG_PORT="${AMWA_REGISTRY_PORT:-8010}"

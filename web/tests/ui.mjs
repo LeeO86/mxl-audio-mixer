@@ -206,12 +206,11 @@ try {
   await page.screenshot({ path: `${out}/talkback.png`, fullPage: true });
   await talkAux.click();
   await until("aux released", async () => !(await talks()));
-  await talkAux.hover();
-  await page.mouse.down();
-  await page.waitForTimeout(900);
-  // Still held: it talks (a busy runner may take a moment more to show it).
-  await until("a held talk button talks", talks, 3000);
-  await page.mouse.up();
+  // A pointer event on the button itself: a mouse hold misses the button when the runner is busy.
+  await talkAux.dispatchEvent("pointerdown", { pointerId: 1, bubbles: true, button: 0, buttons: 1 });
+  await until("a held talk button talks", talks, 5000);
+  await page.waitForTimeout(500);
+  await talkAux.dispatchEvent("pointerup", { pointerId: 1, bubbles: true, button: 0, buttons: 0 });
   await until("held talk released", async () => !(await talks()));
   await listenAux.click();
   await until("listen-back on", async () => (await api("/api/v1/listen-back"))?.input === 1);

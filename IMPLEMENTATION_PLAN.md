@@ -1671,3 +1671,14 @@ proxy certificate. The archive they fetched by hand is a raw LZMA2 stream
 | # | Question | Proposal |
 | --- | --- | --- |
 | 1 | The §16 tone writers run at normal priority in the runner's CPU set, and every missing sample on this run was a late source. Give those writers a real-time priority, or pin them off the DSP core, so the load numbers are not the writers'? | Yes, in the load script, once a whole-core node is the one being measured. On this host the writers and the other tenants share the same CPUs either way. |
+
+### Ports (maintainers, 2026-10-14)
+
+`WEB_PORT` 8160 and `NMOS_PORT` 3312 are another function's ports on the same
+nodes. There is no Compose file in this repo (the spec's Compose demo is still
+listed under deployment, not written); the Kubernetes example and the image
+`EXPOSE` are the examples that exist.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D133 | Defaults become `WEB_PORT` 8190 and `NMOS_PORT` 3342 (events WebSocket 3343). Called out as a breaking default in the 1.1.0 notes, the changelog, the README and the specification. The §16 load keeps 8180/3332. | Both are free on the target nodes, and they do not meet the load test's ports. 1.0.0's numbers stay in that release's notes. |

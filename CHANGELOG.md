@@ -4,6 +4,14 @@
 
 Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
 
+### Breaking default: ports
+
+- `WEB_PORT` defaults to **8190** and `NMOS_PORT` to **3342** (the NMOS events
+  WebSocket is 3343). 1.0.0 used 8160 and 3312, which another function on the
+  same nodes already uses. Set `WEB_PORT=8160` and `NMOS_PORT=3312` to keep the
+  old ports. The image `EXPOSE`, the Kubernetes example, the demo and the
+  AMWA defaults follow.
+
 ### Missing input samples, split by cause
 
 - `input_overrun_samples_total`: samples the ring had already overwritten
