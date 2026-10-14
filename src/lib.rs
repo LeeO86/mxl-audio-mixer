@@ -12,6 +12,8 @@ pub mod events;
 pub mod group_api;
 pub mod history;
 pub mod inputs;
+pub mod logic;
+pub mod logic_api;
 pub mod loudness;
 pub mod meters;
 pub mod mix;

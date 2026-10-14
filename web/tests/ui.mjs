@@ -401,6 +401,76 @@ try {
   await api("/api/v1/autolevels/gtr", { method: "DELETE" });
   pass(`auto-level from the panel: Guitar at ${level.level_lufs} LUFS to −30, gain ${level.gain_db} dB, shown on its strip`);
 
+  // Logic: a constant 1 wired to "set mute" mutes Guitar.
+  await page.goto(`${base}/#logic`);
+  await page.getByLabel("New logic graph name").fill("Keys");
+  await page.getByRole("button", { name: "+ Graph" }).click();
+  await page.getByLabel("Block type").waitFor({ timeout: 5000 });
+  const graph = await until("graph Keys", async () => (await api("/api/v1/logic")).find((g) => g.name === "Keys"));
+  await page.getByLabel("Block type").selectOption("const");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await page.getByLabel("Block type").selectOption("set-mute");
+  await page.getByLabel("Block signal").selectOption("gtr");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("two blocks", async () => (await api(`/api/v1/logic/${graph.id}`)).blocks.length === 2);
+  await page.getByLabel("const-1 value").fill("1");
+  await page.getByLabel("const-1 value").press("Enter");
+  await until("const is 1", async () => (await api(`/api/v1/logic/${graph.id}`)).blocks.find((b) => b.id === "const-1").value === 1);
+  await page.locator('.vue-flow__node[data-id="set-mute-1"]').waitFor({ timeout: 5000 });
+  await page.getByRole("button", { name: "Fit" }).click();
+  await page.waitForTimeout(400);
+  const cableFrom = await center('.vue-flow__node[data-id="const-1"] .vue-flow__handle.source');
+  const cableTo = await center('.vue-flow__node[data-id="set-mute-1"] .vue-flow__handle.target');
+  await page.mouse.move(cableFrom.x, cableFrom.y);
+  await page.mouse.down();
+  await page.mouse.move(cableTo.x, cableTo.y, { steps: 12 });
+  await page.mouse.up();
+  await until("Guitar muted by the cable", async () => (await api("/api/v1/strips/gtr")).mute === true);
+  await page.screenshot({ path: `${out}/logic.png`, fullPage: true });
+  const cable = page.locator(".vue-flow__edge").first();
+  const cableBox = await cable.locator(".vue-flow__edge-interaction").boundingBox();
+  await page.mouse.click(cableBox.x + cableBox.width / 2, cableBox.y + cableBox.height / 2);
+  await page.keyboard.press("Delete");
+  await until("the cable removed", async () => (await api(`/api/v1/logic/${graph.id}`)).wires.length === 0);
+  await page.getByLabel("Block type").selectOption("tally");
+  await page.getByLabel("Tally index").fill("5");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("tally index 5", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "tally");
+    return b?.index === 5 ? b : null;
+  });
+  await page.locator('.vue-flow__node[data-id="tally-1"]').getByText("On air: 5").waitFor({ timeout: 5000 });
+  await page.getByLabel("Block type").selectOption("timer");
+  await page.getByLabel("Timer milliseconds").fill("500");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("timer 500 ms", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "timer");
+    return b?.ms === 500 ? b : null;
+  });
+  await page.locator('.vue-flow__node[data-id="timer-1"]').getByText("Timer: 500 ms").waitFor({ timeout: 5000 });
+  await api("/api/v1/snapshots", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "logic-show", name: "Logic" }) });
+  await page.getByLabel("Block type").selectOption("above");
+  await page.getByLabel("Block signal").selectOption("gtr");
+  await page.getByLabel("Threshold dB").fill("-40");
+  await page.getByLabel("Hysteresis dB").fill("6");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("above -40", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "above");
+    return b?.threshold_db === -40 && b?.hysteresis_db === 6 ? b : null;
+  });
+  await page.getByLabel("Block type").selectOption("recall");
+  await until("snapshot in the list", async () => (await page.getByLabel("Snapshot").innerHTML()).includes("logic-show"));
+  await page.getByLabel("Snapshot").selectOption("logic-show");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("recall logic-show", async () => {
+    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "recall");
+    return b?.snapshot === "logic-show" ? b : null;
+  });
+  await api(`/api/v1/logic/${graph.id}`, { method: "DELETE" });
+  await api("/api/v1/snapshots/logic-show", { method: "DELETE" });
+  await api("/api/v1/strips/gtr", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
+  pass("logic: a cable drawn from a constant to set-mute mutes Guitar, Delete removes it, and on-air and timer blocks take an index and a duration");
+
   for (const tab of ["nmos", "status", "settings"]) {
     await page.goto(`${base}/#${tab}`);
     await page.waitForTimeout(400);

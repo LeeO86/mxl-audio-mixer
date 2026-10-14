@@ -1682,3 +1682,65 @@ listed under deployment, not written); the Kubernetes example and the image
 | # | Decision | Reason |
 | --- | --- | --- |
 | D133 | Defaults become `WEB_PORT` 8190 and `NMOS_PORT` 3342 (events WebSocket 3343). Called out as a breaking default in the 1.1.0 notes, the changelog, the README and the specification. The §16 load keeps 8180/3332. | Both are free on the target nodes, and they do not meet the load test's ports. 1.0.0's numbers stay in that release's notes. |
+
+## M8a: logic graphs
+
+Milestone 8 (§19, release 1.2.0) in parts. This part: graphs of blocks in the
+show, evaluated at 100 Hz, with the blocks a show needs first and a list
+editor. The cable canvas and the remaining block types follow.
+
+### M8a: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D127 | A logic graph is blocks and wires in the show (`logic`), at most 32 graphs of 64 blocks. A value is a number; a boolean is 0 or 1. Ports are fixed per block type; a wire goes from an output to an input and an input takes one wire. A loop is rejected unless it passes through an `edge` or a `latch`: those publish last tick's value, so what follows them is one tick behind. | §11.1 "typed ports"; §11.2 "combinational loops are rejected unless they contain a latch/delay". |
+| D128 | The blocks: `const`, `button` (a soft key, held in the runtime, not the show), `mute`, `fader`, `vad`, `level` (a signal's mute, fader dB, voice and peak dBFS), `and`, `or`, `not`, `compare` (`gt`, `lt`, `eq`), `edge` (1 for the tick its input rose), `latch` (set/reset, reset wins), `set-mute`, `set-fader`. A `vad` block analyses its signal like an auto-level does. | §11.1's list, the part that drives a show: "while the host speaks, mute the music bed", "below −40 dBFS, close the fader". Tally, timers, schedules, NMOS state, webhooks, snapshot recall and math follow (question 2). |
+| D129 | Evaluation is on the control engine's 10 ms tick (100 Hz, §11.2's default). Actions run when their input changed, ramped over 10 ms, and never while `dry_run` is set. A fader they ask for is clamped to the fader range. Deleting a signal removes the blocks that name it. | The tick already exists. Acting on every tick would fight the operator; acting on change does what the graph says once. |
+| D130 | The Logic tab is a list: graphs, blocks, wires by their ports, live values, the soft keys. Positions (`x`, `y`) are stored for the canvas. | The canvas (drag, cables, zoom) is the larger piece and comes next (question 1); the runtime is what a show runs on. |
+
+### M8a: questions
+
+| # | Question | Proposal |
+| --- | --- | --- |
+| 1 | The cable canvas (Vue Flow, as the routing graph) as the next part, the list editor staying for now. | Yes. |
+| 2 | Next blocks: tally on air, a timer, compare against a meter with hysteresis, snapshot recall. Webhooks and schedules after those. | In that order. |
+| 3 | Logic stays out of snapshots (it is the show, not a parameter state). | Yes. |
+| 4 | 100 Hz on the existing tick, not a thread of its own. | As implemented. |
+
+### M8a: answers (maintainer, 2026-10-13)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | The cable canvas next, the list editor staying | Yes. |
+| 2 | Next blocks: tally, a timer, meter hysteresis, snapshot recall | In that order. |
+| 3 | Logic stays out of snapshots | Yes. |
+| 4 | 100 Hz on the existing tick | As implemented. |
+
+The canvas is on the Logic tab (Vue Flow, the blocks' `x` and `y`): draw a cable from an output to an input, Delete removes it, dragging a block remembers where it was put. The list under it edits the same graph.
+
+### M8a: tally on air
+
+A `tally` block takes a TSL tally index (the same number a strip's `tally_index` uses, after `TSL_MAP`). Its output is 1 while that index's left lamp is lit, and 0 before any tally and while the lamp is off. The last lamp stays when packets stop, as audio-follows-video does (D58).
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D134 | The block is on air only (the left lamp), not preview. The index is 0–65535, stored on the block. | Answer 2: tally on air is the next block. Preview is the right lamp; AFV does not use it either (§10.3). |
+
+### M8a: a timer
+
+A `timer` block is the pulse in §11.1. `out` is 1 for `ms` milliseconds after `in` rises, then 0. The length is rounded up to the 10 ms tick, so it is at least the duration asked and at most one tick longer. A rise while it is still on starts the duration again. It remembers, so a loop may pass through it. Zero stays off. The longest duration is one day.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D135 | The timer is a pulse on the rising edge, not an off-delay and not a clock. `ms` is 0 to 86 400 000, rounded up to ticks of the existing 10 ms evaluation. | Answer 2: a timer is the block after tally. §11.1 lists timer/pulse under logic, and schedules after these blocks. The tick is already 10 ms (D129). |
+
+### M8a: meter hysteresis and snapshot recall
+
+An `above` block reads a signal's peak (dBFS). Its output becomes 1 when the peak reaches `threshold_db` (−120 to 20) and stays 1 until the peak falls below that by `hysteresis_db` (0 to 60). Silence, and a signal with no meter yet, read as −200 dBFS, so the block stays off.
+
+A `recall` block names a snapshot. It runs that snapshot when its input rises. The first tick records the input and does not recall, so a graph that loads with the input already on does not recall by itself. The ramp is the same 10 ms as the other logic actions. Recall-safe signals stay as they are. A missing snapshot is left alone and logged. If the recall rewires the plan, the nodes fade out and the plan swaps on a later tick.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D136 | Hysteresis is a threshold and a gap below it, on the signal's peak, in its own block. It turns on at the threshold and off `hysteresis_db` lower. | Answer 2: compare against a meter with hysteresis. A plain compare chatters on a noisy meter. The raw `level` block stays, for a number. |
+| D137 | Recall fires on a rising edge only, after the first tick has been seen. It recalls the whole snapshot (recall-safe signals excepted) over the 10 ms logic ramp. | Answer 2: snapshot recall is the action. Recalling because a constant was already 1 when the mixer started would change a show unasked. |

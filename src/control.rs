@@ -74,6 +74,8 @@ pub struct Control {
     pub revision: u64,
     structure: Option<u64>,
     pending: Option<Mix>,
+    /// When a logic recall faded nodes out, swap the plan at this time.
+    logic_swap_at: Option<Instant>,
     block: u32,
     read_offset: u32,
     input_count: usize,
@@ -86,6 +88,8 @@ pub struct Control {
     pub step_counts: BTreeMap<&'static str, usize>,
     /// VAD, auto-levels, auto-mixes and ducks (§8).
     pub auto: crate::auto::Auto,
+    /// Logic graphs (§11).
+    pub logic: crate::logic::Logic,
 }
 
 impl Control {
@@ -117,6 +121,7 @@ impl Control {
             revision: 0,
             structure: None,
             pending: None,
+            logic_swap_at: None,
             block: config.block_samples,
             read_offset: config.read_offset_samples,
             input_count: config.input_flows,
@@ -126,6 +131,126 @@ impl Control {
             compile_seconds: 0.0,
             step_counts: BTreeMap::new(),
             auto: crate::auto::Auto::new(),
+            logic: crate::logic::Logic::default(),
+        }
+    }
+
+    fn minute_of_day() -> u16 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| ((d.as_secs() / 60) % 1440) as u16)
+            .unwrap_or(0)
+    }
+
+    fn post_webhook(url: String) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build();
+                if let Ok(client) = client {
+                    let _ = client
+                        .post(url)
+                        .json(&serde_json::json!({"value": 1}))
+                        .send()
+                        .await;
+                }
+            });
+        }
+    }
+
+    /// Logic graphs (§11.2), on the same 10 ms tick as the auto engine.
+    pub fn logic_tick(&mut self) {
+        use crate::mix::logic::BlockKind;
+        if self.logic_swap_at.is_some_and(|t| Instant::now() >= t) {
+            self.logic_swap_at = None;
+            if let Err(e) = self.swap() {
+                tracing::warn!("logic recall: {e}");
+            }
+        }
+        if self.pending.is_some() {
+            return;
+        }
+        let speech: std::collections::BTreeMap<String, bool> = self
+            .auto
+            .vads
+            .iter()
+            .map(|(s, v)| (s.clone(), v.state.speech_active))
+            .collect();
+        let mut level_db = std::collections::BTreeMap::new();
+        for g in &self.mix.logic {
+            for b in &g.blocks {
+                if let BlockKind::Level { signal } | BlockKind::Above { signal, .. } = &b.kind {
+                    if let Some(db) = self.meters.peak_dbfs(signal) {
+                        level_db.insert(signal.clone(), db);
+                    }
+                }
+            }
+        }
+        let on_air = self.tally.on_air_indexes();
+        let actions = self.logic.tick(&crate::logic::Readings {
+            mix: &self.mix,
+            speech: &speech,
+            level_db: &level_db,
+            on_air: &on_air,
+            minute_of_day: Self::minute_of_day(),
+        });
+        if actions.is_empty() {
+            return;
+        }
+        let mut next = self.mix.clone();
+        let mut recalling = false;
+        for a in actions {
+            if let Some(url) = a.webhook {
+                Self::post_webhook(url);
+                continue;
+            }
+            if let Some(id) = a.recall {
+                let Some(snap) = next.snapshots.iter().find(|s| s.id == id).cloned() else {
+                    tracing::warn!("logic recall: snapshot {id} does not exist");
+                    continue;
+                };
+                crate::mix::show::recall(&mut next, &snap, &crate::mix::show::Filter::default());
+                recalling = true;
+                continue;
+            }
+            let fader = a.fader_db.map(crate::logic::clamp_fader);
+            for s in next.strips.iter_mut().filter(|s| s.id == a.signal) {
+                if let Some(m) = a.mute {
+                    s.mute = m;
+                }
+                if let Some(db) = fader {
+                    s.fader_db = db;
+                }
+            }
+            for b in next.buses.iter_mut().filter(|b| b.id == a.signal) {
+                if let Some(m) = a.mute {
+                    b.mute = m;
+                }
+                if let Some(db) = fader {
+                    b.fader_db = db;
+                }
+            }
+        }
+        if next == self.mix {
+            return;
+        }
+        match self.stage(next, crate::engine::FADE_SAMPLES) {
+            Ok(Staged::Done) => {}
+            Ok(Staged::Swap { wait }) if recalling => {
+                if wait {
+                    self.logic_swap_at = Some(Instant::now() + fade_wait(self.block));
+                } else if let Err(e) = self.swap() {
+                    tracing::warn!("logic recall: {e}");
+                }
+            }
+            Ok(Staged::Swap { .. }) => {
+                tracing::warn!(
+                    "logic asked for a change that rewires the plan; it was not applied"
+                );
+                self.pending = None;
+            }
+            Err(e) => tracing::warn!("logic: {e}"),
         }
     }
 
