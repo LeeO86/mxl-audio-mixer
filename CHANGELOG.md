@@ -4,6 +4,17 @@
 
 Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
 
+### Missing input samples, split by cause
+
+- `input_overrun_samples_total`: samples the ring had already overwritten
+  (the reader fell behind). `input_late_samples_total` stays the source that
+  had not written the samples yet. Other errors stay in
+  `input_missing_samples_total` only. The §16 load line prints all three, and
+  the inputs table shows overrun next to late.
+- The ONNX Runtime download uses the system certificate store. `ORT_LIB_LOCATION`
+  is the extracted library directory when the download is done by hand (the
+  archive is raw LZMA2).
+
 ### Milestone 7 (part 1): voice detection, auto-mix, ducking
 
 - Voice activity detection (§8.1) on the control side: per analysed signal

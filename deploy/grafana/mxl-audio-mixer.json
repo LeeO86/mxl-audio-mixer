@@ -256,7 +256,17 @@
         {
           "refId": "A",
           "expr": "rate(mxl_audio_mixer_input_missing_samples_total{instance=~\"$instance\"}[1m])",
-          "legendFormat": "input {{input}}"
+          "legendFormat": "missing {{input}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(mxl_audio_mixer_input_late_samples_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "late {{input}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(mxl_audio_mixer_input_overrun_samples_total{instance=~\"$instance\"}[1m])",
+          "legendFormat": "overrun {{input}}"
         }
       ]
     },

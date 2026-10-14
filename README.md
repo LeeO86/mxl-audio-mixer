@@ -186,6 +186,21 @@ LD_LIBRARY_PATH=/opt/mxl/lib NMOS_HOST_ADDRESS=192.0.2.10 MXL_DOMAIN_SCAN_PATH=/
     MIXER_STATE_DIR=/tmp/mixer target/release/mxl-audio-mixer
 ```
 
+The Silero VAD build downloads a prebuilt ONNX Runtime. That download uses the
+system certificate store. Behind a TLS-inspecting proxy, install the proxy's CA
+in the system store first. To skip the download, fetch the archive for this
+target (ort 2.0.0-rc.14, the `x86_64-unknown-linux-gnu` file with no extra
+features: `https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/x86_64-unknown-linux-gnu.tar.lzma2`)
+with a client that trusts the proxy, and extract it. The file is a raw LZMA2
+stream, not a `.tar.xz`:
+
+```sh
+xz --format=raw --lzma2=dict=64MiB -dc x86_64-unknown-linux-gnu.tar.lzma2 | tar -x -C /opt/ort
+ORT_LIB_LOCATION=/opt/ort cargo build --release
+```
+
+`ORT_LIB_LOCATION` is that directory (the one that contains `libonnxruntime.a`).
+
 The image is `ghcr.io/leeo86/mxl-audio-mixer` (uid 1000; tags `X.Y.Z`, `X.Y`, `X`,
 `git-<sha7>`, `nightly-dev`). `deploy/k8s/deployment.yaml` shows the platform
 conventions; `deploy/grafana/` has a dashboard. The development set-up is in
@@ -618,8 +633,10 @@ the control engine did not get), `signals`,
 connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,
 and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
-`input_effective_delay_ms`, `input_late_samples_total`,
-`input_missing_samples_total`, `input_reopens_total`; `process_cpu_seconds_total`,
+`input_effective_delay_ms`, `input_late_samples_total`
+(the source had not written the samples yet), `input_overrun_samples_total`
+(the ring had already overwritten them), `input_missing_samples_total`
+(both, and any other failed read), `input_reopens_total`; `process_cpu_seconds_total`,
 `process_resident_memory_bytes`. All prefixed `mxl_audio_mixer_`.
 
 ## Tests
