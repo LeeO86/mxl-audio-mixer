@@ -209,6 +209,7 @@ try {
   // A pointer event on the button itself: a mouse hold misses the button when the runner is busy.
   await talkAux.dispatchEvent("pointerdown", { pointerId: 1, bubbles: true, button: 0, buttons: 1 });
   await until("a held talk button talks", talks, 5000);
+  await page.waitForTimeout(500);
   await talkAux.dispatchEvent("pointerup", { pointerId: 1, bubbles: true, button: 0, buttons: 0 });
   await until("held talk released", async () => !(await talks()));
   await listenAux.click();
