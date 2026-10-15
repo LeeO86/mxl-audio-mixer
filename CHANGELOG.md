@@ -4,7 +4,7 @@
 
 Milestone 9 (§13: master/slave remote link).
 
-- A slave accepts a master on `/api/v1/link` (WebSocket, pre-shared `MIXER_LINK_TOKEN`). The master connects to up to four `MIXER_LINK_PEERS`. Commands are mute, fader and snapshot recall. The slave holds its mix when the master disconnects; `MIXER_LINK_TAKEOVER=deny` then refuses local changes. `GET /api/v1/remotes` lists peers. `remote_link_up` and `remote_link_rtt_ms`.
+- A slave accepts a master on `/api/v1/link` (WebSocket, pre-shared `MIXER_LINK_TOKEN`). The master connects to up to four `MIXER_LINK_PEERS`. The gallery console shows each far side as a layer (strips, inputs, auxiliaries, meters) and rides fader, mute and send there. The far side mixes its own voices into in-ears (`iem-<voice>`, the other voices plus the gallery return). `POST /api/v1/remotes/<id>/return` publishes the gallery mix-minus of a bus without the far-side contribution and adds that return to the in-ears. Audio stays on MXL. The slave holds its mix when the master disconnects; `MIXER_LINK_TAKEOVER=deny` then refuses local changes. `remote_link_up` and `remote_link_rtt_ms`.
 
 ## 1.2.0 (in progress)
 

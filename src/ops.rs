@@ -211,6 +211,15 @@ pub fn status_json(app: &App) -> Value {
             "ducks": control.mix.ducks.len(),
             "autolevels": control.mix.autolevels.len(),
         },
+        "link": {
+            "role": match app.config.link_role {
+                crate::config::LinkRole::Off => "off",
+                crate::config::LinkRole::Master => "master",
+                crate::config::LinkRole::Slave => "slave",
+            },
+            "up": control.link_up,
+            "seen": control.link_seen,
+        },
         "talkback": {
             "talking": control.talking(),
             "listen_back": control.listen_back(),

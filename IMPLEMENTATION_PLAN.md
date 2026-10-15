@@ -1752,3 +1752,13 @@ One master, up to four slaves, on the mixer's own web port (`/api/v1/link`), tok
 | # | Decision | Reason |
 | --- | --- | --- |
 | D138 | The link is a WebSocket on `WEB_PORT`, not a second listener. Up to 4 peers. Takeover deny blocks `stage` only after a master has connected and then gone. | §13.3 "one master, up to 4 slaves", "holds its last state", "local takeover allowed/denied". TLS is the platform's in front of the web port. |
+
+### Milestone 9: the far-side desk and the gallery return
+
+The gallery works the far side as another layer of the console: the slave sends its strips, buses and sends (and peaks at 10 Hz), and fader, mute and send commands go back. A send that is not there yet is created. Peers are `s1` … `s4`, not the socket URL.
+
+The far-side voices are mixed where the people are. `POST /api/v1/remotes/<id>/return` does both halves. On the gallery it makes or updates one published mix-minus (`ret-<peer>`, bus `of` without the local strips that are the far-side contribution). The id follows the peer, so a rebuild after a restart updates the same output. On the far side each named voice gets `iem-<voice>`: the other voices at unity, post-fader, plus the return strip at unity, post-fader. Those buses are not delay-compensated. Building again does not move a send the operator has already set. The return audio is the published output, routed to that strip by MXL.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D139 | One gallery return for the whole far side, and one in-ear per voice that is the other local voices plus that return. The in-ears are not delay-compensated. The contribution left out of the return is chosen on the gallery desk, because those strips are the audio that arrived home. | The far-side discussion has to be mixed in the room. The gallery sends the other sources once, minus the far-side contribution, so the voices are not heard again after the trip. Per-person mix-minus of the gallery programme would be a feed per voice; one return plus local N-1 of the voices is the same result with one flow. |

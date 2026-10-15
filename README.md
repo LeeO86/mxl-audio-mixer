@@ -384,6 +384,29 @@ High-level operations make ordinary buses and sends (editable afterwards), each
   selection; without `of`, a bus per participant with sends from the others. The
   format is `of`'s or mono.
 - `mix-minus` `{"of", "without", "id"?, "name"?}`: a mix-minus bus.
+
+### Remote production (§13)
+
+The gallery is the master and the far-side mixer is the slave. The gallery console
+draws the far-side strips, inputs and auxiliaries as another layer and rides them
+over the link (fader, mute, send). The far side mixes its own voices into the
+in-ears, so that mix does not wait for the trip to the gallery and back.
+
+`POST /api/v1/remotes/<id>/return` `{"of", "without", "return_strip", "voices"}`
+builds that on both sides. On the gallery, `of` (a bus) becomes a published
+mix-minus, `ret-<peer>` (so `ret-s1`), without the local strips in `without` — the strips on this
+desk that carry the far-side contribution, so those voices are not sent back late.
+On the far side, each voice gets an in-ear bus `iem-<voice>`: the other voices,
+plus `return_strip` (the far-side strip patched to that published flow). Route the
+output to that strip over MXL. Building it again keeps send levels the operator
+has set.
+
+`GET /api/v1/remotes` is the layer: each peer (`s1` … `s4`) has `desk` (strips,
+buses, sends), `peaks` (dBFS, about 10 Hz), `rtt_ms` and `return_bus`.
+`POST /api/v1/remotes/<id>/command` is `{"op":"mute"|"fader"|"send"|"recall", …}`.
+A send that does not exist yet is created. `POST /api/v1/remotes/<id>/push` copies
+the faders, mutes and sends the gallery last saw. When the master drops, the far
+side holds the mix; the console says so.
 - `link` `{"strips", "format"?, "id"?, "name"?}`: mono strips into one stereo or
   surround strip (2: stereo, 3: 3.0, 6: 5.1, 8: 7.1, 10: 5.1.4, 12: 7.1.4): their
   patches in order, the first strip's processing, fader and settings, a send to
@@ -585,6 +608,10 @@ without touching the audio.
 | `GET`, `DELETE /api/v1/shows/history/<id>`, `POST …/<id>/restore` | a version's mix; delete; restore it as the show |
 | `GET`, `PATCH /api/v1/control-room` | the control room (with `soloed`); change `sources`, `solo` (`mode`, `pfl_trim_db`, `programme_db`, `sip`), `reference_spl` |
 | `POST /api/v1/operations/{group,n-1,mix-minus,link,unlink}` | the high-level operations (above) |
+| `GET /api/v1/remotes` | far-side peers (`s1`…): `desk`, `peaks`, `rtt_ms`, `return_bus`, `up` |
+| `POST /api/v1/remotes/<id>/command` | `mute`, `fader`, `send` (`from`, `to`, `db`, `mute`), `recall` on that far side |
+| `POST /api/v1/remotes/<id>/return` | gallery mix-minus (`of`, `without`) published, and far-side in-ears (`return_strip`, `voices`) |
+| `POST /api/v1/remotes/<id>/push` | copy the faders, mutes and sends the gallery last saw |
 | `GET`, `POST /api/v1/vcas`, `GET`, `PATCH`, `DELETE /api/v1/vcas/<id>` | VCAs (every field, `ramp_ms`; GET adds `signals`: the strips and buses under it) |
 | `GET`, `POST /api/v1/mute-groups`, `GET`, `PATCH`, `DELETE /api/v1/mute-groups/<id>` | mute groups (`active`, `members`, `name`) |
 | `GET /api/v1/vad`, `GET`, `PUT`, `DELETE /api/v1/vad/<signal>` | every analysed signal: settings (`own`: its own, else the defaults) and `state`; PUT sets its own (`threshold`, `hold_ms`, `gate_lufs`, `detector`: `silero` or `features`) and analyses it; DELETE removes them |
