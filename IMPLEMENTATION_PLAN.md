@@ -1744,3 +1744,21 @@ A `recall` block names a snapshot. It runs that snapshot when its input rises. T
 | --- | --- | --- |
 | D136 | Hysteresis is a threshold and a gap below it, on the signal's peak, in its own block. It turns on at the threshold and off `hysteresis_db` lower. | Answer 2: compare against a meter with hysteresis. A plain compare chatters on a noisy meter. The raw `level` block stays, for a number. |
 | D137 | Recall fires on a rising edge only, after the first tick has been seen. It recalls the whole snapshot (recall-safe signals excepted) over the 10 ms logic ramp. | Answer 2: snapshot recall is the action. Recalling because a constant was already 1 when the mixer started would change a show unasked. |
+
+### Milestone 9: remote link (first slice)
+
+One master, up to four slaves, on the mixer's own web port (`/api/v1/link`), token in the first message (not shown by `GET /api/v1/config`). The slave sends its revision and the faders and mutes it is on. The master queues mute, fader, recall and a push of those levels. Audio stays on MXL. When the master drops, the slave keeps the mix; with takeover `deny`, local changes are refused until the master is back (after it had connected once, so start-up still loads the show).
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D138 | The link is a WebSocket on `WEB_PORT`, not a second listener. Up to 4 peers. Takeover deny blocks `stage` only after a master has connected and then gone. | §13.3 "one master, up to 4 slaves", "holds its last state", "local takeover allowed/denied". TLS is the platform's in front of the web port. |
+
+### Milestone 9: the far-side desk and the gallery return
+
+The gallery works the far side as another layer of the console: the slave sends its strips, buses and sends (and peaks at 10 Hz), and fader, mute and send commands go back. A send that is not there yet is created. Peers are `s1` … `s4`, not the socket URL.
+
+The far-side voices are mixed where the people are. `POST /api/v1/remotes/<id>/return` does both halves. On the gallery it makes or updates one published mix-minus (`ret-<peer>`, bus `of` without the local strips that are the far-side contribution). The id follows the peer, so a rebuild after a restart updates the same output. On the far side each named voice gets `iem-<voice>`: the other voices at unity, post-fader, plus the return strip at unity, post-fader. Those buses are not delay-compensated. Building again does not move a send the operator has already set. The return audio is the published output, routed to that strip by MXL.
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D139 | One gallery return for the whole far side, and one in-ear per voice that is the other local voices plus that return. The in-ears are not delay-compensated. The contribution left out of the return is chosen on the gallery desk, because those strips are the audio that arrived home. | The far-side discussion has to be mixed in the room. The gallery sends the other sources once, minus the far-side contribution, so the voices are not heard again after the trip. Per-person mix-minus of the gallery programme would be a feed per voice; one return plus local N-1 of the voices is the same result with one flow. |

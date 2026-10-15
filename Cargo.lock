@@ -1001,6 +1001,7 @@ name = "mxl-audio-mixer"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "futures-util",
  "hound",
  "libc",
  "mxl",
@@ -1015,6 +1016,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tracing",
  "tracing-subscriber",

@@ -6,6 +6,7 @@ import { computed, ref, watch } from "vue";
 import AutomationPanel from "./AutomationPanel.vue";
 import GroupsPanel from "./GroupsPanel.vue";
 import OperationsPanel from "./OperationsPanel.vue";
+import RemoteDesk from "./RemoteDesk.vue";
 import Segmented from "./Segmented.vue";
 import Strip from "./Strip.vue";
 import VcaStrip from "./VcaStrip.vue";
@@ -154,4 +155,5 @@ const automating = ref(false);
       <VcaStrip v-for="v in vcas" :key="v.id" :vca="v" />
     </div>
   </div>
+  <RemoteDesk :scale="scale" :alignment="alignment" />
 </template>

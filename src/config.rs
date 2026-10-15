@@ -66,9 +66,21 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MEDIAMTX_ICE_UDP_PORT", default: "8199", description: "WebRTC ICE UDP port of the built-in MediaMTX." },
     Setting { name: "MEDIAMTX_BIN", default: "mediamtx", description: "The built-in MediaMTX executable (the image has it)." },
     Setting { name: "MIXER_MAX_WEB_MONITORS", default: "8", description: "Most personal monitor paths of browser clients at once." },
+    Setting { name: "MIXER_LINK_ROLE", default: "off", description: "Remote link (§13): off, master or slave. A master connects to MIXER_LINK_PEERS; a slave accepts them on /api/v1/link." },
+    Setting { name: "MIXER_LINK_TOKEN", default: "unset", description: "Pre-shared token of the remote link. Required when the role is not off. Never shown by GET /api/v1/config." },
+    Setting { name: "MIXER_LINK_PEERS", default: "unset", description: "Master only: up to 4 WebSocket URLs of slaves, comma-separated (ws:// or wss://)." },
+    Setting { name: "MIXER_LINK_TAKEOVER", default: "allow", description: "Slave: allow or deny local changes after the master has disconnected. The last mix is kept either way." },
 ];
 
 pub const ALLOWED_BLOCKS: [u32; 4] = [48, 96, 144, 240];
+
+/// Remote-link role (§13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkRole {
+    Off,
+    Master,
+    Slave,
+}
 
 /// A setting is invalid. The process exits with code 78.
 #[derive(Debug)]
@@ -146,6 +158,12 @@ pub struct Config {
     pub mediamtx_ice_udp_port: u16,
     pub mediamtx_bin: String,
     pub max_web_monitors: usize,
+    pub link_role: LinkRole,
+    /// Empty when the role is off. Not included in `values`.
+    pub link_token: String,
+    pub link_peers: Vec<String>,
+    /// Slave rejects local mix changes after the master has disconnected.
+    pub link_takeover_deny: bool,
     /// Every setting's value as text and its origin, for `GET /api/v1/config`.
     pub values: Vec<(&'static str, String, Origin)>,
 }
@@ -496,6 +514,61 @@ impl Parser<'_> {
             .map(|(v, _)| v)
             .unwrap_or_else(|| "mediamtx".into());
         let max_web_monitors: usize = self.int("MIXER_MAX_WEB_MONITORS", 8, 0, 64)?;
+        let link_role = match self
+            .get("MIXER_LINK_ROLE")
+            .map(|(v, _)| v)
+            .unwrap_or_else(|| "off".into())
+            .as_str()
+        {
+            "off" => LinkRole::Off,
+            "master" => LinkRole::Master,
+            "slave" => LinkRole::Slave,
+            other => {
+                return err(format!(
+                    "MIXER_LINK_ROLE must be off, master or slave, got {other}"
+                ))
+            }
+        };
+        let link_token = self
+            .get("MIXER_LINK_TOKEN")
+            .map(|(v, _)| v)
+            .unwrap_or_default();
+        if link_role != LinkRole::Off && (link_token.len() < 8 || link_token.len() > 200) {
+            return err(
+                "MIXER_LINK_TOKEN must have 8 to 200 characters when MIXER_LINK_ROLE is not off",
+            );
+        }
+        let link_peers = self
+            .get("MIXER_LINK_PEERS")
+            .map(|(v, _)| v)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if link_role == LinkRole::Master && (link_peers.is_empty() || link_peers.len() > 4) {
+            return err("MIXER_LINK_PEERS must list 1 to 4 ws:// or wss:// URLs when MIXER_LINK_ROLE is master");
+        }
+        if link_peers
+            .iter()
+            .any(|u| !(u.starts_with("ws://") || u.starts_with("wss://")))
+        {
+            return err("MIXER_LINK_PEERS entries must be ws:// or wss:// URLs");
+        }
+        let takeover = self
+            .get("MIXER_LINK_TAKEOVER")
+            .map(|(v, _)| v)
+            .unwrap_or_else(|| "allow".into());
+        let link_takeover_deny = match takeover.as_str() {
+            "allow" => false,
+            "deny" => true,
+            other => {
+                return err(format!(
+                    "MIXER_LINK_TAKEOVER must be allow or deny, got {other}"
+                ))
+            }
+        };
 
         let mut config = Config {
             host_id,
@@ -541,6 +614,10 @@ impl Parser<'_> {
             mediamtx_ice_udp_port,
             mediamtx_bin,
             max_web_monitors,
+            link_role,
+            link_token,
+            link_peers,
+            link_takeover_deny,
             values: Vec::new(),
         };
         config.values = SETTINGS
@@ -611,6 +688,28 @@ impl Config {
             "MEDIAMTX_ICE_UDP_PORT" => self.mediamtx_ice_udp_port.to_string(),
             "MEDIAMTX_BIN" => self.mediamtx_bin.clone(),
             "MIXER_MAX_WEB_MONITORS" => self.max_web_monitors.to_string(),
+            "MIXER_LINK_ROLE" => match self.link_role {
+                LinkRole::Off => "off",
+                LinkRole::Master => "master",
+                LinkRole::Slave => "slave",
+            }
+            .into(),
+            "MIXER_LINK_TOKEN" => {
+                if self.link_token.is_empty() {
+                    String::new()
+                } else {
+                    "set".into()
+                }
+            }
+            "MIXER_LINK_PEERS" => self.link_peers.join(","),
+            "MIXER_LINK_TAKEOVER" => {
+                if self.link_takeover_deny {
+                    "deny"
+                } else {
+                    "allow"
+                }
+            }
+            .into(),
             _ => String::new(),
         }
     }

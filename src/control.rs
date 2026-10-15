@@ -90,6 +90,13 @@ pub struct Control {
     pub auto: crate::auto::Auto,
     /// Logic graphs (§11).
     pub logic: crate::logic::Logic,
+    /// Slave whose master has connected at least once (§13).
+    pub link_slave: bool,
+    pub link_takeover_deny: bool,
+    pub link_seen: bool,
+    pub link_up: bool,
+    /// A command from the master is being applied, so takeover does not block it.
+    pub remote_write: bool,
 }
 
 impl Control {
@@ -132,6 +139,11 @@ impl Control {
             step_counts: BTreeMap::new(),
             auto: crate::auto::Auto::new(),
             logic: crate::logic::Logic::default(),
+            link_slave: config.link_role == crate::config::LinkRole::Slave,
+            link_takeover_deny: config.link_takeover_deny,
+            link_seen: false,
+            link_up: false,
+            remote_write: false,
         }
     }
 
@@ -669,6 +681,14 @@ impl Control {
     /// samples and are done; anything else fades the affected nodes out and needs
     /// [`Control::swap`] after [`fade_wait`].
     pub fn stage(&mut self, next: Mix, ramp: u32) -> Result<Staged, String> {
+        if self.link_slave
+            && self.link_takeover_deny
+            && self.link_seen
+            && !self.link_up
+            && !self.remote_write
+        {
+            return Err("the master is disconnected and local takeover is denied".into());
+        }
         next.validate(self.input_count, self.block)?;
         self.compiler.afv = self.afv_targets(&next);
         self.compiler.auto = self.auto.compile_gains(&next);

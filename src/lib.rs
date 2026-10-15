@@ -12,6 +12,7 @@ pub mod events;
 pub mod group_api;
 pub mod history;
 pub mod inputs;
+pub mod link;
 pub mod logic;
 pub mod logic_api;
 pub mod loudness;

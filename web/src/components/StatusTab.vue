@@ -57,6 +57,14 @@ const uptime = computed(() => {
         <dd><Pill :text="ready.timing_trusted ? `trusted (TAI − UTC ${ready.tai_utc_offset_s} s)` : 'untrusted'" :kind="ready.timing_trusted ? 'ok' : 'bad'" /></dd>
         <dt>Live updates</dt>
         <dd><Pill :text="live.connected ? 'connected' : 'reconnecting'" :kind="live.connected ? 'ok' : 'warn'" /></dd>
+        <dt>Remote link</dt>
+        <dd>
+          <template v-if="s.link">
+            {{ s.link.role }}
+            <Pill v-if="s.link.role === 'slave'" :text="s.link.up ? 'master linked' : s.link.seen ? 'master lost' : 'waiting'" :kind="s.link.up ? 'ok' : s.link.seen ? 'warn' : 'neutral'" />
+          </template>
+          <template v-else>–</template>
+        </dd>
         <dt>Uptime</dt>
         <dd>{{ uptime }}</dd>
       </dl>
