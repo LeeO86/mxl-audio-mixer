@@ -12,7 +12,10 @@ Milestone 9 (§13: master/slave remote link).
 - The DSP thread takes the last CPU whose SMT siblings are all in the pod (a whole core), not just the last CPU. The README and `deploy/k8s` ask for an even CPU count (4 preferred; 2 is the minimum, not measured, and puts the non-DSP threads on the DSP CPU's sibling) and `reservedSystemCPUs`; `full-pcpus-only` is recommended, no longer required.
 - Start-up: `MXL_DOMAIN_SCAN_PATH` must exist (78), `MIXER_STATE_DIR` must be writable (78, before: the changes were lost), libmxl that cannot be loaded exits 75 (was 78), and every port is checked before the output domain is created; a failed start (also one halfway through creating the domain) removes a domain it created.
 - `MXL_OUTPUT_DOMAIN_DIR` must be directly below `MXL_DOMAIN_SCAN_PATH` (78); nothing else is ever removed.
-- An existing `domain_def.json` with another id is kept and used, with a warning (was exit 78), and that domain is not removed on exit even with `MXL_CLEANUP_ON_EXIT=true` (a warning); `domain_def.json` and `options.json` are written atomically.
+- An existing `domain_def.json` with another id is kept and used, with a warning (was exit 78), and that domain is not removed on exit even with `MXL_CLEANUP_ON_EXIT=true` (a warning).
+- `domain_def.json` and `options.json` are created atomically and only once. A private temp file (created exclusively, `create_new`, with a random UUID name) is hard-linked into place, which never replaces an existing file. Several processes creating the same domain at once all succeed, and exactly one of them counts as having created it. The domain filesystem must support hard links (tmpfs, ext4 and xfs do). The temp files are hidden: `.domain_def.json.<uuid>.tmp`, `.options.json.<uuid>.tmp`.
+- Fixed: `mxl-mixer-tone` writers started together on a new domain could exit with "not a valid domain definition" (the `auto.sh` CI flake).
+- An unreadable `domain_def.json` reports the real error (e.g. "cannot read …: Permission denied"). A half-made domain (`options.json` failed after `domain_def.json` was written) is removed by the failed start.
 - The soft open-files limit is raised to the hard limit, at most 65536.
 - Metrics: `logic_ticks_total`, `logic_actions_total{graph}`; `# HELP`/`# TYPE` for `remote_link_up` and `remote_link_rtt_ms`. `webrtc_clients` is dropped from the spec (`preview_readers{path}` counts them).
 - A failed logic webhook is logged as a warning, without the URL's credentials, query and fragment. The README says the API has no authentication and belongs on the pod network.
@@ -36,15 +39,22 @@ Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D157).
 - A fader at −∞ no longer breaks the link: levels carry `"-inf"` (the `null` of older peers is read as −∞). Before, one such fader made the master ignore every later state of that far side.
 - `command` checks the link and queues under one lock, so nothing queued after the link dropped goes out on the next connection; at most 1024 commands wait per far side (503). The 409s and the 503 have a JSON `error`.
 - The master lists its slaves from the start (`remote_link_up` 0 for one never reached), and the RTT is left out while a link is down.
-- The token is compared as a digest (its length does not show in the time taken); a wrong one is logged on the slave at most every 10 s. A user or password in `MIXER_LINK_PEERS` is refused. An unreadable push gets a refusing `ack` too. The link's timers do not burst after a stall.
+- The token is compared as a digest (its length does not show in the time taken), computed once at start; a wrong one is logged on the slave at most every 10 s. A user or password in `MIXER_LINK_PEERS` is refused. An unreadable push gets a refusing `ack` too. The link's timers do not burst after a stall.
 - README: `MIXER_LINK_TOKEN` is a secret (the README said no setting was); `SSL_CERT_FILE`/`SSL_CERT_DIR` for a private CA.
 - CI runs `tests/integration/link.sh`, which now also checks a hung master and far side, takeover deny, a second master, a silent and an oversized connection, and `wss://` through a TLS proxy with a private CA.
+
+### Tests
+
+- The §16 tone writers (`tests/perf/section16.sh`) run off the DSP core at `SCHED_FIFO` `MIXER_RT_PRIORITY` − 4 (at least 1) when allowed; the script takes `MIXER_RT_PRIORITY` only as an integer 1–49 (`off`, `false` or 0 leave them `SCHED_OTHER`).
+- The m0 spike keeps its other threads off the block core; `m0-block-clock` picks the CPU by the whole-core rule. The lint job also runs the m0 spike's tests.
+- The test scripts' `urllib` calls use an opener without proxies (`no_proxy` CIDR entries were ignored).
+- Flakes fixed: `auto.sh` ducking (a fixed input delay and a bounded retry) and `processing.sh` (polling instead of a fixed wait).
 
 ### Documentation
 
 - Release notes for 1.2.0 (`docs/release-notes/1.2.0.md`: the image digest, the hardware run) and 1.3.0 (`docs/release-notes/1.3.0.md`: every setting, ports, volumes, widgets, metric families, what the platform must set, upgrade notes, the catalog facts).
+- `docs/release-notes/1.0.0.md` corrected: `/readyz` does not wait for the TAI offset (watch `timing_trusted`).
 - README: the status line; port 3343 is reserved for IS-07 events and not opened. The specification lists the settings it did not name (§14.1). The plan's status table is current.
-- The link's token digest is computed once.
 
 ## 1.2.0 (2026-10-15)
 

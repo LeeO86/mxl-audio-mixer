@@ -618,9 +618,9 @@ fn set_fader(mix: &mut Mix, signal: &str, db: f64) -> bool {
     false
 }
 
-type Digest = [u8; 20];
+pub(crate) type Digest = [u8; 20];
 
-fn digest(token: &str) -> Digest {
+pub(crate) fn digest(token: &str) -> Digest {
     use sha1::Digest as _;
     sha1::Sha1::digest(token).into()
 }
@@ -633,12 +633,6 @@ fn token_ok(got: &str, want: &Digest) -> bool {
         .zip(want.iter())
         .fold(0u8, |d, (a, b)| d | (a ^ b))
         == 0
-}
-
-/// The digest of `MIXER_LINK_TOKEN`, computed once (the setting does not change).
-fn configured(app: &App) -> &'static Digest {
-    static WANT: std::sync::OnceLock<Digest> = std::sync::OnceLock::new();
-    WANT.get_or_init(|| digest(&app.config.link_token))
 }
 
 /// Log refused tokens at most every 10 s, with the count since the last line.
@@ -693,7 +687,7 @@ async fn slave(mut socket: WebSocket, app: App) {
     let Some(Msg::Hello { token, label, .. }) = hello else {
         return;
     };
-    if !token_ok(&token, configured(&app)) {
+    if !token_ok(&token, &app.config.link_token_digest) {
         note_bad_token();
         refuse(&mut socket, "token").await;
         return;

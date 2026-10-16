@@ -161,6 +161,8 @@ pub struct Config {
     pub link_role: LinkRole,
     /// Empty when the role is off. Not included in `values`.
     pub link_token: String,
+    /// SHA-1 of `link_token`, computed once at load (the link compares digests).
+    pub link_token_digest: crate::link::Digest,
     pub link_peers: Vec<String>,
     /// Slave rejects local mix changes after the master has disconnected.
     pub link_takeover_deny: bool,
@@ -549,7 +551,7 @@ impl Parser<'_> {
             .unwrap_or_default();
         if link_role != LinkRole::Off && (link_token.len() < 8 || link_token.len() > 200) {
             return err(
-                "MIXER_LINK_TOKEN must have 8 to 200 characters when MIXER_LINK_ROLE is not off",
+                "MIXER_LINK_TOKEN must have 8 to 200 bytes when MIXER_LINK_ROLE is not off",
             );
         }
         let link_peers = self
@@ -624,6 +626,7 @@ impl Parser<'_> {
             mediamtx_bin,
             max_web_monitors,
             link_role,
+            link_token_digest: crate::link::digest(&link_token),
             link_token,
             link_peers,
             link_takeover_deny,
@@ -983,6 +986,7 @@ mod tests {
         };
         let c = master("ws://far-a:8190/api/v1/link, wss://far-b.example/api/v1/link").unwrap();
         assert_eq!(c.link_peers.len(), 2);
+        assert_eq!(c.link_token_digest, crate::link::digest("a-long-token"));
         for bad in [
             "http://far:8190/api/v1/link",
             "ws://",

@@ -661,7 +661,7 @@ README's Settings table is the complete list, with every default):
 | `MIXER_INPUT_DELAY_CONFIRM` | false | An automatic delay change waits for the operator instead of applying with a fade. |
 | `MEDIAMTX_BIN` | `mediamtx` | The built-in MediaMTX executable (Appendix B.1). |
 | `MIXER_LINK_ROLE` | `off` | Remote link (§13): `off`, `master` or `slave`. |
-| `MIXER_LINK_TOKEN` | unset | The link's pre-shared token, 8–200 characters; a secret (G1), never shown or exported. |
+| `MIXER_LINK_TOKEN` | unset | The link's pre-shared token, 8–200 bytes; a secret (G1), never shown or exported. |
 | `MIXER_LINK_PEERS` | unset | Master: 1–4 `ws://` or `wss://` slave URLs, each once, no user or password (else exit 78). |
 | `MIXER_LINK_TAKEOVER` | `allow` | Slave: `allow` or `deny` local changes while its master is gone. |
 

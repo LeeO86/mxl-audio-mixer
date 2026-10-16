@@ -17,7 +17,7 @@ peak, peak hold, true peak, RMS, PPM, correlation, gain-reduction and loudness
 (BS.1770-4 / R 128) meters and an analyser; snapshots, layouts and the show
 history; the web UI (console, processing editor, routing matrix, snapshots,
 metering) with live updates over a WebSocket; widgets for operator screens
-(`strip`, `fader-bank`, `loudness`, `monitor`); tally (TSL UMD 5.0) and
+(`strip`, `fader-bank`, `loudness`, `monitor`, `talkback`, `vca`); tally (TSL UMD 5.0) and
 audio-follows-video; the control room (monitors, PFL/AFL, solo-in-place, MXL
 monitor outputs, oscillator); talkback and browser monitoring; VCAs, mute groups,
 N-1 and group operations; voice detection, auto-level, auto-mix and ducking;
@@ -301,7 +301,7 @@ token.
 | `MEDIAMTX_BIN` | mediamtx | The built-in MediaMTX executable (the image has it). |
 | `MIXER_MAX_WEB_MONITORS` | 8 | Most personal monitor paths of browser clients at once. |
 | `MIXER_LINK_ROLE` | off | Remote link (§13): `off`, `master` or `slave`. |
-| `MIXER_LINK_TOKEN` | unset | Pre-shared token (a secret, 8 to 200 characters). Required when the role is not off. `GET /api/v1/config` shows `set`, not the token. |
+| `MIXER_LINK_TOKEN` | unset | Pre-shared token (a secret, 8 to 200 bytes). Required when the role is not off. `GET /api/v1/config` shows `set`, not the token. |
 | `MIXER_LINK_PEERS` | unset | Master: 1 to 4 `ws://` or `wss://` URLs of slaves (with a host), comma-separated, each slave once. The first is `s1`. |
 | `MIXER_LINK_TAKEOVER` | allow | Slave: `allow` or `deny` local changes after the master has disconnected. |
 
