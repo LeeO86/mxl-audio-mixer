@@ -446,6 +446,7 @@ function labelOf(b) {
   const label = typeLabel(b.type);
   if (b.type === "macro") return `${macros.value.find((m) => m.id === b.macro)?.name || b.macro}`;
   if (b.type === "schedule") return `${label}: ${hhmm(b.start_minute)}–${hhmm(b.end_minute)}`;
+  if (paramsOf(b).some((q) => BLANK_KINDS.includes(q.kind) && b[q.name] === "")) return `${label}: no target yet`;
   const p = paramsOf(b).find((q) => q.kind !== "port-type" && b[q.name] !== undefined && b[q.name] !== null && typeof b[q.name] !== "object" && b[q.name] !== "");
   if (!p) return label;
   const v = b[p.name];
