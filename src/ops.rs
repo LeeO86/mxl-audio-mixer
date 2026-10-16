@@ -328,6 +328,7 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
             Ok(errors) => output_errors = errors,
             Err(r) => return *r,
         }
+        app.control().flush_mix();
     }
     let failed = app.node.restore(show.connections).await;
     Json(json!({

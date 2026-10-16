@@ -207,6 +207,31 @@ wait_until 3 "aux unmuted" is "$WEB/api/v1/buses/aux" "d['mute']" False
 [[ "$(json "$WEB/api/v1/logic-macros/inv" "d['exposed']['inputs'][0]['name']")" == x ]] || fail "exposed ports"
 pass "batch: a macro and its graph; not(key) mutes aux, values as m1.n"
 
+# A logic change that rewires the plan and an API change that rewires it, at
+# the same moment: both stay (they share the change lock).
+api POST /api/v1/buses '{"id": "aux2", "name": "Aux 2", "format": "stereo"}' >/dev/null
+api POST /api/v1/buses '{"id": "aux3", "name": "Aux 3", "format": "stereo"}' >/dev/null
+api PUT /api/v1/logic/race '{"name": "Race", "blocks": [{"id": "key", "type": "button"}, {"id": "pub", "type": "set-publish", "signal": "aux2"}],
+  "wires": [{"from_block": "key", "from_port": "out", "to_block": "pub", "to_port": "in"}]}' >/dev/null
+published() { json "$WEB/api/v1/outputs" "sorted(o['signal'] for o in d if o['signal'] in ('aux2', 'aux3'))"; }
+for round in 1 2 3 4 5; do
+    api PUT /api/v1/logic/race/buttons/key '{"pressed": true}' >/dev/null &
+    a=$!
+    api PUT /api/v1/outputs/aux3 >/dev/null &
+    b=$!
+    wait "$a" "$b"
+    wait_until 5 "aux2 and aux3 published (round $round)" is "$WEB/api/v1/outputs" "sorted(o['signal'] for o in d if o['signal'] in ('aux2', 'aux3'))" "['aux2', 'aux3']"
+    api PUT /api/v1/logic/race/buttons/key '{"pressed": false}' >/dev/null &
+    a=$!
+    api DELETE /api/v1/outputs/aux3 >/dev/null &
+    b=$!
+    wait "$a" "$b"
+    wait_until 5 "aux2 and aux3 unpublished (round $round)" is "$WEB/api/v1/outputs" "sorted(o['signal'] for o in d if o['signal'] in ('aux2', 'aux3'))" "[]"
+done
+sleep 0.5
+[[ "$(published)" == "[]" ]] || fail "after the races: $(published)"
+pass "a logic publish and an API publish at once, 5 times: neither lost"
+
 # Refusals.
 code=$(curl -s -o "$WORK/bad.json" -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/logic/bad" \
     -d '{"name": "Bad", "blocks": [{"id": "s", "type": "text", "value": "x"}, {"id": "n", "type": "not"}], "wires": [{"from_block": "s", "from_port": "out", "to_block": "n", "to_port": "in"}]}')
@@ -224,7 +249,17 @@ actions=$(curl -fsS "$WEB/metrics" | sed -n 's/^mxl_audio_mixer_logic_actions_to
 ((actions >= 8)) || fail "logic_actions_total{graph=\"show\"} $actions"
 pass "logic_actions_total{graph=\"show\"} $actions"
 
+# mix.json: a fader change is written within 0.5 s, not at once; SIGTERM
+# writes what waits.
+saved() { python3 -c "import json; print(json.load(open('$WORK/state/mix.json'))['mix']['strips'][0]['fader_db'])"; }
+api PATCH /api/v1/strips/vox '{"fader_db": -3}' >/dev/null
+[[ "$(saved)" != -3.0 ]] || fail "mix.json was written at once"
+sleep 0.7
+[[ "$(saved)" == -3.0 ]] || fail "mix.json not written 0.7 s after the change: $(saved)"
+api PATCH /api/v1/strips/vox '{"fader_db": -4}' >/dev/null
 rc=0
 stop_mixer || rc=$?
 [[ $rc == 143 ]] || fail "exit code $rc"
+[[ "$(saved)" == -4.0 ]] || fail "SIGTERM did not write the waiting change: $(saved)"
+pass "mix.json coalesced: a fader change written within 0.5 s, the last one at SIGTERM"
 pass logic

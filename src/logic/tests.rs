@@ -1100,3 +1100,45 @@ fn the_tick_stays_cheap_at_the_limits() {
     );
     eprintln!("logic tick, 32 × 256 blocks: {per_tick:?}");
 }
+
+#[test]
+fn a_rewiring_change_waits_for_the_change_lock() {
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let mut w = Waiting::default();
+    assert!(matches!(w.take(&lock), Taken::Idle));
+    let publish = Action {
+        graph: "g".into(),
+        block: "pub".into(),
+        dry_run: false,
+        act: Act::Publish {
+            signal: "aux".into(),
+            on: true,
+        },
+    };
+    w.push(publish.clone());
+    // An API change holds the lock: the action waits, then goes once it is free.
+    let held = lock.clone().try_lock_owned().unwrap();
+    for _ in 0..10 {
+        assert!(matches!(w.take(&lock), Taken::Wait));
+    }
+    drop(held);
+    let Taken::Go(guard, acts) = w.take(&lock) else {
+        panic!("the lock is free")
+    };
+    assert_eq!(acts, vec![publish.clone()]);
+    // The logic holds the lock until its swap: the API waits meanwhile.
+    assert!(lock.try_lock().is_err());
+    drop(guard);
+    assert!(lock.try_lock().is_ok());
+    // A lock held for a second gives the actions up (the caller warns).
+    w.push(publish.clone());
+    let _held = lock.clone().try_lock_owned().unwrap();
+    for _ in 1..MAX_WAIT_TICKS {
+        assert!(matches!(w.take(&lock), Taken::Wait));
+    }
+    let Taken::Dropped(acts) = w.take(&lock) else {
+        panic!("given up after 1 s")
+    };
+    assert_eq!(acts, vec![publish]);
+    assert!(matches!(w.take(&lock), Taken::Idle));
+}

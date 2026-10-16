@@ -43,6 +43,11 @@ pub enum PatchState {
     Missing,
 }
 
+/// A change of parameter values is written to `mix.json` at most this often,
+/// this long after it (D168). Plan changes, shutdown and the operator's
+/// explicit show actions write at once.
+pub const SAVE_DELAY: Duration = Duration::from_millis(500);
+
 /// A momentary talk not repeated within this long ends (a client that went away).
 pub const MOMENTARY_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -74,8 +79,15 @@ pub struct Control {
     pub revision: u64,
     structure: Option<u64>,
     pending: Option<Mix>,
-    /// When a logic recall faded nodes out, swap the plan at this time.
+    /// When a logic change faded nodes out, swap the plan at this time.
     logic_swap_at: Option<Instant>,
+    /// The API's change lock (`App::changes`): a logic change that rewires the
+    /// plan takes it too, and holds it until its swap (D167).
+    pub changes: std::sync::Arc<tokio::sync::Mutex<()>>,
+    logic_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    logic_waiting: crate::logic::Waiting,
+    /// `mix.json` is written at most every [`SAVE_DELAY`] (D168).
+    mix_save: crate::state::Coalesce,
     block: u32,
     read_offset: u32,
     input_count: usize,
@@ -134,6 +146,10 @@ impl Control {
             structure: None,
             pending: None,
             logic_swap_at: None,
+            changes: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            logic_guard: None,
+            logic_waiting: crate::logic::Waiting::default(),
+            mix_save: crate::state::Coalesce::default(),
             block: config.block_samples,
             read_offset: config.read_offset_samples,
             input_count: config.input_flows,
@@ -242,6 +258,8 @@ impl Control {
             if let Err(e) = self.swap() {
                 tracing::warn!("logic: {e}");
             }
+            // The API may change the mix again.
+            self.logic_guard = None;
         }
         if self.pending.is_some() {
             return;
@@ -264,11 +282,7 @@ impl Control {
             now_ms: now.as_millis() as u64,
         });
         self.update_tsl_out();
-        if actions.is_empty() {
-            return;
-        }
         let mut ramps: BTreeMap<u32, Vec<Act>> = BTreeMap::new();
-        let mut structural = Vec::new();
         for a in actions {
             let text = a.act.describe();
             let mut event = serde_json::json!({
@@ -290,6 +304,17 @@ impl Control {
                 continue;
             }
             let samples = |ms: f64| (ms * 48.0).round() as u32;
+            if matches!(
+                a.act,
+                Act::Pfl { .. }
+                    | Act::Talk { .. }
+                    | Act::Publish { .. }
+                    | Act::Monitor { .. }
+                    | Act::Recall { .. }
+            ) {
+                self.logic_waiting.push(a);
+                continue;
+            }
             match a.act {
                 Act::Webhook { url } => Self::post_webhook(url, a.graph, a.block),
                 Act::Loudness { signal, action } => {
@@ -315,11 +340,7 @@ impl Control {
                 | Act::Param { ramp_ms, .. } => {
                     ramps.entry(samples(ramp_ms)).or_default().push(a.act)
                 }
-                Act::Pfl { .. }
-                | Act::Talk { .. }
-                | Act::Publish { .. }
-                | Act::Monitor { .. }
-                | Act::Recall { .. } => structural.push(a.act),
+                _ => {}
             }
         }
         self.update_tsl_out();
@@ -335,13 +356,36 @@ impl Control {
                 return;
             }
         }
-        if structural.is_empty() {
-            return;
-        }
+        self.run_waiting();
+    }
+
+    /// The logic changes that rewire the plan, when the change lock is free:
+    /// staged together; the lock is held until the swap (D167).
+    fn run_waiting(&mut self) {
+        use crate::logic::{Act, Taken};
+        let (guard, actions) = match self.logic_waiting.take(&self.changes) {
+            Taken::Idle | Taken::Wait => return,
+            Taken::Dropped(actions) => {
+                for a in actions {
+                    tracing::warn!(
+                        graph = %a.graph,
+                        block = %a.block,
+                        "logic: {} given up: the mix was being changed for 1 s",
+                        a.act.describe()
+                    );
+                }
+                return;
+            }
+            Taken::Go(guard, actions) => (guard, actions),
+        };
+        let described: Vec<String> = actions
+            .iter()
+            .map(|a| format!("{} {}: {}", a.graph, a.block, a.act.describe()))
+            .collect();
         let mut next = self.mix.clone();
         let solo_before = self.compiler.solo.clone();
         let talk_before = self.compiler.talking.clone();
-        for act in structural {
+        for act in actions.into_iter().map(|a| a.act) {
             match act {
                 Act::Pfl { signal, on } => {
                     if on {
@@ -398,11 +442,24 @@ impl Control {
             }
         }
         // Solo and talk live in the compiler: they need a stage too.
-        if next != self.mix
-            || self.compiler.solo != solo_before
-            || self.compiler.talking != talk_before
+        if next == self.mix
+            && self.compiler.solo == solo_before
+            && self.compiler.talking == talk_before
         {
-            self.stage_logic(next, FADE_SAMPLES);
+            return;
+        }
+        match self.stage(next, FADE_SAMPLES) {
+            Ok(Staged::Done) => {}
+            Ok(Staged::Swap { wait: true }) => {
+                self.logic_swap_at = Some(Instant::now() + fade_wait(self.block));
+                self.logic_guard = Some(guard);
+            }
+            Ok(Staged::Swap { wait: false }) => {
+                if let Err(e) = self.swap() {
+                    tracing::warn!("logic: {e} ({})", described.join("; "));
+                }
+            }
+            Err(e) => tracing::warn!("logic: {e}; not applied: {}", described.join("; ")),
         }
     }
 
@@ -482,6 +539,11 @@ impl Control {
         self.engine.collect();
         self.inputs.tick(&mut self.engine);
         self.history.tick(&self.mix);
+        if self.mix_save.take_due(Instant::now()) {
+            if let Err(e) = self.write_mix() {
+                tracing::error!("saving the mix: {e}");
+            }
+        }
     }
 
     /// The meter tick (§7, 25 Hz): meters, loudness, the analyser.
@@ -970,7 +1032,7 @@ impl Control {
                 let specs = self.specs(&self.mix);
                 self.outputs.sync(&mut self.engine, &self.node, &specs);
             }
-            self.save()?;
+            self.changed();
             return Ok(Staged::Done);
         }
         let mut wait = false;
@@ -1042,15 +1104,37 @@ impl Control {
         Ok(errors)
     }
 
-    fn save(&mut self) -> Result<(), String> {
+    /// A change of the mix: clients reload it; `mix.json` follows within
+    /// [`SAVE_DELAY`] (D168).
+    fn changed(&mut self) {
         self.revision += 1;
+        self.history.changed(&self.mix);
+        self.mix_save.changed(Instant::now(), SAVE_DELAY);
+    }
+
+    /// A change of the mix, written to `mix.json` at once.
+    fn save(&mut self) -> Result<(), String> {
+        self.changed();
+        self.mix_save.take();
+        self.write_mix()
+    }
+
+    fn write_mix(&self) -> Result<(), String> {
         let body = serde_json::json!({"version": 1, "mix": self.mix});
         crate::state::write_atomic(
             &self.mix_path,
             &serde_json::to_vec_pretty(&body).unwrap_or_default(),
-        )?;
-        self.history.changed(&self.mix);
-        Ok(())
+        )
+    }
+
+    /// Write `mix.json` now if a change waits (shutdown, an operator's explicit
+    /// show action).
+    pub fn flush_mix(&mut self) {
+        if self.mix_save.take() {
+            if let Err(e) = self.write_mix() {
+                tracing::error!("saving the mix: {e}");
+            }
+        }
     }
 
     /// The patch state of each channel of `strip`.
@@ -1096,6 +1180,7 @@ impl Control {
 
     /// Stop the DSP thread (fading the outputs), then release readers and writers (G8).
     pub fn stop(&mut self) {
+        self.flush_mix();
         self.engine.stop();
         self.inputs.release();
     }

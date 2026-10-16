@@ -320,7 +320,10 @@ for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true
 
 ## The mix
 
-Kept in `MIXER_STATE_DIR/mix.json` and in the show file. Signal ids (strips and
+Kept in `MIXER_STATE_DIR/mix.json` and in the show file. `mix.json` is written
+atomically: within 0.5 s of fader and parameter changes (from the API or from
+logic; a crash loses at most that much), at once after any other change, and at
+SIGTERM. Signal ids (strips and
 buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
 an id gets `strip-<n>` or `bus-<n>`.
 

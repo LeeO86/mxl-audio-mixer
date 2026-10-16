@@ -2003,14 +2003,19 @@ and writes the same text to the log (info).
   then applies; a macro and its graph in one batch; the 400 issue names block
   `n`, port `in`, wire 0; a stale revision is 409; deleting a used macro is 400.
 
-### M8b: findings
+### M8b: findings, fixed before the release
 
-- A logic action that rewires the plan (publish, monitor source, recall, PFL,
-  talk) is staged by the control tick without the API's change lock. If an API
-  change stages while that swap waits for its fade, the API's change replaces it
-  and the logic's change is lost (the logic then believes it applied). This was
-  so for recall in 1.2.0 already; the logic does not retry.
-- A value action that follows a continuously changing input (a level into
-  `set-fader` or `set-param`) stages, and so saves `mix.json`, on every change
-  above its threshold (0.05 dB, or 1e-6 relative): up to 100 writes a second.
-  As in 1.2.0 for `set-fader`.
+Two problems found while building M8b; both were in 1.2.0 too (recall, and
+`set-fader` and the API's faders), and both are fixed (maintainer's request,
+2026-10-16).
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D167 | The API and the logic share one change lock (`App::changes` is `Control::changes`). A logic change that rewires the plan (PFL, talk, publish, monitor source, recall) waits for the lock on the control tick (`try_lock`, once per tick), and holds it from its stage until its swap. If the lock stays taken for 1 s, the waiting actions are given up with a warning that names each action. Value changes (mutes, faders, VCAs, parameters) never swap and need no lock. | The logic staged without the lock: an API change that staged while the logic's swap waited for its fade replaced it, and the logic, which had marked it applied, never sent it again. Waiting on the tick keeps the control thread from blocking. |
+| D168 | `mix.json` is written at most every 500 ms after a value change (`state::Coalesce`): the revision, the clients and the show history follow at once, only the file waits. A change that swaps the plan, a show action (snapshots, layouts, history, import) and SIGTERM write at once. The write stays atomic (a temporary file, renamed). | A level into `set-fader`, or an operator riding a fader, saved the whole mix up to 100 times a second onto the `/config` volume. A crash now loses at most the last 0.5 s of fader moves. |
+
+Tests: `logic::tests::a_rewiring_change_waits_for_the_change_lock`,
+`state::tests::writes_are_coalesced`; `tests/integration/logic.sh` publishes one
+bus by logic and another by the API at the same moment five times (neither is
+lost), checks that a fader change reaches `mix.json` within 0.7 s but not at
+once, and that SIGTERM writes the last one.

@@ -291,6 +291,8 @@ async fn run(mut config: Config) -> ExitCode {
             config.tsl_out_screen
         );
     }
+    // One change lock for the API and the logic's plan changes (D167).
+    let changes = control.changes.clone();
     let control = Arc::new(Mutex::new(control));
     let link_peers = Arc::new(tokio::sync::Mutex::new(
         mxl_audio_mixer::link::Peers::default(),
@@ -398,7 +400,7 @@ async fn run(mut config: Config) -> ExitCode {
         config: config.clone(),
         node: node.clone(),
         control: control.clone(),
-        changes: Arc::new(tokio::sync::Mutex::new(())),
+        changes: changes.clone(),
         tai_offset_s,
         timing_trusted,
         started: Instant::now(),

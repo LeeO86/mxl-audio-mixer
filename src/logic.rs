@@ -971,6 +971,58 @@ impl Logic {
     }
 }
 
+/// Ticks a logic change that rewires the plan waits for the change lock (1 s).
+pub const MAX_WAIT_TICKS: u32 = 100;
+
+/// Logic changes that rewire the plan (PFL, talk, publish, monitor source,
+/// recall), waiting for the API's change lock, so an API change and a logic
+/// change never overwrite each other's staged plan (D167).
+#[derive(Default)]
+pub struct Waiting {
+    actions: Vec<Action>,
+    ticks: u32,
+}
+
+/// What [`Waiting::take`] found.
+pub enum Taken {
+    /// Nothing waits.
+    Idle,
+    /// The lock is held by a change of the mix; try again next tick.
+    Wait,
+    /// The lock, held until the change is swapped in, and the actions.
+    Go(tokio::sync::OwnedMutexGuard<()>, Vec<Action>),
+    /// The lock was held for [`MAX_WAIT_TICKS`]: these are given up.
+    Dropped(Vec<Action>),
+}
+
+impl Waiting {
+    pub fn push(&mut self, a: Action) {
+        self.actions.push(a);
+    }
+
+    /// One try per tick.
+    pub fn take(&mut self, lock: &std::sync::Arc<tokio::sync::Mutex<()>>) -> Taken {
+        if self.actions.is_empty() {
+            return Taken::Idle;
+        }
+        match lock.clone().try_lock_owned() {
+            Ok(guard) => {
+                self.ticks = 0;
+                Taken::Go(guard, std::mem::take(&mut self.actions))
+            }
+            Err(_) => {
+                self.ticks += 1;
+                if self.ticks >= MAX_WAIT_TICKS {
+                    self.ticks = 0;
+                    Taken::Dropped(std::mem::take(&mut self.actions))
+                } else {
+                    Taken::Wait
+                }
+            }
+        }
+    }
+}
+
 /// The curve through `points` at `x`: linear between them, flat outside.
 fn map(points: &[[f64; 2]], x: f64) -> f64 {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {

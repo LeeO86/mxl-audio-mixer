@@ -8,7 +8,7 @@ Milestone 9 (§13: master/slave remote link).
 
 ### Logic editor
 
-Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D166, X11–X16).
+Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D168, X11–X16).
 
 - Typed ports (`boolean`, `number`, `level`, `event`, `string`) and type-checked wires with fixed conversions; every 1.2.0 graph stays valid.
 - New blocks: `text`, `trigger` (`POST /api/v1/logic/<graph>/trigger/<block>`), `pfl`, `loudness`, `nmos-receiver`, `nmos-sender`, `link`; `toggle`, `counter`, `math`, `scale`, `map`, `select`, `compare` `ge`/`le`/`ne`; `set-vca`, `set-param`, `set-pfl`, `set-talk`, `set-publish`, `set-monitor`, `loudness-control`, `tsl-out`, `log`. `set-fader` and `set-vca` take `ramp_ms`.
@@ -17,6 +17,8 @@ Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D166, X11–X16).
 - Graphs are compiled once per change and run in topological order; their answers carry `revision`, `ports`, typed `values` and the last 20 `actions`. Dry run lists its actions (also on the events WebSocket and in the log). An action whose input has no wire never runs; `edge` outputs an event.
 - New settings `TSL_OUT_TARGET` and `TSL_OUT_SCREEN` (TSL UMD 5.0 over UDP, on every change and every second; invalid values exit 78).
 - The webhook block posts `{"graph", "block", "value"}` as documented (it posted only `value`).
+- Fixed: a logic change that rewires the plan (publish, PFL, talk, monitor source, snapshot recall; recall was affected in 1.2.0 too) could be lost when an API change staged during its fade. Logic and the API now share one change lock (D167).
+- `mix.json` is written at most every 500 ms after a parameter change (faders from the API or from logic), at once after a plan change, a show action (snapshots, layouts, history, import) and at SIGTERM; it was written on every change, up to 100 times a second (D168).
 - `tests/integration/logic.sh` runs in CI.
 
 ### Platform readiness
