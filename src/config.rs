@@ -67,8 +67,8 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MEDIAMTX_BIN", default: "mediamtx", description: "The built-in MediaMTX executable (the image has it)." },
     Setting { name: "MIXER_MAX_WEB_MONITORS", default: "8", description: "Most personal monitor paths of browser clients at once." },
     Setting { name: "MIXER_LINK_ROLE", default: "off", description: "Remote link (§13): off, master or slave. A master connects to MIXER_LINK_PEERS; a slave accepts them on /api/v1/link." },
-    Setting { name: "MIXER_LINK_TOKEN", default: "unset", description: "Pre-shared token of the remote link. Required when the role is not off. Never shown by GET /api/v1/config." },
-    Setting { name: "MIXER_LINK_PEERS", default: "unset", description: "Master only: up to 4 WebSocket URLs of slaves, comma-separated (ws:// or wss://)." },
+    Setting { name: "MIXER_LINK_TOKEN", default: "unset", description: "Pre-shared token of the remote link (a secret: give it from a Kubernetes Secret). Required when the role is not off. Never shown by GET /api/v1/config." },
+    Setting { name: "MIXER_LINK_PEERS", default: "unset", description: "Master only: up to 4 WebSocket URLs of slaves, comma-separated (ws:// or wss://), each slave once. ws:// sends the token in clear: trusted networks only." },
     Setting { name: "MIXER_LINK_TAKEOVER", default: "allow", description: "Slave: allow or deny local changes after the master has disconnected. The last mix is kept either way." },
 ];
 
@@ -564,12 +564,7 @@ impl Parser<'_> {
         if link_role == LinkRole::Master && (link_peers.is_empty() || link_peers.len() > 4) {
             return err("MIXER_LINK_PEERS must list 1 to 4 ws:// or wss:// URLs when MIXER_LINK_ROLE is master");
         }
-        if link_peers
-            .iter()
-            .any(|u| !(u.starts_with("ws://") || u.starts_with("wss://")))
-        {
-            return err("MIXER_LINK_PEERS entries must be ws:// or wss:// URLs");
-        }
+        check_link_peers(&link_peers)?;
         let takeover = self
             .get("MIXER_LINK_TAKEOVER")
             .map(|(v, _)| v)
@@ -784,6 +779,50 @@ fn is_host(text: &str) -> bool {
         && !labels.iter().all(|l| l.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// `MIXER_LINK_PEERS`: `ws://` or `wss://` URLs with a host, each slave once.
+fn check_link_peers(urls: &[String]) -> Result<(), ConfigError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for url in urls {
+        let Ok(uri) = url.parse::<axum::http::Uri>() else {
+            return err(format!("MIXER_LINK_PEERS: {url} is not a URL"));
+        };
+        let scheme = uri.scheme_str().unwrap_or_default();
+        if scheme != "ws" && scheme != "wss" {
+            return err(format!(
+                "MIXER_LINK_PEERS entries must be ws:// or wss:// URLs, got {url}"
+            ));
+        }
+        if uri.authority().is_some_and(|a| a.as_str().contains('@')) {
+            return err(format!(
+                "MIXER_LINK_PEERS: {url} has a user or password; the token is MIXER_LINK_TOKEN"
+            ));
+        }
+        let Some(host) = uri.host().filter(|h| !h.is_empty()) else {
+            return err(format!("MIXER_LINK_PEERS: {url} has no host"));
+        };
+        // After the host: nothing (the default port) or `:<1-65535>`.
+        let authority = uri.authority().map_or("", |a| a.as_str());
+        let after_host = authority.strip_prefix(host).unwrap_or_default();
+        let port = match after_host.strip_prefix(':').map(str::parse::<u16>) {
+            None if after_host.is_empty() => {
+                if scheme == "wss" {
+                    443
+                } else {
+                    80
+                }
+            }
+            Some(Ok(port)) if port > 0 => port,
+            _ => return err(format!("MIXER_LINK_PEERS: {url} has an invalid port")),
+        };
+        let path = uri.path_and_query().map_or("/", |p| p.as_str());
+        let key = format!("{scheme}://{}:{port}{path}", host.to_ascii_lowercase());
+        if !seen.insert(key) {
+            return err(format!("MIXER_LINK_PEERS lists {url} twice"));
+        }
+    }
+    Ok(())
+}
+
 /// `TSL_MAP`: comma-separated `display:index` pairs, both 0–65535, each display once.
 fn parse_tsl_map(raw: &str) -> Result<BTreeMap<u16, u16>, ConfigError> {
     let mut map = BTreeMap::new();
@@ -931,6 +970,35 @@ mod tests {
             assert!(load_vars(&[(k, v)]).is_err(), "{k}={v}");
         }
         assert!(load_vars(&[("TSL_ENABLE", "true"), ("TSL_UDP_PORT", "8190")]).is_err());
+    }
+
+    #[test]
+    fn link_peers_are_websocket_urls_with_a_host_each_once() {
+        let master = |peers: &str| {
+            load_vars(&[
+                ("MIXER_LINK_ROLE", "master"),
+                ("MIXER_LINK_TOKEN", "a-long-token"),
+                ("MIXER_LINK_PEERS", peers),
+            ])
+        };
+        let c = master("ws://far-a:8190/api/v1/link, wss://far-b.example/api/v1/link").unwrap();
+        assert_eq!(c.link_peers.len(), 2);
+        for bad in [
+            "http://far:8190/api/v1/link",
+            "ws://",
+            "ws:///api/v1/link",
+            "ws://far:99999/api/v1/link",
+            "far:8190",
+            // The same slave twice, also by the default port or the host's case.
+            "ws://far:8190/api/v1/link,ws://far:8190/api/v1/link",
+            "ws://far/api/v1/link,ws://FAR:80/api/v1/link",
+            "wss://far/api/v1/link,wss://far:443/api/v1/link",
+            "wss://user:secret@far/api/v1/link",
+        ] {
+            assert!(master(bad).is_err(), "{bad}");
+        }
+        // Different paths or schemes are different slaves.
+        assert!(master("ws://far/a,ws://far/b,wss://far/a").is_ok());
     }
 
     #[test]

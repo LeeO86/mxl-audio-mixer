@@ -147,6 +147,11 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/link.sh (the remote link, a hung peer, takeover)
+        run: tests/integration/link.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
       - name: tests/integration/auto.sh (VAD, auto-mix, ducking; espeak-ng speech)
         run: tests/integration/auto.sh
         env:
