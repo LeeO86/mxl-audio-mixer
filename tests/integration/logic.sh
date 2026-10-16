@@ -175,7 +175,9 @@ wait_until 3 "dry-run actions" is "$WEB/api/v1/logic/show" "any(a['dry_run'] and
 sleep 0.3
 [[ "$(strip "round(d['fader_db'], 3)")" == -6.021 ]] || fail "dry run moved the fader"
 [[ "$(json "$WEB/api/v1/outputs" "any(o['signal'] == 'aux' for o in d)")" == True ]] || fail "dry run unpublished"
-pass "dry run: actions listed, nothing applied"
+off=$(python3 -c "print({'screen': 4, 'index': 7, 'lh': 0, 'rh': 0, 'label': ''})")
+wait_until 3 "TSL index 7 off" is "file://$WORK/tsl.json" "d['displays'][0]" "$off"
+pass "dry run: actions listed, nothing applied; TSL index 7 switched off"
 api PATCH /api/v1/logic/show '{"dry_run": false}' >/dev/null
 wait_until 3 "fader back" is "$VOX" "round(d['fader_db'], 3)" 0.0
 wait_until 5 "aux unpublished" is "$WEB/api/v1/outputs" "any(o['signal'] == 'aux' for o in d)" False

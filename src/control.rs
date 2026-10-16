@@ -48,6 +48,23 @@ pub enum PatchState {
 /// explicit show actions write at once.
 pub const SAVE_DELAY: Duration = Duration::from_millis(500);
 
+/// `MIXER_TEST_LOGIC_SWAP_DELAY_MS` (test only, at most 5 s): a logic swap
+/// waits this much longer, so `tests/integration/logic.sh` can put an API change
+/// inside the window. Warned at start when set.
+fn test_swap_delay() -> Duration {
+    let ms = std::env::var("MIXER_TEST_LOGIC_SWAP_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(5_000);
+    if ms > 0 {
+        tracing::warn!(
+            "MIXER_TEST_LOGIC_SWAP_DELAY_MS={ms}: logic plan changes are delayed by {ms} ms; for tests only, never in production"
+        );
+    }
+    Duration::from_millis(ms)
+}
+
 /// Logic webhook posts running at once.
 pub const MAX_WEBHOOKS: usize = 8;
 
@@ -93,6 +110,9 @@ pub struct Control {
     /// window (`tests/integration/logic.sh`). 0 otherwise.
     logic_swap_delay: Duration,
     logic_waiting: crate::logic::Waiting,
+    /// Logic mutes, faders, VCAs and parameters waiting for the change lock
+    /// (the newest per block).
+    logic_values: Vec<crate::logic::Action>,
     /// Logic blocks whose rewiring change failed (warned once).
     logic_failing: std::collections::BTreeSet<(String, String)>,
     /// The logic last found valid, with what it named (D171).
@@ -163,14 +183,9 @@ impl Control {
             logic_swap_at: None,
             changes: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             logic_guard: None,
-            logic_swap_delay: Duration::from_millis(
-                std::env::var("MIXER_TEST_LOGIC_SWAP_DELAY_MS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(0)
-                    .min(5_000),
-            ),
+            logic_swap_delay: test_swap_delay(),
             logic_waiting: crate::logic::Waiting::default(),
+            logic_values: Vec::new(),
             logic_failing: std::collections::BTreeSet::new(),
             mix_save: crate::state::Coalesce::default(),
             logic_valid: None,
@@ -327,7 +342,6 @@ impl Control {
             now_ms: now.as_millis() as u64,
         });
         self.update_tsl_out();
-        let mut ramps: BTreeMap<u32, Vec<Act>> = BTreeMap::new();
         for a in actions {
             let text = a.act.describe();
             let mut event = serde_json::json!({
@@ -344,11 +358,13 @@ impl Control {
             } else if a.dry_run {
                 tracing::info!(graph = %a.graph, block = %a.block, "logic dry run: {text}");
             }
-            let _ = self.logic_events.send(event.to_string());
+            // A retry of a failed change is not listed again (warned once).
+            if !a.retry {
+                let _ = self.logic_events.send(event.to_string());
+            }
             if a.dry_run {
                 continue;
             }
-            let samples = |ms: f64| (ms * 48.0).round() as u32;
             if matches!(
                 a.act,
                 Act::Pfl { .. }
@@ -379,29 +395,58 @@ impl Control {
                         (index, crate::tally::OutDisplay { left, right, label }),
                     );
                 }
-                Act::Mute { .. } => ramps.entry(FADE_SAMPLES).or_default().push(a.act),
-                Act::Fader { ramp_ms, .. }
-                | Act::Vca { ramp_ms, .. }
-                | Act::Param { ramp_ms, .. } => {
-                    ramps.entry(samples(ramp_ms)).or_default().push(a.act)
+                Act::Mute { .. } | Act::Fader { .. } | Act::Vca { .. } | Act::Param { .. } => {
+                    // The newest value of a block waits for the change lock.
+                    self.logic_values
+                        .retain(|x| !(x.graph == a.graph && x.block == a.block));
+                    self.logic_values.push(a);
                 }
                 _ => {}
             }
         }
         self.update_tsl_out();
+        if !self.run_values() {
+            return;
+        }
+        self.run_waiting();
+    }
+
+    /// Stage the waiting mutes, faders, VCAs and parameters under the change
+    /// lock, grouped by ramp; they wait a tick while an API change holds it
+    /// (D167). False when a swap is now pending.
+    fn run_values(&mut self) -> bool {
+        use crate::logic::Act;
+        if self.logic_values.is_empty() {
+            return true;
+        }
+        let Ok(guard) = self.changes.clone().try_lock_owned() else {
+            return true;
+        };
+        let mut guard = Some(guard);
+        let samples = |ms: f64| (ms * 48.0).round() as u32;
+        let mut ramps: BTreeMap<u32, Vec<Act>> = BTreeMap::new();
+        for a in std::mem::take(&mut self.logic_values) {
+            let ramp = match &a.act {
+                Act::Fader { ramp_ms, .. }
+                | Act::Vca { ramp_ms, .. }
+                | Act::Param { ramp_ms, .. } => samples(*ramp_ms),
+                _ => FADE_SAMPLES,
+            };
+            ramps.entry(ramp).or_default().push(a.act);
+        }
         for (ramp, acts) in ramps {
             let mut next = self.mix.clone();
             for act in acts {
                 apply_value_act(&mut next, act);
             }
-            if next != self.mix && !self.stage_logic(next, ramp) {
+            if next != self.mix && !self.stage_logic(next, ramp, &mut guard) {
                 tracing::warn!(
                     "logic: a change waits for the plan; later actions of this tick were dropped"
                 );
-                return;
+                return false;
             }
         }
-        self.run_waiting();
+        true
     }
 
     /// The logic changes that rewire the plan, when the change lock is free:
@@ -526,41 +571,26 @@ impl Control {
         }
     }
 
-    /// Stage a logic change; a swap happens now or after the fade. False when
-    /// a swap is pending.
-    fn stage_logic(&mut self, next: Mix, ramp: u32) -> bool {
+    /// Stage a logic value change under the change lock (`guard`); a swap
+    /// happens now or after the fade, holding the lock until then. False when a
+    /// swap is pending.
+    fn stage_logic(
+        &mut self,
+        next: Mix,
+        ramp: u32,
+        guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> bool {
         match self.stage(next, ramp) {
             Ok(Staged::Done) => true,
-            Ok(Staged::Swap { wait }) => {
-                // A mute, fader, VCA or smoothed parameter never rewires the
-                // plan; if one does, it takes the change lock like the others.
-                match self.changes.clone().try_lock_owned() {
-                    Ok(guard) if wait => {
-                        self.logic_swap_at =
-                            Some(Instant::now() + fade_wait(self.block) + self.logic_swap_delay);
-                        self.logic_guard = Some(guard);
-                        return false;
-                    }
-                    Ok(_guard) => {
-                        if let Err(e) = self.swap() {
-                            tracing::warn!("logic: {e}");
-                        }
-                    }
-                    Err(_) => {
-                        // The nodes are already fading: the swap must follow.
-                        tracing::error!(
-                            "logic: a value change rewired the plan while the mix was being changed"
-                        );
-                        if wait {
-                            self.logic_swap_at = Some(
-                                Instant::now() + fade_wait(self.block) + self.logic_swap_delay,
-                            );
-                            return false;
-                        }
-                        if let Err(e) = self.swap() {
-                            tracing::warn!("logic: {e}");
-                        }
-                    }
+            Ok(Staged::Swap { wait: true }) => {
+                self.logic_swap_at =
+                    Some(Instant::now() + fade_wait(self.block) + self.logic_swap_delay);
+                self.logic_guard = guard.take();
+                false
+            }
+            Ok(Staged::Swap { wait: false }) => {
+                if let Err(e) = self.swap() {
+                    tracing::warn!("logic: {e}");
                 }
                 true
             }
@@ -569,6 +599,17 @@ impl Control {
                 true
             }
         }
+    }
+
+    /// Shutdown: the indexes the logic's TSL output has lit, emptied so the
+    /// sender switches them off too.
+    pub fn tsl_off(&mut self) -> Vec<u16> {
+        let indexes = self.tsl_displays.values().map(|(i, _)| *i).collect();
+        self.tsl_displays.clear();
+        if let Some(tx) = &self.tsl_out {
+            tx.send_replace(BTreeMap::new());
+        }
+        indexes
     }
 
     /// Hand the `tsl-out` displays of the running graphs to the TSL sender.

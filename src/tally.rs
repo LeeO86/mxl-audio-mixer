@@ -398,10 +398,44 @@ pub fn encode_out(screen: u16, displays: &BTreeMap<u16, OutDisplay>) -> Vec<Vec<
     packets
 }
 
+/// The display that switches an index off: no lamps, no label.
+fn off() -> OutDisplay {
+    OutDisplay {
+        left: false,
+        right: false,
+        label: String::new(),
+    }
+}
+
+/// How often an index that left the output is sent off, a second apart.
+const OFF_REPEATS: u32 = 3;
+
+/// Shutdown: switch `indexes` off at `target` now (twice, 50 ms apart).
+pub async fn send_off(target: &str, screen: u16, indexes: &[u16]) {
+    if indexes.is_empty() {
+        return;
+    }
+    let displays: BTreeMap<u16, OutDisplay> = indexes.iter().map(|i| (*i, off())).collect();
+    let Ok(socket) = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await else {
+        return;
+    };
+    let Ok(Some(to)) = tokio::net::lookup_host(target).await.map(|mut a| a.next()) else {
+        return;
+    };
+    for round in 0..2 {
+        if round > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        for packet in encode_out(screen, &displays) {
+            let _ = socket.send_to(&packet, to).await;
+        }
+    }
+}
+
 /// Send the displays of `state` to `target` (`host:port`) over UDP: on every
 /// change and at least once a second (§10.3). An index that leaves the state
-/// (its block removed, its graph disabled or in dry run) is sent once with its
-/// lamps off and no label, so no lamp stays lit. The name is resolved again
+/// (its block removed, its graph disabled or in dry run) is sent with its
+/// lamps off and no label three times, a second apart, so no lamp stays lit. The name is resolved again
 /// every 30 s. A failure is logged once until sending works again.
 pub fn spawn_sender(
     target: String,
@@ -419,6 +453,8 @@ pub fn spawn_sender(
         let mut address: Option<(std::net::SocketAddr, Instant)> = None;
         let mut warned = false;
         let mut last: BTreeMap<u16, OutDisplay> = BTreeMap::new();
+        // Indexes switched off: how often sent, and when last.
+        let mut offs: BTreeMap<u16, (u32, Option<Instant>)> = BTreeMap::new();
         let mut every = tokio::time::interval(std::time::Duration::from_secs(1));
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -427,16 +463,18 @@ pub fn spawn_sender(
                 _ = every.tick() => {}
             }
             let current = state.borrow_and_update().clone();
-            let mut displays = current.clone();
             for index in last.keys().filter(|i| !current.contains_key(i)) {
-                displays.insert(
-                    *index,
-                    OutDisplay {
-                        left: false,
-                        right: false,
-                        label: String::new(),
-                    },
-                );
+                offs.entry(*index).or_insert((0, None));
+            }
+            offs.retain(|i, _| !current.contains_key(i));
+            last = current.clone();
+            let mut displays = current.clone();
+            let mut due = Vec::new();
+            for (index, (_, at)) in &offs {
+                if at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(950)) {
+                    displays.insert(*index, off());
+                    due.push(*index);
+                }
             }
             if displays.is_empty() {
                 continue;
@@ -474,8 +512,13 @@ pub fn spawn_sender(
                     tracing::info!("TSL output to {to}: sending again");
                 }
                 warned = false;
-                // The indexes switched off have been sent once.
-                last = current;
+                for index in due {
+                    if let Some((count, at)) = offs.get_mut(&index) {
+                        *count += 1;
+                        *at = Some(Instant::now());
+                    }
+                }
+                offs.retain(|_, (count, _)| *count < OFF_REPEATS);
             }
         }
     });

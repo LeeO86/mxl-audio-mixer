@@ -71,6 +71,7 @@ fn speech_mutes_the_music_one_tick_after_it_starts() {
             graph: "g".into(),
             block: "m".into(),
             dry_run: false,
+            retry: false,
             act: Act::Mute {
                 signal: "music".into(),
                 on: false
@@ -1118,6 +1119,7 @@ fn a_rewiring_change_waits_for_the_change_lock() {
         graph: "g".into(),
         block: "pub".into(),
         dry_run: false,
+        retry: false,
         act: Act::Publish {
             signal: "aux".into(),
             on,
@@ -1504,4 +1506,32 @@ fn an_action_without_a_target_is_valid_and_never_acts() {
         assert!(tick(&mut logic, &mix).is_empty());
     }
     assert_eq!(value(&logic, "in"), json!(false));
+}
+
+#[test]
+fn a_forgotten_action_runs_again_as_a_quiet_retry() {
+    // D167: a rewiring change that failed is retried, without a new entry.
+    let mix = mix_of(
+        vec![
+            block("c", K::Const { value: 1.0 }),
+            block(
+                "p",
+                K::SetPublish {
+                    signal: "music".into(),
+                },
+            ),
+        ],
+        vec![out("c", "p", "in")],
+    );
+    let mut logic = Logic::default();
+    let first = logic.tick(&Readings::quiet(&mix));
+    assert_eq!(first.len(), 1);
+    assert!(!first[0].retry);
+    assert!(logic.tick(&Readings::quiet(&mix)).is_empty());
+    logic.forget("g", "p");
+    let again = logic.tick(&Readings::quiet(&mix));
+    assert_eq!(again.len(), 1);
+    assert!(again[0].retry);
+    assert_eq!(logic.recent("g").len(), 1, "listed once");
+    assert!(logic.tick(&Readings::quiet(&mix)).is_empty());
 }

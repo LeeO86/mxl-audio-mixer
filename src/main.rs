@@ -444,6 +444,11 @@ async fn run(mut config: Config) -> ExitCode {
     tracing::info!("shutting down");
     let deadline = config.shutdown_timeout;
     let sequence = async {
+        // The logic's TSL lamps go off (D174).
+        let lit = control.lock().unwrap_or_else(|e| e.into_inner()).tsl_off();
+        if let Some(target) = &config.tsl_out_target {
+            mxl_audio_mixer::tally::send_off(target, config.tsl_out_screen, &lit).await;
+        }
         // G8 1: fade the outputs, stop media and release the MXL readers and writers.
         tokio::task::block_in_place(|| control.lock().unwrap_or_else(|e| e.into_inner()).stop());
         // G8 2: deregister every NMOS resource, the Node last.
@@ -479,14 +484,22 @@ async fn run(mut config: Config) -> ExitCode {
     }
     // D168: changes that came in during the shutdown are written too (also
     // after a timeout). A control engine still busy is not waited for.
-    match control.try_lock() {
-        Ok(mut c) => c.flush_mix(),
-        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().flush_mix(),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            tracing::error!(
-                "the control engine is busy: the last changes of the mix were not written"
-            )
+    // The ticker holds the lock for a tick at most: try for about 200 ms.
+    let mut flushed = false;
+    for _ in 0..20 {
+        match control.try_lock() {
+            Ok(mut c) => c.flush_mix(),
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().flush_mix(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
         }
+        flushed = true;
+        break;
+    }
+    if !flushed {
+        tracing::error!("the control engine is busy: the last changes of the mix were not written");
     }
     if term {
         ExitCode::from(EX_TERM)

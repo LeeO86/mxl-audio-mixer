@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 
-use crate::api::{apply_held, bad, body, conflict, not_found, ApiResult};
+use crate::api::{apply_held, bad, body, conflict, internal, not_found, ApiResult};
 use crate::engine::FADE_SAMPLES;
 use crate::mix::logic::{issues, warnings, Block, BlockKind, Graph, Issue, Macro, Wire};
 use crate::mix::Mix;
@@ -138,7 +138,7 @@ async fn change(app: &App, f: impl FnOnce(&mut Mix) -> ApiResult<()>) -> ApiResu
         (candidate, found)
     })
     .await
-    .map_err(|e| bad(e.to_string()))?;
+    .map_err(|e| internal(e.to_string()))?;
     if !found.is_empty() {
         return Err(refused(&found));
     }
@@ -719,7 +719,7 @@ async fn validate(State(app): State<App>, bytes: axum::body::Bytes) -> Response 
         conflicted(b.apply(&mut mix))?;
         let found = tokio::task::spawn_blocking(move || issues(&mix))
             .await
-            .map_err(|e| bad(e.to_string()))?;
+            .map_err(|e| internal(e.to_string()))?;
         Ok(Json(json!({"issues": found})).into_response())
     })
     .await

@@ -280,6 +280,8 @@ pub struct Action {
     /// The block (`<instance>.<block>` inside a macro).
     pub block: String,
     pub dry_run: bool,
+    /// A retry of a change that failed (D167): not listed again.
+    pub retry: bool,
     pub act: Act,
 }
 
@@ -312,6 +314,9 @@ struct State {
     n: f64,
     count: f64,
     applied: Option<Applied>,
+    /// What it applied was forgotten after a failure: its next action is a
+    /// retry.
+    retry: bool,
     /// Edge and timer: the input has been seen once (the first tick is not a
     /// rise, D172).
     seen: bool,
@@ -503,13 +508,19 @@ impl Run {
         r: &Readings<'_>,
         pressed: &BTreeMap<String, bool>,
         triggered: &BTreeSet<String>,
-    ) -> Vec<(String, Act)> {
+    ) -> Vec<(String, Act, bool)> {
         let mut acts = Vec::new();
+        let mut retries = Vec::new();
         self.tick += 1;
         let plan = self.plan.clone();
         for &i in &plan.order {
             let b = &plan.blocks[i];
+            let before = acts.len();
             let v = self.evaluate(i, &b.id, &b.kind, r, pressed, triggered, &mut acts);
+            if acts.len() > before {
+                let retry = std::mem::take(&mut self.states[i].retry);
+                retries.resize(acts.len(), retry);
+            }
             self.outs[i] = v;
         }
         // The blocks that remember take this tick's value together, so one of
@@ -526,7 +537,10 @@ impl Run {
                 *f += 1;
             }
         }
-        acts
+        acts.into_iter()
+            .zip(retries)
+            .map(|((b, a), r)| (b, a, r))
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -974,6 +988,7 @@ impl Logic {
         if let Some(run) = self.runs.get_mut(graph) {
             if let Some(i) = run.plan.blocks.iter().position(|b| b.id == block) {
                 run.states[i].applied = None;
+                run.states[i].retry = true;
             }
         }
     }
@@ -1049,20 +1064,23 @@ impl Logic {
                 *self.actions.entry(g.id.clone()).or_default() += acts.len() as u64;
             }
             let recent = self.recent.entry(g.id.clone()).or_default();
-            for (block, act) in acts {
-                recent.push_back(Recent {
-                    t_ms: r.now_ms,
-                    block: block.clone(),
-                    action: act.describe(),
-                    dry_run: g.dry_run,
-                });
-                if recent.len() > RECENT {
-                    recent.pop_front();
+            for (block, act, retry) in acts {
+                if !retry {
+                    recent.push_back(Recent {
+                        t_ms: r.now_ms,
+                        block: block.clone(),
+                        action: act.describe(),
+                        dry_run: g.dry_run,
+                    });
+                    if recent.len() > RECENT {
+                        recent.pop_front();
+                    }
                 }
                 out.push(Action {
                     graph: g.id.clone(),
                     block,
                     dry_run: g.dry_run,
+                    retry,
                     act,
                 });
             }

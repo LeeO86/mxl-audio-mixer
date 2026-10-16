@@ -250,6 +250,10 @@ its own authentication, not the web port itself.
 
 ## Settings
 
+`MIXER_TEST_LOGIC_SWAP_DELAY_MS` is for `tests/integration/logic.sh` only (it delays
+the logic's plan changes and is logged as a warning at start): never set it in
+production.
+
 Environment first, then the JSON file `MIXER_CONFIG_FILE` (an object of these keys),
 then the defaults. Unknown environment variables are ignored; unknown file keys and
 invalid values exit with code 78. `GET /api/v1/config` lists every value with its
@@ -666,7 +670,9 @@ those publish last tick's value.
 Value actions (mute, faders, parameters, PFL, talk, publish, TSL) follow their
 input from the first tick on; event actions run when their input fires. An
 action whose input has no wire never runs, also through an unconnected macro
-input, and neither does one whose target is still empty (`""`: listed in the
+input (a logic block in between is a source of its own: an unconnected macro
+input into `not` into `set-mute` still mutes, as an unwired `not` would at the
+top level), and neither does one whose target is still empty (`""`: listed in the
 graph's `warnings`, "choose a target"). Actions are the same changes the API makes, ramped and clamped the same
 way; NaN is no change, +∞ is a fader's maximum. Each action block runs at most
 every 20 ms (TSL 50 ms, a webhook 100 ms, changes that rewire the plan 250 ms;
