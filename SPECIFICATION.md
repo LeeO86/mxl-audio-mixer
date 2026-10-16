@@ -600,6 +600,16 @@ One master ↔ up to 4 slaves, full parameter control, state sync, meters, takeo
 re-sync. Redundant "tracking" (two instances processing the same inputs in lock-step)
 is a later candidate.
 
+v1's link (README "Remote production"; IMPLEMENTATION_PLAN X5–X10):
+
+- the master connects with `wss://`, and a TLS-terminating proxy sits in front of
+  the slave's web port; `ws://` (token in clear) is for a trusted network only;
+- one master per slave at a time;
+- each side pings every second and drops a peer it has not heard for 5 s; the
+  master then reconnects;
+- commands are numbered and acknowledged per connection, at most once (not resent);
+- a message type a peer does not know is ignored, so versions interoperate.
+
 ---
 
 ## 14. Platform contract (G1–G14)

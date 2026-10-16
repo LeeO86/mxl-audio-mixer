@@ -10,9 +10,18 @@
 //! The slave holds its mix when the master disconnects. With
 //! `MIXER_LINK_TAKEOVER=deny`, local changes are then refused until the master
 //! is back.
+//!
+//! The slave takes one master at a time. Each side pings every second; a side
+//! that hears nothing for [`DEAD_AFTER`] closes the link (the master then
+//! reconnects). Commands are sent at most once: one that is not sent when the
+//! link drops is dropped, and the master pushes its levels again if it wants.
+//! A message of a type this version does not know is ignored.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -32,6 +41,74 @@ use crate::mix::model::{
 };
 use crate::mix::Format;
 use crate::ops::App;
+
+/// A side that hears nothing for this long closes the link. Both sides ping
+/// every [`PING_EVERY`], and the slave sends meters ten times a second.
+pub const DEAD_AFTER: Duration = Duration::from_secs(5);
+const PING_EVERY: Duration = Duration::from_secs(1);
+/// A connection that has not sent its hello by then is closed.
+const HELLO_WITHIN: Duration = Duration::from_secs(5);
+/// The master gives up a connection attempt after this long and retries.
+const CONNECT_WITHIN: Duration = Duration::from_secs(10);
+/// The largest link message, both ways (axum's default is 64 MiB). A desk or a
+/// push is a part of the mix, which the API takes up to 2 MB.
+pub const MAX_MESSAGE: usize = 4 << 20;
+/// Commands queued for one slave at most. The queue is sent every 50 ms, so
+/// a full one means the link is stuck.
+const MAX_PENDING: usize = 1024;
+
+/// The slave's side of the link (§13): the master connection that holds it,
+/// and whether local changes are refused.
+#[derive(Debug, Default)]
+pub struct Takeover {
+    /// A slave with `MIXER_LINK_TAKEOVER=deny`.
+    pub deny: bool,
+    /// A master has connected at least once.
+    pub seen: bool,
+    /// The connection that holds the link: one master at a time.
+    owner: Option<u64>,
+    /// The master's own change is being staged.
+    pub remote_write: bool,
+}
+
+impl Takeover {
+    pub fn new(deny: bool) -> Self {
+        Self {
+            deny,
+            ..Self::default()
+        }
+    }
+
+    /// A master holds the link.
+    pub fn up(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    /// Connection `conn` takes the link; false while another master holds it.
+    pub fn claim(&mut self, conn: u64) -> bool {
+        if self.owner.is_some() {
+            return false;
+        }
+        self.owner = Some(conn);
+        self.seen = true;
+        true
+    }
+
+    /// Connection `conn` ended. Only the connection that holds the link
+    /// brings it down.
+    pub fn release(&mut self, conn: u64) {
+        if self.owner == Some(conn) {
+            self.owner = None;
+        }
+    }
+
+    /// Takeover deny refuses this change: a master had connected, none holds
+    /// the link now, and the change is not the master's own. Start-up (no
+    /// master yet) still loads the show.
+    pub fn refuses(&self) -> bool {
+        self.deny && self.seen && self.owner.is_none() && !self.remote_write
+    }
+}
 
 /// What the master asks the slave to do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,6 +172,8 @@ enum Msg {
     },
     /// Master → slave: apply the faders, mutes and sends the master last saw.
     Push {
+        #[serde(default)]
+        seq: u64,
         levels: Vec<Level>,
         #[serde(default)]
         sends: Vec<DeskSend>,
@@ -110,8 +189,14 @@ enum Msg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Level {
     signal: String,
-    fader_db: f64,
+    /// `"-inf"` for −∞. Peers before 1.3.0 wrote `null`, read as −∞.
+    #[serde(deserialize_with = "db_or_null")]
+    fader_db: Db,
     mute: bool,
+}
+
+fn db_or_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Db, D::Error> {
+    Ok(Option::<Db>::deserialize(d)?.unwrap_or(Db::MINUS_INF))
 }
 
 /// The far-side desk, as the gallery draws it.
@@ -257,7 +342,7 @@ pub fn apply_command(mix: &mut Mix, command: &Command) -> Result<(), String> {
 /// Copy faders, mutes and sends onto signals that exist.
 pub(crate) fn push_levels(dst: &mut Mix, levels: &[Level], sends: &[DeskSend]) {
     for level in levels {
-        set_fader(dst, &level.signal, level.fader_db);
+        set_fader(dst, &level.signal, level.fader_db.0);
         set_mute(dst, &level.signal, level.mute);
     }
     for send in sends {
@@ -270,14 +355,14 @@ pub(crate) fn levels_of(mix: &Mix) -> Vec<Level> {
     for s in &mix.strips {
         out.push(Level {
             signal: s.id.clone(),
-            fader_db: s.fader_db.0,
+            fader_db: s.fader_db,
             mute: s.mute,
         });
     }
     for b in &mix.buses {
         out.push(Level {
             signal: b.id.clone(),
-            fader_db: b.fader_db.0,
+            fader_db: b.fader_db,
             mute: b.mute,
         });
     }
@@ -352,7 +437,7 @@ pub fn ensure_return(
             return Err(format!("signal {w} does not exist"));
         }
     }
-    let id = return_id(mix, peer);
+    let id = return_id(mix, peer)?;
     let format = mix.bus(of).map(|b| b.format).unwrap_or(Format::Stereo);
     let minus = Minus {
         of: of.to_string(),
@@ -426,20 +511,19 @@ pub fn apply_ears(mix: &mut Mix, return_strip: &str, voices: &[String]) -> Resul
 }
 
 /// `ret-<peer>` (`ret-s1`), so a rebuild finds the same bus after a restart.
-fn return_id(mix: &Mix, peer: &str) -> String {
+/// Refused while another signal has that id: a fresh id each time would leave
+/// a new bus and output behind on every rebuild.
+fn return_id(mix: &Mix, peer: &str) -> Result<String, String> {
     let wanted = format!("ret-{peer}");
-    let ok = (1..=32).contains(&wanted.len())
-        && wanted
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if ok {
-        let kept = mix.bus(&wanted).and_then(|b| b.minus.as_ref()).is_some();
-        let free = mix.kind(&wanted).is_none() && mix.vca(&wanted).is_none();
-        if kept || free {
-            return wanted;
-        }
+    let kept = mix.bus(&wanted).and_then(|b| b.minus.as_ref()).is_some();
+    let free = mix.kind(&wanted).is_none() && mix.vca(&wanted).is_none();
+    if kept || free {
+        Ok(wanted)
+    } else {
+        Err(format!(
+            "{wanted} is another signal: rename it to build the gallery return"
+        ))
     }
-    mix.next_id("ret")
 }
 
 fn iem_id(mix: &Mix, voice: &str) -> String {
@@ -534,106 +618,161 @@ fn set_fader(mix: &mut Mix, signal: &str, db: f64) -> bool {
     false
 }
 
+/// Compares SHA-1 digests in constant time, so neither the content nor the
+/// length of the token shows in the time taken.
 fn token_ok(got: &str, want: &str) -> bool {
-    if got.len() != want.len() {
-        return false;
+    use sha1::Digest;
+    let (got, want) = (sha1::Sha1::digest(got), sha1::Sha1::digest(want));
+    got.iter()
+        .zip(want.iter())
+        .fold(0u8, |d, (a, b)| d | (a ^ b))
+        == 0
+}
+
+/// Log refused tokens at most every 10 s, with the count since the last line.
+fn note_bad_token() {
+    static REFUSED: AtomicU64 = AtomicU64::new(0);
+    static NEXT_LOG_MS: AtomicU64 = AtomicU64::new(0);
+    REFUSED.fetch_add(1, Ordering::Relaxed);
+    let now = now_ms();
+    let next = NEXT_LOG_MS.load(Ordering::Relaxed);
+    if now >= next
+        && NEXT_LOG_MS
+            .compare_exchange(next, now + 10_000, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let refused = REFUSED.swap(0, Ordering::Relaxed);
+        tracing::warn!(
+            refused,
+            "remote link: refused connections with a wrong token"
+        );
     }
-    let mut diff = 0u8;
-    for (a, b) in got.bytes().zip(want.bytes()) {
-        diff |= a ^ b;
-    }
-    diff == 0
 }
 
 async fn socket(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
     if app.config.link_role != LinkRole::Slave {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
-    ws.on_upgrade(move |socket| slave(socket, app))
+    ws.max_message_size(MAX_MESSAGE)
+        .max_frame_size(MAX_MESSAGE)
+        .on_upgrade(move |socket| slave(socket, app))
+}
+
+/// Numbers the master connections, so that only the one holding the link ends it.
+static CONNECTIONS: AtomicU64 = AtomicU64::new(1);
+
+/// The link, held by one master connection. Dropping it brings the link down.
+struct Held {
+    app: App,
+    conn: u64,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.app.control().link.release(self.conn);
+    }
 }
 
 async fn slave(mut socket: WebSocket, app: App) {
-    let Some(Ok(Message::Text(text))) = socket.recv().await else {
-        return;
+    let hello = match tokio::time::timeout(HELLO_WITHIN, socket.recv()).await {
+        Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<Msg>(&text).ok(),
+        _ => None,
     };
-    let Ok(Msg::Hello { token, .. }) = serde_json::from_str::<Msg>(&text) else {
+    let Some(Msg::Hello { token, label, .. }) = hello else {
         return;
     };
     if !token_ok(&token, &app.config.link_token) {
-        let _ = socket
-            .send(Message::Text(
-                serde_json::to_string(&Msg::Ack {
-                    seq: 0,
-                    ok: false,
-                    error: "token".into(),
-                })
-                .unwrap_or_default()
-                .into(),
-            ))
-            .await;
+        note_bad_token();
+        refuse(&mut socket, "token").await;
         return;
     }
-    {
-        let mut c = app.control();
-        c.link_up = true;
-        c.link_seen = true;
+    let conn = CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+    if !app.control().link.claim(conn) {
+        tracing::warn!(master = %label, "remote link: refused a second master");
+        refuse(&mut socket, "another master is connected").await;
+        return;
     }
+    let held = Held {
+        app: app.clone(),
+        conn,
+    };
+    app.link.lock().await.master_seen(Some(&label));
+    if let Err(e) = slave_session(&app, &mut socket).await {
+        tracing::warn!(master = %label, "remote link: {e}");
+    }
+    // Down in the peer list before the link is free for the next master.
+    app.link.lock().await.master_seen(None);
+    drop(held);
+}
+
+async fn refuse(socket: &mut WebSocket, error: &str) {
+    let ack = Msg::Ack {
+        seq: 0,
+        ok: false,
+        error: error.into(),
+    };
+    let _ = send(socket, text_msg(&ack)).await;
+}
+
+/// Returns only when the link has ended.
+async fn slave_session(app: &App, socket: &mut WebSocket) -> Result<(), String> {
     let hello = Msg::Hello {
         role: "slave".into(),
         token: String::new(),
         label: app.config.host_id.clone(),
     };
-    if socket.send(text_msg(&hello)).await.is_err() {
-        mark_down(&app);
-        return;
-    }
-    if send_state(&app, &mut socket).await.is_err() {
-        mark_down(&app);
-        return;
-    }
+    send(socket, text_msg(&hello)).await?;
+    send_state(app, socket).await?;
     let mut sent = app.control().revision;
-    let mut meters = tokio::time::interval(Duration::from_millis(100));
-    let mut ping = tokio::time::interval(Duration::from_secs(1));
+    let mut meters = interval(Duration::from_millis(100));
+    let mut ping = interval(PING_EVERY);
+    let mut heard = Instant::now();
+    let mut logged = false;
     loop {
         tokio::select! {
-            msg = socket.recv() => {
-                let Some(Ok(Message::Text(text))) = msg else {
-                    mark_down(&app);
-                    return;
-                };
-                if handle_slave(&app, &text, &mut socket).await.is_err() {
-                    mark_down(&app);
-                    return;
+            msg = next_within(socket, heard) => {
+                match msg? {
+                    Some(Ok(Message::Text(text))) => {
+                        heard = Instant::now();
+                        handle_slave(app, &text, socket, &mut logged).await?;
+                    }
+                    Some(Ok(Message::Close(_))) | None => return Err("the master closed the link".into()),
+                    Some(Ok(_)) => heard = Instant::now(),
+                    Some(Err(e)) => return Err(e.to_string()),
                 }
             }
             _ = meters.tick() => {
                 let rev = app.control().revision;
-                if rev != sent && send_state(&app, &mut socket).await.is_err() {
-                    mark_down(&app);
-                    return;
+                if rev != sent {
+                    send_state(app, socket).await?;
                 }
                 sent = app.control().revision;
-                let peaks = peaks_of(&app);
-                if socket.send(text_msg(&Msg::Meters { peaks })).await.is_err() {
-                    mark_down(&app);
-                    return;
-                }
+                let peaks = peaks_of(app);
+                send(socket, text_msg(&Msg::Meters { peaks })).await?;
             }
             _ = ping.tick() => {
-                let t_ms = now_ms();
-                if socket.send(text_msg(&Msg::Ping { t_ms })).await.is_err() {
-                    mark_down(&app);
-                    return;
-                }
+                send(socket, text_msg(&Msg::Ping { t_ms: now_ms() })).await?;
             }
         }
     }
 }
 
-fn mark_down(app: &App) {
-    let mut c = app.control();
-    c.link_up = false;
-    c.link_seen = true;
+/// A tick that, after a stall, comes once and goes on from there (no burst).
+fn interval(period: Duration) -> tokio::time::Interval {
+    let mut i = tokio::time::interval(period);
+    i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    i
+}
+
+/// The next frame, or an error when nothing has come for [`DEAD_AFTER`] since
+/// `heard`: a peer that is gone without closing the socket.
+async fn next_within<S>(socket: &mut S, heard: Instant) -> Result<Option<S::Item>, String>
+where
+    S: futures_util::Stream + Unpin,
+{
+    tokio::time::timeout_at(heard + DEAD_AFTER, socket.next())
+        .await
+        .map_err(|_| format!("nothing heard for {} s", DEAD_AFTER.as_secs()))
 }
 
 fn peaks_of(app: &App) -> BTreeMap<String, f64> {
@@ -660,23 +799,71 @@ fn peaks_of(app: &App) -> BTreeMap<String, f64> {
     peaks
 }
 
-async fn send_state(app: &App, socket: &mut WebSocket) -> Result<(), ()> {
+async fn send_state(app: &App, socket: &mut WebSocket) -> Result<(), String> {
     let (revision, levels, desk) = {
         let c = app.control();
         (c.revision, levels_of(&c.mix), desk_of(&c.mix))
     };
-    socket
-        .send(text_msg(&Msg::State {
-            revision,
-            levels,
-            desk: Some(desk),
-        }))
-        .await
-        .map_err(|_| ())
+    let state = Msg::State {
+        revision,
+        levels,
+        desk: Some(desk),
+    };
+    send(socket, text_msg(&state)).await
 }
 
-async fn handle_slave(app: &App, text: &str, socket: &mut WebSocket) -> Result<(), ()> {
-    let msg: Msg = serde_json::from_str(text).map_err(|_| ())?;
+/// A message this version does not know: its `type`, and its `seq` (a command's).
+#[derive(Debug, PartialEq)]
+struct Unknown {
+    kind: String,
+    seq: u64,
+}
+
+fn parse(text: &str) -> Result<Msg, Unknown> {
+    serde_json::from_str(text).map_err(|_| {
+        let v: Value = serde_json::from_str(text).unwrap_or_default();
+        Unknown {
+            kind: v["type"].as_str().unwrap_or_default().to_string(),
+            seq: v["seq"].as_u64().unwrap_or(0),
+        }
+    })
+}
+
+/// A peer of another version may send what this one does not know: ignore it,
+/// and say so once per connection.
+fn note_unknown(logged: &mut bool, kind: &str) {
+    if !*logged {
+        *logged = true;
+        tracing::warn!(
+            kind,
+            "remote link: ignoring a message this version does not know (logged once per connection)"
+        );
+    }
+}
+
+async fn handle_slave(
+    app: &App,
+    text: &str,
+    socket: &mut WebSocket,
+    logged: &mut bool,
+) -> Result<(), String> {
+    let msg = match parse(text) {
+        Ok(msg) => msg,
+        Err(unknown) if unknown.kind == "command" || unknown.kind == "push" => {
+            // A command or push this version does not understand: refuse it,
+            // keep the link.
+            let ack = Msg::Ack {
+                seq: unknown.seq,
+                ok: false,
+                error: "command not understood".into(),
+            };
+            return send(socket, text_msg(&ack)).await;
+        }
+        Err(unknown) => {
+            note_unknown(logged, &unknown.kind);
+            return Ok(());
+        }
+    };
     match msg {
         Msg::Command { seq, command } => {
             let result = apply_remote(app, &command).await;
@@ -686,51 +873,40 @@ async fn handle_slave(app: &App, text: &str, socket: &mut WebSocket) -> Result<(
                 ok,
                 error: result.err().unwrap_or_default(),
             };
-            socket.send(text_msg(&ack)).await.map_err(|_| ())?;
+            send(socket, text_msg(&ack)).await?;
             if ok {
                 send_state(app, socket).await?;
             }
         }
-        Msg::Push { levels, sends } => {
+        Msg::Push { seq, levels, sends } => {
             let result = apply_push(app, &levels, &sends).await;
             let ok = result.is_ok();
             let ack = Msg::Ack {
-                seq: 0,
+                seq,
                 ok,
                 error: result.err().unwrap_or_default(),
             };
-            socket.send(text_msg(&ack)).await.map_err(|_| ())?;
+            send(socket, text_msg(&ack)).await?;
             if ok {
                 send_state(app, socket).await?;
             }
         }
-        Msg::Pong { t_ms } => {
-            let rtt = now_ms().saturating_sub(t_ms) as f64;
-            let mut peers = app.link.lock().await;
-            if let Some(p) = peers.list.iter_mut().find(|p| p.id == "master") {
-                p.rtt_ms = Some(rtt);
-                p.up = true;
-            } else {
-                peers.list.push(Peer {
-                    id: "master".into(),
-                    url: String::new(),
-                    label: "master".into(),
-                    up: true,
-                    rtt_ms: Some(rtt),
-                    revision: 0,
-                    last_error: String::new(),
-                });
-            }
-        }
-        Msg::Ping { t_ms } => {
-            socket
-                .send(text_msg(&Msg::Pong { t_ms }))
-                .await
-                .map_err(|_| ())?;
-        }
+        Msg::Pong { t_ms } => app.link.lock().await.pong("master", t_ms, now_ms()),
+        Msg::Ping { t_ms } => send(socket, text_msg(&Msg::Pong { t_ms })).await?,
         _ => {}
     }
     Ok(())
+}
+
+/// Stage the master's change: takeover deny never refuses it (§13).
+fn stage_remote(
+    control: &mut crate::control::Control,
+    next: Mix,
+) -> Result<crate::control::Staged, String> {
+    control.link.remote_write = true;
+    let staged = control.stage(next, FADE_SAMPLES);
+    control.link.remote_write = false;
+    staged
 }
 
 async fn apply_remote(app: &App, command: &Command) -> Result<(), String> {
@@ -738,12 +914,9 @@ async fn apply_remote(app: &App, command: &Command) -> Result<(), String> {
     let _serial = app.changes.lock().await;
     let staged = {
         let mut control = app.control();
-        control.remote_write = true;
         let mut next = control.mix.clone();
-        let result = apply_command(&mut next, &command);
-        control.remote_write = false;
-        result?;
-        control.stage(next, FADE_SAMPLES)
+        apply_command(&mut next, &command)?;
+        stage_remote(&mut control, next)
     };
     finish(app, staged).await
 }
@@ -754,11 +927,9 @@ async fn apply_push(app: &App, levels: &[Level], sends: &[DeskSend]) -> Result<(
     let _serial = app.changes.lock().await;
     let staged = {
         let mut control = app.control();
-        control.remote_write = true;
         let mut next = control.mix.clone();
         push_levels(&mut next, &levels, &sends);
-        control.remote_write = false;
-        control.stage(next, FADE_SAMPLES)
+        stage_remote(&mut control, next)
     };
     finish(app, staged).await
 }
@@ -779,167 +950,246 @@ fn text_msg(msg: &Msg) -> Message {
     Message::Text(serde_json::to_string(msg).unwrap_or_default().into())
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+fn ws_text(msg: &Msg) -> tungstenite::Message {
+    tungstenite::Message::Text(serde_json::to_string(msg).unwrap_or_default().into())
 }
 
-/// A stable short id for a slave URL (`s1` … `s4`).
-fn slug_for(peers: &Peers, url: &str) -> String {
-    if let Some(p) = peers.list.iter().find(|p| p.url == url || p.id == url) {
-        return p.id.clone();
+/// Send one message. A peer that does not take it within [`DEAD_AFTER`] is gone.
+async fn send<S, M>(socket: &mut S, message: M) -> Result<(), String>
+where
+    S: futures_util::Sink<M> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match tokio::time::timeout(DEAD_AFTER, socket.send(message)).await {
+        Ok(result) => result.map_err(|e| e.to_string()),
+        Err(_) => Err(format!("a send waited {} s", DEAD_AFTER.as_secs())),
     }
-    for n in 1..=4 {
-        let id = format!("s{n}");
-        if !peers.list.iter().any(|p| p.id == id) {
-            return id;
+}
+
+/// Milliseconds on this process's monotonic clock. A ping's stamp comes back
+/// in its pong, so the round trip reads one host's clock only.
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+/// A slave's id is its place in `MIXER_LINK_PEERS` (`s1` … `s4`), so it stays
+/// the same across restarts whichever slave answers first.
+fn peer_id(urls: &[String], url: &str) -> String {
+    let n = urls.iter().position(|u| u == url).unwrap_or(0);
+    format!("s{}", n + 1)
+}
+
+impl Peers {
+    fn peer_mut(&mut self, id: &str) -> Option<&mut Peer> {
+        self.list.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Slave: the master connected (with its label), or went away (`None`).
+    fn master_seen(&mut self, label: Option<&str>) {
+        let up = label.is_some();
+        if let Some(p) = self.peer_mut("master") {
+            p.up = up;
+            if let Some(label) = label {
+                p.label = label.to_string();
+            } else {
+                p.rtt_ms = None;
+            }
+            return;
+        }
+        self.list.push(Peer {
+            id: "master".into(),
+            url: String::new(),
+            label: label.unwrap_or("master").to_string(),
+            up,
+            rtt_ms: None,
+            revision: 0,
+            last_error: String::new(),
+        });
+    }
+
+    /// A pong to this side's own ping: the round trip on this host's clock.
+    fn pong(&mut self, id: &str, t_ms: u64, now: u64) {
+        if let Some(p) = self.peer_mut(id) {
+            p.rtt_ms = Some(now.saturating_sub(t_ms) as f64);
         }
     }
-    "s1".into()
+
+    /// Master: slave `id` at `url` is listed, and up once it says hello. Called
+    /// at start (so a slave never reached shows as down) and on each connection.
+    fn listed(&mut self, id: &str, url: &str) {
+        if let Some(p) = self.peer_mut(id) {
+            p.url = url.to_string();
+            p.up = false;
+            return;
+        }
+        self.list.push(Peer {
+            id: id.to_string(),
+            url: url.to_string(),
+            label: String::new(),
+            up: false,
+            rtt_ms: None,
+            revision: 0,
+            last_error: String::new(),
+        });
+    }
+
+    /// Master: the link to slave `id` ended. What was not sent is dropped
+    /// (at most once).
+    fn ended(&mut self, id: &str) {
+        if let Some(p) = self.peer_mut(id) {
+            p.up = false;
+            p.rtt_ms = None;
+        }
+        let dropped = self.pending.remove(id).map_or(0, |c| c.len())
+            + usize::from(self.pending_push.remove(id).is_some());
+        if dropped > 0 {
+            tracing::warn!(
+                peer = id,
+                dropped,
+                "remote link: commands not sent before the link ended were dropped"
+            );
+        }
+    }
+
+    /// Master: queue a command for the live link to slave `id`. Checked and
+    /// queued under one lock, so nothing is queued after [`Peers::ended`].
+    fn enqueue(&mut self, id: &str, command: Command) -> Result<(), (StatusCode, &'static str)> {
+        if !self.list.iter().any(|p| p.id == id && p.up) {
+            return Err((StatusCode::CONFLICT, "the far side is not linked"));
+        }
+        let queue = self.pending.entry(id.to_string()).or_default();
+        if queue.len() >= MAX_PENDING {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the far side is not taking commands",
+            ));
+        }
+        queue.push(command);
+        Ok(())
+    }
+
+    /// Master: one message from slave `id`; returns the reply to send, if any.
+    fn on_slave_msg(&mut self, id: &str, msg: Msg, now: u64) -> Option<Msg> {
+        match msg {
+            Msg::Hello { label, .. } => {
+                if let Some(p) = self.peer_mut(id) {
+                    p.label = label;
+                    p.up = true;
+                    p.last_error.clear();
+                }
+            }
+            Msg::State {
+                revision,
+                levels,
+                desk,
+            } => {
+                if !levels.is_empty() {
+                    self.levels.insert(id.to_string(), levels);
+                }
+                if let Some(desk) = desk {
+                    self.desks.insert(id.to_string(), desk);
+                }
+                if let Some(p) = self.peer_mut(id) {
+                    p.revision = revision;
+                    p.up = true;
+                }
+            }
+            Msg::Ack { seq, ok, error } => {
+                if !ok {
+                    tracing::warn!(peer = id, seq, "remote link: the slave refused: {error}");
+                }
+                if let Some(p) = self.peer_mut(id) {
+                    p.last_error = if ok { String::new() } else { error };
+                }
+            }
+            // The slave's own round trip; the master measures with its own pings.
+            Msg::Ping { t_ms } => return Some(Msg::Pong { t_ms }),
+            Msg::Pong { t_ms } => self.pong(id, t_ms, now),
+            Msg::Meters { peaks } => {
+                self.peaks.insert(id.to_string(), peaks);
+            }
+            Msg::Command { .. } | Msg::Push { .. } => {}
+        }
+        None
+    }
 }
+
+type MasterSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Master: keep a connection to one slave and remember its desk.
 pub async fn master(app: App, url: String) {
+    let id = peer_id(&app.config.link_peers, &url);
+    app.link.lock().await.listed(&id, &url);
     loop {
-        match master_once(&app, &url).await {
-            Ok(()) => {}
-            Err(e) => tracing::warn!(peer = %url, "remote link: {e}"),
+        if let Err(e) = master_once(&app, &id, &url).await {
+            tracing::warn!(peer = %url, "remote link: {e}");
         }
-        {
-            let mut peers = app.link.lock().await;
-            if let Some(p) = peers.list.iter_mut().find(|p| p.url == url) {
-                p.up = false;
-            }
-        }
+        app.link.lock().await.ended(&id);
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
-async fn master_once(app: &App, url: &str) -> Result<(), String> {
-    let (mut socket, _) = tokio_tungstenite::connect_async(url)
+/// Returns only when the link has ended.
+async fn master_once(app: &App, id: &str, url: &str) -> Result<(), String> {
+    let config = tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
+    let connect = tokio_tungstenite::connect_async_with_config(url, Some(config), false);
+    let (mut socket, _) = tokio::time::timeout(CONNECT_WITHIN, connect)
         .await
+        .map_err(|_| format!("no connection within {} s", CONNECT_WITHIN.as_secs()))?
         .map_err(|e| e.to_string())?;
+    app.link.lock().await.listed(id, url);
     let hello = Msg::Hello {
         role: "master".into(),
         token: app.config.link_token.clone(),
         label: app.config.host_id.clone(),
     };
-    socket
-        .send(tungstenite::Message::Text(
-            serde_json::to_string(&hello).unwrap_or_default().into(),
-        ))
-        .await
-        .map_err(|e| e.to_string())?;
-    let id = {
-        let mut peers = app.link.lock().await;
-        let id = slug_for(&peers, url);
-        if let Some(p) = peers.list.iter_mut().find(|p| p.id == id) {
-            p.url = url.to_string();
-            p.up = true;
-        } else {
-            peers.list.push(Peer {
-                id: id.clone(),
-                url: url.to_string(),
-                label: String::new(),
-                up: true,
-                rtt_ms: None,
-                revision: 0,
-                last_error: String::new(),
-            });
-        }
-        id
-    };
-    let started = Instant::now();
-    let mut flush = tokio::time::interval(Duration::from_millis(50));
-    while started.elapsed() < Duration::from_secs(3600) {
+    send(&mut socket, ws_text(&hello)).await?;
+    let mut flush = interval(Duration::from_millis(50));
+    let mut ping = interval(PING_EVERY);
+    let mut heard = Instant::now();
+    let mut seq = 0;
+    let mut logged = false;
+    loop {
         tokio::select! {
-            msg = socket.next() => {
-                let Some(msg) = msg else { return Err("closed".into()); };
-                let msg = msg.map_err(|e| e.to_string())?;
-                let tungstenite::Message::Text(text) = msg else { continue; };
-                handle_master(app, &id, &text, &mut socket).await?;
+            msg = next_within(&mut socket, heard) => {
+                match msg? {
+                    Some(Ok(tungstenite::Message::Text(text))) => {
+                        heard = Instant::now();
+                        let reply = match parse(&text) {
+                            Ok(msg) => app.link.lock().await.on_slave_msg(id, msg, now_ms()),
+                            Err(unknown) => {
+                                note_unknown(&mut logged, &unknown.kind);
+                                None
+                            }
+                        };
+                        if let Some(reply) = reply {
+                            send(&mut socket, ws_text(&reply)).await?;
+                        }
+                    }
+                    Some(Ok(tungstenite::Message::Close(_))) | None => return Err("the slave closed the link".into()),
+                    Some(Ok(_)) => heard = Instant::now(),
+                    Some(Err(e)) => return Err(e.to_string()),
+                }
             }
-            _ = flush.tick() => {
-                flush_master(app, &id, &mut socket).await?;
-            }
+            _ = flush.tick() => flush_master(app, id, &mut socket, &mut seq).await?,
+            _ = ping.tick() => send(&mut socket, ws_text(&Msg::Ping { t_ms: now_ms() })).await?,
         }
     }
-    Ok(())
 }
 
-async fn handle_master(
-    app: &App,
-    id: &str,
-    text: &str,
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) -> Result<(), String> {
-    let Ok(parsed) = serde_json::from_str::<Msg>(text) else {
-        return Ok(());
-    };
-    match parsed {
-        Msg::Hello { label, .. } => {
-            let mut peers = app.link.lock().await;
-            if let Some(p) = peers.list.iter_mut().find(|p| p.id == id) {
-                p.label = label;
-            }
-        }
-        Msg::State {
-            revision,
-            levels,
-            desk,
-        } => {
-            let mut peers = app.link.lock().await;
-            if !levels.is_empty() {
-                peers.levels.insert(id.to_string(), levels);
-            }
-            if let Some(desk) = desk {
-                peers.desks.insert(id.to_string(), desk);
-            }
-            if let Some(p) = peers.list.iter_mut().find(|p| p.id == id) {
-                p.revision = revision;
-                p.up = true;
-            }
-        }
-        Msg::Ack { ok, error, .. } => {
-            let mut peers = app.link.lock().await;
-            if let Some(p) = peers.list.iter_mut().find(|p| p.id == id) {
-                p.last_error = if ok { String::new() } else { error };
-            }
-        }
-        Msg::Ping { t_ms } => {
-            let rtt = now_ms().saturating_sub(t_ms) as f64;
-            let mut peers = app.link.lock().await;
-            if let Some(p) = peers.list.iter_mut().find(|p| p.id == id) {
-                p.rtt_ms = Some(rtt);
-            }
-            socket
-                .send(tungstenite::Message::Text(
-                    serde_json::to_string(&Msg::Pong { t_ms })
-                        .unwrap_or_default()
-                        .into(),
-                ))
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        Msg::Meters { peaks } => {
-            let mut peers = app.link.lock().await;
-            peers.peaks.insert(id.to_string(), peaks);
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
+/// Send the queued commands and push, numbered from 1 on each connection.
 async fn flush_master(
     app: &App,
     id: &str,
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    socket: &mut MasterSocket,
+    seq: &mut u64,
 ) -> Result<(), String> {
     let (commands, push) = {
         let mut peers = app.link.lock().await;
@@ -948,31 +1198,18 @@ async fn flush_master(
             peers.pending_push.remove(id),
         )
     };
-    for (seq, command) in commands.into_iter().enumerate() {
-        socket
-            .send(tungstenite::Message::Text(
-                serde_json::to_string(&Msg::Command {
-                    seq: seq as u64 + 1,
-                    command,
-                })
-                .unwrap_or_default()
-                .into(),
-            ))
-            .await
-            .map_err(|e| e.to_string())?;
+    for command in commands {
+        *seq += 1;
+        send(socket, ws_text(&Msg::Command { seq: *seq, command })).await?;
     }
     if let Some(push) = push {
-        socket
-            .send(tungstenite::Message::Text(
-                serde_json::to_string(&Msg::Push {
-                    levels: push.levels,
-                    sends: push.sends,
-                })
-                .unwrap_or_default()
-                .into(),
-            ))
-            .await
-            .map_err(|e| e.to_string())?;
+        *seq += 1;
+        let push = Msg::Push {
+            seq: *seq,
+            levels: push.levels,
+            sends: push.sends,
+        };
+        send(socket, ws_text(&push)).await?;
     }
     Ok(())
 }
@@ -1000,38 +1237,35 @@ async fn remotes(State(app): State<App>) -> Json<Value> {
     Json(json!({ "peers": list }))
 }
 
+fn refused((code, error): (StatusCode, &str)) -> Response {
+    (code, Json(json!({ "error": error }))).into_response()
+}
+
 async fn command(
     State(app): State<App>,
     Path(id): Path<String>,
     Json(command): Json<Command>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
+) -> Response {
     if app.config.link_role != LinkRole::Master {
-        return Err(axum::http::StatusCode::NOT_FOUND);
+        return StatusCode::NOT_FOUND.into_response();
     }
-    let peers = app.link.lock().await;
-    if !peers.list.iter().any(|p| p.id == id && p.up) {
-        return Err(axum::http::StatusCode::CONFLICT);
+    // The connection task owns the socket; it sends the queue every 50 ms.
+    match app.link.lock().await.enqueue(&id, command) {
+        Ok(()) => Json(json!({"queued": true})).into_response(),
+        Err(e) => refused(e),
     }
-    drop(peers);
-    // The live socket is the master's; commands are applied by the slave when
-    // it receives them. This process is the master, so the command is queued
-    // on the peer for the connection task. A direct send needs the socket,
-    // which the connection task owns. Store the command for that task.
-    let mut peers = app.link.lock().await;
-    peers.pending.entry(id).or_default().push(command);
-    Ok(Json(json!({"queued": true})))
 }
 
-async fn push(
-    State(app): State<App>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
+async fn push(State(app): State<App>, Path(id): Path<String>) -> Response {
     if app.config.link_role != LinkRole::Master {
-        return Err(axum::http::StatusCode::NOT_FOUND);
+        return StatusCode::NOT_FOUND.into_response();
     }
     let mut peers = app.link.lock().await;
+    if !peers.list.iter().any(|p| p.id == id && p.up) {
+        return refused((StatusCode::CONFLICT, "the far side is not linked"));
+    }
     let Some(levels) = peers.levels.get(&id).cloned() else {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return refused((StatusCode::CONFLICT, "no levels from the far side yet"));
     };
     let sends = peers
         .desks
@@ -1039,7 +1273,7 @@ async fn push(
         .map(|d| d.sends.clone())
         .unwrap_or_default();
     peers.pending_push.insert(id, PushBody { levels, sends });
-    Ok(Json(json!({"queued": true})))
+    Json(json!({"queued": true})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1073,12 +1307,8 @@ async fn gallery_return(
     };
     {
         let peers = app.link.lock().await;
-        if !peers.list.iter().any(|p| p.id == id) {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "far side is not linked"})),
-            )
-                .into_response();
+        if !peers.list.iter().any(|p| p.id == id && p.up) {
+            return refused((StatusCode::CONFLICT, "the far side is not linked"));
         }
     }
     let _serial = app.changes.lock().await;
@@ -1098,10 +1328,15 @@ async fn gallery_return(
     {
         let mut peers = app.link.lock().await;
         peers.returns.insert(id.clone(), bus.clone());
-        peers.pending.entry(id).or_default().push(Command::Ears {
+        let ears = Command::Ears {
             return_strip: body.return_strip,
             voices: body.voices,
-        });
+        };
+        // The link may have dropped while the return was built: the gallery
+        // bus stays, and building again sends the in-ears.
+        if let Err(e) = peers.enqueue(&id, ears) {
+            return refused(e);
+        }
     }
     (
         StatusCode::CREATED,
@@ -1258,5 +1493,316 @@ mod tests {
                 db: Db::MINUS_INF,
             }
         );
+    }
+    #[test]
+    fn one_master_holds_the_link_and_takeover_deny_spares_its_changes() {
+        let mut t = Takeover::new(true);
+        assert!(!t.refuses(), "start-up loads the show before any master");
+        assert!(t.claim(1));
+        assert!(t.up() && t.seen && !t.refuses());
+        assert!(!t.claim(2), "a second master is refused");
+        // A connection that never held the link does not bring it down.
+        t.release(2);
+        assert!(t.up());
+        t.release(1);
+        assert!(!t.up());
+        assert!(t.refuses(), "the master is gone: local changes are refused");
+        t.remote_write = true;
+        assert!(!t.refuses(), "the master's own change passes");
+        t.remote_write = false;
+        assert!(t.claim(3), "the master is back");
+        // The old connection ending late (a stale release) leaves the new one up.
+        t.release(1);
+        assert!(t.up() && !t.refuses());
+        let mut allow = Takeover::new(false);
+        assert!(allow.claim(1));
+        allow.release(1);
+        assert!(!allow.refuses());
+    }
+
+    #[test]
+    fn a_message_of_another_version_is_named_not_fatal() {
+        assert!(matches!(
+            parse(r#"{"type":"ping","t_ms":5,"extra":1}"#),
+            Ok(Msg::Ping { t_ms: 5 })
+        ));
+        assert_eq!(
+            parse(r#"{"type":"tally","on":true}"#).unwrap_err(),
+            Unknown {
+                kind: "tally".into(),
+                seq: 0
+            }
+        );
+        assert_eq!(
+            parse(r#"{"type":"command","seq":7,"command":{"op":"pan","signal":"vox"}}"#)
+                .unwrap_err(),
+            Unknown {
+                kind: "command".into(),
+                seq: 7
+            }
+        );
+        assert_eq!(parse("not json").unwrap_err().kind, "");
+        // A push from an older master has no seq.
+        assert!(matches!(
+            parse(r#"{"type":"push","levels":[]}"#),
+            Ok(Msg::Push { seq: 0, .. })
+        ));
+        let mut logged = false;
+        note_unknown(&mut logged, "tally");
+        assert!(logged);
+    }
+
+    #[test]
+    fn the_master_measures_the_round_trip_with_its_own_clock() {
+        let mut peers = Peers::default();
+        peers.listed("s1", "ws://far/api/v1/link");
+        assert!(!peers.list[0].up, "up once the slave says hello");
+        let hello = Msg::Hello {
+            role: "slave".into(),
+            token: String::new(),
+            label: "far".into(),
+        };
+        assert!(peers.on_slave_msg("s1", hello, 0).is_none());
+        assert!(peers.list[0].up);
+        assert_eq!(peers.list[0].label, "far");
+        // The slave's ping carries the slave's clock: answered, not measured.
+        let reply = peers.on_slave_msg("s1", Msg::Ping { t_ms: 9_000_000 }, 1_000);
+        assert!(matches!(reply, Some(Msg::Pong { t_ms: 9_000_000 })));
+        assert_eq!(peers.list[0].rtt_ms, None);
+        // The pong to the master's ping sent at 1 000 ms, back at 1 012 ms.
+        assert!(peers
+            .on_slave_msg("s1", Msg::Pong { t_ms: 1_000 }, 1_012)
+            .is_none());
+        assert_eq!(peers.list[0].rtt_ms, Some(12.0));
+        let refused = Msg::Ack {
+            seq: 3,
+            ok: false,
+            error: "no signal x".into(),
+        };
+        peers.on_slave_msg("s1", refused, 0);
+        assert_eq!(peers.list[0].last_error, "no signal x");
+        assert!(now_ms() <= now_ms(), "monotonic");
+    }
+
+    #[test]
+    fn link_state_follows_the_connection_and_unsent_commands_are_dropped() {
+        let mut slave = Peers::default();
+        slave.master_seen(Some("gallery"));
+        assert!(metrics(&slave).contains(&"remote_link_up{peer=\"master\"} 1".to_string()));
+        slave.pong("master", 100, 104);
+        assert_eq!(slave.list[0].rtt_ms, Some(4.0));
+        slave.master_seen(None);
+        assert!(metrics(&slave).contains(&"remote_link_up{peer=\"master\"} 0".to_string()));
+        assert_eq!(slave.list.len(), 1);
+        assert_eq!(slave.list[0].label, "gallery");
+
+        let mut master = Peers::default();
+        master.listed("s2", "ws://b/api/v1/link");
+        master.on_slave_msg(
+            "s2",
+            Msg::State {
+                revision: 4,
+                levels: Vec::new(),
+                desk: None,
+            },
+            0,
+        );
+        assert!(master.list[0].up);
+        master
+            .pending
+            .entry("s2".into())
+            .or_default()
+            .push(Command::Recall {
+                snapshot: "a".into(),
+            });
+        master.pending_push.insert(
+            "s2".into(),
+            PushBody {
+                levels: Vec::new(),
+                sends: Vec::new(),
+            },
+        );
+        master.ended("s2");
+        assert!(!master.list[0].up);
+        assert!(master.pending.is_empty() && master.pending_push.is_empty());
+        assert!(metrics(&master).contains(&"remote_link_up{peer=\"s2\"} 0".to_string()));
+    }
+
+    #[test]
+    fn a_slave_keeps_its_place_in_the_peer_list_as_its_id() {
+        let urls: Vec<String> = ["ws://a/l", "ws://b/l", "ws://c/l"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(peer_id(&urls, "ws://c/l"), "s3");
+        assert_eq!(peer_id(&urls, "ws://a/l"), "s1");
+    }
+
+    #[test]
+    fn a_taken_return_id_is_refused_instead_of_leaking_a_bus_per_rebuild() {
+        let mut home = Mix::default();
+        home.buses.push(Bus::new("main", Format::Stereo));
+        home.strips.push(strip("ret-s1"));
+        for _ in 0..3 {
+            assert!(ensure_return(&mut home, "s1", "main", &[]).is_err());
+        }
+        assert_eq!(home.buses.len(), 1);
+        assert!(home.outputs.is_empty());
+        assert_eq!(
+            ensure_return(&mut home, "s2", "main", &[]).unwrap(),
+            "ret-s2"
+        );
+        assert_eq!(
+            ensure_return(&mut home, "s2", "main", &[]).unwrap(),
+            "ret-s2"
+        );
+        assert_eq!(home.buses.len(), 2);
+        assert_eq!(home.outputs.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_peer_is_gone_after_the_deadline() {
+        let mut silent = futures_util::stream::pending::<u8>();
+        let heard = Instant::now();
+        let err = next_within(&mut silent, heard).await.unwrap_err();
+        assert!(err.contains("nothing heard"), "{err}");
+        assert!(Instant::now() - heard >= DEAD_AFTER);
+        let mut talking = futures_util::stream::iter([1u8]);
+        assert_eq!(next_within(&mut talking, Instant::now()).await, Ok(Some(1)));
+
+        /// A peer whose socket takes nothing more.
+        struct Stuck;
+        impl futures_util::Sink<u8> for Stuck {
+            type Error = String;
+            fn poll_ready(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), String>> {
+                std::task::Poll::Pending
+            }
+            fn start_send(self: std::pin::Pin<&mut Self>, _: u8) -> Result<(), String> {
+                Ok(())
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), String>> {
+                std::task::Poll::Pending
+            }
+            fn poll_close(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), String>> {
+                std::task::Poll::Pending
+            }
+        }
+        assert!(send(&mut Stuck, 1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn wss_is_built_in() {
+        // A listener that closes at once: with TLS built in, the handshake
+        // fails on the socket instead of "TLS support not compiled in".
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        let url = format!("wss://127.0.0.1:{port}/api/v1/link");
+        let err = tokio_tungstenite::connect_async(url).await.unwrap_err();
+        assert!(
+            !matches!(
+                err,
+                tungstenite::Error::Url(tungstenite::error::UrlError::TlsFeatureNotEnabled)
+            ),
+            "{err}"
+        );
+    }
+    #[test]
+    fn minus_infinity_survives_state_and_push() {
+        let mut mix = Mix::default();
+        let mut s = strip("vox");
+        s.fader_db = Db::MINUS_INF;
+        mix.strips.push(s);
+        let state = Msg::State {
+            revision: 2,
+            levels: levels_of(&mix),
+            desk: Some(desk_of(&mix)),
+        };
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(text.contains(r#""fader_db":"-inf""#), "{text}");
+        let Ok(Msg::State { levels, desk, .. }) = parse(&text) else {
+            panic!("a state with -inf is not read: {text}");
+        };
+        assert_eq!(levels[0].fader_db, Db::MINUS_INF);
+        assert_eq!(desk.unwrap().strips[0].fader_db, Db::MINUS_INF);
+        let push = Msg::Push {
+            seq: 4,
+            levels,
+            sends: Vec::new(),
+        };
+        let Ok(Msg::Push { seq: 4, levels, .. }) = parse(&serde_json::to_string(&push).unwrap())
+        else {
+            panic!("a push with -inf is not read");
+        };
+        let mut other = Mix::default();
+        other.strips.push(strip("vox"));
+        push_levels(&mut other, &levels, &[]);
+        assert_eq!(other.strips[0].fader_db, Db::MINUS_INF);
+        // Peers before 1.3.0 wrote -inf as null.
+        let old = r#"{"type":"push","levels":[{"signal":"vox","fader_db":null,"mute":false}]}"#;
+        let Ok(Msg::Push { levels, .. }) = parse(old) else {
+            panic!("an older push is not read");
+        };
+        assert_eq!(levels[0].fader_db, Db::MINUS_INF);
+        assert!(parse(r#"{"type":"push","levels":[{"signal":"vox"}]}"#)
+            .is_err_and(|u| u.kind == "push"));
+    }
+
+    #[test]
+    fn commands_queue_only_on_a_live_link_and_only_so_many() {
+        let mut peers = Peers::default();
+        peers.listed("s1", "ws://far/l");
+        let mute = || Command::Mute {
+            signal: "vox".into(),
+            mute: true,
+        };
+        assert_eq!(
+            peers.enqueue("s1", mute()).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            peers.enqueue("s9", mute()).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+        peers.list[0].up = true;
+        peers.list[0].rtt_ms = Some(3.0);
+        for _ in 0..MAX_PENDING {
+            peers.enqueue("s1", mute()).unwrap();
+        }
+        assert_eq!(
+            peers.enqueue("s1", mute()).unwrap_err().0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(metrics(&peers)
+            .iter()
+            .any(|l| l.starts_with("remote_link_rtt_ms")));
+        peers.ended("s1");
+        assert!(peers.pending.is_empty());
+        // A command that comes after the link ended is refused, not kept for
+        // the next connection.
+        assert_eq!(
+            peers.enqueue("s1", mute()).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+        assert!(peers.pending.is_empty());
+        assert_eq!(peers.list[0].rtt_ms, None);
+        assert!(!metrics(&peers)
+            .iter()
+            .any(|l| l.starts_with("remote_link_rtt_ms")));
+        assert!(!token_ok("secret-token-and-more", "secret-token"));
+        assert!(!token_ok("", "secret-token"));
     }
 }

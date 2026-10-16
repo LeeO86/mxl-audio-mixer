@@ -63,7 +63,7 @@ function peakOf(peer, id) {
         <span v-if="p.return_bus" class="muted small">return <code>{{ p.return_bus }}</code> published</span>
         <span v-if="p.last_error" class="muted small">{{ p.last_error }}</span>
       </div>
-      <div v-if="!p.desk" class="empty">Linked. Waiting for the desk.</div>
+      <div v-if="!p.desk" class="empty">{{ p.up ? "Linked. Waiting for the desk." : "Not linked yet." }}</div>
       <div v-else class="console">
         <div class="strips">
           <RemoteStrip
