@@ -130,8 +130,13 @@ pub fn effective() -> String {
     }
 }
 
-/// Raise the soft limit of open files to the hard limit (16 inputs and their
-/// MXL files fit in 1024, 256 might not). Returns the soft limit now in force.
+/// The most open files [`raise_open_files`] asks for: enough for 256 inputs, and
+/// still fine for children and for code that uses `select()`.
+pub const OPEN_FILES: u64 = 65_536;
+
+/// Raise the soft limit of open files to the hard limit, at most [`OPEN_FILES`]
+/// (16 inputs and their MXL files fit in 1024, 256 might not). Returns the soft
+/// limit now in force.
 pub fn raise_open_files() -> std::io::Result<u64> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
@@ -142,8 +147,9 @@ pub fn raise_open_files() -> std::io::Result<u64> {
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        if limit.rlim_cur < limit.rlim_max {
-            limit.rlim_cur = limit.rlim_max;
+        let target = limit.rlim_max.min(OPEN_FILES);
+        if limit.rlim_cur < target {
+            limit.rlim_cur = target;
             if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -170,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn open_files_soft_limit_is_the_hard_limit() {
+    fn open_files_soft_limit_is_raised_up_to_the_cap() {
         let soft = raise_open_files().unwrap();
         let mut limit = libc::rlimit {
             rlim_cur: 0,
@@ -178,6 +184,6 @@ mod tests {
         };
         unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
         assert_eq!(soft, limit.rlim_cur);
-        assert_eq!(limit.rlim_cur, limit.rlim_max);
+        assert!(limit.rlim_cur >= limit.rlim_max.min(OPEN_FILES));
     }
 }

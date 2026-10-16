@@ -212,12 +212,13 @@ the pod IP in `NMOS_HOST_ADDRESS`, the registry in `NMOS_REGISTRY_ADDRESS` /
 `NMOS_REGISTRY_PORT`, and the node's kernel TAI offset set (CLOCK_TAI = UTC + 37 s).
 
 **CPUs.** Guaranteed QoS (requests = limits) with an **even** number of whole CPUs
-on a node with the static CPU manager: 2 at least (one physical core), 4
-preferred. The DSP thread runs on the last of the pod's CPUs whose SMT siblings
-are all in the pod (a whole core), so no other workload runs on its sibling; the
-mixer keeps its other threads (the meters, the API, the preview) off that core
-when it has CPUs on another one. With 2 CPUs they share the DSP thread's core
-(its sibling); with 4 they get a core of their own. The kubelet's
+on a node with the static CPU manager: prefer `"4"` (two physical cores); `"2"`
+(one core) is the minimum and has not been measured on hardware. The DSP thread
+runs on the last of the pod's CPUs whose SMT siblings are all in the pod (a whole
+core), so no other workload runs on its sibling; the mixer keeps its other threads
+(the meters, the API, the preview) off that core when it has CPUs on another one.
+With `"4"` they get a core of their own; with `"2"` the non-DSP threads run on the
+DSP CPU's sibling. The kubelet's
 `reservedSystemCPUs` should cover the system daemons and the unpinned pods, so
 nothing else lands on the pod's cores. `full-pcpus-only` is recommended (it
 guarantees whole cores), not required: with an even request the static policy
@@ -231,12 +232,14 @@ capability; with `SYS_NICE` in the container's capabilities
 (`capabilities: {drop: [ALL], add: [SYS_NICE]}`) the mixer raises it at start and
 logs `effective capabilities: sys_nice`. Without it the mixer starts anyway, runs
 the DSP thread `SCHED_OTHER` and logs a warning; `mxl_audio_mixer_dsp_realtime`
-is then 0.
+is then 0. The file capability makes glibc run the binary in secure mode:
+`LD_LIBRARY_PATH` and `LD_PRELOAD` are ignored (the image finds libmxl through
+`ldconfig`, in `/usr/local/lib`).
 
 **Network.** The API has no authentication: keep the web and NMOS ports on the pod
 network (the platform's ingress in front of the UI). The logic editor's webhook
 block posts only to `http://` and `https://` URLs; a failed post is a warning in
-the log (without the URL's query).
+the log (without the URL's credentials, query and fragment).
 
 ## Settings
 
@@ -263,7 +266,7 @@ origin. No setting is a secret.
 | `MXL_OUTPUT_DOMAIN_DIR` | <scan path>/mixer-<first 8 hex of the domain id> | The mixer's own output domain, a directory directly below the scan path (else exit 78). Created if missing; the only directory MXL_CLEANUP_ON_EXIT removes. |
 | `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 of NMOS_SEED | Id of the own output domain. An existing domain_def.json with another id is kept (a warning), never overwritten. |
 | `MXL_HISTORY_DURATION_NS` | 200000000 | history_duration written into a new output domain. |
-| `MXL_CLEANUP_ON_EXIT` | false | Remove the own output domain directory on SIGTERM. |
+| `MXL_CLEANUP_ON_EXIT` | false | Remove the own output domain directory on SIGTERM (not a pre-existing domain whose id was kept). |
 | `SHUTDOWN_TIMEOUT_S` | 10 | Time for the SIGTERM sequence (1–120). |
 | `MIXER_CONFIG_FILE` | unset | JSON file with any of these settings (environment wins). |
 | `MIXER_STATE_DIR` | /config | Directory of everything the mixer writes itself (show file, connections); must be writable, else exit 78. |

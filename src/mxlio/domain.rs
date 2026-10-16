@@ -58,6 +58,9 @@ pub struct OutputDomain {
     pub id: Uuid,
     /// This call wrote `domain_def.json`.
     pub created: bool,
+    /// `domain_def.json` had another id than the configured one: the domain is
+    /// not this instance's to remove (`MXL_CLEANUP_ON_EXIT` leaves it).
+    pub foreign: bool,
 }
 
 /// Create the own output domain once (G2). An existing `domain_def.json` is never
@@ -69,13 +72,17 @@ pub fn ensure_output_domain(
     label: &str,
     history_ns: u64,
 ) -> Result<OutputDomain, String> {
-    if dir.parent().is_none() || dir == Path::new("/Volumes/mxl") {
+    if dir.parent().is_none() {
         return Err(format!("{} cannot be an output domain", dir.display()));
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let def = dir.join("domain_def.json");
     let domain = match read_def(dir) {
-        Some(existing) if existing.id == id => OutputDomain { id, created: false },
+        Some(existing) if existing.id == id => OutputDomain {
+            id,
+            created: false,
+            foreign: false,
+        },
         Some(existing) => {
             tracing::warn!(
                 "{} already has id {}, not {id}; keeping {} and not overwriting it",
@@ -86,6 +93,7 @@ pub fn ensure_output_domain(
             OutputDomain {
                 id: existing.id,
                 created: false,
+                foreign: true,
             }
         }
         None if def.exists() => {
@@ -105,7 +113,11 @@ pub fn ensure_output_domain(
                 &def,
                 &serde_json::to_vec_pretty(&body).unwrap_or_default(),
             )?;
-            OutputDomain { id, created: true }
+            OutputDomain {
+                id,
+                created: true,
+                foreign: false,
+            }
         }
     };
     let options = dir.join("options.json");
@@ -168,7 +180,11 @@ mod tests {
         let id = Uuid::new_v4();
         assert_eq!(
             ensure_output_domain(&dir, id, "Mixer", 200_000_000).unwrap(),
-            OutputDomain { id, created: true }
+            OutputDomain {
+                id,
+                created: true,
+                foreign: false
+            }
         );
         assert!(!dir.join("domain_def.tmp").exists());
         let def: serde_json::Value =
@@ -177,7 +193,8 @@ mod tests {
         for key in ["id", "label", "description", "tags"] {
             assert!(def.get(key).is_some(), "{key}");
         }
-        assert!(!ensure_output_domain(&dir, id, "Mixer", 1).unwrap().created);
+        let again = ensure_output_domain(&dir, id, "Mixer", 1).unwrap();
+        assert!(!again.created && !again.foreign);
         assert!(std::fs::read_to_string(dir.join("options.json"))
             .unwrap()
             .contains("200000000"));
@@ -185,7 +202,11 @@ mod tests {
         let before = std::fs::read_to_string(dir.join("domain_def.json")).unwrap();
         assert_eq!(
             ensure_output_domain(&dir, Uuid::new_v4(), "Other", 1).unwrap(),
-            OutputDomain { id, created: false }
+            OutputDomain {
+                id,
+                created: false,
+                foreign: true
+            }
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("domain_def.json")).unwrap(),

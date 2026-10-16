@@ -37,7 +37,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MXL_OUTPUT_DOMAIN_DIR", default: "<scan path>/mixer-<first 8 hex of the domain id>", description: "The mixer's own output domain, a directory directly below the scan path (else exit 78). Created if missing; the only directory MXL_CLEANUP_ON_EXIT removes." },
     Setting { name: "MXL_OUTPUT_DOMAIN_ID", default: "UUIDv5 of NMOS_SEED", description: "Id of the own output domain. An existing domain_def.json with another id is kept (a warning), never overwritten." },
     Setting { name: "MXL_HISTORY_DURATION_NS", default: "200000000", description: "history_duration written into a new output domain." },
-    Setting { name: "MXL_CLEANUP_ON_EXIT", default: "false", description: "Remove the own output domain directory on SIGTERM." },
+    Setting { name: "MXL_CLEANUP_ON_EXIT", default: "false", description: "Remove the own output domain directory on SIGTERM (not a pre-existing domain whose id was kept)." },
     Setting { name: "SHUTDOWN_TIMEOUT_S", default: "10", description: "Time for the SIGTERM sequence (1–120)." },
     Setting { name: "MIXER_CONFIG_FILE", default: "unset", description: "JSON file with any of these settings (environment wins)." },
     Setting { name: "MIXER_STATE_DIR", default: "/config", description: "Directory of everything the mixer writes itself (show file, connections); must be writable, else exit 78." },

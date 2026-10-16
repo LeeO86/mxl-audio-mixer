@@ -63,17 +63,20 @@ env HOST_ID=it-scan NMOS_HOST_ADDRESS="$HOST_IP" MXL_DOMAIN_SCAN_PATH="$WORK/mis
 [[ $rc == 78 && ! -e "$WORK/missing" ]] || fail "missing MXL_DOMAIN_SCAN_PATH: exit $rc, not 78"
 pass "a missing MXL_DOMAIN_SCAN_PATH exits 78"
 
-# G2: an existing domain_def.json with another id is kept, never overwritten.
+# G2: an existing domain_def.json with another id is kept, never overwritten, and
+# not removed on exit even with MXL_CLEANUP_ON_EXIT=true.
 mkdir -p "$WORK/mxl/kept"
 echo '{"id": "77777777-7777-4777-8777-777777777777", "label": "kept", "description": "pre-made", "tags": {}}' \
     >"$WORK/mxl/kept/domain_def.json"
 before=$(md5sum <"$WORK/mxl/kept/domain_def.json")
-start_mixer NMOS_SEED=it-kept MXL_OUTPUT_DOMAIN_DIR="$WORK/mxl/kept"
+start_mixer NMOS_SEED=it-kept MXL_OUTPUT_DOMAIN_DIR="$WORK/mxl/kept" MXL_CLEANUP_ON_EXIT=true
 [[ "$(json "$WEB/api/v1/status" "d['mxl']['output_domain_id']")" == 77777777-7777-4777-8777-777777777777 ]] ||
     fail "the existing domain id was not kept"
 [[ "$(md5sum <"$WORK/mxl/kept/domain_def.json")" == "$before" ]] || fail "domain_def.json was rewritten"
 rc=0
 stop_mixer || rc=$?
 [[ $rc == 143 ]] || fail "exit code $rc"
-pass "an existing domain id is kept and its domain_def.json untouched"
+[[ -f "$WORK/mxl/kept/domain_def.json" ]] || fail "the kept domain was removed on exit"
+[[ "$(md5sum <"$WORK/mxl/kept/domain_def.json")" == "$before" ]] || fail "domain_def.json changed on exit"
+pass "an existing domain id is kept, its domain_def.json untouched and not removed on exit"
 pass lifecycle

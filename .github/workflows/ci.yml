@@ -238,7 +238,7 @@ jobs:
           rc=0; docker run --rm --cap-drop ALL -e WEB_PORT=abc mxl-audio-mixer:ci || rc=$?
           [ "$rc" = 78 ]
           docker run -d --name smoke --network host -e HOST_ID=smoke -e NMOS_HOST_ADDRESS=192.0.2.10 \
-            --cap-drop ALL --cap-add SYS_NICE -e MIXER_RT_PRIORITY=49 \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges -e MIXER_RT_PRIORITY=49 \
             -e MXL_DOMAIN_SCAN_PATH=/tmp mxl-audio-mixer:ci
           for _ in $(seq 1 50); do curl -fs http://127.0.0.1:8190/livez && break; sleep 0.2; done
           curl -fs http://127.0.0.1:8190/readyz

@@ -126,14 +126,10 @@ fn main() -> ExitCode {
             config.log_level
         )))
         .init();
-    tracing::info!(
-        "effective capabilities: {}{}",
-        caps::effective(),
-        raised
-            .err()
-            .map(|e| format!(" (raising the permitted ones failed: {e})"))
-            .unwrap_or_default()
-    );
+    tracing::info!("effective capabilities: {}", caps::effective());
+    if let Err(e) = raised {
+        tracing::warn!("raising the permitted capabilities into the effective set failed: {e}");
+    }
     match open_files {
         Ok(n) => tracing::info!("open files limit {n}"),
         Err(e) => tracing::warn!("open files limit not raised: {e}"),
@@ -179,7 +175,9 @@ async fn run(mut config: Config) -> ExitCode {
     if let Err(e) = check_ports(&config) {
         return fail(EX_UNAVAILABLE, e);
     }
-    let created = match domain::ensure_output_domain(
+    // A failed ensure may leave a directory it made; remove it only then.
+    let existed = config.output_domain_dir.exists();
+    let (created, foreign) = match domain::ensure_output_domain(
         &config.output_domain_dir,
         config.output_domain_id,
         &config.nmos_label,
@@ -193,10 +191,25 @@ async fn run(mut config: Config) -> ExitCode {
                 d.id
             );
             config.set_output_domain_id(d.id);
-            d.created
+            (d.created, d.foreign)
         }
-        Err(e) => return fail(EX_CONFIG, format!("MXL output domain: {e}")),
+        Err(e) => {
+            return abort(
+                !existed,
+                &config,
+                EX_CONFIG,
+                format!("MXL output domain: {e}"),
+            )
+        }
     };
+    // G2: a domain with another id was there before; it is not ours to remove.
+    let cleanup_on_exit = config.cleanup_on_exit && !foreign;
+    if config.cleanup_on_exit && foreign {
+        tracing::warn!(
+            "MXL_CLEANUP_ON_EXIT: {} keeps its own id, so it is not removed on exit",
+            config.output_domain_dir.display()
+        );
+    }
 
     let mut engine = match Engine::start(EngineConfig {
         inputs: config.input_flows,
@@ -419,7 +432,7 @@ async fn run(mut config: Config) -> ExitCode {
         )
         .await;
         // G8 3: remove the own output domain.
-        if config.cleanup_on_exit {
+        if cleanup_on_exit {
             match domain::remove_output_domain(&config.output_domain_dir, &config.scan_path) {
                 Ok(()) => tracing::info!(
                     "removed output domain {}",

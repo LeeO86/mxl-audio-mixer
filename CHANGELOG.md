@@ -8,16 +8,16 @@ Milestone 9 (§13: master/slave remote link).
 
 ### Platform readiness
 
-- Real time on Kubernetes: the image gives the binary `CAP_SYS_NICE` as a permitted file capability (`setcap cap_sys_nice+p`) and the mixer raises it into its effective set at start, so `MIXER_RT_PRIORITY` works for uid 1000 with `SYS_NICE` in `capabilities.add` (before, only the bounding set had it and `SCHED_FIFO` was refused). The start log lists the effective capabilities; a refused `SCHED_FIFO` is a warning; new gauge `dsp_realtime`. Without `SYS_NICE` the mixer still starts (`SCHED_OTHER`).
-- The DSP thread takes the last CPU whose SMT siblings are all in the pod (a whole core), not just the last CPU. The README, the release notes and `deploy/k8s` ask for an even CPU count (2 at least, 4 preferred) and `reservedSystemCPUs`; `full-pcpus-only` is recommended, no longer required.
-- Start-up: `MXL_DOMAIN_SCAN_PATH` must exist (78), `MIXER_STATE_DIR` must be writable (78, before: the changes were lost), libmxl that cannot be loaded exits 75 (was 78), and every port is checked before the output domain is created; a failed start removes a domain it created.
+- Real time on Kubernetes: the image gives the binary `CAP_SYS_NICE` as a permitted file capability (`setcap cap_sys_nice+p`) and the mixer raises it into its effective set at start, so `MIXER_RT_PRIORITY` works for uid 1000 with `SYS_NICE` in `capabilities.add` (before, only the bounding set had it and `SCHED_FIFO` was refused). The start log lists the effective capabilities; a refused `SCHED_FIFO` is a warning; new gauge `dsp_realtime`. Without `SYS_NICE` the mixer still starts (`SCHED_OTHER`). The file capability puts the binary in glibc's secure mode (`LD_LIBRARY_PATH` and `LD_PRELOAD` are ignored; the image finds libmxl through `ldconfig`).
+- The DSP thread takes the last CPU whose SMT siblings are all in the pod (a whole core), not just the last CPU. The README and `deploy/k8s` ask for an even CPU count (4 preferred; 2 is the minimum, not measured, and puts the non-DSP threads on the DSP CPU's sibling) and `reservedSystemCPUs`; `full-pcpus-only` is recommended, no longer required.
+- Start-up: `MXL_DOMAIN_SCAN_PATH` must exist (78), `MIXER_STATE_DIR` must be writable (78, before: the changes were lost), libmxl that cannot be loaded exits 75 (was 78), and every port is checked before the output domain is created; a failed start (also one halfway through creating the domain) removes a domain it created.
 - `MXL_OUTPUT_DOMAIN_DIR` must be directly below `MXL_DOMAIN_SCAN_PATH` (78); nothing else is ever removed.
-- An existing `domain_def.json` with another id is kept and used, with a warning (was exit 78); `domain_def.json` and `options.json` are written atomically.
-- The soft open-files limit is raised to the hard limit.
+- An existing `domain_def.json` with another id is kept and used, with a warning (was exit 78), and that domain is not removed on exit even with `MXL_CLEANUP_ON_EXIT=true` (a warning); `domain_def.json` and `options.json` are written atomically.
+- The soft open-files limit is raised to the hard limit, at most 65536.
 - Metrics: `logic_ticks_total`, `logic_actions_total{graph}`; `# HELP`/`# TYPE` for `remote_link_up` and `remote_link_rtt_ms`. `webrtc_clients` is dropped from the spec (`preview_readers{path}` counts them).
-- A failed logic webhook is logged as a warning. The README says the API has no authentication and belongs on the pod network.
+- A failed logic webhook is logged as a warning, without the URL's credentials, query and fragment. The README says the API has no authentication and belongs on the pod network.
 - The version is 1.3.0 in `Cargo.toml` and `web/package.json` (1.1.0 and 1.2.0 still reported 1.0.0); a release tag that does not match them fails the publish workflow.
-- `deploy/k8s`: the released tag 1.3.0, `MXL_OUTPUT_DOMAIN_ID`, `MIXER_RT_PRIORITY=49`, `SYS_NICE` with `drop: [ALL]`. `docs/release-notes/1.3.0.md` with "What the platform must set".
+- `deploy/k8s`: the released tag 1.3.0, `MXL_OUTPUT_DOMAIN_ID`, `MIXER_RT_PRIORITY=49`, `SYS_NICE` with `drop: [ALL]`.
 
 ## 1.2.0 (in progress)
 

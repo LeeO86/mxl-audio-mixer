@@ -738,7 +738,8 @@ Pod network; MXL root `hostPath`; uid 1000; `/config` volume for show files.
   - Pin the DSP thread to one of the pod's CPUs, read from the affinity mask; never
     assume CPU 0 or any fixed number. The platform's static CPU manager gives pods
     arbitrary CPU sets. The DSP CPU is the last one whose SMT siblings are all in the
-    pod (a whole core); request an even number of CPUs (2 at least, 4 preferred).
+    pod (a whole core); request an even number of CPUs: 4 preferred; 2 is the minimum
+    (not measured), and then the non-DSP threads run on the DSP CPU's sibling.
 - **Compose demo:** registry, mxl-test-player (tones), the mixer, mxl-webrtc-monitor,
   MediaMTX; plus a two-instance demo for master/slave.
 - **Kubernetes Deployment** that `mxl-poc-platform` can vendor (L3 production function).

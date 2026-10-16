@@ -171,9 +171,7 @@ impl Control {
                     Err(e) => Err(e),
                 };
                 if let Err(e) = sent {
-                    // Without the query: it may carry a token.
-                    let target = url.split(['?', '#']).next().unwrap_or_default();
-                    tracing::warn!("logic webhook {target}: {}", e.without_url());
+                    tracing::warn!("logic webhook {}: {}", redact_url(&url), e.without_url());
                 }
             });
         }
@@ -933,5 +931,35 @@ pub fn load_mix(path: &std::path::Path) -> Mix {
             let _ = std::fs::rename(path, &bad);
             Mix::default()
         }
+    }
+}
+
+/// A URL for the log without what may be a secret: `user:password@` and the
+/// query and fragment.
+pub fn redact_url(url: &str) -> String {
+    let url = url.split(['?', '#']).next().unwrap_or_default();
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            let slash = if rest.contains('/') { "/" } else { "" };
+            format!("{scheme}://{host}{slash}{path}")
+        }
+        None => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn webhook_urls_are_logged_without_secrets() {
+        use super::redact_url;
+        assert_eq!(
+            redact_url("https://user:pass@hooks.example:8443/a/b?token=x#f"),
+            "https://hooks.example:8443/a/b"
+        );
+        assert_eq!(redact_url("http://10.0.0.1/hook"), "http://10.0.0.1/hook");
+        assert_eq!(redact_url("http://u@h"), "http://h");
+        assert_eq!(redact_url("http://h/p@q"), "http://h/p@q");
     }
 }

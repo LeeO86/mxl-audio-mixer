@@ -1,7 +1,8 @@
 # G12 example: the pod network, the standard environment names, probes, the MXL
 # root hostPath and a writable /config. Pin the image by a released tag (and by
-# digest on the platform). Guaranteed QoS with an even number of whole CPUs (2 at
-# least, 4 preferred) on nodes whose kubelet has the static CPU manager, with
+# digest on the platform). Guaranteed QoS with an even number of whole CPUs ("4"
+# preferred; "2", the minimum, not measured: the non-DSP threads then run on the
+# DSP CPU's sibling) on nodes whose kubelet has the static CPU manager, with
 # reservedSystemCPUs covering the system daemons (full-pcpus-only is recommended,
 # not required): the DSP thread takes a whole core. Check dsp.scheduling in
 # GET /api/v1/status ("a core of its own"). SYS_NICE lets MIXER_RT_PRIORITY work
@@ -124,7 +125,7 @@ spec:
             httpGet:
               path: /livez
               port: web
-          # Guaranteed: requests = limits, an even number of whole CPUs ("2" is one core).
+          # Guaranteed: requests = limits, an even number of whole CPUs ("4" preferred, "2" the minimum).
           resources:
             requests:
               cpu: "4"
