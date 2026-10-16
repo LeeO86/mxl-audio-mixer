@@ -56,6 +56,8 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "TSL_TCP_PORT", default: "8911", description: "TSL UMD 5.0 over TCP (DLE/STX framing)." },
     Setting { name: "TSL_SCREEN", default: "-1", description: "Only this TSL screen; -1 is every screen." },
     Setting { name: "TSL_MAP", default: "empty", description: "display:index pairs, e.g. 0:1,1:2: the tally index a TSL display index drives; empty: the same number." },
+    Setting { name: "TSL_OUT_TARGET", default: "unset", description: "host:port that the logic editor's tsl-out blocks send TSL UMD 5.0 to over UDP. Unset: no TSL output." },
+    Setting { name: "TSL_OUT_SCREEN", default: "0", description: "TSL screen of the logic editor's TSL output, 0–65534." },
     Setting { name: "PREVIEW_PUBLISH_URL", default: "unset", description: "RTSP base URL of the shared MediaMTX. Unset: start a built-in MediaMTX and publish there." },
     Setting { name: "PREVIEW_PATH_PREFIX", default: "mxl-audio-mixer", description: "Path prefix of every stream: <prefix>/<monitor id>." },
     Setting { name: "PREVIEW_WHEP_URL", default: "unset", description: "Public base URL of WHEP and WHIP for the browser. Unset with the built-in MediaMTX: the page's host and MEDIAMTX_WHEP_PORT." },
@@ -147,6 +149,9 @@ pub struct Config {
     pub tsl_screen: Option<u16>,
     /// TSL display index → tally index; empty: the same number.
     pub tsl_map: BTreeMap<u16, u16>,
+    /// `host:port` of the logic editor's TSL output; `None`: off.
+    pub tsl_out_target: Option<String>,
+    pub tsl_out_screen: u16,
     /// RTSP base of the shared MediaMTX; `None`: the built-in one.
     pub preview_publish_url: Option<String>,
     pub preview_path_prefix: String,
@@ -480,6 +485,14 @@ impl Parser<'_> {
             Some((raw, _)) => parse_tsl_map(&raw)?,
         };
 
+        let tsl_out_target = match self.get("TSL_OUT_TARGET") {
+            None => None,
+            Some((raw, _)) => Some(
+                parse_host_port(&raw).map_err(|e| ConfigError(format!("TSL_OUT_TARGET {e}")))?,
+            ),
+        };
+        let tsl_out_screen: u16 = self.int("TSL_OUT_SCREEN", 0, 0, 65534)?;
+
         let url = |name: &str, schemes: &[&str]| -> Result<Option<String>, ConfigError> {
             match self.get(name) {
                 None => Ok(None),
@@ -615,6 +628,8 @@ impl Parser<'_> {
             tsl_tcp_port,
             tsl_screen,
             tsl_map,
+            tsl_out_target,
+            tsl_out_screen,
             preview_publish_url,
             preview_path_prefix,
             preview_whep_url,
@@ -702,6 +717,8 @@ impl Config {
                 .map(|(d, i)| format!("{d}:{i}"))
                 .collect::<Vec<_>>()
                 .join(","),
+            "TSL_OUT_TARGET" => opt(self.tsl_out_target.clone()),
+            "TSL_OUT_SCREEN" => self.tsl_out_screen.to_string(),
             "PREVIEW_PUBLISH_URL" => opt(self.preview_publish_url.clone()),
             "PREVIEW_PATH_PREFIX" => self.preview_path_prefix.clone(),
             "PREVIEW_WHEP_URL" => opt(self.preview_whep_url.clone()),
@@ -824,6 +841,31 @@ fn check_link_peers(urls: &[String]) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+/// `host:port`: a DNS name or an IPv4 address (an IPv6 one in brackets) and a
+/// port 1–65535.
+fn parse_host_port(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    let bad = || format!("must be host:port, got {raw:?}");
+    let (host, port) = raw.rsplit_once(':').ok_or_else(bad)?;
+    let port_ok = port.parse::<u16>().is_ok_and(|p| p > 0);
+    let host_ok = if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        v6.parse::<std::net::Ipv6Addr>().is_ok()
+    } else {
+        !host.is_empty()
+            && host.len() <= 253
+            && host.split('.').all(|l| {
+                !l.is_empty()
+                    && l.len() <= 63
+                    && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+    };
+    if port_ok && host_ok {
+        Ok(raw.to_string())
+    } else {
+        Err(bad())
+    }
 }
 
 /// `TSL_MAP`: comma-separated `display:index` pairs, both 0–65535, each display once.
@@ -973,6 +1015,25 @@ mod tests {
             assert!(load_vars(&[(k, v)]).is_err(), "{k}={v}");
         }
         assert!(load_vars(&[("TSL_ENABLE", "true"), ("TSL_UDP_PORT", "8190")]).is_err());
+        let c = load_vars(&[
+            ("TSL_OUT_TARGET", "tally.example:8910"),
+            ("TSL_OUT_SCREEN", "2"),
+        ])
+        .unwrap();
+        assert_eq!(c.tsl_out_target.as_deref(), Some("tally.example:8910"));
+        assert_eq!(c.tsl_out_screen, 2);
+        assert_eq!(load_vars(&[]).unwrap().tsl_out_target, None);
+        assert!(load_vars(&[("TSL_OUT_TARGET", "[::1]:9000")]).is_ok());
+        for (k, v) in [
+            ("TSL_OUT_TARGET", "tally.example"),
+            ("TSL_OUT_TARGET", "tally.example:0"),
+            ("TSL_OUT_TARGET", ":8910"),
+            ("TSL_OUT_TARGET", "a b:8910"),
+            ("TSL_OUT_TARGET", "udp://x:8910"),
+            ("TSL_OUT_SCREEN", "65535"),
+        ] {
+            assert!(load_vars(&[(k, v)]).is_err(), "{k}={v}");
+        }
     }
 
     #[test]

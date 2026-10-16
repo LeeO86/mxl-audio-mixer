@@ -664,6 +664,8 @@ README's Settings table is the complete list, with every default):
 | `MIXER_LINK_TOKEN` | unset | The link's pre-shared token, 8–200 bytes; a secret (G1), never shown or exported. |
 | `MIXER_LINK_PEERS` | unset | Master: 1–4 `ws://` or `wss://` slave URLs, each once, no user or password (else exit 78). |
 | `MIXER_LINK_TAKEOVER` | `allow` | Slave: `allow` or `deny` local changes while its master is gone. |
+| `TSL_OUT_TARGET` | unset | `host:port` of the logic editor's TSL UMD 5.0 output over UDP (§11.1 "TSL tally out"); invalid: exit 78. |
+| `TSL_OUT_SCREEN` | 0 | Its TSL screen, 0–65534. |
 
 ---
 

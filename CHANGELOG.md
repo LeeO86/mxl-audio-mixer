@@ -6,6 +6,19 @@ Milestone 9 (§13: master/slave remote link).
 
 - A slave accepts a master on `/api/v1/link` (WebSocket, pre-shared `MIXER_LINK_TOKEN`). The master connects to up to four `MIXER_LINK_PEERS`. The gallery console shows each far side as a layer (strips, inputs, auxiliaries, meters) and rides fader, mute and send there. The far side mixes its own voices into in-ears (`iem-<voice>`, the other voices plus the gallery return). `POST /api/v1/remotes/<id>/return` publishes the gallery mix-minus of a bus without the far-side contribution and adds that return to the in-ears. Audio stays on MXL. The slave holds its mix when the master disconnects; `MIXER_LINK_TAKEOVER=deny` then refuses local changes. `remote_link_up` and `remote_link_rtt_ms`.
 
+### Logic editor
+
+Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D166, X11–X16).
+
+- Typed ports (`boolean`, `number`, `level`, `event`, `string`) and type-checked wires with fixed conversions; every 1.2.0 graph stays valid.
+- New blocks: `text`, `trigger` (`POST /api/v1/logic/<graph>/trigger/<block>`), `pfl`, `loudness`, `nmos-receiver`, `nmos-sender`, `link`; `toggle`, `counter`, `math`, `scale`, `map`, `select`, `compare` `ge`/`le`/`ne`; `set-vca`, `set-param`, `set-pfl`, `set-talk`, `set-publish`, `set-monitor`, `loudness-control`, `tsl-out`, `log`. `set-fader` and `set-vca` take `ramp_ms`.
+- Macros (`logic_macros` in the show, `/api/v1/logic-macros`): sub-graphs with exposed ports (`macro-in`, `macro-out`), inlined for evaluation, with recursion, depth (4) and size (256 blocks per graph inlined) checks.
+- `GET /api/v1/logic-blocks`, `PUT /api/v1/logic/<id>`, `POST /api/v1/logic-batch` and `POST /api/v1/logic-validate`, with a `revision` check (409); refused graphs answer 400 with `issues` (graph or macro, block, port, wire).
+- Graphs are compiled once per change and run in topological order; their answers carry `revision`, `ports`, typed `values` and the last 20 `actions`. Dry run lists its actions (also on the events WebSocket and in the log). An action whose input has no wire never runs; `edge` outputs an event.
+- New settings `TSL_OUT_TARGET` and `TSL_OUT_SCREEN` (TSL UMD 5.0 over UDP, on every change and every second; invalid values exit 78).
+- The webhook block posts `{"graph", "block", "value"}` as documented (it posted only `value`).
+- `tests/integration/logic.sh` runs in CI.
+
 ### Platform readiness
 
 - Real time on Kubernetes: the image gives the binary `CAP_SYS_NICE` as a permitted file capability (`setcap cap_sys_nice+p`) and the mixer raises it into its effective set at start, so `MIXER_RT_PRIORITY` works for uid 1000 with `SYS_NICE` in `capabilities.add` (before, only the bounding set had it and `SCHED_FIFO` was refused). The start log lists the effective capabilities; a refused `SCHED_FIFO` is a warning; new gauge `dsp_realtime`. Without `SYS_NICE` the mixer still starts (`SCHED_OTHER`). The file capability puts the binary in glibc's secure mode (`LD_LIBRARY_PATH` and `LD_PRELOAD` are ignored; the image finds libmxl through `ldconfig`).
@@ -53,6 +66,7 @@ Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D157).
 ### Documentation
 
 - Release notes for 1.2.0 (`docs/release-notes/1.2.0.md`: the image digest, the hardware run) and 1.3.0 (`docs/release-notes/1.3.0.md`: every setting, ports, volumes, widgets, metric families, what the platform must set, upgrade notes, the catalog facts).
+- The 1.3.0 notes say how browser talkback's WHIP path meets the shared MediaMTX's publish rule, and that the mixer sends no WHIP credentials.
 - `docs/release-notes/1.0.0.md` corrected: `/readyz` does not wait for the TAI offset (watch `timing_trusted`).
 - README: the status line; port 3343 is reserved for IS-07 events and not opened. The specification lists the settings it did not name (§14.1). The plan's status table is current.
 

@@ -1,14 +1,33 @@
 //! The logic runtime (§11.2): every 10 ms (100 Hz, the control engine's tick)
-//! each enabled graph is evaluated in order. A block that remembers (`edge`,
-//! `latch`, `timer`) publishes the value it computed last tick, which is what
-//! lets a loop through one be deterministic. Actions run when their input changed,
-//! and not at all while the graph is in dry-run.
+//! each enabled graph is evaluated. A graph is compiled once (macros inlined,
+//! [`crate::mix::logic::inline`]) into an index-based plan and recompiled when
+//! it or a macro changes; the blocks run in topological order (D160). A block
+//! that remembers publishes the value it computed last tick, which is what lets
+//! a loop through one be deterministic.
+//!
+//! Value actions (mute, fader, VCA, parameter, PFL, talk, publish, TSL out)
+//! follow their input: on the first tick and whenever it changes. Event
+//! actions (monitor source, loudness, recall, webhook, log) run when their
+//! input fires. An action whose input has no wire never runs. In dry run the
+//! actions are returned marked `dry_run` and not executed (D164).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::mix::logic::{Block, BlockKind, CompareOp, Graph};
+use serde_json::{json, Value as Json};
+
+use crate::loudness::LoudnessValues;
+use crate::mix::logic::{
+    inline, BlockKind, CompareOp, FlatBlock, Graph, LoudnessAction, Macro, MathOp, Measure,
+    PortType,
+};
 use crate::mix::model::Db;
+use crate::mix::room::Source;
 use crate::mix::Mix;
+
+/// Silence, and a signal with no meter or loudness yet.
+pub const FLOOR_DB: f64 = -200.0;
+/// The actions a graph keeps for the API.
+pub const RECENT: usize = 20;
 
 /// What the blocks read, gathered once per tick.
 pub struct Readings<'a> {
@@ -19,32 +38,809 @@ pub struct Readings<'a> {
     pub on_air: &'a BTreeSet<u16>,
     /// UTC minute of the day, 0..1440.
     pub minute_of_day: u16,
+    /// Signals in PFL.
+    pub pfl: &'a BTreeSet<String>,
+    pub loudness: &'a BTreeMap<String, LoudnessValues>,
+    /// NMOS sender and receiver keys (`in-3`, `out-pgm`) that are active.
+    pub nmos: &'a BTreeSet<String>,
+    /// Remote-link peers that are up (`master`, `s1` …).
+    pub link: &'a BTreeSet<String>,
+    /// Unix time, for the action list.
+    pub now_ms: u64,
+}
+
+static NO_BOOLS: BTreeMap<String, bool> = BTreeMap::new();
+static NO_LEVELS: BTreeMap<String, f64> = BTreeMap::new();
+static NO_INDEXES: BTreeSet<u16> = BTreeSet::new();
+static NO_STRINGS: BTreeSet<String> = BTreeSet::new();
+static NO_LOUDNESS: BTreeMap<String, LoudnessValues> = BTreeMap::new();
+
+impl<'a> Readings<'a> {
+    /// Nothing measured, nothing on air, midnight.
+    pub fn quiet(mix: &'a Mix) -> Self {
+        Self {
+            mix,
+            speech: &NO_BOOLS,
+            level_db: &NO_LEVELS,
+            on_air: &NO_INDEXES,
+            minute_of_day: 0,
+            pfl: &NO_STRINGS,
+            loudness: &NO_LOUDNESS,
+            nmos: &NO_STRINGS,
+            link: &NO_STRINGS,
+            now_ms: 0,
+        }
+    }
+}
+
+/// A value on a wire.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Bool(bool),
+    /// A number or a level.
+    Num(f64),
+    /// Fired this tick.
+    Event(bool),
+    Str(String),
+}
+
+impl Value {
+    fn truthy(&self) -> bool {
+        match self {
+            Self::Bool(b) | Self::Event(b) => *b,
+            Self::Num(x) => *x >= 0.5,
+            Self::Str(s) => !s.is_empty(),
+        }
+    }
+
+    fn num(&self) -> f64 {
+        match self {
+            Self::Num(x) => *x,
+            other => f64::from(u8::from(other.truthy())),
+        }
+    }
+
+    fn text(&self) -> String {
+        match self {
+            Self::Str(s) => s.clone(),
+            Self::Bool(b) => b.to_string(),
+            Self::Num(x) => format_number(*x),
+            Self::Event(_) => String::new(),
+        }
+    }
+
+    fn default_of(ty: PortType) -> Self {
+        match ty {
+            PortType::Boolean => Self::Bool(false),
+            PortType::Number | PortType::Level => Self::Num(0.0),
+            PortType::Event => Self::Event(false),
+            PortType::String => Self::Str(String::new()),
+        }
+    }
+}
+
+/// A number as text: at most two decimals, `inf` and `-inf`.
+pub fn format_number(x: f64) -> String {
+    if x.is_nan() {
+        return "nan".into();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "inf".into() } else { "-inf".into() };
+    }
+    let s = format!("{x:.2}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" {
+        "0".into()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Convert at an input (D158). `prev` is the input's last on/off, for a value
+/// that becomes an event (it does not fire on the first tick seen).
+fn convert(v: &Value, want: PortType, prev: &mut Option<bool>) -> Value {
+    match want {
+        PortType::Boolean => Value::Bool(v.truthy()),
+        PortType::Number | PortType::Level => Value::Num(v.num()),
+        PortType::String => Value::Str(v.text()),
+        PortType::Event => match v {
+            Value::Event(f) => Value::Event(*f),
+            other => {
+                let cur = other.truthy();
+                let fired = *prev == Some(false) && cur;
+                *prev = Some(cur);
+                Value::Event(fired)
+            }
+        },
+    }
+}
+
+/// What a logic action asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Act {
+    Mute {
+        signal: String,
+        on: bool,
+    },
+    Fader {
+        signal: String,
+        db: f64,
+        ramp_ms: f64,
+    },
+    Vca {
+        vca: String,
+        db: f64,
+        ramp_ms: f64,
+    },
+    Param {
+        signal: String,
+        node: String,
+        param: String,
+        value: f64,
+        ramp_ms: f64,
+    },
+    Pfl {
+        signal: String,
+        on: bool,
+    },
+    Talk {
+        mic: String,
+        destination: String,
+        on: bool,
+    },
+    Publish {
+        signal: String,
+        on: bool,
+    },
+    Monitor {
+        monitor: String,
+        source: Option<Source>,
+    },
+    Loudness {
+        signal: String,
+        action: LoudnessAction,
+    },
+    Recall {
+        snapshot: String,
+    },
+    Webhook {
+        url: String,
+    },
+    Tsl {
+        index: u16,
+        left: bool,
+        right: bool,
+        label: String,
+    },
+    Log {
+        text: String,
+    },
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+impl Act {
+    /// For the action list and the events socket.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Mute { signal, on } => format!("mute {signal} {}", on_off(*on)),
+            Self::Fader { signal, db, .. } => format!("fader {signal} {} dB", format_number(*db)),
+            Self::Vca { vca, db, .. } => format!("VCA {vca} {} dB", format_number(*db)),
+            Self::Param {
+                signal,
+                node,
+                param,
+                value,
+                ..
+            } => format!("{signal} {node} {param} {}", format_number(*value)),
+            Self::Pfl { signal, on } => format!("PFL {signal} {}", on_off(*on)),
+            Self::Talk {
+                mic,
+                destination,
+                on,
+            } => format!("talk {mic} to {destination} {}", on_off(*on)),
+            Self::Publish { signal, on } => {
+                format!("{} {signal}", if *on { "publish" } else { "unpublish" })
+            }
+            Self::Monitor { monitor, source } => format!(
+                "monitor {monitor} source {}",
+                match source {
+                    Some(Source::Signal(s)) => s.clone(),
+                    Some(Source::Input(i)) => format!("input {i}"),
+                    None => "default".into(),
+                }
+            ),
+            Self::Loudness { signal, action } => format!("loudness {signal} {}", action.name()),
+            Self::Recall { snapshot } => format!("recall {snapshot}"),
+            Self::Webhook { url } => format!("webhook {}", crate::control::redact_url(url)),
+            Self::Tsl {
+                index,
+                left,
+                right,
+                label,
+            } => format!(
+                "TSL {index} left {} right {} {label:?}",
+                on_off(*left),
+                on_off(*right)
+            ),
+            Self::Log { text } => format!("log {text}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
-    pub signal: String,
-    pub mute: Option<bool>,
-    pub fader_db: Option<f64>,
-    /// Recall this snapshot. Set on a rising edge only.
-    pub recall: Option<String>,
-    /// POST this URL. Set on a rising edge only.
-    pub webhook: Option<String>,
+    pub graph: String,
+    /// The block (`<instance>.<block>` inside a macro).
+    pub block: String,
+    pub dry_run: bool,
+    pub act: Act,
+}
+
+/// One entry of a graph's action list (`actions` in the API).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Recent {
+    pub t_ms: u64,
+    pub block: String,
+    pub action: String,
+    pub dry_run: bool,
+}
+
+/// What a value action last applied.
+#[derive(Debug, Clone, PartialEq)]
+enum Applied {
+    Bool(bool),
+    Num(f64),
+    Tsl(bool, bool, String),
+}
+
+/// A block's memory, kept by block id across recompiles.
+#[derive(Debug, Clone, Default)]
+struct State {
+    /// Per input: its last on/off, for a value converted into an event.
+    conv: Vec<Option<bool>>,
+    held: bool,
+    /// Last input (edge, timer, debounce).
+    prev: bool,
+    /// Ticks left (timer), waited (delay), stable (debounce).
+    n: f64,
+    count: f64,
+    applied: Option<Applied>,
+}
+
+struct Plan {
+    blocks: Vec<FlatBlock>,
+    /// Per block and input: the block that feeds it.
+    inputs: Vec<Vec<Option<usize>>>,
+    /// The blocks that do not remember, in order.
+    order: Vec<usize>,
+    /// The blocks that remember.
+    stateful: Vec<usize>,
+}
+
+impl Plan {
+    fn new(g: &Graph, macros: &[Macro]) -> Result<Self, String> {
+        let flat = inline(&g.blocks, &g.wires, macros)?;
+        let order = flat
+            .order()
+            .map_err(|i| format!("a combinational loop through {}", flat.blocks[i].id))?;
+        let mut inputs: Vec<Vec<Option<usize>>> = flat
+            .blocks
+            .iter()
+            .map(|b| vec![None; b.ports.inputs.len()])
+            .collect();
+        for w in &flat.wires {
+            inputs[w.to][w.to_port] = Some(w.from);
+        }
+        let stateful = (0..flat.blocks.len())
+            .filter(|i| flat.blocks[*i].kind.remembers())
+            .collect();
+        Ok(Self {
+            order: order
+                .into_iter()
+                .filter(|i| !flat.blocks[*i].kind.remembers())
+                .collect(),
+            stateful,
+            inputs,
+            blocks: flat.blocks,
+        })
+    }
+}
+
+/// One enabled graph.
+struct Run {
+    graph: Graph,
+    /// Shared with each tick, so the blocks are not copied to be read.
+    plan: std::sync::Arc<Plan>,
+    states: Vec<State>,
+    /// Each block's value after the last tick (an action's: its input).
+    outs: Vec<Value>,
+    /// Times each block's value fired as an event.
+    fired: Vec<u64>,
+    dry_run: bool,
+}
+
+impl Run {
+    fn new(g: &Graph, macros: &[Macro], old: Option<Run>) -> Result<Self, String> {
+        let plan = Plan::new(g, macros)?;
+        // A change of dry run is noticed by the caller (it resets what was applied).
+        let dry_run = old.as_ref().map_or(g.dry_run, |o| o.dry_run);
+        let mut kept: BTreeMap<String, (State, Value, u64)> = BTreeMap::new();
+        if let Some(old) = old {
+            for (((b, s), v), f) in old
+                .plan
+                .blocks
+                .iter()
+                .zip(old.states)
+                .zip(old.outs)
+                .zip(old.fired)
+            {
+                kept.insert(b.id.clone(), (s, v, f));
+            }
+        }
+        let mut states = Vec::new();
+        let mut outs = Vec::new();
+        let mut fired = Vec::new();
+        for (i, b) in plan.blocks.iter().enumerate() {
+            let ty = b
+                .ports
+                .outputs
+                .first()
+                .or(b.ports.inputs.first())
+                .map_or(PortType::Number, |p| p.ty);
+            let (mut s, v, f) = kept
+                .remove(&b.id)
+                .unwrap_or_else(|| (State::default(), Value::default_of(ty), 0));
+            s.conv.resize(plan.inputs[i].len(), None);
+            states.push(s);
+            outs.push(v);
+            fired.push(f);
+        }
+        Ok(Self {
+            graph: g.clone(),
+            plan: std::sync::Arc::new(plan),
+            states,
+            outs,
+            fired,
+            dry_run,
+        })
+    }
+
+    /// Input `k` of block `i`, converted to the input's type.
+    fn read(&mut self, i: usize, k: usize) -> Value {
+        let want = self.plan.blocks[i].ports.inputs[k].ty;
+        match self.plan.inputs[i][k] {
+            None => Value::default_of(want),
+            Some(src) => convert(&self.outs[src], want, &mut self.states[i].conv[k]),
+        }
+    }
+
+    fn wired(&self, i: usize, k: usize) -> bool {
+        self.plan.inputs[i].get(k).is_some_and(Option::is_some)
+    }
+
+    fn tick(
+        &mut self,
+        r: &Readings<'_>,
+        pressed: &BTreeMap<String, bool>,
+        triggered: &BTreeSet<String>,
+    ) -> Vec<(String, Act)> {
+        let mut acts = Vec::new();
+        let plan = self.plan.clone();
+        for &i in &plan.order {
+            let b = &plan.blocks[i];
+            let v = self.evaluate(i, &b.id, &b.kind, r, pressed, triggered, &mut acts);
+            self.outs[i] = v;
+        }
+        // The blocks that remember take this tick's value together, so one of
+        // them reads another's previous tick: the delay a loop needs.
+        let mut taken = Vec::with_capacity(plan.stateful.len());
+        for &i in &plan.stateful {
+            taken.push((i, self.remember(i, &plan.blocks[i].kind)));
+        }
+        for (i, v) in taken {
+            self.outs[i] = v;
+        }
+        for (v, f) in self.outs.iter().zip(self.fired.iter_mut()) {
+            if *v == Value::Event(true) {
+                *f += 1;
+            }
+        }
+        acts
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate(
+        &mut self,
+        i: usize,
+        id: &str,
+        kind: &BlockKind,
+        r: &Readings<'_>,
+        pressed: &BTreeMap<String, bool>,
+        triggered: &BTreeSet<String>,
+        acts: &mut Vec<(String, Act)>,
+    ) -> Value {
+        let b = Value::Bool;
+        let level = |s: &str| r.level_db.get(s).copied().unwrap_or(FLOOR_DB);
+        match kind {
+            BlockKind::Const { value } => Value::Num(*value),
+            BlockKind::Text { value } => Value::Str(value.clone()),
+            BlockKind::Button => b(pressed.get(id).copied().unwrap_or(false)),
+            BlockKind::Trigger => Value::Event(triggered.contains(id)),
+            BlockKind::Mute { signal } => b(muted(r.mix, signal)),
+            BlockKind::Pfl { signal } => b(r.pfl.contains(signal)),
+            BlockKind::Fader { signal } => Value::Num(fader(r.mix, signal)),
+            BlockKind::Vad { signal } => b(r.speech.get(signal).copied().unwrap_or(false)),
+            BlockKind::Level { signal } => Value::Num(level(signal)),
+            BlockKind::Above {
+                signal,
+                threshold_db,
+                hysteresis_db,
+            } => {
+                let l = level(signal);
+                let s = &mut self.states[i];
+                if !s.held {
+                    s.held = l >= *threshold_db;
+                } else if l < *threshold_db - *hysteresis_db {
+                    s.held = false;
+                }
+                b(s.held)
+            }
+            BlockKind::Loudness { signal, measure } => {
+                let v = r.loudness.get(signal).map_or(FLOOR_DB, |l| {
+                    let x = match measure {
+                        Measure::Momentary => l.momentary_lufs.0,
+                        Measure::ShortTerm => l.short_term_lufs.0,
+                        Measure::Integrated => l.integrated_lufs.0,
+                        Measure::Range => l.range_lu,
+                        Measure::TruePeak => l.max_true_peak_dbtp.0,
+                    };
+                    if x.is_finite() {
+                        x
+                    } else {
+                        FLOOR_DB
+                    }
+                });
+                Value::Num(v)
+            }
+            BlockKind::Tally { index } => b(r.on_air.contains(index)),
+            BlockKind::Schedule {
+                start_minute,
+                end_minute,
+            } => b(in_schedule(r.minute_of_day, *start_minute, *end_minute)),
+            BlockKind::NmosReceiver { input } => b(r.nmos.contains(&format!("in-{input}"))),
+            BlockKind::NmosSender { signal } => {
+                b(r.nmos.contains(&crate::outputs::nmos_key(signal)))
+            }
+            BlockKind::Link { peer } => b(r.link.contains(peer)),
+            BlockKind::And => {
+                let (x, y) = (self.read(i, 0).truthy(), self.read(i, 1).truthy());
+                b(x && y)
+            }
+            BlockKind::Or => {
+                let (x, y) = (self.read(i, 0).truthy(), self.read(i, 1).truthy());
+                b(x || y)
+            }
+            BlockKind::Xor => {
+                let (x, y) = (self.read(i, 0).truthy(), self.read(i, 1).truthy());
+                b(x != y)
+            }
+            BlockKind::Not => b(!self.read(i, 0).truthy()),
+            BlockKind::Compare { op } => {
+                let (x, y) = (self.read(i, 0).num(), self.read(i, 1).num());
+                let eq = (x - y).abs() < 1e-6 || x == y;
+                b(match op {
+                    CompareOp::Gt => x > y,
+                    CompareOp::Lt => x < y,
+                    CompareOp::Eq => eq,
+                    CompareOp::Ge => x > y || eq,
+                    CompareOp::Le => x < y || eq,
+                    CompareOp::Ne => !eq,
+                })
+            }
+            BlockKind::Math { op } => {
+                let (x, y) = (self.read(i, 0).num(), self.read(i, 1).num());
+                Value::Num(match op {
+                    MathOp::Add => x + y,
+                    MathOp::Sub => x - y,
+                    MathOp::Mul => x * y,
+                    MathOp::Div if y == 0.0 => 0.0,
+                    MathOp::Div => x / y,
+                    MathOp::Min => x.min(y),
+                    MathOp::Max => x.max(y),
+                })
+            }
+            BlockKind::Scale { factor, offset } => {
+                Value::Num(self.read(i, 0).num() * factor + offset)
+            }
+            BlockKind::Map { points } => Value::Num(map(points, self.read(i, 0).num())),
+            BlockKind::Select { inputs, .. } => {
+                let sel = self.read(i, 0).num();
+                let last = f64::from(*inputs) - 1.0;
+                let k = if sel.is_nan() {
+                    0
+                } else {
+                    sel.round().clamp(0.0, last) as usize
+                };
+                // Every input is read, so their conversions keep their state.
+                let values: Vec<Value> = (1..=usize::from(*inputs))
+                    .map(|k| self.read(i, k))
+                    .collect();
+                values[k].clone()
+            }
+            BlockKind::MacroIn { .. } | BlockKind::MacroOut { .. } => self.read(i, 0),
+            BlockKind::Edge
+            | BlockKind::Latch
+            | BlockKind::Toggle
+            | BlockKind::Counter
+            | BlockKind::Timer { .. }
+            | BlockKind::Delay { .. }
+            | BlockKind::Debounce { .. }
+            | BlockKind::Macro { .. } => Value::Bool(false),
+            _ => self.action(i, id, kind, acts),
+        }
+    }
+
+    /// An action block: what it asks for (into `acts`), and its input's value.
+    fn action(
+        &mut self,
+        i: usize,
+        id: &str,
+        kind: &BlockKind,
+        acts: &mut Vec<(String, Act)>,
+    ) -> Value {
+        if let BlockKind::TslOut { index } = kind {
+            if !(0..3).any(|k| self.wired(i, k)) {
+                return Value::Bool(false);
+            }
+            let left = self.read(i, 0).truthy();
+            let right = self.read(i, 1).truthy();
+            let label = self.read(i, 2).text();
+            let now = Applied::Tsl(left, right, label.clone());
+            if self.states[i].applied.as_ref() != Some(&now) {
+                self.states[i].applied = Some(now);
+                acts.push((
+                    id.to_string(),
+                    Act::Tsl {
+                        index: *index,
+                        left,
+                        right,
+                        label,
+                    },
+                ));
+            }
+            return Value::Bool(left);
+        }
+        if !self.wired(i, 0) {
+            return Value::default_of(self.plan.blocks[i].ports.inputs[0].ty);
+        }
+        let v = self.read(i, 0);
+        let mut follow_bool = |s: &mut State, act: &dyn Fn(bool) -> Act| {
+            let on = v.truthy();
+            if s.applied != Some(Applied::Bool(on)) {
+                s.applied = Some(Applied::Bool(on));
+                acts.push((id.to_string(), act(on)));
+            }
+        };
+        let s = &mut self.states[i];
+        match kind {
+            BlockKind::SetMute { signal } => follow_bool(s, &|on| Act::Mute {
+                signal: signal.clone(),
+                on,
+            }),
+            BlockKind::SetPfl { signal } => follow_bool(s, &|on| Act::Pfl {
+                signal: signal.clone(),
+                on,
+            }),
+            BlockKind::SetPublish { signal } => follow_bool(s, &|on| Act::Publish {
+                signal: signal.clone(),
+                on,
+            }),
+            BlockKind::SetTalk { mic, destination } => follow_bool(s, &|on| Act::Talk {
+                mic: mic.clone(),
+                destination: destination.clone(),
+                on,
+            }),
+            BlockKind::SetFader { .. } | BlockKind::SetVca { .. } | BlockKind::SetParam { .. } => {
+                let x = v.num();
+                let changed = match s.applied {
+                    Some(Applied::Num(p)) => {
+                        let tolerance = if matches!(kind, BlockKind::SetParam { .. }) {
+                            1e-6 * p.abs().max(1.0)
+                        } else {
+                            0.05
+                        };
+                        !(p == x || (p - x).abs() <= tolerance)
+                    }
+                    _ => true,
+                };
+                if changed {
+                    s.applied = Some(Applied::Num(x));
+                    acts.push((
+                        id.to_string(),
+                        match kind {
+                            BlockKind::SetFader { signal, ramp_ms } => Act::Fader {
+                                signal: signal.clone(),
+                                db: x,
+                                ramp_ms: *ramp_ms,
+                            },
+                            BlockKind::SetVca { vca, ramp_ms } => Act::Vca {
+                                vca: vca.clone(),
+                                db: x,
+                                ramp_ms: *ramp_ms,
+                            },
+                            BlockKind::SetParam {
+                                signal,
+                                node,
+                                param,
+                                ramp_ms,
+                            } => Act::Param {
+                                signal: signal.clone(),
+                                node: node.clone(),
+                                param: param.clone(),
+                                value: x,
+                                ramp_ms: *ramp_ms,
+                            },
+                            _ => unreachable!(),
+                        },
+                    ));
+                }
+            }
+            _ if v.truthy() => {
+                let act = match kind {
+                    BlockKind::SetMonitor { monitor, source } => Act::Monitor {
+                        monitor: monitor.clone(),
+                        source: source.clone(),
+                    },
+                    BlockKind::LoudnessControl { signal, action } => Act::Loudness {
+                        signal: signal.clone(),
+                        action: *action,
+                    },
+                    BlockKind::Recall { snapshot } => Act::Recall {
+                        snapshot: snapshot.clone(),
+                    },
+                    BlockKind::Webhook { url } => Act::Webhook { url: url.clone() },
+                    BlockKind::Log { message } => {
+                        let value = self.wired(i, 1).then(|| self.read(i, 1).text());
+                        Act::Log {
+                            text: match value {
+                                Some(x) if message.is_empty() => x,
+                                Some(x) => format!("{message} {x}"),
+                                None => message.clone(),
+                            },
+                        }
+                    }
+                    _ => return v,
+                };
+                acts.push((id.to_string(), act));
+            }
+            BlockKind::Log { .. } if self.wired(i, 1) => {
+                // Keep the value input's conversion current.
+                self.read(i, 1);
+            }
+            _ => {}
+        }
+        v
+    }
+
+    /// A block that remembers: its value for the next tick.
+    fn remember(&mut self, i: usize, kind: &BlockKind) -> Value {
+        match kind {
+            BlockKind::Edge => {
+                let cur = self.read(i, 0).truthy();
+                let s = &mut self.states[i];
+                let rose = cur && !s.prev;
+                s.prev = cur;
+                Value::Event(rose)
+            }
+            BlockKind::Latch => {
+                let (set, reset) = (self.read(i, 0).truthy(), self.read(i, 1).truthy());
+                let s = &mut self.states[i];
+                if reset {
+                    s.held = false;
+                } else if set {
+                    s.held = true;
+                }
+                Value::Bool(s.held)
+            }
+            BlockKind::Toggle => {
+                let fire = self.read(i, 0).truthy();
+                let s = &mut self.states[i];
+                if fire {
+                    s.held = !s.held;
+                }
+                Value::Bool(s.held)
+            }
+            BlockKind::Counter => {
+                let up = self.read(i, 0).truthy();
+                let down = self.read(i, 1).truthy();
+                let reset = self.read(i, 2).truthy();
+                let s = &mut self.states[i];
+                if reset {
+                    s.count = 0.0;
+                } else {
+                    s.count += f64::from(u8::from(up)) - f64::from(u8::from(down));
+                }
+                Value::Num(s.count)
+            }
+            BlockKind::Timer { ms } => {
+                let cur = self.read(i, 0).truthy();
+                let s = &mut self.states[i];
+                if cur && !s.prev {
+                    s.n = pulse_ticks(*ms);
+                }
+                s.prev = cur;
+                let running = s.n > 0.0;
+                if running {
+                    s.n -= 1.0;
+                }
+                Value::Bool(running)
+            }
+            BlockKind::Delay { ms } => {
+                let cur = self.read(i, 0).truthy();
+                let s = &mut self.states[i];
+                if cur == s.held {
+                    s.n = 0.0;
+                } else {
+                    s.n += 1.0;
+                    if s.n >= pulse_ticks(*ms).max(1.0) {
+                        s.held = cur;
+                        s.n = 0.0;
+                    }
+                }
+                Value::Bool(s.held)
+            }
+            BlockKind::Debounce { ms } => {
+                let cur = self.read(i, 0).truthy();
+                let s = &mut self.states[i];
+                s.n = if cur == s.prev { s.n + 1.0 } else { 1.0 };
+                s.prev = cur;
+                if s.n >= pulse_ticks(*ms).max(1.0) {
+                    s.held = cur;
+                    s.n = 0.0;
+                }
+                Value::Bool(s.held)
+            }
+            _ => Value::Bool(false),
+        }
+    }
+
+    fn values(&self) -> Json {
+        let mut m = serde_json::Map::new();
+        for (i, b) in self.plan.blocks.iter().enumerate() {
+            let v = match &self.outs[i] {
+                Value::Bool(x) => json!(x),
+                Value::Num(x) => json!(x),
+                Value::Str(s) => json!(s),
+                Value::Event(_) => json!(self.fired[i]),
+            };
+            m.insert(b.id.clone(), v);
+        }
+        Json::Object(m)
+    }
 }
 
 #[derive(Default)]
 pub struct Logic {
-    /// Last value of the blocks that remember, per graph.
-    memory: BTreeMap<String, BTreeMap<String, f64>>,
-    /// What each action last applied, so it runs only when its input changes.
-    applied: BTreeMap<String, BTreeMap<String, f64>>,
+    runs: BTreeMap<String, Run>,
+    /// The macros the runs were compiled with.
+    macros: Vec<Macro>,
     /// Soft keys, per graph and block.
     buttons: BTreeMap<String, BTreeMap<String, bool>>,
-    /// The last tick's value of every block, per graph.
-    pub values: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Triggers posted since the last tick, per graph.
+    triggers: BTreeMap<String, BTreeSet<String>>,
+    recent: BTreeMap<String, VecDeque<Recent>>,
+    /// Graphs that do not compile (validation should have refused them).
+    broken: BTreeSet<String>,
     /// Ticks evaluated (`logic_ticks_total`).
     pub ticks: u64,
-    /// Actions returned, per graph (`logic_actions_total{graph}`).
+    /// Actions run, per graph (`logic_actions_total{graph}`).
     pub actions: BTreeMap<String, u64>,
 }
 
@@ -64,289 +860,139 @@ impl Logic {
             .unwrap_or(false)
     }
 
-    /// One tick. Returns the actions whose input changed.
-    pub fn tick(&mut self, readings: &Readings<'_>) -> Vec<Action> {
-        let graphs: Vec<Graph> = readings
-            .mix
+    /// The soft keys held down in `graph`.
+    pub fn pressed(&self, graph: &str) -> Vec<String> {
+        self.buttons
+            .get(graph)
+            .map(|g| {
+                g.iter()
+                    .filter(|(_, p)| **p)
+                    .map(|(b, _)| b.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Fire trigger `block` of `graph` on the next tick (D166).
+    pub fn trigger(&mut self, graph: &str, block: &str) {
+        self.triggers
+            .entry(graph.to_string())
+            .or_default()
+            .insert(block.to_string());
+    }
+
+    /// Each block's value after the last tick, as JSON (`values` in the API).
+    pub fn values(&self, graph: &str) -> Option<Json> {
+        self.runs.get(graph).map(Run::values)
+    }
+
+    /// The last [`RECENT`] actions of `graph`, oldest first.
+    pub fn recent(&self, graph: &str) -> Vec<Recent> {
+        self.recent
+            .get(graph)
+            .map(|r| r.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// One tick. Returns the actions to run (and the dry-run ones, marked).
+    pub fn tick(&mut self, r: &Readings<'_>) -> Vec<Action> {
+        let mix = r.mix;
+        let macros_changed = self.macros != mix.logic_macros;
+        if macros_changed {
+            self.macros = mix.logic_macros.clone();
+        }
+        let enabled: BTreeSet<&str> = mix
             .logic
             .iter()
             .filter(|g| g.enabled)
-            .cloned()
+            .map(|g| g.id.as_str())
             .collect();
-        self.values
-            .retain(|id, _| graphs.iter().any(|g| &g.id == id));
-        self.memory
-            .retain(|id, _| graphs.iter().any(|g| &g.id == id));
-        self.applied
-            .retain(|id, _| graphs.iter().any(|g| &g.id == id));
+        self.runs.retain(|id, _| enabled.contains(id.as_str()));
+        self.recent
+            .retain(|id, _| mix.logic.iter().any(|g| &g.id == id));
+        self.buttons
+            .retain(|id, _| mix.logic.iter().any(|g| &g.id == id));
         self.ticks += 1;
-        let mut actions = Vec::new();
-        for g in &graphs {
-            let a = self.graph(g, readings);
-            if !a.is_empty() {
-                *self.actions.entry(g.id.clone()).or_default() += a.len() as u64;
+        let mut out = Vec::new();
+        for g in mix.logic.iter().filter(|g| g.enabled) {
+            let stale = self
+                .runs
+                .get(&g.id)
+                .is_none_or(|run| macros_changed || run.graph != *g);
+            if stale {
+                let old = self.runs.remove(&g.id);
+                match Run::new(g, &self.macros, old) {
+                    Ok(run) => {
+                        self.broken.remove(&g.id);
+                        self.runs.insert(g.id.clone(), run);
+                    }
+                    Err(e) => {
+                        if self.broken.insert(g.id.clone()) {
+                            tracing::warn!("logic {}: {e}", g.id);
+                        }
+                        continue;
+                    }
+                }
             }
-            actions.extend(a);
-        }
-        actions
-    }
-
-    fn graph(&mut self, g: &Graph, readings: &Readings<'_>) -> Vec<Action> {
-        let order = order(g);
-        let mut out: BTreeMap<String, f64> = BTreeMap::new();
-        let memory = self.memory.entry(g.id.clone()).or_default();
-        for b in &g.blocks {
-            if b.kind.remembers() {
-                out.insert(b.id.clone(), memory.get(&b.id).copied().unwrap_or(0.0));
+            let run = self.runs.get_mut(&g.id).expect("compiled");
+            if run.dry_run != g.dry_run {
+                // What dry run did not apply is applied once it ends.
+                run.dry_run = g.dry_run;
+                for s in &mut run.states {
+                    s.applied = None;
+                }
             }
-        }
-        let pressed = self.buttons.get(&g.id).cloned().unwrap_or_default();
-        let input = |b: &Block, port: &str, out: &BTreeMap<String, f64>| -> f64 {
-            g.wires
-                .iter()
-                .find(|w| w.to_block == b.id && w.to_port == port)
-                .and_then(|w| out.get(&w.from_block))
-                .copied()
-                .unwrap_or(0.0)
-        };
-        for id in &order {
-            let b = g.blocks.iter().find(|b| &b.id == id).unwrap();
-            if b.kind.remembers() {
+            let pressed = self.buttons.get(&g.id).cloned().unwrap_or_default();
+            let triggered = self.triggers.remove(&g.id).unwrap_or_default();
+            let acts = run.tick(r, &pressed, &triggered);
+            if acts.is_empty() {
                 continue;
             }
-            let v = match &b.kind {
-                BlockKind::Const { value } => *value,
-                BlockKind::Button => {
-                    f64::from(u8::from(pressed.get(&b.id).copied().unwrap_or(false)))
+            if !g.dry_run {
+                *self.actions.entry(g.id.clone()).or_default() += acts.len() as u64;
+            }
+            let recent = self.recent.entry(g.id.clone()).or_default();
+            for (block, act) in acts {
+                recent.push_back(Recent {
+                    t_ms: r.now_ms,
+                    block: block.clone(),
+                    action: act.describe(),
+                    dry_run: g.dry_run,
+                });
+                if recent.len() > RECENT {
+                    recent.pop_front();
                 }
-                BlockKind::Mute { signal } => f64::from(u8::from(muted(readings.mix, signal))),
-                BlockKind::Fader { signal } => fader(readings.mix, signal),
-                BlockKind::Vad { signal } => f64::from(u8::from(
-                    readings.speech.get(signal).copied().unwrap_or(false),
-                )),
-                BlockKind::Level { signal } => {
-                    readings.level_db.get(signal).copied().unwrap_or(-200.0)
-                }
-                BlockKind::Tally { index } => f64::from(u8::from(readings.on_air.contains(index))),
-                BlockKind::Above {
-                    signal,
-                    threshold_db,
-                    hysteresis_db,
-                } => {
-                    let level = readings.level_db.get(signal).copied().unwrap_or(-200.0);
-                    let key = format!("above:{}", b.id);
-                    let mut held = memory.get(&key).copied().unwrap_or(0.0);
-                    if held < 0.5 {
-                        if level >= *threshold_db {
-                            held = 1.0;
-                        }
-                    } else if level < *threshold_db - *hysteresis_db {
-                        held = 0.0;
-                    }
-                    memory.insert(key, held);
-                    held
-                }
-                BlockKind::And => {
-                    f64::from(u8::from(on(input(b, "a", &out)) && on(input(b, "b", &out))))
-                }
-                BlockKind::Or => {
-                    f64::from(u8::from(on(input(b, "a", &out)) || on(input(b, "b", &out))))
-                }
-                BlockKind::Xor => {
-                    f64::from(u8::from(on(input(b, "a", &out)) != on(input(b, "b", &out))))
-                }
-                BlockKind::Schedule {
-                    start_minute,
-                    end_minute,
-                } => f64::from(u8::from(in_schedule(
-                    readings.minute_of_day,
-                    *start_minute,
-                    *end_minute,
-                ))),
-                BlockKind::Not => f64::from(u8::from(!on(input(b, "in", &out)))),
-                BlockKind::Compare { op } => {
-                    let (a, b2) = (input(b, "a", &out), input(b, "b", &out));
-                    let r = match op {
-                        CompareOp::Gt => a > b2,
-                        CompareOp::Lt => a < b2,
-                        CompareOp::Eq => (a - b2).abs() < 1e-6,
-                    };
-                    f64::from(u8::from(r))
-                }
-                BlockKind::SetMute { .. }
-                | BlockKind::SetFader { .. }
-                | BlockKind::Recall { .. }
-                | BlockKind::Webhook { .. } => {
-                    input(b, b.kind.ports().1.first().copied().unwrap_or("in"), &out)
-                }
-                BlockKind::Edge
-                | BlockKind::Latch
-                | BlockKind::Timer { .. }
-                | BlockKind::Delay { .. }
-                | BlockKind::Debounce { .. } => 0.0,
-            };
-            out.insert(b.id.clone(), v);
-        }
-        // The blocks that remember publish last tick's value (what the blocks
-        // after them read above). They all take this tick's value together, so
-        // one of them reads another's previous tick: the delay a loop needs.
-        let mut taken = Vec::new();
-        for b in g.blocks.iter().filter(|b| b.kind.remembers()) {
-            let now = match &b.kind {
-                BlockKind::Edge => {
-                    let key = format!("in:{}", b.id);
-                    let was = memory.get(&key).copied().unwrap_or(0.0);
-                    let cur = input(b, "in", &out);
-                    memory.insert(key, cur);
-                    f64::from(u8::from(on(cur) && !on(was)))
-                }
-                BlockKind::Latch => {
-                    let mut held = memory.get(&b.id).copied().unwrap_or(0.0);
-                    if on(input(b, "reset", &out)) {
-                        held = 0.0;
-                    } else if on(input(b, "set", &out)) {
-                        held = 1.0;
-                    }
-                    held
-                }
-                BlockKind::Timer { ms } => {
-                    let key_in = format!("in:{}", b.id);
-                    let key_left = format!("left:{}", b.id);
-                    let was = memory.get(&key_in).copied().unwrap_or(0.0);
-                    let cur = input(b, "in", &out);
-                    memory.insert(key_in, cur);
-                    let mut left = if on(cur) && !on(was) {
-                        pulse_ticks(*ms)
-                    } else {
-                        memory.get(&key_left).copied().unwrap_or(0.0)
-                    };
-                    let running = left > 0.0;
-                    if left > 0.0 {
-                        left -= 1.0;
-                    }
-                    memory.insert(key_left, left);
-                    f64::from(u8::from(running))
-                }
-                BlockKind::Delay { ms } => {
-                    let key_out = format!("delay-out:{}", b.id);
-                    let key_wait = format!("delay-wait:{}", b.id);
-                    let cur = on(input(b, "in", &out));
-                    let mut held = memory.get(&key_out).copied().unwrap_or(0.0) >= 0.5;
-                    let mut wait = memory.get(&key_wait).copied().unwrap_or(0.0);
-                    if cur == held {
-                        wait = 0.0;
-                    } else {
-                        wait += 1.0;
-                        if wait >= pulse_ticks(*ms).max(1.0) {
-                            held = cur;
-                            wait = 0.0;
-                        }
-                    }
-                    memory.insert(key_out, f64::from(u8::from(held)));
-                    memory.insert(key_wait, wait);
-                    f64::from(u8::from(held))
-                }
-                BlockKind::Debounce { ms } => {
-                    let key_out = format!("deb-out:{}", b.id);
-                    let key_in = format!("deb-in:{}", b.id);
-                    let key_n = format!("deb-n:{}", b.id);
-                    let cur = on(input(b, "in", &out));
-                    let prev = memory.get(&key_in).copied().unwrap_or(0.0) >= 0.5;
-                    let mut n = if cur == prev {
-                        memory.get(&key_n).copied().unwrap_or(0.0) + 1.0
-                    } else {
-                        1.0
-                    };
-                    let mut held = memory.get(&key_out).copied().unwrap_or(0.0) >= 0.5;
-                    if n >= pulse_ticks(*ms).max(1.0) {
-                        held = cur;
-                        n = 0.0;
-                    }
-                    memory.insert(key_in, f64::from(u8::from(cur)));
-                    memory.insert(key_n, n);
-                    memory.insert(key_out, f64::from(u8::from(held)));
-                    f64::from(u8::from(held))
-                }
-                _ => 0.0,
-            };
-            taken.push((b.id.clone(), now));
-        }
-        for (id, now) in taken {
-            memory.insert(id.clone(), now);
-            out.insert(id, now);
-        }
-        let mut actions = Vec::new();
-        if !g.dry_run {
-            let applied = self.applied.entry(g.id.clone()).or_default();
-            for b in &g.blocks {
-                let v = out.get(&b.id).copied().unwrap_or(0.0);
-                let last = applied.get(&b.id).copied();
-                match &b.kind {
-                    BlockKind::SetMute { signal } if last.is_none_or(|p| on(p) != on(v)) => {
-                        applied.insert(b.id.clone(), v);
-                        actions.push(Action {
-                            signal: signal.clone(),
-                            mute: Some(on(v)),
-                            fader_db: None,
-                            recall: None,
-                            webhook: None,
-                        });
-                    }
-                    BlockKind::SetFader { signal } if last.is_none_or(|p| (p - v).abs() > 0.05) => {
-                        applied.insert(b.id.clone(), v);
-                        actions.push(Action {
-                            signal: signal.clone(),
-                            mute: None,
-                            fader_db: Some(v),
-                            recall: None,
-                            webhook: None,
-                        });
-                    }
-                    BlockKind::Webhook { url } => {
-                        let was = last.unwrap_or(v);
-                        if last.is_none() {
-                            applied.insert(b.id.clone(), v);
-                        } else if on(v) && !on(was) {
-                            applied.insert(b.id.clone(), v);
-                            actions.push(Action {
-                                signal: String::new(),
-                                mute: None,
-                                fader_db: None,
-                                recall: None,
-                                webhook: Some(url.clone()),
-                            });
-                        } else if on(v) != on(was) {
-                            applied.insert(b.id.clone(), v);
-                        }
-                    }
-                    BlockKind::Recall { snapshot } => {
-                        let was = last.unwrap_or(v);
-                        if last.is_none() {
-                            applied.insert(b.id.clone(), v);
-                        } else if on(v) && !on(was) {
-                            applied.insert(b.id.clone(), v);
-                            actions.push(Action {
-                                signal: String::new(),
-                                mute: None,
-                                fader_db: None,
-                                recall: Some(snapshot.clone()),
-                                webhook: None,
-                            });
-                        } else if on(v) != on(was) {
-                            applied.insert(b.id.clone(), v);
-                        }
-                    }
-                    _ => {}
-                }
+                out.push(Action {
+                    graph: g.id.clone(),
+                    block,
+                    dry_run: g.dry_run,
+                    act,
+                });
             }
         }
-        self.values.insert(g.id.clone(), out);
-        actions
+        self.triggers.clear();
+        out
     }
 }
 
-fn on(v: f64) -> bool {
-    v >= 0.5
+/// The curve through `points` at `x`: linear between them, flat outside.
+fn map(points: &[[f64; 2]], x: f64) -> f64 {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return x;
+    };
+    if x <= first[0] || x.is_nan() {
+        return first[1];
+    }
+    if x >= last[0] {
+        return last[1];
+    }
+    for w in points.windows(2) {
+        let ([x0, y0], [x1, y1]) = (w[0], w[1]);
+        if x <= x1 {
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+        }
+    }
+    last[1]
 }
 
 fn in_schedule(minute: u16, start: u16, end: u16) -> bool {
@@ -383,40 +1029,6 @@ fn fader(mix: &Mix, signal: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Combinational order: a block after the blocks it reads, except a block that
-/// remembers, whose output is already known.
-fn order(g: &Graph) -> Vec<String> {
-    let mut incoming: BTreeMap<&str, usize> = g.blocks.iter().map(|b| (b.id.as_str(), 0)).collect();
-    let mut next: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for w in &g.wires {
-        let to = g.blocks.iter().find(|b| b.id == w.to_block);
-        if to.is_some_and(|b| b.kind.remembers()) {
-            continue;
-        }
-        *incoming.get_mut(w.to_block.as_str()).unwrap() += 1;
-        next.entry(w.from_block.as_str())
-            .or_default()
-            .push(&w.to_block);
-    }
-    let mut ready: Vec<&str> = incoming
-        .iter()
-        .filter(|(_, n)| **n == 0)
-        .map(|(id, _)| *id)
-        .collect();
-    let mut out = Vec::new();
-    while let Some(id) = ready.pop() {
-        out.push(id.to_string());
-        for n in next.get(id).into_iter().flatten() {
-            let c = incoming.get_mut(n).unwrap();
-            *c -= 1;
-            if *c == 0 {
-                ready.push(n);
-            }
-        }
-    }
-    out
-}
-
 /// Clamp a fader a logic graph asked for.
 pub fn clamp_fader(db: f64) -> Db {
     Db(if db.is_finite() {
@@ -427,418 +1039,4 @@ pub fn clamp_fader(db: f64) -> Db {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mix::logic::{Block, BlockKind, CompareOp, Graph, Wire};
-    use crate::mix::model::tests::strip;
-    use crate::mix::model::Db;
-    use crate::mix::Format;
-
-    fn block(id: &str, kind: BlockKind) -> Block {
-        Block {
-            id: id.into(),
-            kind,
-            x: 0.0,
-            y: 0.0,
-        }
-    }
-
-    fn wire(from: &str, to: &str, port: &str) -> Wire {
-        Wire {
-            from_block: from.into(),
-            from_port: "out".into(),
-            to_block: to.into(),
-            to_port: port.into(),
-        }
-    }
-
-    fn readings<'a>(
-        mix: &'a Mix,
-        speech: &'a BTreeMap<String, bool>,
-        level: &'a BTreeMap<String, f64>,
-        on_air: &'a BTreeSet<u16>,
-    ) -> Readings<'a> {
-        Readings {
-            mix,
-            speech,
-            level_db: level,
-            on_air,
-            minute_of_day: 0,
-        }
-    }
-
-    fn readings_at<'a>(
-        mix: &'a Mix,
-        speech: &'a BTreeMap<String, bool>,
-        level: &'a BTreeMap<String, f64>,
-        on_air: &'a BTreeSet<u16>,
-        minute_of_day: u16,
-    ) -> Readings<'a> {
-        Readings {
-            minute_of_day,
-            ..readings(mix, speech, level, on_air)
-        }
-    }
-
-    #[test]
-    fn speech_mutes_the_music_one_tick_after_it_starts() {
-        let mut mix = Mix::default();
-        mix.strips.push(strip("vox", Format::Mono));
-        mix.strips.push(strip("music", Format::Mono));
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: false,
-            blocks: vec![
-                block(
-                    "v",
-                    BlockKind::Vad {
-                        signal: "vox".into(),
-                    },
-                ),
-                block(
-                    "m",
-                    BlockKind::SetMute {
-                        signal: "music".into(),
-                    },
-                ),
-            ],
-            wires: vec![wire("v", "m", "in")],
-        });
-        let mut logic = Logic::default();
-        let level = BTreeMap::new();
-        let on_air = BTreeSet::new();
-        let mut speech = BTreeMap::from([("vox".to_string(), false)]);
-        // The first tick applies what the graph says now.
-        assert_eq!(
-            logic.tick(&readings(&mix, &speech, &level, &on_air)),
-            vec![Action {
-                signal: "music".into(),
-                mute: Some(false),
-                fader_db: None,
-                recall: None,
-                webhook: None
-            }]
-        );
-        assert!(
-            logic
-                .tick(&readings(&mix, &speech, &level, &on_air))
-                .is_empty(),
-            "not again"
-        );
-        speech.insert("vox".into(), true);
-        assert_eq!(
-            logic.tick(&readings(&mix, &speech, &level, &on_air)),
-            vec![Action {
-                signal: "music".into(),
-                mute: Some(true),
-                fader_db: None,
-                recall: None,
-                webhook: None
-            }]
-        );
-        assert!(logic
-            .tick(&readings(&mix, &speech, &level, &on_air))
-            .is_empty());
-        // logic_ticks_total and logic_actions_total{graph}.
-        assert_eq!(logic.ticks, 4);
-        assert_eq!(logic.actions, BTreeMap::from([("g".to_string(), 2)]));
-    }
-
-    #[test]
-    fn an_edge_through_a_latch_toggles() {
-        let mut mix = Mix::default();
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: true,
-            blocks: vec![
-                block("b", BlockKind::Button),
-                block("e", BlockKind::Edge),
-                block("l", BlockKind::Latch),
-            ],
-            wires: vec![wire("b", "e", "in"), wire("e", "l", "set")],
-        });
-        let mut logic = Logic::default();
-        let speech = BTreeMap::new();
-        let level = BTreeMap::new();
-        let on_air = BTreeSet::new();
-        logic.tick(&readings(&mix, &speech, &level, &on_air));
-        logic.set_button("g", "b", true);
-        logic.tick(&readings(&mix, &speech, &level, &on_air));
-        // The edge publishes one tick later; the latch takes it the tick after.
-        assert_eq!(logic.values["g"]["e"], 1.0);
-        logic.tick(&readings(&mix, &speech, &level, &on_air));
-        assert_eq!(logic.values["g"]["l"], 1.0);
-        assert_eq!(logic.values["g"]["e"], 0.0, "the edge lasts one tick");
-        logic.set_button("g", "b", false);
-        logic.tick(&readings(&mix, &speech, &level, &on_air));
-        assert_eq!(logic.values["g"]["l"], 1.0, "the latch holds");
-    }
-
-    #[test]
-    fn compare_and_fader() {
-        let mut mix = Mix::default();
-        mix.strips.push(strip("vox", Format::Mono));
-        mix.strips[0].fader_db = Db(-20.0);
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: false,
-            blocks: vec![
-                block(
-                    "f",
-                    BlockKind::Fader {
-                        signal: "vox".into(),
-                    },
-                ),
-                block("c", BlockKind::Const { value: -10.0 }),
-                block("cmp", BlockKind::Compare { op: CompareOp::Lt }),
-                block(
-                    "set",
-                    BlockKind::SetFader {
-                        signal: "vox".into(),
-                    },
-                ),
-            ],
-            wires: vec![
-                wire("f", "cmp", "a"),
-                wire("c", "cmp", "b"),
-                wire("cmp", "set", "level"),
-            ],
-        });
-        // compare out is 1 (fader -20 < -10), and set-fader sets the fader to
-        // that 1: the wiring is what the graph asked.
-        let mut logic = Logic::default();
-        let speech = BTreeMap::new();
-        let level = BTreeMap::new();
-        let on_air = BTreeSet::new();
-        let a = logic.tick(&readings(&mix, &speech, &level, &on_air));
-        assert_eq!(logic.values["g"]["cmp"], 1.0);
-        assert_eq!(a[0].fader_db, Some(1.0));
-        assert_eq!(clamp_fader(f64::NEG_INFINITY).0, f64::NEG_INFINITY);
-        assert_eq!(clamp_fader(30.0).0, crate::mix::model::MAX_FADER_DB);
-    }
-
-    #[test]
-    fn tally_on_air_mutes_when_the_lamp_is_lit() {
-        let mut mix = Mix::default();
-        mix.strips.push(strip("music", Format::Mono));
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: false,
-            blocks: vec![
-                block("t", BlockKind::Tally { index: 5 }),
-                block(
-                    "m",
-                    BlockKind::SetMute {
-                        signal: "music".into(),
-                    },
-                ),
-            ],
-            wires: vec![wire("t", "m", "in")],
-        });
-        let mut logic = Logic::default();
-        let speech = BTreeMap::new();
-        let level = BTreeMap::new();
-        let off = BTreeSet::new();
-        let on = BTreeSet::from([5]);
-        assert_eq!(logic.values.get("g"), None);
-        let first = logic.tick(&readings(&mix, &speech, &level, &off));
-        assert_eq!(logic.values["g"]["t"], 0.0);
-        assert_eq!(first[0].mute, Some(false));
-        let lit = logic.tick(&readings(&mix, &speech, &level, &on));
-        assert_eq!(logic.values["g"]["t"], 1.0);
-        assert_eq!(lit[0].mute, Some(true));
-        assert!(logic.tick(&readings(&mix, &speech, &level, &on)).is_empty());
-        let dark = logic.tick(&readings(&mix, &speech, &level, &off));
-        assert_eq!(logic.values["g"]["t"], 0.0);
-        assert_eq!(dark[0].mute, Some(false));
-    }
-
-    #[test]
-    fn a_timer_holds_after_its_input_rises_and_a_new_rise_restarts_it() {
-        let mut mix = Mix::default();
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: true,
-            blocks: vec![
-                block("b", BlockKind::Button),
-                block("t", BlockKind::Timer { ms: 30.0 }),
-            ],
-            wires: vec![wire("b", "t", "in")],
-        });
-        let mut logic = Logic::default();
-        let speech = BTreeMap::new();
-        let level = BTreeMap::new();
-        let on_air = BTreeSet::new();
-        let tick = |logic: &mut Logic, mix: &Mix| {
-            logic.tick(&readings(mix, &speech, &level, &on_air));
-            logic.values["g"]["t"]
-        };
-        assert_eq!(tick(&mut logic, &mix), 0.0);
-        logic.set_button("g", "b", true);
-        assert_eq!(tick(&mut logic, &mix), 1.0);
-        assert_eq!(tick(&mut logic, &mix), 1.0);
-        logic.set_button("g", "b", false);
-        assert_eq!(tick(&mut logic, &mix), 1.0, "the pulse outlasts the input");
-        assert_eq!(tick(&mut logic, &mix), 0.0);
-        logic.set_button("g", "b", true);
-        assert_eq!(tick(&mut logic, &mix), 1.0);
-        logic.set_button("g", "b", false);
-        assert_eq!(tick(&mut logic, &mix), 1.0);
-        logic.set_button("g", "b", true);
-        assert_eq!(tick(&mut logic, &mix), 1.0, "a rise starts the 30 ms again");
-        assert_eq!(tick(&mut logic, &mix), 1.0);
-        assert_eq!(tick(&mut logic, &mix), 1.0);
-        assert_eq!(tick(&mut logic, &mix), 0.0);
-        assert_eq!(pulse_ticks(0.0), 0.0);
-        assert_eq!(pulse_ticks(11.0), 2.0);
-    }
-
-    #[test]
-    fn above_holds_until_the_level_falls_by_the_hysteresis() {
-        let mut mix = Mix::default();
-        mix.strips.push(strip("vox", Format::Mono));
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: true,
-            blocks: vec![block(
-                "a",
-                BlockKind::Above {
-                    signal: "vox".into(),
-                    threshold_db: -40.0,
-                    hysteresis_db: 6.0,
-                },
-            )],
-            wires: vec![],
-        });
-        let mut logic = Logic::default();
-        let speech = BTreeMap::new();
-        let on_air = BTreeSet::new();
-        let tick = |logic: &mut Logic, db: f64| {
-            let level = BTreeMap::from([("vox".into(), db)]);
-            logic.tick(&readings(&mix, &speech, &level, &on_air));
-            logic.values["g"]["a"]
-        };
-        assert_eq!(tick(&mut logic, -50.0), 0.0);
-        assert_eq!(tick(&mut logic, -40.0), 1.0);
-        assert_eq!(tick(&mut logic, -45.0), 1.0, "still inside the hysteresis");
-        assert_eq!(tick(&mut logic, -46.0), 1.0, "the floor still holds");
-        assert_eq!(tick(&mut logic, -47.0), 0.0);
-        assert_eq!(tick(&mut logic, -40.0), 1.0);
-    }
-
-    #[test]
-    fn a_recall_fires_when_its_input_rises() {
-        let mut mix = Mix::default();
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: false,
-            blocks: vec![
-                block("b", BlockKind::Button),
-                block(
-                    "r",
-                    BlockKind::Recall {
-                        snapshot: "show".into(),
-                    },
-                ),
-            ],
-            wires: vec![wire("b", "r", "in")],
-        });
-        let mut logic = Logic::default();
-        let speech = BTreeMap::new();
-        let level = BTreeMap::new();
-        let on_air = BTreeSet::new();
-        let tick = |logic: &mut Logic| logic.tick(&readings(&mix, &speech, &level, &on_air));
-        assert!(
-            tick(&mut logic).is_empty(),
-            "off at the start does not recall"
-        );
-        logic.set_button("g", "b", true);
-        let rose = tick(&mut logic);
-        assert_eq!(rose.len(), 1);
-        assert_eq!(rose[0].recall.as_deref(), Some("show"));
-        assert!(tick(&mut logic).is_empty(), "holding does not recall again");
-        logic.set_button("g", "b", false);
-        assert!(tick(&mut logic).is_empty());
-        logic.set_button("g", "b", true);
-        assert_eq!(tick(&mut logic)[0].recall.as_deref(), Some("show"));
-    }
-
-    #[test]
-    fn xor_schedule_and_a_webhook_on_the_rise() {
-        let mut mix = Mix::default();
-        mix.logic.push(Graph {
-            id: "g".into(),
-            name: "G".into(),
-            description: String::new(),
-            enabled: true,
-            dry_run: false,
-            blocks: vec![
-                block("a", BlockKind::Const { value: 1.0 }),
-                block("b", BlockKind::Const { value: 1.0 }),
-                block("x", BlockKind::Xor),
-                block(
-                    "s",
-                    BlockKind::Schedule {
-                        start_minute: 22 * 60,
-                        end_minute: 6 * 60,
-                    },
-                ),
-                block("btn", BlockKind::Button),
-                block(
-                    "w",
-                    BlockKind::Webhook {
-                        url: "https://example.test/hook".into(),
-                    },
-                ),
-            ],
-            wires: vec![
-                wire("a", "x", "a"),
-                wire("b", "x", "b"),
-                wire("btn", "w", "in"),
-            ],
-        });
-        let mut logic = Logic::default();
-        let speech = BTreeMap::new();
-        let level = BTreeMap::new();
-        let on_air = BTreeSet::new();
-        logic.tick(&readings_at(&mix, &speech, &level, &on_air, 23 * 60));
-        assert_eq!(logic.values["g"]["x"], 0.0, "both on is not xor");
-        assert_eq!(logic.values["g"]["s"], 1.0, "23:00 is inside 22:00–06:00");
-        logic.tick(&readings_at(&mix, &speech, &level, &on_air, 12 * 60));
-        assert_eq!(logic.values["g"]["s"], 0.0);
-        assert!(logic
-            .tick(&readings(&mix, &speech, &level, &on_air))
-            .iter()
-            .all(|a| a.webhook.is_none()));
-        logic.set_button("g", "btn", true);
-        let rose = logic.tick(&readings(&mix, &speech, &level, &on_air));
-        assert_eq!(
-            rose[0].webhook.as_deref(),
-            Some("https://example.test/hook")
-        );
-        assert!(in_schedule(0, 22 * 60, 6 * 60));
-        assert!(in_schedule(10 * 60, 9 * 60, 17 * 60));
-        assert!(!in_schedule(8 * 60, 9 * 60, 17 * 60));
-    }
-}
+mod tests;

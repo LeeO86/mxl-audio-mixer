@@ -344,6 +344,106 @@ pub fn wrap(packet: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One display of the logic editor's TSL output (`tsl-out`, D165).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutDisplay {
+    /// The left lamp (red: on air).
+    pub left: bool,
+    /// The right lamp (green: preview).
+    pub right: bool,
+    pub label: String,
+}
+
+/// Most displays in one packet (a UDP datagram stays far below 64 KiB).
+const DISPLAYS_PER_PACKET: usize = 64;
+
+/// TSL UMD 5.0 packets (PBC first, no DLE/STX) for `displays` on `screen`:
+/// labels in UTF-16, brightness full, text tally off.
+pub fn encode_out(screen: u16, displays: &BTreeMap<u16, OutDisplay>) -> Vec<Vec<u8>> {
+    let all: Vec<(&u16, &OutDisplay)> = displays.iter().collect();
+    all.chunks(DISPLAYS_PER_PACKET)
+        .map(|chunk| {
+            let mut body = vec![0u8, 0x01];
+            body.extend_from_slice(&screen.to_le_bytes());
+            for (index, d) in chunk {
+                let control: u16 = (u16::from(d.right) << 1) | (u16::from(d.left) << 4) | (3 << 6);
+                let text: Vec<u8> = d
+                    .label
+                    .encode_utf16()
+                    .take(256)
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                body.extend_from_slice(&index.to_le_bytes());
+                body.extend_from_slice(&control.to_le_bytes());
+                body.extend_from_slice(&(text.len() as u16).to_le_bytes());
+                body.extend_from_slice(&text);
+            }
+            let mut packet = (body.len() as u16).to_le_bytes().to_vec();
+            packet.extend_from_slice(&body);
+            packet
+        })
+        .collect()
+}
+
+/// Send the displays of `state` to `target` (`host:port`) over UDP: on every
+/// change and at least once a second (§10.3). The name is resolved again
+/// every 30 s.
+pub fn spawn_sender(
+    target: String,
+    screen: u16,
+    mut state: tokio::sync::watch::Receiver<BTreeMap<u16, OutDisplay>>,
+) {
+    tokio::spawn(async move {
+        let socket = match tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("TSL output: {e}");
+                return;
+            }
+        };
+        let mut address: Option<(std::net::SocketAddr, Instant)> = None;
+        let mut warned = false;
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(1));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                changed = state.changed() => if changed.is_err() { return },
+                _ = every.tick() => {}
+            }
+            let displays = state.borrow_and_update().clone();
+            if displays.is_empty() {
+                continue;
+            }
+            if address.is_none_or(|(_, t)| t.elapsed().as_secs() >= 30) {
+                match tokio::net::lookup_host(target.as_str())
+                    .await
+                    .map(|mut a| a.next())
+                {
+                    Ok(Some(a)) => address = Some((a, Instant::now())),
+                    other => {
+                        if !warned {
+                            tracing::warn!("TSL output: cannot resolve {target}: {other:?}");
+                            warned = true;
+                        }
+                        if address.is_none() {
+                            continue;
+                        }
+                    }
+                }
+            }
+            let Some((to, _)) = address else { continue };
+            for packet in encode_out(screen, &displays) {
+                if let Err(e) = socket.send_to(&packet, to).await {
+                    if !warned {
+                        tracing::warn!("TSL output to {to}: {e}");
+                        warned = true;
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +524,60 @@ mod tests {
         let mut t = Tally::default();
         t.packet(&plain, &encode(7, &[(4, 2, 0, "")]));
         assert!(t.on_air(4));
+    }
+
+    #[test]
+    fn the_tsl_output_parses_back() {
+        let displays = BTreeMap::from([
+            (
+                3,
+                OutDisplay {
+                    left: true,
+                    right: false,
+                    label: "ON AIR".into(),
+                },
+            ),
+            (
+                9,
+                OutDisplay {
+                    left: false,
+                    right: true,
+                    label: "Stüdio".into(),
+                },
+            ),
+        ]);
+        let packets = encode_out(2, &displays);
+        assert_eq!(packets.len(), 1);
+        let back = parse(&packets[0]).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(
+            (back[0].screen, back[0].index, back[0].lh, back[0].rh),
+            (2, 3, 1, 0)
+        );
+        assert_eq!(back[0].label, "ON AIR");
+        assert_eq!(back[0].brightness, 3);
+        assert_eq!((back[1].index, back[1].lh, back[1].rh), (9, 0, 2));
+        assert_eq!(back[1].label, "Stüdio");
+        let many: BTreeMap<u16, OutDisplay> = (0..100)
+            .map(|i| {
+                (
+                    i,
+                    OutDisplay {
+                        left: true,
+                        right: false,
+                        label: String::new(),
+                    },
+                )
+            })
+            .collect();
+        let packets = encode_out(0, &many);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(
+            packets
+                .iter()
+                .map(|p| parse(p).unwrap().len())
+                .sum::<usize>(),
+            100
+        );
     }
 }

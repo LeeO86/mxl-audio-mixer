@@ -1960,3 +1960,57 @@ and writes the same text to the log (info).
 | D164 | Actions become the same mix changes the API makes: mute, fader, VCA, a node parameter (only parameters the DSP smooths; ramped by `ramp_ms`, clamped to the parameter's range), PFL, talk, publish, monitor source, loudness start/stop/reset, snapshot recall. Value actions follow their input (on the first tick and on each change); event actions run when the event fires. Value changes are staged with their ramp first, then the changes that rewire the plan (fade, swap on a later tick, as recall did). In dry run nothing is executed; the action is listed and sent on the events socket. | §11.2 "actions become parameter messages". A structural node parameter (a filter slope, a delay time) would swap the plan on every change of a number. |
 | D165 | TSL out sends UMD 5.0 over UDP to one `TSL_OUT_TARGET`, screen `TSL_OUT_SCREEN`, from a task off the control tick: the full state of every `tsl-out` block (left lamp red, right lamp green, label UTF-16) on every change and every second. | §10.3's own rules for a TSL sender. The tick only hands over the state. |
 | D166 | `trigger` fires on the tick after its POST; several POSTs in one tick are one event. | A trigger is an event; the tick is the clock. |
+
+### M8b: answers to the UI agent (2026-10-16)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | `GET /api/v1/logic-blocks` shape | An array of `{"type", "label", "category", "params", "inputs", "outputs", "remembers"}`; a param is `{"name", "kind", "min"?, "max"?, "default"?, "options"?, "max_length"?}` with `kind` one of `number`, `integer`, `string`, `url`, `signal` (strip or bus), `signal-or-vca`, `vca`, `snapshot`, `monitor`, `mic`, `destination`, `macro`, `node`, `param`, `peer`, `enum`, `port-type`, `points`, `source`. `select` and `macro` list the ports of their default parameters; a graph's `ports` has the real ones. |
+| 2 | Do PUT, PATCH and batch answers carry `revision` and `ports`? | Yes: every answer is the full GET object. A stale revision is 409 `{"error", "revision"}`; in a batch 409 `{"error", "conflicts": [{"graph" or "macro", "revision"}]}` and nothing is applied. |
+| 3 | Macro GET | `revision`, `ports` (per inner block, as a graph's) and `exposed` (`{"inputs", "outputs"}`: the instance's typed ports, in block order). Live values exist per graph only, as `<instance>.<block>`. |
+| 4 | Is `.` refused in block ids? | Yes: ids are 1–32 characters a-z, 0-9 and `-`, not starting with `-`. Ungrouping must keep the 32-character and 64-block limits. |
+| 5 | Macro ids `macro-<n>` | Fine (`POST /api/v1/logic-macros` without an id picks the same). |
+| 6 | Plan numbers | The backend uses D158–D174 and X11–X19; the UI D175 and X20 on. |
+
+### M8b: deviations
+
+| # | Spec | Deviation | Reason |
+| --- | --- | --- | --- |
+| X11 | §11.1 "timer/clock (TAI-based)" | No clock block: `timer` is the pulse, `schedule` the UTC minute of the day. | A show needs the time of day (the schedule); a raw TAI number has no consumer yet. |
+| X12 | §11.1 "mute/PFL state", "PFL" | `pfl` reads PFL only and `set-pfl` sets it; AFL is not read or set by logic, and `set-pfl` off ends only a PFL. | §11.1 names PFL; an AFL the operator set stays theirs. |
+| X13 | §11.1 "webhook/HTTP endpoint" | The trigger has no authentication (as the whole API, README "Network") and carries no value. | A secret on one endpoint would suggest a protection the rest of the API does not have; the platform's ingress is where authentication belongs. |
+| X14 | §11.1 "set any node parameter" | Only parameters the DSP smooths, and `bypass`. Structural ones (band types, filter mode and slope, delay time, limiter look-ahead, detector) are refused at validation. Out-of-range values are clamped to the parameter's range. | A structural change swaps the plan; a logic value can change every 10 ms. |
+| X15 | §11.3 "sub-graphs (macros)" | No per-instance parameters: an instance is its definition, and a block in a macro that names a signal names it in every instance. | The first slice of macros; parameters would need a template model in the show. |
+| X16 | §11.1 "TSL tally out" | One UDP target per mixer (`TSL_OUT_TARGET`, `TSL_OUT_SCREEN`); no TCP; the text tally lamp stays off; two blocks with the same index: the last graph wins. | The tally targets on the platform take UDP; a target per block would be a setting per show. |
+
+### M8b: results (dev host)
+
+- Unit tests: every block (`src/logic/tests.rs`), the conversions and type
+  checks, validation issues with block and port, macros (inlining, state per
+  instance, recursion, depth, size, loops through a macro), `set-param` (smoothed
+  only, clamping), the TSL encoder (parsed back by the receiver), a 1.2.0 show
+  with every 1.2 block type (loads, validates, writes back the same), the
+  catalog and revisions, the settings.
+- The tick at the limits (32 graphs × 256 inlined blocks, 8192 blocks): 0.41 ms
+  per 10 ms tick in a release build (2.0 ms in a debug build; the unit test
+  `the_tick_stays_cheap_at_the_limits` requires below 10 ms), on the control
+  thread with the control lock held. A show's few graphs take microseconds.
+- `tests/integration/logic.sh` (new, in CI) passes in the lab's test image: a
+  trigger mutes and unmutes a strip, a soft key ramps its fader (−6.02 dB,
+  sample-exact on the output), publishes a bus (a plan swap from the tick), sends
+  TSL (screen 4, index 7, red, "LOGIC", repeated every second) and posts the
+  webhook body; the log line arrives on the events WebSocket; dry run lists and
+  then applies; a macro and its graph in one batch; the 400 issue names block
+  `n`, port `in`, wire 0; a stale revision is 409; deleting a used macro is 400.
+
+### M8b: findings
+
+- A logic action that rewires the plan (publish, monitor source, recall, PFL,
+  talk) is staged by the control tick without the API's change lock. If an API
+  change stages while that swap waits for its fade, the API's change replaces it
+  and the logic's change is lost (the logic then believes it applied). This was
+  so for recall in 1.2.0 already; the logic does not retry.
+- A value action that follows a continuously changing input (a level into
+  `set-fader` or `set-param`) stages, and so saves `mix.json`, on every change
+  above its threshold (0.05 dB, or 1e-6 relative): up to 100 writes a second.
+  As in 1.2.0 for `set-fader`.

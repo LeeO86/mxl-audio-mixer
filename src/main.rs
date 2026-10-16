@@ -282,9 +282,22 @@ async fn run(mut config: Config) -> ExitCode {
             Err(e) => tracing::error!("saving the mix: {e}"),
         }
     }
+    if let Some(target) = config.tsl_out_target.clone() {
+        let (tx, rx) = tokio::sync::watch::channel(Default::default());
+        control.tsl_out = Some(tx);
+        mxl_audio_mixer::tally::spawn_sender(target.clone(), config.tsl_out_screen, rx);
+        tracing::info!(
+            "TSL UMD 5.0 output to udp {target}, screen {}",
+            config.tsl_out_screen
+        );
+    }
     let control = Arc::new(Mutex::new(control));
+    let link_peers = Arc::new(tokio::sync::Mutex::new(
+        mxl_audio_mixer::link::Peers::default(),
+    ));
 
     let ticking = control.clone();
+    let ticking_link = link_peers.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let mut meter_tick = tokio::time::interval(METER_TICK);
@@ -304,7 +317,15 @@ async fn run(mut config: Config) -> ExitCode {
                 _ = tick.tick() => lock().tick(),
                 _ = meter_tick.tick() => lock().meter_tick(),
                 _ = auto_tick.tick() => {
+                    // The link's peers for the logic `link` block; a busy lock
+                    // keeps the last state.
+                    let up = ticking_link.try_lock().ok().map(|p| {
+                        p.list.iter().filter(|p| p.up).map(|p| p.id.clone()).collect()
+                    });
                     let mut c = lock();
+                    if let Some(up) = up {
+                        c.link_up = up;
+                    }
                     c.auto_tick();
                     c.logic_tick();
                 }
@@ -382,9 +403,7 @@ async fn run(mut config: Config) -> ExitCode {
         timing_trusted,
         started: Instant::now(),
         mediamtx: mediamtx.clone(),
-        link: Arc::new(tokio::sync::Mutex::new(
-            mxl_audio_mixer::link::Peers::default(),
-        )),
+        link: link_peers,
     };
     if config.link_role == mxl_audio_mixer::config::LinkRole::Master {
         for url in config.link_peers.clone() {

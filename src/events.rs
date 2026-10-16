@@ -11,6 +11,9 @@
 //!   the analysed signals, the auto nodes' gains (the deepest channel's), the
 //!   auto-levels' and the ratio ducks' states, §8).
 //!
+//! - `{"type": "logic", "graph", "block", "action", "dry_run", "t_ms"}` for every
+//!   logic action and dry-run action (§11.2), with `"log": text` from a `log`
+//!   block;
 //! - `{"type": "analysis", …}` with the meters, for clients that subscribed to it
 //!   (as `values` of `GET /api/v1/analysis`).
 //!
@@ -123,8 +126,20 @@ async fn run(mut socket: WebSocket, app: App) {
     let mut every = 1u64;
     let mut ticks = 0u64;
     let mut analysis = false;
+    let mut logic = app.control().logic_events.subscribe();
     loop {
         tokio::select! {
+            event = logic.recv() => match event {
+                Ok(text) => {
+                    if socket.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    logic = app.control().logic_events.subscribe();
+                }
+            },
             _ = status.tick() => {
                 let s = json!({"type": "status", "status": status_json(&app)});
                 if !send(&mut socket, &s).await {

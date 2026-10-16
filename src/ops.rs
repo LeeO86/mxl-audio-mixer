@@ -697,7 +697,7 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "logic_actions_total",
         "counter",
-        "Logic actions run (mute, fader, recall, webhook), per graph.",
+        "Logic actions run (not dry run), per graph.",
         control
             .logic
             .actions

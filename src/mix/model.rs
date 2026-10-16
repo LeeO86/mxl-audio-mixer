@@ -435,6 +435,9 @@ pub struct Mix {
     /// Logic graphs (§11).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logic: Vec<super::logic::Graph>,
+    /// Logic macros: sub-graphs used as blocks (§11.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logic_macros: Vec<super::logic::Macro>,
 }
 
 /// What a signal id names.
