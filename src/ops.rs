@@ -217,8 +217,8 @@ pub fn status_json(app: &App) -> Value {
                 crate::config::LinkRole::Master => "master",
                 crate::config::LinkRole::Slave => "slave",
             },
-            "up": control.link_up,
-            "seen": control.link_seen,
+            "up": control.link.up(),
+            "seen": control.link.seen,
         },
         "talkback": {
             "talking": control.talking(),

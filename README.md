@@ -246,7 +246,9 @@ the log (without the URL's credentials, query and fragment).
 Environment first, then the JSON file `MIXER_CONFIG_FILE` (an object of these keys),
 then the defaults. Unknown environment variables are ignored; unknown file keys and
 invalid values exit with code 78. `GET /api/v1/config` lists every value with its
-origin. No setting is a secret.
+origin. One setting is a secret: `MIXER_LINK_TOKEN`. Give it through the
+environment from a Kubernetes Secret; `GET /api/v1/config` shows `set`, not the
+token.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -296,8 +298,8 @@ origin. No setting is a secret.
 | `MEDIAMTX_BIN` | mediamtx | The built-in MediaMTX executable (the image has it). |
 | `MIXER_MAX_WEB_MONITORS` | 8 | Most personal monitor paths of browser clients at once. |
 | `MIXER_LINK_ROLE` | off | Remote link (§13): `off`, `master` or `slave`. |
-| `MIXER_LINK_TOKEN` | unset | Pre-shared token. Required when the role is not off. `GET /api/v1/config` shows `set`, not the token. |
-| `MIXER_LINK_PEERS` | unset | Master: 1 to 4 `ws://` or `wss://` URLs of slaves, comma-separated. |
+| `MIXER_LINK_TOKEN` | unset | Pre-shared token (a secret, 8 to 200 characters). Required when the role is not off. `GET /api/v1/config` shows `set`, not the token. |
+| `MIXER_LINK_PEERS` | unset | Master: 1 to 4 `ws://` or `wss://` URLs of slaves (with a host), comma-separated, each slave once. The first is `s1`. |
 | `MIXER_LINK_TAKEOVER` | allow | Slave: `allow` or `deny` local changes after the master has disconnected. |
 
 Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
@@ -431,6 +433,35 @@ buses, sends), `peaks` (dBFS, about 10 Hz), `rtt_ms` and `return_bus`.
 A send that does not exist yet is created. `POST /api/v1/remotes/<id>/push` copies
 the faders, mutes and sends the gallery last saw. When the master drops, the far
 side holds the mix; the console says so.
+
+The link (`/api/v1/link` on the slave's `WEB_PORT`):
+
+- Security: the token is the first message. Over `ws://` it travels in clear,
+  so keep a `ws://` link on a trusted network. Across anything else use
+  `wss://`: the master speaks TLS (rustls, the system certificate store, so a
+  private CA installed there is trusted), and the slave serves plain WebSocket,
+  so put a TLS-terminating proxy or ingress in front of its web port.
+- One master at a time: a second one is refused (its `last_error` is "another
+  master is connected") until the first has gone.
+- Dead link: each side pings every second and closes the link when it has
+  heard nothing for 5 s. The master reconnects every 2 s. `remote_link_up` is
+  0 meanwhile, on the master (`peer="s1"`…) and on the slave (`peer="master"`).
+- Takeover: with `MIXER_LINK_TAKEOVER=deny`, local changes on the slave are
+  refused (400) from the moment its master has gone until one is back; the
+  master's own commands are never refused. Before the first master, the slave
+  loads its show as usual.
+- Delivery is at most once: commands are numbered on each connection and the
+  slave acknowledges each (a refused one shows in `last_error`). Commands are
+  not resent; one that was not sent when the link drops is dropped. After a
+  reconnect, push to bring the far side to what the gallery last saw.
+  `command`, `push` and `return` answer 409 while the far side is down.
+- A hello must come within 5 s, and a message may have 4 MiB at most.
+- A message of a type the other version does not know is ignored (logged once
+  per connection), and a command it does not know is refused, so the link
+  stays up between versions.
+- The round trip (`rtt_ms`, `remote_link_rtt_ms`) is measured on each side's
+  own clock, with its own pings.
+- `ret-<peer>` taken by another signal: `return` is refused; rename it.
 - `link` `{"strips", "format"?, "id"?, "name"?}`: mono strips into one stereo or
   surround strip (2: stereo, 3: 3.0, 6: 5.1, 8: 7.1, 10: 5.1.4, 12: 7.1.4): their
   patches in order, the first strip's processing, fader and settings, a send to
@@ -735,7 +766,11 @@ microphone by WHIP from headless Chrome into an MXL output, with its latency),
 `tests/integration/auto.sh` (gain sharing sample-exact on two tones with a weight,
 bypass, a muted member, without a plan swap; the VAD on espeak-ng speech and not on
 a tone; a tone ducked under the speech, its depth, onset latency and release on the
-output; two talkers taking turns with last-mic-hold), `tests/perf/section16.sh` (the
+output; two talkers taking turns with last-mic-hold), `tests/integration/link.sh`
+(two mixers on the remote link: the gallery rides the far side, the return and
+the in-ears; a second master, a connection without hello and an oversized
+message refused; a hung master and a hung far side dropped within 5 s and
+reconnected, takeover deny meanwhile), `tests/perf/section16.sh` (the
 §16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
 the maintainers are in `tests/hw/`.
