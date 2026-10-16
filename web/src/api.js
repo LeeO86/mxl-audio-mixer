@@ -13,6 +13,8 @@ export async function exchange(path, { method = "GET", body, text = false } = {}
     headers,
     body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
     cache: "no-store",
+    // A hung request ends after 30 s, so a poll waiting for it carries on.
+    signal: AbortSignal.timeout(30000),
   });
   const raw = await resp.text();
   let data = raw;
@@ -25,7 +27,8 @@ export async function exchange(path, { method = "GET", body, text = false } = {}
   }
   if (!resp.ok) {
     const reason = data && typeof data === "object" ? data.error : String(data || "").slice(0, 200);
-    throw new Error(reason || `HTTP ${resp.status}`);
+    // The answer stays on the error: a refused logic edit lists its issues there (D162).
+    throw Object.assign(new Error(reason || `HTTP ${resp.status}`), { status: resp.status, data });
   }
   const revision = resp.headers.get("x-mix-revision");
   return { data, revision: revision === null ? null : Number(revision) };

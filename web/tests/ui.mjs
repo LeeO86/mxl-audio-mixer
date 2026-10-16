@@ -407,6 +407,9 @@ try {
   await page.getByRole("button", { name: "+ Graph" }).click();
   await page.getByLabel("Block type").waitFor({ timeout: 5000 });
   const graph = await until("graph Keys", async () => (await api("/api/v1/logic")).find((g) => g.name === "Keys"));
+  // A new graph starts in dry run; this one goes live.
+  await page.getByLabel("dry run").uncheck();
+  await until("Keys live", async () => (await api(`/api/v1/logic/${graph.id}`)).dry_run === false);
   await page.getByLabel("Block type").selectOption("const");
   await page.getByRole("button", { name: "+ Block" }).click();
   await page.getByLabel("Block type").selectOption("set-mute");
@@ -432,40 +435,35 @@ try {
   await page.mouse.click(cableBox.x + cableBox.width / 2, cableBox.y + cableBox.height / 2);
   await page.keyboard.press("Delete");
   await until("the cable removed", async () => (await api(`/api/v1/logic/${graph.id}`)).wires.length === 0);
-  await page.getByLabel("Block type").selectOption("tally");
-  await page.getByLabel("Tally index").fill("5");
-  await page.getByRole("button", { name: "+ Block" }).click();
-  await until("tally index 5", async () => {
-    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "tally");
-    return b?.index === 5 ? b : null;
+  // Parameters are edited in the list: on air index, timer, meter threshold, snapshot recall.
+  const blockOf = async (type) => (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === type);
+  for (const type of ["tally", "timer", "above", "recall"]) {
+    if (type === "recall") await api("/api/v1/snapshots", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "logic-show", name: "Logic" }) });
+    await page.getByLabel("Block type").selectOption(type);
+    await page.getByRole("button", { name: "+ Block" }).click();
+    await until(`a ${type} block`, () => blockOf(type));
+  }
+  const setField = async (label, value) => {
+    await page.getByLabel(label, { exact: true }).fill(value);
+    await page.getByLabel(label, { exact: true }).press("Enter");
+  };
+  await setField("tally-1 index", "5");
+  await until("tally index 5", async () => (await blockOf("tally"))?.index === 5);
+  await page.locator('.vue-flow__node[data-id="tally-1"]').getByText(": 5").waitFor({ timeout: 5000 });
+  await setField("timer-1 ms", "500");
+  await until("timer 500 ms", async () => (await blockOf("timer"))?.ms === 500);
+  await page.locator('.vue-flow__node[data-id="timer-1"]').getByText("500 ms").waitFor({ timeout: 5000 });
+  await setField("above-1 threshold_db", "-40");
+  await setField("above-1 hysteresis_db", "6");
+  await until("above -40/6", async () => {
+    const b = await blockOf("above");
+    return b?.threshold_db === -40 && b?.hysteresis_db === 6;
   });
-  await page.locator('.vue-flow__node[data-id="tally-1"]').getByText("On air: 5").waitFor({ timeout: 5000 });
-  await page.getByLabel("Block type").selectOption("timer");
-  await page.getByLabel("Timer milliseconds").fill("500");
-  await page.getByRole("button", { name: "+ Block" }).click();
-  await until("timer 500 ms", async () => {
-    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "timer");
-    return b?.ms === 500 ? b : null;
-  });
-  await page.locator('.vue-flow__node[data-id="timer-1"]').getByText("Timer: 500 ms").waitFor({ timeout: 5000 });
-  await api("/api/v1/snapshots", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "logic-show", name: "Logic" }) });
-  await page.getByLabel("Block type").selectOption("above");
-  await page.getByLabel("Block signal").selectOption("gtr");
-  await page.getByLabel("Threshold dB").fill("-40");
-  await page.getByLabel("Hysteresis dB").fill("6");
-  await page.getByRole("button", { name: "+ Block" }).click();
-  await until("above -40", async () => {
-    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "above");
-    return b?.threshold_db === -40 && b?.hysteresis_db === 6 ? b : null;
-  });
-  await page.getByLabel("Block type").selectOption("recall");
-  await until("snapshot in the list", async () => (await page.getByLabel("Snapshot").innerHTML()).includes("logic-show"));
-  await page.getByLabel("Snapshot").selectOption("logic-show");
-  await page.getByRole("button", { name: "+ Block" }).click();
-  await until("recall logic-show", async () => {
-    const b = (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === "recall");
-    return b?.snapshot === "logic-show" ? b : null;
-  });
+  // A new recall has no snapshot until one is chosen.
+  if ((await blockOf("recall"))?.snapshot !== "") throw new Error("a recall got a snapshot by itself");
+  await until("snapshot in the list", async () => (await page.getByLabel("recall-1 snapshot", { exact: true }).innerHTML()).includes("logic-show"));
+  await page.getByLabel("recall-1 snapshot", { exact: true }).selectOption("logic-show");
+  await until("recall logic-show", async () => (await blockOf("recall"))?.snapshot === "logic-show");
   await api(`/api/v1/logic/${graph.id}`, { method: "DELETE" });
   await api("/api/v1/snapshots/logic-show", { method: "DELETE" });
   await api("/api/v1/strips/gtr", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ mute: false }) });
