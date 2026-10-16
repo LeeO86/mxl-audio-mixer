@@ -720,10 +720,6 @@ impl Run {
                 };
                 acts.push((id.to_string(), act));
             }
-            BlockKind::Log { .. } if self.wired(i, 1) => {
-                // Keep the value input's conversion current.
-                self.read(i, 1);
-            }
             _ => {}
         }
         v
