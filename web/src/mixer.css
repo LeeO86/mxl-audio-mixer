@@ -279,7 +279,39 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 
 /* Routing graph (§5) */
 .graphwrap { position: relative; height: calc(100vh - 11rem); min-height: 420px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
-.logiccanvas { height: 360px; min-height: 280px; margin-top: .4rem; }
+/* Logic editor (§11.3): palette | canvas; the palette goes above the canvas on a narrow screen. */
+.ltools { margin-top: .5rem; }
+.row.tight > .lhint { flex: 1 1 12rem; }
+.logiceditor { display: grid; grid-template-columns: 10rem minmax(0, 1fr); gap: .6rem; margin-top: .4rem; }
+.lpalette { border: 1px solid var(--border); border-radius: 8px; padding: .5rem; background: var(--panel2); overflow-y: auto; max-height: 62vh; }
+.lpalette .pitem { display: block; width: 100%; text-align: left; margin: .2rem 0; padding: .25rem .45rem; border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 5px; background: var(--panel); color: var(--text); font: inherit; font-size: .78rem; cursor: grab; }
+.lpalette .pitem:hover { border-color: var(--accent); }
+.logiccanvas { height: 62vh; min-height: 320px; }
+.lnode { min-width: 140px; }
+.gnode.k-in, .lpalette .k-in { border-left-color: var(--accent); }
+.gnode.k-logic, .lpalette .k-logic { border-left-color: var(--muted); }
+.gnode.k-act, .lpalette .k-act { border-left-color: var(--warn); }
+.lnode .lfoot { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-top: .15rem; }
+.lval { font-size: .72rem; font-weight: 600; font-variant-numeric: tabular-nums; padding: 0 .35rem; border-radius: 3px; background: var(--chip); color: var(--text); white-space: nowrap; }
+.lval.on { background: var(--ok); color: #fff; }
+.lval.off { color: var(--muted); }
+.amtable tr.chosen td { background: var(--chip); }
+.lparams { display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
+.vue-flow__controls { box-shadow: none; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.vue-flow__controls-button { background: var(--panel2); border-bottom: 1px solid var(--border); }
+.vue-flow__controls-button:hover { background: var(--border); }
+.vue-flow__controls-button svg { fill: var(--text); }
+.vue-flow__minimap { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
+.vue-flow__minimap-mask { fill: var(--bg); fill-opacity: .65; }
+.vue-flow__minimap-node { fill: var(--chip); stroke: var(--muted); }
+.vue-flow__selection, .vue-flow__nodesselection-rect { background: rgba(77, 163, 255, .08); border: 1px dashed var(--accent); }
+@media (max-width: 860px) {
+  .logiceditor { grid-template-columns: 1fr; }
+  .lpalette { display: flex; flex-wrap: wrap; gap: .3rem; max-height: none; }
+  .lpalette .group-caption { flex-basis: 100%; margin: .3rem 0 0; }
+  .lpalette .pitem { width: auto; margin: 0; }
+  .logiccanvas { height: 55vh; }
+}
 .graph { width: 100%; height: 100%; }
 .gnode { min-width: 150px; padding: .35rem .6rem; border: 1px solid var(--border); border-left: 4px solid var(--colour); border-radius: 6px; background: var(--panel); color: var(--text); font-size: .8rem; }
 .gnode.muted { opacity: .55; }
