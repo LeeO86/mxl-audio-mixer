@@ -792,16 +792,17 @@ fn check_link_peers(urls: &[String]) -> Result<(), ConfigError> {
                 "MIXER_LINK_PEERS entries must be ws:// or wss:// URLs, got {url}"
             ));
         }
+        if uri.authority().is_some_and(|a| a.as_str().contains('@')) {
+            return err(format!(
+                "MIXER_LINK_PEERS: {url} has a user or password; the token is MIXER_LINK_TOKEN"
+            ));
+        }
         let Some(host) = uri.host().filter(|h| !h.is_empty()) else {
             return err(format!("MIXER_LINK_PEERS: {url} has no host"));
         };
         // After the host: nothing (the default port) or `:<1-65535>`.
         let authority = uri.authority().map_or("", |a| a.as_str());
-        let after_host = authority
-            .rsplit_once('@')
-            .map_or(authority, |(_, a)| a)
-            .strip_prefix(host)
-            .unwrap_or_default();
+        let after_host = authority.strip_prefix(host).unwrap_or_default();
         let port = match after_host.strip_prefix(':').map(str::parse::<u16>) {
             None if after_host.is_empty() => {
                 if scheme == "wss" {
@@ -992,6 +993,7 @@ mod tests {
             "ws://far:8190/api/v1/link,ws://far:8190/api/v1/link",
             "ws://far/api/v1/link,ws://FAR:80/api/v1/link",
             "wss://far/api/v1/link,wss://far:443/api/v1/link",
+            "wss://user:secret@far/api/v1/link",
         ] {
             assert!(master(bad).is_err(), "{bad}");
         }

@@ -410,6 +410,15 @@ High-level operations make ordinary buses and sends (editable afterwards), each
   selection; without `of`, a bus per participant with sends from the others. The
   format is `of`'s or mono.
 - `mix-minus` `{"of", "without", "id"?, "name"?}`: a mix-minus bus.
+- `link` `{"strips", "format"?, "id"?, "name"?}`: mono strips into one stereo or
+  surround strip (2: stereo, 3: 3.0, 6: 5.1, 8: 7.1, 10: 5.1.4, 12: 7.1.4): their
+  patches in order, the first strip's processing, fader and settings, a send to
+  every bus one of them sent to (the first one's); references (layouts, VCAs, mute
+  groups, monitor sources, mix-minus) move to it.
+- `unlink` `{"strip"}`: a stereo strip into `<id>-l` and `<id>-r`, hard left and
+  right, each with its processing, fader and sends.
+
+The console's Operations panel runs them on a selection of strips.
 
 ### Remote production (§13)
 
@@ -438,14 +447,21 @@ The link (`/api/v1/link` on the slave's `WEB_PORT`):
 
 - Security: the token is the first message. Over `ws://` it travels in clear,
   so keep a `ws://` link on a trusted network. Across anything else use
-  `wss://`: the master speaks TLS (rustls, the system certificate store, so a
-  private CA installed there is trusted), and the slave serves plain WebSocket,
-  so put a TLS-terminating proxy or ingress in front of its web port.
+  `wss://`: the master speaks TLS (rustls with the system certificate store),
+  and the slave serves plain WebSocket, so put a TLS-terminating proxy or
+  ingress in front of its web port. For a private CA, install it in the
+  master's system store, or point `SSL_CERT_FILE` (a PEM file) or
+  `SSL_CERT_DIR` at it; either one replaces the system store. A wrong token is
+  refused and logged on the slave (at most every 10 s, with a count). Put the
+  token in `MIXER_LINK_TOKEN`, not in the URL: a user or password there is
+  refused.
 - One master at a time: a second one is refused (its `last_error` is "another
   master is connected") until the first has gone.
 - Dead link: each side pings every second and closes the link when it has
   heard nothing for 5 s. The master reconnects every 2 s. `remote_link_up` is
-  0 meanwhile, on the master (`peer="s1"`…) and on the slave (`peer="master"`).
+  0 meanwhile, on the master (`peer="s1"`…, listed from the start, so a slave
+  never reached shows too) and on the slave (`peer="master"`), and the RTT is
+  left out until the link is back.
 - Takeover: with `MIXER_LINK_TAKEOVER=deny`, local changes on the slave are
   refused (400) from the moment its master has gone until one is back; the
   master's own commands are never refused. Before the first master, the slave
@@ -454,23 +470,17 @@ The link (`/api/v1/link` on the slave's `WEB_PORT`):
   slave acknowledges each (a refused one shows in `last_error`). Commands are
   not resent; one that was not sent when the link drops is dropped. After a
   reconnect, push to bring the far side to what the gallery last saw.
-  `command`, `push` and `return` answer 409 while the far side is down.
+  `command`, `push` and `return` answer 409 while the far side is down, and
+  `command` 503 when 1024 commands are waiting (a stuck link); the body is
+  `{"error"}`.
 - A hello must come within 5 s, and a message may have 4 MiB at most.
 - A message of a type the other version does not know is ignored (logged once
-  per connection), and a command it does not know is refused, so the link
-  stays up between versions.
+  per connection), and a command or push it cannot read is refused, so the
+  link stays up between versions. A fader at −∞ is `"-inf"` (`null` from
+  versions before 1.3.0 is read as −∞).
 - The round trip (`rtt_ms`, `remote_link_rtt_ms`) is measured on each side's
   own clock, with its own pings.
 - `ret-<peer>` taken by another signal: `return` is refused; rename it.
-- `link` `{"strips", "format"?, "id"?, "name"?}`: mono strips into one stereo or
-  surround strip (2: stereo, 3: 3.0, 6: 5.1, 8: 7.1, 10: 5.1.4, 12: 7.1.4): their
-  patches in order, the first strip's processing, fader and settings, a send to
-  every bus one of them sent to (the first one's); references (layouts, VCAs, mute
-  groups, monitor sources, mix-minus) move to it.
-- `unlink` `{"strip"}`: a stereo strip into `<id>-l` and `<id>-r`, hard left and
-  right, each with its processing, fader and sends.
-
-The console's Operations panel runs them on a selection of strips.
 
 ### Voice detection, auto-level, auto-mix and ducking (§8)
 

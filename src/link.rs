@@ -53,6 +53,9 @@ const CONNECT_WITHIN: Duration = Duration::from_secs(10);
 /// The largest link message, both ways (axum's default is 64 MiB). A desk or a
 /// push is a part of the mix, which the API takes up to 2 MB.
 pub const MAX_MESSAGE: usize = 4 << 20;
+/// Commands queued for one slave at most. The queue is sent every 50 ms, so
+/// a full one means the link is stuck.
+const MAX_PENDING: usize = 1024;
 
 /// The slave's side of the link (§13): the master connection that holds it,
 /// and whether local changes are refused.
@@ -186,8 +189,14 @@ enum Msg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Level {
     signal: String,
-    fader_db: f64,
+    /// `"-inf"` for −∞. Peers before 1.3.0 wrote `null`, read as −∞.
+    #[serde(deserialize_with = "db_or_null")]
+    fader_db: Db,
     mute: bool,
+}
+
+fn db_or_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Db, D::Error> {
+    Ok(Option::<Db>::deserialize(d)?.unwrap_or(Db::MINUS_INF))
 }
 
 /// The far-side desk, as the gallery draws it.
@@ -333,7 +342,7 @@ pub fn apply_command(mix: &mut Mix, command: &Command) -> Result<(), String> {
 /// Copy faders, mutes and sends onto signals that exist.
 pub(crate) fn push_levels(dst: &mut Mix, levels: &[Level], sends: &[DeskSend]) {
     for level in levels {
-        set_fader(dst, &level.signal, level.fader_db);
+        set_fader(dst, &level.signal, level.fader_db.0);
         set_mute(dst, &level.signal, level.mute);
     }
     for send in sends {
@@ -346,14 +355,14 @@ pub(crate) fn levels_of(mix: &Mix) -> Vec<Level> {
     for s in &mix.strips {
         out.push(Level {
             signal: s.id.clone(),
-            fader_db: s.fader_db.0,
+            fader_db: s.fader_db,
             mute: s.mute,
         });
     }
     for b in &mix.buses {
         out.push(Level {
             signal: b.id.clone(),
-            fader_db: b.fader_db.0,
+            fader_db: b.fader_db,
             mute: b.mute,
         });
     }
@@ -609,15 +618,35 @@ fn set_fader(mix: &mut Mix, signal: &str, db: f64) -> bool {
     false
 }
 
+/// Compares SHA-1 digests in constant time, so neither the content nor the
+/// length of the token shows in the time taken.
 fn token_ok(got: &str, want: &str) -> bool {
-    if got.len() != want.len() {
-        return false;
+    use sha1::Digest;
+    let (got, want) = (sha1::Sha1::digest(got), sha1::Sha1::digest(want));
+    got.iter()
+        .zip(want.iter())
+        .fold(0u8, |d, (a, b)| d | (a ^ b))
+        == 0
+}
+
+/// Log refused tokens at most every 10 s, with the count since the last line.
+fn note_bad_token() {
+    static REFUSED: AtomicU64 = AtomicU64::new(0);
+    static NEXT_LOG_MS: AtomicU64 = AtomicU64::new(0);
+    REFUSED.fetch_add(1, Ordering::Relaxed);
+    let now = now_ms();
+    let next = NEXT_LOG_MS.load(Ordering::Relaxed);
+    if now >= next
+        && NEXT_LOG_MS
+            .compare_exchange(next, now + 10_000, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let refused = REFUSED.swap(0, Ordering::Relaxed);
+        tracing::warn!(
+            refused,
+            "remote link: refused connections with a wrong token"
+        );
     }
-    let mut diff = 0u8;
-    for (a, b) in got.bytes().zip(want.bytes()) {
-        diff |= a ^ b;
-    }
-    diff == 0
 }
 
 async fn socket(ws: WebSocketUpgrade, State(app): State<App>) -> Response {
@@ -653,6 +682,7 @@ async fn slave(mut socket: WebSocket, app: App) {
         return;
     };
     if !token_ok(&token, &app.config.link_token) {
+        note_bad_token();
         refuse(&mut socket, "token").await;
         return;
     }
@@ -694,8 +724,8 @@ async fn slave_session(app: &App, socket: &mut WebSocket) -> Result<(), String> 
     send(socket, text_msg(&hello)).await?;
     send_state(app, socket).await?;
     let mut sent = app.control().revision;
-    let mut meters = tokio::time::interval(Duration::from_millis(100));
-    let mut ping = tokio::time::interval(PING_EVERY);
+    let mut meters = interval(Duration::from_millis(100));
+    let mut ping = interval(PING_EVERY);
     let mut heard = Instant::now();
     let mut logged = false;
     loop {
@@ -725,6 +755,13 @@ async fn slave_session(app: &App, socket: &mut WebSocket) -> Result<(), String> 
             }
         }
     }
+}
+
+/// A tick that, after a stall, comes once and goes on from there (no burst).
+fn interval(period: Duration) -> tokio::time::Interval {
+    let mut i = tokio::time::interval(period);
+    i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    i
 }
 
 /// The next frame, or an error when nothing has come for [`DEAD_AFTER`] since
@@ -812,8 +849,9 @@ async fn handle_slave(
 ) -> Result<(), String> {
     let msg = match parse(text) {
         Ok(msg) => msg,
-        Err(unknown) if unknown.kind == "command" => {
-            // A command this version does not understand: refuse it, keep the link.
+        Err(unknown) if unknown.kind == "command" || unknown.kind == "push" => {
+            // A command or push this version does not understand: refuse it,
+            // keep the link.
             let ack = Msg::Ack {
                 seq: unknown.seq,
                 ok: false,
@@ -957,6 +995,8 @@ impl Peers {
             p.up = up;
             if let Some(label) = label {
                 p.label = label.to_string();
+            } else {
+                p.rtt_ms = None;
             }
             return;
         }
@@ -978,8 +1018,9 @@ impl Peers {
         }
     }
 
-    /// Master: a socket to slave `id` is open. It is up once the slave says hello.
-    fn connected(&mut self, id: &str, url: &str) {
+    /// Master: slave `id` at `url` is listed, and up once it says hello. Called
+    /// at start (so a slave never reached shows as down) and on each connection.
+    fn listed(&mut self, id: &str, url: &str) {
         if let Some(p) = self.peer_mut(id) {
             p.url = url.to_string();
             p.up = false;
@@ -1001,6 +1042,7 @@ impl Peers {
     fn ended(&mut self, id: &str) {
         if let Some(p) = self.peer_mut(id) {
             p.up = false;
+            p.rtt_ms = None;
         }
         let dropped = self.pending.remove(id).map_or(0, |c| c.len())
             + usize::from(self.pending_push.remove(id).is_some());
@@ -1011,6 +1053,23 @@ impl Peers {
                 "remote link: commands not sent before the link ended were dropped"
             );
         }
+    }
+
+    /// Master: queue a command for the live link to slave `id`. Checked and
+    /// queued under one lock, so nothing is queued after [`Peers::ended`].
+    fn enqueue(&mut self, id: &str, command: Command) -> Result<(), (StatusCode, &'static str)> {
+        if !self.list.iter().any(|p| p.id == id && p.up) {
+            return Err((StatusCode::CONFLICT, "the far side is not linked"));
+        }
+        let queue = self.pending.entry(id.to_string()).or_default();
+        if queue.len() >= MAX_PENDING {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the far side is not taking commands",
+            ));
+        }
+        queue.push(command);
+        Ok(())
     }
 
     /// Master: one message from slave `id`; returns the reply to send, if any.
@@ -1065,6 +1124,7 @@ type MasterSocket =
 /// Master: keep a connection to one slave and remember its desk.
 pub async fn master(app: App, url: String) {
     let id = peer_id(&app.config.link_peers, &url);
+    app.link.lock().await.listed(&id, &url);
     loop {
         if let Err(e) = master_once(&app, &id, &url).await {
             tracing::warn!(peer = %url, "remote link: {e}");
@@ -1084,15 +1144,15 @@ async fn master_once(app: &App, id: &str, url: &str) -> Result<(), String> {
         .await
         .map_err(|_| format!("no connection within {} s", CONNECT_WITHIN.as_secs()))?
         .map_err(|e| e.to_string())?;
-    app.link.lock().await.connected(id, url);
+    app.link.lock().await.listed(id, url);
     let hello = Msg::Hello {
         role: "master".into(),
         token: app.config.link_token.clone(),
         label: app.config.host_id.clone(),
     };
     send(&mut socket, ws_text(&hello)).await?;
-    let mut flush = tokio::time::interval(Duration::from_millis(50));
-    let mut ping = tokio::time::interval(PING_EVERY);
+    let mut flush = interval(Duration::from_millis(50));
+    let mut ping = interval(PING_EVERY);
     let mut heard = Instant::now();
     let mut seq = 0;
     let mut logged = false;
@@ -1177,41 +1237,35 @@ async fn remotes(State(app): State<App>) -> Json<Value> {
     Json(json!({ "peers": list }))
 }
 
+fn refused((code, error): (StatusCode, &str)) -> Response {
+    (code, Json(json!({ "error": error }))).into_response()
+}
+
 async fn command(
     State(app): State<App>,
     Path(id): Path<String>,
     Json(command): Json<Command>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
+) -> Response {
     if app.config.link_role != LinkRole::Master {
-        return Err(axum::http::StatusCode::NOT_FOUND);
+        return StatusCode::NOT_FOUND.into_response();
     }
-    let peers = app.link.lock().await;
-    if !peers.list.iter().any(|p| p.id == id && p.up) {
-        return Err(axum::http::StatusCode::CONFLICT);
+    // The connection task owns the socket; it sends the queue every 50 ms.
+    match app.link.lock().await.enqueue(&id, command) {
+        Ok(()) => Json(json!({"queued": true})).into_response(),
+        Err(e) => refused(e),
     }
-    drop(peers);
-    // The live socket is the master's; commands are applied by the slave when
-    // it receives them. This process is the master, so the command is queued
-    // on the peer for the connection task. A direct send needs the socket,
-    // which the connection task owns. Store the command for that task.
-    let mut peers = app.link.lock().await;
-    peers.pending.entry(id).or_default().push(command);
-    Ok(Json(json!({"queued": true})))
 }
 
-async fn push(
-    State(app): State<App>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
+async fn push(State(app): State<App>, Path(id): Path<String>) -> Response {
     if app.config.link_role != LinkRole::Master {
-        return Err(axum::http::StatusCode::NOT_FOUND);
+        return StatusCode::NOT_FOUND.into_response();
     }
     let mut peers = app.link.lock().await;
     if !peers.list.iter().any(|p| p.id == id && p.up) {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return refused((StatusCode::CONFLICT, "the far side is not linked"));
     }
     let Some(levels) = peers.levels.get(&id).cloned() else {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return refused((StatusCode::CONFLICT, "no levels from the far side yet"));
     };
     let sends = peers
         .desks
@@ -1219,7 +1273,7 @@ async fn push(
         .map(|d| d.sends.clone())
         .unwrap_or_default();
     peers.pending_push.insert(id, PushBody { levels, sends });
-    Ok(Json(json!({"queued": true})))
+    Json(json!({"queued": true})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1254,11 +1308,7 @@ async fn gallery_return(
     {
         let peers = app.link.lock().await;
         if !peers.list.iter().any(|p| p.id == id && p.up) {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "far side is not linked"})),
-            )
-                .into_response();
+            return refused((StatusCode::CONFLICT, "the far side is not linked"));
         }
     }
     let _serial = app.changes.lock().await;
@@ -1278,10 +1328,15 @@ async fn gallery_return(
     {
         let mut peers = app.link.lock().await;
         peers.returns.insert(id.clone(), bus.clone());
-        peers.pending.entry(id).or_default().push(Command::Ears {
+        let ears = Command::Ears {
             return_strip: body.return_strip,
             voices: body.voices,
-        });
+        };
+        // The link may have dropped while the return was built: the gallery
+        // bus stays, and building again sends the in-ears.
+        if let Err(e) = peers.enqueue(&id, ears) {
+            return refused(e);
+        }
     }
     (
         StatusCode::CREATED,
@@ -1500,7 +1555,7 @@ mod tests {
     #[test]
     fn the_master_measures_the_round_trip_with_its_own_clock() {
         let mut peers = Peers::default();
-        peers.connected("s1", "ws://far/api/v1/link");
+        peers.listed("s1", "ws://far/api/v1/link");
         assert!(!peers.list[0].up, "up once the slave says hello");
         let hello = Msg::Hello {
             role: "slave".into(),
@@ -1542,7 +1597,7 @@ mod tests {
         assert_eq!(slave.list[0].label, "gallery");
 
         let mut master = Peers::default();
-        master.connected("s2", "ws://b/api/v1/link");
+        master.listed("s2", "ws://b/api/v1/link");
         master.on_slave_msg(
             "s2",
             Msg::State {
@@ -1664,5 +1719,90 @@ mod tests {
             ),
             "{err}"
         );
+    }
+    #[test]
+    fn minus_infinity_survives_state_and_push() {
+        let mut mix = Mix::default();
+        let mut s = strip("vox");
+        s.fader_db = Db::MINUS_INF;
+        mix.strips.push(s);
+        let state = Msg::State {
+            revision: 2,
+            levels: levels_of(&mix),
+            desk: Some(desk_of(&mix)),
+        };
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(text.contains(r#""fader_db":"-inf""#), "{text}");
+        let Ok(Msg::State { levels, desk, .. }) = parse(&text) else {
+            panic!("a state with -inf is not read: {text}");
+        };
+        assert_eq!(levels[0].fader_db, Db::MINUS_INF);
+        assert_eq!(desk.unwrap().strips[0].fader_db, Db::MINUS_INF);
+        let push = Msg::Push {
+            seq: 4,
+            levels,
+            sends: Vec::new(),
+        };
+        let Ok(Msg::Push { seq: 4, levels, .. }) = parse(&serde_json::to_string(&push).unwrap())
+        else {
+            panic!("a push with -inf is not read");
+        };
+        let mut other = Mix::default();
+        other.strips.push(strip("vox"));
+        push_levels(&mut other, &levels, &[]);
+        assert_eq!(other.strips[0].fader_db, Db::MINUS_INF);
+        // Peers before 1.3.0 wrote -inf as null.
+        let old = r#"{"type":"push","levels":[{"signal":"vox","fader_db":null,"mute":false}]}"#;
+        let Ok(Msg::Push { levels, .. }) = parse(old) else {
+            panic!("an older push is not read");
+        };
+        assert_eq!(levels[0].fader_db, Db::MINUS_INF);
+        assert!(parse(r#"{"type":"push","levels":[{"signal":"vox"}]}"#)
+            .is_err_and(|u| u.kind == "push"));
+    }
+
+    #[test]
+    fn commands_queue_only_on_a_live_link_and_only_so_many() {
+        let mut peers = Peers::default();
+        peers.listed("s1", "ws://far/l");
+        let mute = || Command::Mute {
+            signal: "vox".into(),
+            mute: true,
+        };
+        assert_eq!(
+            peers.enqueue("s1", mute()).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            peers.enqueue("s9", mute()).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+        peers.list[0].up = true;
+        peers.list[0].rtt_ms = Some(3.0);
+        for _ in 0..MAX_PENDING {
+            peers.enqueue("s1", mute()).unwrap();
+        }
+        assert_eq!(
+            peers.enqueue("s1", mute()).unwrap_err().0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(metrics(&peers)
+            .iter()
+            .any(|l| l.starts_with("remote_link_rtt_ms")));
+        peers.ended("s1");
+        assert!(peers.pending.is_empty());
+        // A command that comes after the link ended is refused, not kept for
+        // the next connection.
+        assert_eq!(
+            peers.enqueue("s1", mute()).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
+        assert!(peers.pending.is_empty());
+        assert_eq!(peers.list[0].rtt_ms, None);
+        assert!(!metrics(&peers)
+            .iter()
+            .any(|l| l.starts_with("remote_link_rtt_ms")));
+        assert!(!token_ok("secret-token-and-more", "secret-token"));
+        assert!(!token_ok("", "secret-token"));
     }
 }

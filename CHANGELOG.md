@@ -21,7 +21,7 @@ Milestone 9 (§13: master/slave remote link).
 
 ### Remote link
 
-Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D153).
+Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D157).
 
 - `wss://` works: the master speaks TLS (rustls, the system certificate store). It failed on every attempt before. The slave needs a TLS-terminating proxy in front of its web port. Over `ws://` the token travels in clear: keep such a link on a trusted network.
 - Takeover deny no longer refuses the master's own commands, and a closing extra connection no longer marks the link down under a live master.
@@ -33,8 +33,12 @@ Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D153).
 - A hello must come within 5 s, and a link message may have 4 MiB at most (was 64 MiB).
 - `MIXER_LINK_PEERS` must be `ws://` or `wss://` URLs with a host and a valid port, each slave once (exit 78). A slave's id is its place in the list (`s1` first), not the order in which slaves answered.
 - `return` is refused while `ret-<peer>` is another signal; it used to leave a new bus and output behind on every rebuild.
-- README: `MIXER_LINK_TOKEN` is a secret (the README said no setting was).
-- CI runs `tests/integration/link.sh`, which now also checks a hung master and far side, takeover deny, a second master, a silent and an oversized connection.
+- A fader at −∞ no longer breaks the link: levels carry `"-inf"` (the `null` of older peers is read as −∞). Before, one such fader made the master ignore every later state of that far side.
+- `command` checks the link and queues under one lock, so nothing queued after the link dropped goes out on the next connection; at most 1024 commands wait per far side (503). The 409s and the 503 have a JSON `error`.
+- The master lists its slaves from the start (`remote_link_up` 0 for one never reached), and the RTT is left out while a link is down.
+- The token is compared as a digest (its length does not show in the time taken); a wrong one is logged on the slave at most every 10 s. A user or password in `MIXER_LINK_PEERS` is refused. An unreadable push gets a refusing `ack` too. The link's timers do not burst after a stall.
+- README: `MIXER_LINK_TOKEN` is a secret (the README said no setting was); `SSL_CERT_FILE`/`SSL_CERT_DIR` for a private CA.
+- CI runs `tests/integration/link.sh`, which now also checks a hung master and far side, takeover deny, a second master, a silent and an oversized connection, and `wss://` through a TLS proxy with a private CA.
 
 ## 1.2.0 (in progress)
 

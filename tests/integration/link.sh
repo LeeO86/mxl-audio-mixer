@@ -139,3 +139,34 @@ kill -CONT "$FAR_PID"
 wait_until 25 "the gallery back on s1" gallery_up True
 wait_until 5 "the far side back up" far_up True
 pass "a hung peer is dropped within 5 s and the link comes back; takeover deny holds the far side meanwhile"
+
+# wss:// through a TLS-terminating proxy, trusting a private CA by SSL_CERT_FILE.
+# A second gallery reaches the far side (the TLS handshake and the hello pass)
+# and is refused as a second master. Its other slave is never reached: listed
+# and down from the start.
+TLS="$WORK/tls"
+mkdir -p "$TLS"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=link-test CA" \
+    -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout "$TLS/ca.key" -out "$TLS/ca.pem" 2>/dev/null
+openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout "$TLS/key.pem" -out "$TLS/req.csr" 2>/dev/null
+printf 'subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' >"$TLS/ext"
+openssl x509 -req -in "$TLS/req.csr" -CA "$TLS/ca.pem" -CAkey "$TLS/ca.key" -CAcreateserial -days 1 \
+    -extfile "$TLS/ext" -out "$TLS/cert.pem" 2>/dev/null
+node "$(dirname "$0")/tls_proxy.mjs" 8443 "$TLS/cert.pem" "$TLS/key.pem" 8191 &
+PIDS+=("$!")
+G2="$WORK/gallery2"
+G2_WEB="http://127.0.0.1:8192"
+mkdir -p "$G2/mxl" "$G2/state"
+boot gallery2 \
+    WEB_PORT=8192 NMOS_PORT=3362 \
+    MXL_DOMAIN_SCAN_PATH="$G2/mxl" MIXER_STATE_DIR="$G2/state" MXL_OUTPUT_DOMAIN_DIR="$G2/mxl/out" \
+    MEDIAMTX_RTSP_PORT=8984 MEDIAMTX_WHEP_PORT=8629 MEDIAMTX_ICE_UDP_PORT=8229 \
+    MIXER_LINK_ROLE=master MIXER_LINK_TOKEN="$TOKEN" SSL_CERT_FILE="$TLS/ca.pem" \
+    MIXER_LINK_PEERS="wss://localhost:8443/api/v1/link,ws://127.0.0.1:9/api/v1/link"
+wait_until 40 "gallery2" http_ok "$G2_WEB/livez"
+metric "$G2_WEB" s2 0 || fail "a slave never reached is not listed as down"
+wait_until 15 "the far side to refuse gallery2 over wss://" \
+    bash -c "curl -fsS '$G2_WEB/api/v1/remotes' | grep -q 'another master is connected'"
+far_up True || fail "the second master over wss:// took the link down"
+pass "wss:// through a TLS proxy with a private CA; a slave never reached is listed down"

@@ -25,6 +25,8 @@ tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "
 # rustls with the system certificate store, for wss:// peers (rustls and aws-lc-rs
 # are already built for reqwest).
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+# Token digests for a constant-time compare (already built for axum's WebSocket).
+sha1 = "0.10"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
