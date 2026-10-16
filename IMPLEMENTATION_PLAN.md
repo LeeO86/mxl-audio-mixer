@@ -13,6 +13,7 @@ current so that work can resume after an interruption.
 | M1–M6 skeleton, DSP core, processing, console, control room, preview, talkback, VCA, N-1 | done, **released in 1.0.0** (`14e9487`, 2026-10-13) |
 | M7 VAD, auto-level, auto-mix, ducking; the missing-sample split; ports 8190/3342 | done, **released in 1.1.0** (`ee2d06d`, 2026-10-14) |
 | M8a logic graphs | done, **released in 1.2.0** (`8e2aae6`, 2026-10-15); maintainers' hardware run 2026-10-15/16 (`docs/release-notes/1.2.0.md`) |
+| M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | branch `feat/logic-complete`, for 1.3.0 |
 | M9 remote link (master/slave) | done on `main` (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **1.3.0 in progress**, untagged |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
@@ -1804,3 +1805,158 @@ The audit of `09b5598` found the link failing forever on `wss://`, a takeover gu
 | D155 | `command` and the in-ears of `return` check that the link is up and queue under one lock; `ended` clears the queue under the same lock. At most 1024 commands wait per far side (503). | A command checked before and queued after the link dropped went out on the next connection. The queue is sent every 50 ms, so a full one is a stuck link. |
 | D156 | The token is compared as SHA-1 digests in constant time (`sha1`, already built for axum's WebSocket); a wrong one is logged at most every 10 s with a count. A user or password in a peer URL is refused. | The length showed in the time taken; a guessing peer was silent; a password in a URL would be shown by `GET /api/v1/config`. |
 | D157 | The master lists its slaves at start (down), and the RTT is dropped while a link is down. The timers delay after a stall instead of bursting. | A slave never reached was missing from the metrics and the console; a stale RTT read as a live one. |
+
+## M8b: the logic editor, complete (§11)
+
+M8a (1.2.0) evaluated number-only graphs with 23 block types. This part adds
+typed ports, the rest of §11.1's blocks, macros (§11.3) and an API the canvas
+can edit atomically with. The UI (canvas, palette, markers, copy/paste,
+undo/redo) is built in parallel against the shape below.
+
+### M8b: API shape (for the UI)
+
+**Signal types.** Every port has one of `boolean`, `number`, `level` (dB),
+`event` (a trigger that is true for one tick) and `string`.
+
+**Wires and conversions (D158).** A wire goes from an output to an input, and
+an input takes one wire. The input converts the value it receives, and no other
+conversion exists:
+
+| from \ to | boolean | number | level | event | string |
+| --- | --- | --- | --- | --- | --- |
+| boolean | = | 1 / 0 | 1 / 0 | fires when it turns on | `true` / `false` |
+| number | ≥ 0.5 | = | = | fires when it reaches 0.5 | formatted |
+| level | ≥ 0.5 | = | = | fires when it reaches 0.5 | formatted |
+| event | true on the tick it fires | 1 on that tick, else 0 | 1 on that tick, else 0 | = | **rejected** |
+| string | **rejected** | **rejected** | **rejected** | **rejected** | = |
+
+A value that converts to an event does not fire on the first tick the graph
+runs (D137). "Formatted" is the number with at most two decimals (`-12.5`,
+`-inf`). An input with no wire reads `false`, `0`, no event, or `""`.
+
+**Blocks.** `GET /api/v1/logic-blocks` lists every type with its category,
+parameters (name, kind, range, default, options), ports and whether it
+remembers. Params are fields of the block next to `id`, `type`, `x`, `y`, as in
+1.2. New in M8b are marked *new*.
+
+| Type | Params | Inputs | Outputs |
+| --- | --- | --- | --- |
+| **Inputs** | | | |
+| `const` | `value` number | | `out` number |
+| `text` *new* | `value` string (≤ 200) | | `out` string |
+| `button` | | | `out` boolean |
+| `trigger` *new* | | | `out` event: fired by `POST /api/v1/logic/<graph>/trigger/<block>` |
+| `mute` | `signal` | | `out` boolean |
+| `pfl` *new* | `signal` (strip, bus or VCA) | | `out` boolean: in PFL |
+| `fader` | `signal` | | `out` level |
+| `vad` | `signal` | | `out` boolean |
+| `level` | `signal` | | `out` level (peak dBFS, −200 for none) |
+| `above` | `signal`, `threshold_db`, `hysteresis_db` | | `out` boolean |
+| `loudness` *new* | `signal`, `measure`: `momentary` · `short-term` · `integrated` · `range` · `true-peak` | | `out` level (LUFS, LU, dBTP; −200 for none) |
+| `tally` | `index` | | `out` boolean |
+| `schedule` | `start_minute`, `end_minute` (UTC) | | `out` boolean |
+| `nmos-receiver` *new* | `input` (1–N) | | `out` boolean: the input's receiver is active (`master_enable`) |
+| `nmos-sender` *new* | `signal` | | `out` boolean: the signal's sender is active |
+| `link` *new* | `peer`: `master` or `s1`…`s4` | | `out` boolean: the remote link to that peer is up |
+| **Logic** | | | |
+| `and`, `or`, `xor` | | `a`, `b` boolean | `out` boolean |
+| `not` | | `in` boolean | `out` boolean |
+| `compare` | `op`: `gt` · `lt` · `eq` · `ge` *new* · `le` *new* · `ne` *new* | `a`, `b` number | `out` boolean |
+| `math` *new* | `op`: `add` · `sub` · `mul` · `div` · `min` · `max` | `a`, `b` number | `out` number (÷0 gives 0) |
+| `scale` *new* | `factor`, `offset` | `in` number | `out` number: in × factor + offset |
+| `map` *new* | `points`: 2–16 `[x, y]`, x rising | `in` number | `out` number: the curve through the points, flat outside them |
+| `select` *new* | `inputs` 2–8, `value_type` (not `event`) | `sel` number, `in0`…`in<n−1>` of `value_type` | `out` `value_type`: the input `sel` (rounded, clamped) |
+| `edge` | | `in` boolean | `out` event (was a number) |
+| `latch` | | `set`, `reset` boolean | `out` boolean |
+| `toggle` *new* | | `in` event | `out` boolean: flips on each event |
+| `counter` *new* | | `up`, `down`, `reset` event | `out` number |
+| `timer` | `ms` | `in` boolean | `out` boolean |
+| `delay` | `ms` | `in` boolean | `out` boolean |
+| `debounce` | `ms` | `in` boolean | `out` boolean |
+| **Actions** | | | |
+| `set-mute` | `signal` | `in` boolean | |
+| `set-fader` | `signal`, `ramp_ms` *new* (default 10) | `level` level | |
+| `set-vca` *new* | `vca`, `ramp_ms` | `level` level | |
+| `set-param` *new* | `signal`, `node`, `param` (a field, or a path such as `bands/1/gain_db`; `bypass`), `ramp_ms` | `value` number | |
+| `set-pfl` *new* | `signal` | `in` boolean | |
+| `set-talk` *new* | `mic`, `destination` | `in` boolean | |
+| `set-publish` *new* | `signal` | `in` boolean | |
+| `set-monitor` *new* | `monitor`, `source` (`{"signal": id}`, `{"input": n}` or `null`) | `in` event | |
+| `loudness-control` *new* | `signal`, `action`: `start` · `stop` · `reset` | `in` event | |
+| `recall` | `snapshot` | `in` event | |
+| `webhook` | `url` | `in` event | |
+| `tsl-out` *new* | `index` (0–65534) | `left`, `right` boolean, `label` string | |
+| `log` *new* | `message` (≤ 200) | `in` event, `value` string | |
+| **Macros** | | | |
+| `macro` *new* | `macro` (a macro id) | the macro's `macro-in` names | the macro's `macro-out` names |
+| `macro-in` *new* | `name`, `value_type` | | `out` `value_type` (only inside a macro) |
+| `macro-out` *new* | `name`, `value_type` | `in` `value_type` | (only inside a macro) |
+
+**Graph JSON.** As in 1.2 (`id`, `name`, `description`, `enabled`, `dry_run`,
+`blocks`, `wires`). `GET /api/v1/logic[/<id>]` adds:
+- `revision`: a digest of the graph (16 hex digits); it changes with any edit;
+- `ports`: `{block: {"inputs": [{name, type}], "outputs": [...]}}`, also for
+  `select` and macro instances;
+- `values`: `{block: value}` after the last tick: a boolean, a number (`null`
+  for ±∞), a string, or for an event output the number of times it has fired.
+  Blocks inside a macro instance are `<instance>.<block>` (nested:
+  `a.b.c`);
+- `buttons`: the soft keys held down (also `<instance>.<block>`);
+- `actions`: the last 20 actions, newest last:
+  `{"t_ms", "block", "action", "dry_run"}` (`action` is readable text).
+
+**Editing (D161).**
+- `PUT /api/v1/logic/<id>`: the whole graph (creates it if missing). With
+  `"revision"` it is applied only if the graph still has that revision,
+  otherwise 409 `{"error", "revision": <current>}`. `PATCH` takes `revision` too.
+- `POST /api/v1/logic-batch`: `{"graphs": [graph…], "macros": [macro…],
+  "delete_graphs": [id…], "delete_macros": [id…]}`, each graph and macro whole
+  and optionally with `revision`. Applied as one change, or not at all. Answers
+  `{"graphs": [...], "macros": [...]}` (as GET). This is what "group into a
+  macro" (a new macro plus the graph that now uses it) and undo/redo use.
+- `POST /api/v1/logic-validate`: the same body as the batch; checks it against
+  the current mix without applying it and answers 200 `{"issues": [...]}`.
+- `GET, POST /api/v1/logic-macros`, `GET, PUT, PATCH, DELETE
+  /api/v1/logic-macros/<id>`: macros, as graphs.
+- `POST /api/v1/logic/<id>/trigger/<block>`: fires a `trigger` block on the next
+  tick (204). No body. Same access as the rest of the API (none: X13).
+- `PUT /api/v1/logic/<id>/buttons/<block>`: as in 1.2.
+
+**Validation errors (D162).** A refused logic change answers 400 with
+`{"error": "<the first issue as text>", "issues": [issue…]}`. An issue is
+`{"graph": id|null, "macro": id|null, "block": id|null, "port": name|null,
+"wire": index|null, "message": text}`: `graph` or `macro` is where it is,
+`block` and `port` are the marker's place (for a wire, its input end), `wire` the
+index in `wires`. Every issue of the body is listed, not only the first.
+
+**Macros (D163).** `logic_macros` in the show: `{id, name, description,
+blocks, wires}`. Its exposed ports are its `macro-in` blocks (instance inputs)
+and `macro-out` blocks (instance outputs), by `name`. A `macro` block in a graph
+(or in another macro) is an instance. Evaluation inlines every instance: a
+`macro-in` and a `macro-out` become a pass-through, the inner blocks
+`<instance>.<id>`. Each instance has its own state. Validation: a macro that
+uses itself (directly or through others) is refused; nesting is at most 4 deep;
+a graph has at most 256 blocks once inlined; loops are checked on the inlined
+graph. Up to 32 macros of 64 blocks each.
+
+**Events WebSocket.** Every action (and every dry-run action) is also sent as
+`{"type": "logic", "graph", "block", "action", "dry_run", "t_ms"}`; a `log`
+block sends `{"type": "logic", "graph", "block", "log": text, "dry_run", "t_ms"}`
+and writes the same text to the log (info).
+
+**Settings.** `TSL_OUT_TARGET` (`host:port`, unset: no TSL output) and
+`TSL_OUT_SCREEN` (0–65534, default 0); invalid values exit 78.
+
+### M8b: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D158 | Five port types and the conversion table above. Numbers, levels and booleans convert into each other (≥ 0.5 is on, as in 1.2); anything but an event converts into a string; a string feeds only a string, an event only a non-string. | Every 1.2 graph (all numbers) stays valid without a migration. The rejections are the wires that cannot mean anything. |
+| D159 | No show-format change that needs a migration: graphs keep their JSON, `logic_macros` is a new optional key, the show file stays version 1. A 1.2 fixture with every block type loads and runs the same (test). Two behaviours change: an action whose input has no wire never acts (1.2 applied 0 at the first tick), and `edge` outputs an event. | Additive keys load on the new version; a version bump would make 1.3 shows unreadable to 1.2 for no gain, and 1.2 refuses unknown block types anyway. The unwired action was a surprise (an unwired `set-mute` unmuted at load). |
+| D160 | Evaluation compiles each enabled graph (macros inlined) into an index-based plan, rebuilt only when the graph or a macro changes; blocks run in topological order (ties by block order), the blocks that remember (`edge`, `latch`, `toggle`, `counter`, `timer`, `delay`, `debounce`) publish last tick's value, and their state is kept by block id across rebuilds. All on the control engine's 10 ms tick; nothing on the DSP thread. | Deterministic (§11.2). 1.2 searched the wires for every input on every tick; 32 × 256 inlined blocks at 100 Hz needs indexes. `toggle` and `counter` remember so loops through them stay legal. |
+| D161 | Whole-resource writes with an optional `revision` (a digest of the graph or macro), plus a batch over graphs and macros, applied in one `apply`. No per-operation patch language. | The canvas holds the whole graph anyway; copy/paste and undo/redo then send the graph they show. The digest needs no counter kept in the show, and two clients that saved the same content agree. |
+| D162 | Logic validation collects every issue with its graph or macro, block, port and wire; `Mix::validate` keeps returning the first as text. | Markers for the UI (§11.3) without a second validator. |
+| D163 | Macros are definitions in the show, used by instances, inlined for evaluation, with recursion, depth (4) and size (256 inlined blocks per graph) checks. No per-instance parameters: an instance is the definition. | §11.3 "sub-graphs with exposed ports". The limits keep the tick bounded: 32 graphs × 256 blocks. |
+| D164 | Actions become the same mix changes the API makes: mute, fader, VCA, a node parameter (only parameters the DSP smooths; ramped by `ramp_ms`, clamped to the parameter's range), PFL, talk, publish, monitor source, loudness start/stop/reset, snapshot recall. Value actions follow their input (on the first tick and on each change); event actions run when the event fires. Value changes are staged with their ramp first, then the changes that rewire the plan (fade, swap on a later tick, as recall did). In dry run nothing is executed; the action is listed and sent on the events socket. | §11.2 "actions become parameter messages". A structural node parameter (a filter slope, a delay time) would swap the plan on every change of a number. |
+| D165 | TSL out sends UMD 5.0 over UDP to one `TSL_OUT_TARGET`, screen `TSL_OUT_SCREEN`, from a task off the control tick: the full state of every `tsl-out` block (left lamp red, right lamp green, label UTF-16) on every change and every second. | §10.3's own rules for a TSL sender. The tick only hands over the state. |
+| D166 | `trigger` fires on the tick after its POST; several POSTs in one tick are one event. | A trigger is an event; the tick is the clock. |
