@@ -1,7 +1,8 @@
 <script setup>
 // One block on the logic canvas: a row per port, inputs on the left and outputs on the right, each
 // coloured by its type (§11.1). The live value (§11.2 debug view) is the pill at the bottom right. A
-// validation issue (D162) outlines the block or rings the port in red, with the message as its title.
+// validation issue (D162) outlines the block or rings the port in red, with the message as its title; a
+// warning (a target still to choose) outlines it in amber and does not block anything.
 // While a cable is being drawn, inputs that cannot take it are dimmed (D158).
 import { computed, inject } from "vue";
 import { Handle, Position } from "@vue-flow/core";
@@ -19,9 +20,9 @@ const refused = (side, type) => {
 </script>
 
 <template>
-  <div class="gnode lnode" :class="[`k-${props.data.kind}`, { bad: props.data.issues.length, fired: props.data.fired, instance: props.data.instance }]" :data-lnode="props.data.id" :title="props.data.issues.join('\n') || null">
+  <div class="gnode lnode" :class="[`k-${props.data.kind}`, { bad: props.data.issues.length, warn: props.data.warnings.length, fired: props.data.fired, instance: props.data.instance }]" :data-lnode="props.data.id" :title="[...props.data.issues, ...props.data.warnings].join('\n') || null">
     <div class="gname">
-      {{ props.data.label }}<span v-if="props.data.issues.length" class="lbad" :data-issue="props.data.id">!</span>
+      {{ props.data.label }}<span v-if="props.data.issues.length" class="lbad" :data-issue="props.data.id">!</span><span v-else-if="props.data.warnings.length" class="lwarn" :data-warning="props.data.id">?</span>
     </div>
     <div v-for="i in rows" :key="i" class="lrow">
       <span class="lin">

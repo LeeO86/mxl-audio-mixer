@@ -407,6 +407,9 @@ try {
   await page.getByRole("button", { name: "+ Graph" }).click();
   await page.getByLabel("Block type").waitFor({ timeout: 5000 });
   const graph = await until("graph Keys", async () => (await api("/api/v1/logic")).find((g) => g.name === "Keys"));
+  // A new graph starts in dry run; this one goes live.
+  await page.getByLabel("dry run").uncheck();
+  await until("Keys live", async () => (await api(`/api/v1/logic/${graph.id}`)).dry_run === false);
   await page.getByLabel("Block type").selectOption("const");
   await page.getByRole("button", { name: "+ Block" }).click();
   await page.getByLabel("Block type").selectOption("set-mute");
@@ -456,6 +459,8 @@ try {
     const b = await blockOf("above");
     return b?.threshold_db === -40 && b?.hysteresis_db === 6;
   });
+  // A new recall has no snapshot until one is chosen.
+  if ((await blockOf("recall"))?.snapshot !== "") throw new Error("a recall got a snapshot by itself");
   await until("snapshot in the list", async () => (await page.getByLabel("recall-1 snapshot", { exact: true }).innerHTML()).includes("logic-show"));
   await page.getByLabel("recall-1 snapshot", { exact: true }).selectOption("logic-show");
   await until("recall logic-show", async () => (await blockOf("recall"))?.snapshot === "logic-show");

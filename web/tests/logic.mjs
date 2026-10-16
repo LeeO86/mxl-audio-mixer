@@ -35,6 +35,7 @@ const pass = (what) => console.log(`[logic.mjs] PASS: ${what}`);
 
 const browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
 const made = [];
+const madeMacros = [];
 const muted = new Set();
 try {
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, colorScheme: "dark" });
@@ -49,6 +50,22 @@ try {
     const b = await page.locator(selector).boundingBox();
     return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
   };
+  // The view has stopped moving (after Fit or a zoom): the same transform three times 60 ms apart.
+  const settled = async () => {
+    let last = "";
+    let same = 0;
+    await until("the view settled", async () => {
+      const t = await page.locator(".vue-flow__transformationpane").evaluate((e) => getComputedStyle(e).transform);
+      same = t === last ? same + 1 : 0;
+      last = t;
+      await new Promise((r) => setTimeout(r, 60));
+      return same >= 2;
+    });
+  };
+  const fit = async () => {
+    await page.getByRole("button", { name: "Fit" }).click();
+    await settled();
+  };
   // A click on an empty part of the canvas: the keys go to the editor, not to a field.
   const focusCanvas = async () => {
     const b = await page.locator(".logiccanvas").boundingBox();
@@ -62,20 +79,32 @@ try {
   made.push(g.id);
   await page.getByLabel("Logic graph", { exact: true }).selectOption(g.id);
   await page.locator(".lpalette").waitFor();
+  if (g.dry_run !== true) throw new Error("a new graph is not in dry run");
+  await page.locator("[data-state]", { hasText: "DRY RUN" }).waitFor({ timeout: 3000 });
+  pass("a new graph starts in dry run, and the toolbar says so");
 
   // The palette: a click adds a Number in the middle of the view; a drag drops Set mute where it lands.
   await page.locator('.lpalette [data-palette="const"]').click();
   await until("const-1 from the palette", async () => (await graphOf(g.id)).blocks.some((b) => b.id === "const-1"));
   const box = await page.locator(".logiccanvas").boundingBox();
   await page.locator('.lpalette [data-palette="set-mute"]').dragTo(page.locator(".logiccanvas"), { targetPosition: { x: box.width - 260, y: 120 } });
-  const sm = await until("set-mute-1 dropped", async () => (await graphOf(g.id)).blocks.find((b) => b.id === "set-mute-1"));
-  if (!sm.signal) throw new Error(`set-mute-1 without a signal: ${JSON.stringify(sm)}`);
+  // An action gets no target by itself: it is made with "" (inert), marked in amber until one is chosen.
+  const blank = await until("set-mute-1 dropped", async () => (await graphOf(g.id)).blocks.find((b) => b.id === "set-mute-1"));
+  if (blank.signal !== "") throw new Error(`set-mute-1 got a target by itself: ${blank.signal}`);
+  await page.locator('.lnode.warn[data-lnode="set-mute-1"]').waitFor({ timeout: 3000 });
+  await page.locator("[data-waiting]").waitFor({ timeout: 3000 });
+  await page.getByLabel("set-mute-1 signal", { exact: true }).selectOption("vox");
+  const sm = await until("set-mute-1 on vox", async () => {
+    const b = (await graphOf(g.id)).blocks.find((x) => x.id === "set-mute-1");
+    return b.signal === "vox" ? b : null;
+  });
+  await until("the warning gone", async () => (await page.locator('.lnode.warn[data-lnode="set-mute-1"]').count()) === 0);
   muted.add(sm.signal);
   await node("set-mute-1").waitFor();
   const dropped = await node("set-mute-1").boundingBox();
   const at = { x: box.x + box.width - 260, y: box.y + 120 };
   if (at.x < dropped.x || at.x > dropped.x + dropped.width || at.y < dropped.y - 10 || at.y > dropped.y + dropped.height + 10) throw new Error(`dropped at ${JSON.stringify(dropped)}, not at ${JSON.stringify(at)}`);
-  pass("palette: a click adds a block, a drag drops one where it lands");
+  pass("palette: a click adds a block, a drag drops one where it lands; an action starts without a target, marked, until one is chosen");
 
   // Value, then a cable: the live value of the action shows "on".
   // Typed, then the tab redraws a few times (polls, ports, selection) before Enter: the number stays.
@@ -84,8 +113,7 @@ try {
   await page.waitForTimeout(800);
   await page.getByLabel("const-1 value").press("Enter");
   await until("const is 1", async () => (await graphOf(g.id)).blocks.find((b) => b.id === "const-1").value === 1);
-  await page.getByRole("button", { name: "Fit" }).click();
-  await page.waitForTimeout(400);
+  await fit();
   const from = await center('.vue-flow__node[data-id="const-1"] .vue-flow__handle.source');
   const to = await center('.vue-flow__node[data-id="set-mute-1"] .vue-flow__handle.target');
   await page.mouse.move(from.x, from.y);
@@ -110,6 +138,13 @@ try {
   await until("redo: the cable", async () => (await graphOf(g.id)).wires.length === 1);
   await until("nothing left to redo", () => page.getByRole("button", { name: "Redo" }).isDisabled());
   pass("undo and redo: Ctrl+Z twice, Ctrl+Shift+Z and the Redo button, each one edit");
+
+  // Ctrl+Z in a text field is the field's own undo, not the graph's.
+  await page.getByLabel("New logic graph name").focus();
+  await page.keyboard.press(`${mod}+z`);
+  await page.waitForTimeout(600);
+  if ((await graphOf(g.id)).wires.length !== 1 || (await page.getByRole("button", { name: "Undo" }).isDisabled())) throw new Error("Ctrl+Z in a field undid a graph edit");
+  pass("shortcuts: Ctrl+Z in a field leaves the graph alone");
 
   // Multi-select, copy, paste: new ids, the cable between them, moved 40 px; one undo removes the paste.
   await node("const-1").click();
@@ -164,6 +199,16 @@ try {
     return d.blocks.length === 2 && d.wires.length === 1 && d.blocks.some((b) => b.id === "const-1") ? d : null;
   });
   pass("paste into another graph: the blocks and their cable, ids free in that graph");
+
+  // A webhook's URL is asked for before the block is made.
+  await page.locator('.lpalette [data-palette="webhook"]').click();
+  await page.getByRole("dialog", { name: "Choose the target" }).waitFor({ timeout: 3000 });
+  if (!(await page.getByRole("button", { name: "Add", exact: true }).isDisabled())) throw new Error("Add is enabled before the URL is given");
+  await page.getByLabel("new url", { exact: true }).fill("http://127.0.0.1:9/hook");
+  await page.getByLabel("new url", { exact: true }).press("Enter");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await until("the webhook", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "webhook" && b.url === "http://127.0.0.1:9/hook"));
+  pass("a webhook asks for its URL first");
 
   // Somebody else changes the graph: undo refuses to overwrite it and clears the history.
   await page.getByLabel("Logic graph", { exact: true }).selectOption(g.id);
@@ -226,8 +271,7 @@ try {
   muted.add("gtr");
   await page.getByLabel("Logic graph", { exact: true }).selectOption(m.id);
   await node("text-1").waitFor();
-  await page.getByRole("button", { name: "Fit" }).click();
-  await page.waitForTimeout(400);
+  await fit();
   const handle = (id, side, port) => `.vue-flow__node[data-id="${id}"] .vue-flow__handle.${side}[data-handleid="${port}"]`;
   const cls = async (sel) => (await page.locator(sel).getAttribute("class")) || "";
   if (!(await cls(handle("const-1", "source", "out"))).includes("t-number")) throw new Error("const-1 out is not a number port");
@@ -294,9 +338,39 @@ try {
   await node(inst.id).waitFor();
   pass("open a macro: breadcrumb, its blocks with the instance's live values, back to the graph");
 
-  // Ungroup: the blocks come back with the cables; the macro, now unused, goes.
+  // Paste into the macro (it is the definition: every instance gets it), then undo it there.
+  await node(inst.id).dblclick();
+  await node("not-1").waitFor();
+  await node("not-1").click();
+  await page.keyboard.press(`${mod}+c`);
+  await page.keyboard.press(`${mod}+v`);
+  await until("pasted into the macro", async () => (await api(`/api/v1/logic-macros/${inst.macro}`)).blocks.some((b) => b.id === "not-2"));
+  await focusCanvas();
+  await page.keyboard.press(`${mod}+z`);
+  await until("undone in the macro", async () => !(await api(`/api/v1/logic-macros/${inst.macro}`)).blocks.some((b) => b.id === "not-2"));
+  // Its own input does not paste into a graph: copy in-in and not-1, paste in the graph.
+  await node("in-in").click();
+  await node("not-1").click({ modifiers: [mod] });
+  await page.keyboard.press(`${mod}+c`);
+  await page.locator(".lcrumbs button", { hasText: "Macro" }).first().click();
+  await node(inst.id).waitFor();
+  await page.getByRole("button", { name: "Paste blocks" }).click();
+  const withPaste = await until("pasted into the graph", async () => {
+    const d = await graphOf(m.id);
+    return d.blocks.some((b) => b.type === "not") ? d : null;
+  });
+  if (withPaste.blocks.some((b) => b.type === "macro-in")) throw new Error("a macro input was pasted into a graph");
+  await focusCanvas();
+  await page.keyboard.press(`${mod}+z`);
+  await until("the graph paste undone", async () => !(await graphOf(m.id)).blocks.some((b) => b.type === "not"));
+  pass("paste into a macro and undo there; a macro's own input is left out when pasting into a graph");
+
+  // Ungroup in a live graph asks first; "switch to dry run first" does that, then ungroups. The blocks
+  // come back with the cables; the macro, now unused, goes.
   await node(inst.id).click();
   await page.getByRole("button", { name: "Ungroup" }).click();
+  await page.getByRole("alertdialog", { name: "Change a live graph" }).waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Switch to dry run first" }).click();
   const flat = await until("ungrouped", async () => {
     const d = await graphOf(m.id);
     return d.blocks.some((b) => b.type === "not") && !d.blocks.some((b) => b.type === "macro") ? d : null;
@@ -304,10 +378,20 @@ try {
   const inner = flat.blocks.find((b) => b.type === "not").id;
   if (!flat.wires.some((w) => w.from_block === "const-1" && w.to_block === inner) || !flat.wires.some((w) => w.from_block === inner && w.to_block === "or-1")) throw new Error(`ungrouped wires: ${JSON.stringify(flat.wires)}`);
   if ((await api("/api/v1/logic-macros")).some((x) => x.id === inst.macro)) throw new Error("the unused macro was kept");
-  pass(`ungroup: ${inner} back in the graph with its cables, the unused macro removed`);
+  if ((await graphOf(m.id)).dry_run !== true) throw new Error("not switched to dry run");
+  await page.locator("[data-state]", { hasText: "DRY RUN" }).waitFor({ timeout: 3000 });
+  pass(`ungroup in a live graph: confirmed after switching to dry run; ${inner} back with its cables, the unused macro removed`);
+
+  // Undo never changes on or dry run: the ungroup is undone, the graph stays in dry run.
+  await focusCanvas();
+  await page.keyboard.press(`${mod}+z`);
+  await until("ungroup undone", async () => (await graphOf(m.id)).blocks.some((b) => b.type === "macro"));
+  if ((await graphOf(m.id)).dry_run !== true) throw new Error("undo took the graph live");
+  await page.keyboard.press(`${mod}+Shift+z`);
+  await until("ungroup redone", async () => !(await graphOf(m.id)).blocks.some((b) => b.type === "macro"));
+  pass("undo and redo around a dry-run switch leave the graph in dry run");
 
   // Dry run: the action is listed, not done.
-  await page.getByLabel("dry run").check();
   await until("dry run on", async () => (await graphOf(m.id)).dry_run === true);
   await page.getByLabel("const-1 value", { exact: true }).fill("0");
   await page.getByLabel("const-1 value", { exact: true }).press("Enter");
@@ -323,6 +407,24 @@ try {
   await page.locator('[data-live="trigger-1"]', { hasText: "×1" }).waitFor({ timeout: 3000 });
   await page.locator('[data-live="toggle-1"]', { hasText: "on" }).waitFor({ timeout: 3000 });
   pass("events: the trigger shows its count, the toggle flipped");
+
+  // Ungrouping past 64 blocks is refused: 63 numbers and a macro of two blocks.
+  await api("/api/v1/logic-macros", { method: "POST", headers: json, body: JSON.stringify({ id: "two", name: "Two", blocks: [{ id: "a", type: "not" }, { id: "b", type: "not", x: 200 }] }) });
+  madeMacros.push("two");
+  const big = await api("/api/v1/logic", {
+    method: "POST",
+    headers: json,
+    body: JSON.stringify({ name: "Big", dry_run: true, blocks: [...Array.from({ length: 63 }, (_, i) => ({ id: `const-${i + 1}`, type: "const", value: i, x: (i % 9) * 200, y: 200 + Math.floor(i / 9) * 100 })), { id: "macro-1", type: "macro", macro: "two", x: 0, y: 0 }] }),
+  });
+  made.push(big.id);
+  await page.getByLabel("Logic graph", { exact: true }).selectOption(big.id);
+  await node("macro-1").waitFor();
+  await fit();
+  await node("macro-1").click();
+  await page.getByRole("button", { name: "Ungroup" }).click();
+  await page.locator(".banner", { hasText: "at most 64" }).waitFor({ timeout: 3000 });
+  if ((await graphOf(big.id)).blocks.length !== 64) throw new Error("the ungroup past 64 blocks was written");
+  pass("ungroup past 64 blocks: refused with a message, nothing written");
 
   // Narrow screen: the palette goes above the canvas, no horizontal scroll.
   await page.setViewportSize({ width: 420, height: 900 });
@@ -343,6 +445,7 @@ try {
 } finally {
   for (const id of made) await api(`/api/v1/logic/${id}`, { method: "DELETE" }).catch(() => {});
   for (const x of (await api("/api/v1/logic-macros").catch(() => [])) || []) if (x.name === "Inverter") await api(`/api/v1/logic-macros/${x.id}`, { method: "DELETE" }).catch(() => {});
+  for (const id of madeMacros) await api(`/api/v1/logic-macros/${id}`, { method: "DELETE" }).catch(() => {});
   for (const id of muted) await api(`/api/v1/strips/${id}`, { method: "PATCH", headers: json, body: JSON.stringify({ mute: false }) }).catch(() => {});
   await browser.close();
 }

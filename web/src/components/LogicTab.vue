@@ -18,14 +18,14 @@ import LogicNode from "./LogicNode.vue";
 import LogicParam from "./LogicParam.vue";
 import { api, fmtDb } from "../api.js";
 import { act, live, room, signalOf, signals, vcas } from "../store.js";
-import { PORT_TYPES, batchFor, boundary, canWire, clipboard, copyOf, forget, freshId, group, history, historyOf, pasted, portName, portsOf, record, resource, same, ungroup } from "../logicEdit.js";
+import { PORT_TYPES, boundary, canWire, clipboard, copyOf, forget, freshId, group, history, historyOf, pasted, portName, portsOf, record, resource, same, sameEdit, ungroup } from "../logicEdit.js";
 
 const { applyNodeChanges, applyEdgeChanges, fitView, screenToFlowCoordinate, getSelectedNodes, getSelectedEdges } = useVueFlow("logic");
 
 const MAX_BLOCKS = 64;
 const graphs = computed(() => live.mix?.logic || []);
-const polledMacros = ref([]);
-const macros = computed(() => live.mix?.logic_macros || polledMacros.value);
+// The mix leaves out `logic_macros` when there is none.
+const macros = computed(() => live.mix?.logic_macros || []);
 const snapshots = computed(() => live.mix?.snapshots || []);
 const selected = ref("");
 const graph = computed(() => graphs.value.find((g) => g.id === selected.value) || graphs.value[0] || null);
@@ -73,17 +73,36 @@ watch(openMacro, (m) => {
 // Updated in place, so that only what shows a value redraws on each poll: redrawing the whole tab would
 // reset a number being typed in the list.
 const values = reactive({});
-const detail = reactive({ buttons: [], actions: [], ports: {} });
+const detail = reactive({ buttons: [], actions: [], ports: {}, warnings: [] });
 const fired = {}; // block -> last event count seen
 let timer = 0;
-let polls = 0;
+let polling = false;
 
+// What another graph or macro showed must not stay: values, ports and actions start empty there.
+function forgetShown() {
+  for (const k of Object.keys(values)) delete values[k];
+  for (const k of Object.keys(fired)) delete fired[k];
+  Object.assign(detail, { buttons: [], actions: [], ports: {}, warnings: [] });
+}
+watch(() => (doc.value ? keyOf(doc.value) : ""), forgetShown);
+
+// One poll at a time; an answer for a graph or macro that is no longer open is dropped.
 async function refresh() {
+  if (polling) return;
+  polling = true;
+  try {
+    await poll();
+  } finally {
+    polling = false;
+  }
+}
+async function poll() {
   const g = graph.value;
-  if (polls++ % 4 === 0 && !live.mix?.logic_macros) polledMacros.value = (await api.get("/api/v1/logic-macros").catch(() => null)) || polledMacros.value;
+  const m = openMacro.value;
   if (!g) return;
   const d = await api.get(`/api/v1/logic/${g.id}`).catch(() => null);
-  if (!d || g.id !== graph.value?.id) return;
+  const md = m ? await api.get(`/api/v1/logic-macros/${m.id}`).catch(() => null) : null;
+  if (!d || (m && !md) || g.id !== graph.value?.id || m?.id !== openMacro.value?.id) return;
   const v = d.values || {};
   for (const k of Object.keys(values)) if (!(k in v)) delete values[k];
   Object.assign(values, v);
@@ -91,9 +110,8 @@ async function refresh() {
   const changed = (k, v) => JSON.stringify(v) !== JSON.stringify(detail[k]) && (detail[k] = v);
   changed("buttons", d.buttons || []);
   changed("actions", d.actions || []);
-  let p = d.ports || {};
-  if (openMacro.value) p = (await api.get(`/api/v1/logic-macros/${openMacro.value.id}`).catch(() => null))?.ports || {};
-  changed("ports", p);
+  changed("ports", (md || d).ports || {});
+  changed("warnings", (md || d).warnings || []);
   showValues();
 }
 
@@ -159,10 +177,12 @@ async function send(body, want) {
   }
 }
 
-// Reads `reads` (graphs and macros), lets `build` make the new resources, writes them as one batch with
-// the revisions read (a 409 means someone else changed them: nothing is written) and records the edit
-// in the open document's history. `build` returns the batch body, a string (why not), or null.
-function edit(label, reads, build) {
+// Reads `reads` (graphs and macros; with `lists`, also every graph and macro as `cur.graphs` and
+// `cur.macros`), lets `build` make
+// the new resources, writes them as one batch with the revisions read (a 409 means someone else changed
+// them: nothing is written) and, with a label, records the edit in the open document's history.
+// `build` returns the batch body, a string (why not), or null.
+function edit(label, reads, build, { lists = false } = {}) {
   const d = doc.value;
   if (!d) return queued;
   const key = keyOf(d);
@@ -170,6 +190,11 @@ function edit(label, reads, build) {
     .then(async () => {
       const cur = {};
       for (const r of reads) cur[keyOf(r)] = await api.get(urlOf(r)).catch(() => null);
+      if (lists) {
+        cur.graphs = await api.get("/api/v1/logic").catch(() => null);
+        cur.macros = await api.get("/api/v1/logic-macros").catch(() => null);
+        if (!cur.graphs || !cur.macros) return void (live.actionError = "The logic could not be read; nothing was written.");
+      }
       const made = build(cur);
       if (!made) return;
       if (typeof made === "string") {
@@ -187,9 +212,9 @@ function edit(label, reads, build) {
         for (const r of body[`${kind}s`]) {
           const before = cur[`${kind}:${r.id}`];
           const after = (done[`${kind}s`] || []).find((x) => x.id === r.id);
-          if (!before || !same(before, after)) changes.push({ kind, id: r.id, before: resource(before), after: resource(after), beforeRev: before?.revision, afterRev: after?.revision });
+          if (!before || !same(before, after)) changes.push({ kind, id: r.id, before: resource(before), after: resource(after) });
         }
-        for (const id of body[`delete_${kind}s`]) changes.push({ kind, id, before: resource(cur[`${kind}:${id}`]), after: null, beforeRev: cur[`${kind}:${id}`]?.revision });
+        for (const id of body[`delete_${kind}s`]) changes.push({ kind, id, before: resource(cur[`${kind}:${id}`]), after: null });
       }
       if (changes.length && label) record(key, { label, changes });
     })
@@ -208,30 +233,58 @@ function commit(label, mutate) {
 }
 const patch = (label, body) => commit(label, () => body);
 
-// Undo (back) or redo: the entry's resources as they were, refused (409) if changed meanwhile.
+// "On" and "dry run" of graphs: the operator's switches, written at once and never undone or redone (an
+// undo must not take a graph live).
+function setGraphs(ids, fields) {
+  queued = queued
+    .then(async () => {
+      const body = { graphs: [] };
+      for (const id of ids) {
+        const c = await api.get(`/api/v1/logic/${id}`).catch(() => null);
+        if (c) body.graphs.push({ ...resource(c), ...fields, revision: c.revision });
+      }
+      if (body.graphs.length && (await send(body))?.conflict) live.actionError = "Changed elsewhere meanwhile; nothing was written. Try again.";
+    })
+    .catch(failed);
+  return queued;
+}
+
+// Undo (back) or redo. Each graph and macro of the entry is read again and must still be what this client
+// left (else the history is cleared: someone else changed it); it is written back with the revision just
+// read, keeping its "on" and "dry run". A refused step (400) is dropped from the history.
 function step(back) {
   const d = doc.value;
   if (!d) return queued;
   const key = keyOf(d);
+  const cleared = () => {
+    forget(key);
+    live.notice = "Changed elsewhere meanwhile: the undo history of this graph is cleared.";
+  };
   queued = queued
     .then(async () => {
       const h = historyOf(key);
       const from = back ? h.undo : h.redo;
       const entry = from.at(-1);
       if (!entry) return;
-      const done = await send(batchFor(entry, back));
-      if (done?.conflict) {
-        forget(key);
-        live.notice = "Changed elsewhere meanwhile: the undo history of this graph is cleared.";
-        return;
-      }
-      if (!done) return;
+      const body = { graphs: [], macros: [], delete_graphs: [], delete_macros: [] };
       for (const c of entry.changes) {
-        const now = (done[`${c.kind}s`] || []).find((x) => x.id === c.id);
-        if (back) c.beforeRev = now?.revision;
-        else c.afterRev = now?.revision;
+        let cur;
+        try {
+          cur = await api.get(urlOf(c));
+        } catch (e) {
+          if (e.status !== 404) return void (live.actionError = e.message);
+          cur = null;
+        }
+        const expect = back ? c.after : c.before;
+        const want = back ? c.before : c.after;
+        if (expect ? !cur || !sameEdit(cur, expect) : cur) return cleared();
+        if (!want) body[`delete_${c.kind}s`].push(c.id);
+        else body[`${c.kind}s`].push(cur ? { ...want, ...(c.kind === "graph" ? { enabled: cur.enabled, dry_run: cur.dry_run } : {}), revision: cur.revision } : { ...want, ...(c.kind === "graph" ? { dry_run: true } : {}) });
       }
+      const done = await send(body);
+      if (done?.conflict) return cleared();
       from.pop();
+      if (!done) return;
       (back ? h.redo : h.undo).push(entry);
       live.notice = `${back ? "Undone" : "Redone"}: ${entry.label}.`;
     })
@@ -244,14 +297,25 @@ const undoNext = computed(() => (doc.value ? history[keyOf(doc.value)]?.undo.at(
 const redoNext = computed(() => (doc.value ? history[keyOf(doc.value)]?.redo.at(-1)?.label || "" : ""));
 
 async function addGraph() {
-  const body = {};
+  // A new graph starts in dry run: its actions are listed, not done, until the operator goes live.
+  const body = { dry_run: true };
   if (name.value.trim()) body.name = name.value.trim();
-  const made = await act(() => api.post("/api/v1/logic", body), "Logic graph added.");
+  const made = await act(() => api.post("/api/v1/logic", body), "Logic graph added (dry run).");
   if (made) {
     name.value = "";
     selected.value = made.id;
   }
 }
+
+// Histories of graphs and macros that are gone (deleted here or elsewhere) are dropped.
+watch(
+  () => (live.mix ? [...graphs.value.map((g) => `graph:${g.id}`), ...macros.value.map((m) => `macro:${m.id}`)].join(",") : null),
+  (now) => {
+    if (now === null) return;
+    const there = new Set(now.split(","));
+    for (const k of Object.keys(history)) if (!there.has(k)) forget(k);
+  },
+);
 
 async function removeGraph(id) {
   if (await act(() => api.del(`/api/v1/logic/${id}`))) forget(`graph:${id}`);
@@ -282,21 +346,30 @@ function optionsOf(p, b) {
 const JSON_KINDS = ["points", "source"];
 const NUMBER_KINDS = ["number", "integer"];
 
-// The parameters a new block starts with: the catalog's defaults, else the first strip, snapshot, ...,
-// 1000 ms, the lowest number allowed, `bypass` for a node parameter. A string is why the block cannot be
-// made.
+// The parameters a new block starts with. A target (the strip, VCA, snapshot, monitor, mic, destination,
+// node or parameter it reads or acts on) is never guessed: it stays "" (the block is valid and inert,
+// with a warning) until the operator chooses one, unless a strip or bus is picked in the add row. Other
+// parameters take the catalog's default, else 1000 ms or the lowest number allowed. An action's other
+// parameters without a default (a webhook's URL, a TSL index) are `needs`, asked for before the block is
+// made. A string is why the block cannot be made.
+const BLANK_KINDS = ["signal", "signal-or-vca", "vca", "snapshot", "monitor", "mic", "destination", "node", "param"];
 function paramsFor(type, inView) {
   const e = entryOf(type);
-  const out = {};
+  const action = categoryOf(type) === "action";
+  const params = {};
+  const needs = [];
   for (const p of e?.params || []) {
     let v = p.default ?? (p.kind === "source" ? null : undefined);
     if (p.name === "name" && (type === "macro-in" || type === "macro-out")) v = freshId(type === "macro-in" ? "in" : "out", new Set(inView.filter((b) => b.type === type).map((b) => b.name)));
+    if (v === undefined && BLANK_KINDS.includes(p.kind)) v = p.kind.startsWith("signal") && signals.value.some((x) => x.id === addSignal.value) ? addSignal.value : "";
+    if (v === undefined && action) {
+      needs.push(p);
+      continue;
+    }
     if (v === undefined && p.name === "ms") v = 1000;
-    if (v === undefined && p.kind === "url") v = "http://example.invalid/";
-    if (v === undefined && p.kind === "param") v = "bypass";
     if (v === undefined) {
-      const opts = optionsOf(p, { type, ...out });
-      if (opts) v = (p.kind === "signal" && opts.some((o) => o.id === addSignal.value) ? addSignal.value : opts[0]?.id) ?? undefined;
+      const opts = optionsOf(p, { type, ...params });
+      if (opts) v = opts[0]?.id;
       else if (NUMBER_KINDS.includes(p.kind)) v = Math.max(p.min ?? 0, Math.min(p.max ?? 0, 0));
       else if (p.kind === "boolean") v = false;
       else if (p.kind === "points") v = [
@@ -306,26 +379,42 @@ function paramsFor(type, inView) {
       else v = "";
     }
     if (v === undefined) return `${typeLabel(type)} needs a ${p.kind}, and there is none yet.`;
-    out[p.name] = v;
+    params[p.name] = v;
   }
-  return out;
+  return { params, needs };
 }
 
-// A new block at `at` (canvas coordinates), or in a row; it is selected. `extra` sets parameters.
+// A new block at `at` (canvas coordinates), or in a row; it is selected. `extra` sets parameters. An
+// action whose target is not chosen yet asks for it first.
+const choosing = ref(null); // { type, at, extra, draft, needs } while an action's target is asked for
 function place(type, at, extra = {}) {
   const v = view.value;
   if (!v) return;
-  const params = paramsFor(type, v.blocks);
-  if (typeof params === "string") {
-    live.actionError = params;
-    return;
-  }
+  const r = paramsFor(type, v.blocks);
+  if (typeof r === "string") return void (live.actionError = r);
+  const needs = r.needs.filter((p) => !(p.name in extra));
+  if (needs.length) choosing.value = { type, at, extra, needs, draft: { id: "new", type, ...r.params, ...extra } };
+  else add(type, at, { ...r.params, ...extra });
+}
+const chosen = computed(() => choosing.value?.needs.every((p) => choosing.value.draft[p.name] !== undefined && choosing.value.draft[p.name] !== ""));
+function choose(p, raw) {
+  const n = Number(raw);
+  choosing.value.draft[p.name] = NUMBER_KINDS.includes(p.kind) ? (String(raw).trim() === "" || !Number.isFinite(n) ? undefined : n) : raw;
+}
+function addChosen() {
+  const c = choosing.value;
+  if (!c || !chosen.value) return;
+  choosing.value = null;
+  const { id: _id, type: _type, ...params } = c.draft;
+  add(c.type, c.at, params);
+}
+function add(type, at, params) {
   commit(`Add ${typeLabel(type)}`, (g) => {
     if (g.blocks.length >= MAX_BLOCKS) return void (live.actionError = `A graph or macro holds at most ${MAX_BLOCKS} blocks.`);
     const id = freshId(type, new Set(g.blocks.map((b) => b.id)));
     const pos = at || { x: 40 + (g.blocks.length % 5) * 220, y: 80 + Math.floor(g.blocks.length / 5) * 140 };
     want = new Set([id]);
-    return { blocks: [...g.blocks, { id, type, x: Math.round(pos.x), y: Math.round(pos.y), ...params, ...extra }] };
+    return { blocks: [...g.blocks, { id, type, x: Math.round(pos.x), y: Math.round(pos.y), ...params }] };
   });
 }
 
@@ -392,6 +481,36 @@ function removeWire(w) {
   commit("Delete cable", (g) => ({ wires: g.wires.filter((x) => wireKey(x) !== wireKey(w)) }));
 }
 
+// ---- live or not --------------------------------------------------------------------------------
+
+// The graphs that run for real (on, not in dry run) and contain the open document: the graph itself, or
+// every live graph that uses the open macro, also through other macros.
+function uses(blocks, id, seen = new Set()) {
+  return blocks.some((b) => b.type === "macro" && (b.macro === id || (!seen.has(b.macro) && seen.add(b.macro) && uses(macros.value.find((m) => m.id === b.macro)?.blocks || [], id, seen))));
+}
+const liveGraphs = computed(() => {
+  const running = graphs.value.filter((g) => g.enabled && !g.dry_run);
+  if (!openMacro.value) return running.filter((g) => g.id === graph.value?.id);
+  return running.filter((g) => uses(g.blocks, openMacro.value.id));
+});
+const state = computed(() => (!graph.value ? "" : openMacro.value ? (liveGraphs.value.length ? "live" : "dry") : !graph.value.enabled ? "off" : graph.value.dry_run ? "dry" : "live"));
+
+// Group, ungroup and paste re-make blocks: in a live graph, actions among them apply at once and blocks
+// that remember start empty (D172). Then the operator confirms, or goes to dry run first.
+const confirming = ref(null); // { text, run }
+const risky = (blocks) => blocks.some((b) => categoryOf(b.type) === "action" || entryOf(b.type)?.remembers || b.type === "macro");
+function guardLive(blocks, text, run) {
+  if (liveGraphs.value.length && risky(blocks)) confirming.value = { text, run };
+  else run();
+}
+function confirmLive(dryFirst) {
+  const c = confirming.value;
+  confirming.value = null;
+  if (!c) return;
+  if (dryFirst) setGraphs(liveGraphs.value.map((g) => g.id), { dry_run: true });
+  c.run();
+}
+
 // ---- selection, delete, copy, paste ------------------------------------------------------------
 
 // Delete on the canvas reports blocks and cables one by one; they are removed as one edit.
@@ -432,10 +551,18 @@ function copy() {
 }
 
 // The clipboard into the open graph or macro (any one), with new ids, a bit further down and right on
-// each paste.
+// each paste. A macro's own inputs and outputs are left out when pasting into a graph.
 function paste() {
   if (!view.value || !clipboard.blocks.length) return false;
-  const clip = { blocks: clipboard.blocks, wires: clipboard.wires };
+  const inGraph = !openMacro.value;
+  const own = (t) => inGraph && (t === "macro-in" || t === "macro-out");
+  const drop = new Set(clipboard.blocks.filter((b) => own(b.type)).map((b) => b.id));
+  const clip = { blocks: clipboard.blocks.filter((b) => !drop.has(b.id)), wires: clipboard.wires.filter((w) => !drop.has(w.from_block) && !drop.has(w.to_block)) };
+  if (!clip.blocks.length) return true;
+  guardLive(clip.blocks, "Pasted actions act at once in a live graph, and pasted blocks that remember start empty.", () => pasteNow(clip));
+  return true;
+}
+function pasteNow(clip) {
   const offset = 40 * ++clipboard.pastes;
   commit(`Paste ${clip.blocks.length} block${clip.blocks.length > 1 ? "s" : ""}`, (g) => {
     if (g.blocks.length + clip.blocks.length > MAX_BLOCKS) return void (live.actionError = `Pasting gives ${g.blocks.length + clip.blocks.length} blocks; a graph or macro holds at most ${MAX_BLOCKS}.`);
@@ -446,6 +573,10 @@ function paste() {
   return true;
 }
 
+// Whether the last click was on the canvas (then Ctrl+C is for blocks, whatever text is selected).
+let canvasLast = false;
+const onDown = (e) => (canvasLast = !!e.target?.closest?.(".logiccanvas"));
+
 // Ctrl/Cmd + Z, Shift+Z (or Y), C, V while no text field has the focus.
 function onKey(e) {
   if (!view.value || !(e.ctrlKey || e.metaKey) || e.altKey) return;
@@ -454,7 +585,8 @@ function onKey(e) {
   let done = true;
   if (k === "z" && !e.shiftKey) undo();
   else if ((k === "z" && e.shiftKey) || k === "y") redo();
-  else if (k === "c") done = copy();
+  // Ctrl+C copies the text selected on the page, unless the canvas was clicked last.
+  else if (k === "c") done = (canvasLast || !window.getSelection()?.toString()) && copy();
   else if (k === "v") done = paste();
   else done = false;
   if (done) e.preventDefault();
@@ -469,8 +601,13 @@ function startGroup() {
   const ids = selectedIds.value;
   if (!v || !ids.length) return;
   if (ids.some((id) => ["macro-in", "macro-out"].includes(blockOf(id)?.type))) return void (live.actionError = "A macro's own inputs and outputs cannot be grouped.");
-  grouping.value = { ids, name: "", ...boundary(v, ids, ports) };
+  const b = boundary(v, ids, ports);
+  const size = ids.length + b.inputs.filter((p) => p.crossing).length + b.outputs.filter((p) => p.crossing).length;
+  if (size > MAX_BLOCKS) return void (live.actionError = `The macro would hold ${size} blocks with its inputs and outputs; a macro holds at most ${MAX_BLOCKS}.`);
+  grouping.value = { ids, name: "", ...b };
 }
+// The ports a group exposes, as a comparable key.
+const portsKey = (b) => JSON.stringify([b.inputs, b.outputs].map((l) => l.map((p) => [p.block, p.port, p.type, p.crossing])));
 
 const groupProblem = computed(() => {
   const gp = grouping.value;
@@ -479,6 +616,8 @@ const groupProblem = computed(() => {
     const names = gp[side].filter((p) => p.expose).map((p) => portName(p.name));
     if (new Set(names).size !== names.length) return `Two exposed ${side} have the same name.`;
   }
+  const size = gp.ids.length + gp.inputs.filter((p) => p.expose).length + gp.outputs.filter((p) => p.expose).length;
+  if (size > MAX_BLOCKS) return `The macro would hold ${size} blocks; at most ${MAX_BLOCKS}.`;
   return "";
 });
 
@@ -487,24 +626,39 @@ function makeGroup() {
   const d = doc.value;
   if (!gp || !d || groupProblem.value) return;
   grouping.value = null;
+  const members = gp.ids.map(blockOf).filter(Boolean);
+  guardLive(members, "Grouping starts the blocks that remember (latches, toggles, counters, timers) empty, and actions apply their input again at once.", () => groupNow(gp, d));
+}
+function groupNow(gp, d) {
   const exposed = { inputs: gp.inputs.map((p) => ({ ...p, name: portName(p.name) })), outputs: gp.outputs.map((p) => ({ ...p, name: portName(p.name) })) };
-  edit("Group into macro", [d], (cur) => {
-    const c = cur[keyOf(d)];
-    if (!c) return null;
-    const macroId = freshId("macro", new Set(macros.value.map((m) => m.id)));
-    const instanceId = freshId("macro", new Set(c.blocks.map((b) => b.id)));
-    const r = group(c, gp.ids, exposed, { macroId, name: gp.name.trim() || macroId, instanceId });
-    want = new Set([instanceId]);
-    const body = { graphs: [], macros: [r.macro] };
-    body[`${d.kind}s`].push({ ...resource(c), blocks: r.blocks, wires: r.wires });
-    return body;
-  });
+  edit(
+    "Group into macro",
+    [d],
+    (cur) => {
+      const c = cur[keyOf(d)];
+      if (!c) return null;
+      // The ports shown in the dialog must still be the group's ports (someone may have rewired it).
+      if (gp.ids.some((id) => !c.blocks.some((b) => b.id === id)) || portsKey(boundary(c, gp.ids, ports)) !== portsKey(gp)) return "The blocks changed meanwhile; group them again.";
+      const macroId = freshId("macro", new Set(cur.macros.map((m) => m.id)));
+      const instanceId = freshId("macro", new Set(c.blocks.map((b) => b.id)));
+      const r = group(c, gp.ids, exposed, { macroId, name: gp.name.trim() || macroId, instanceId });
+      want = new Set([instanceId]);
+      const body = { graphs: [], macros: [r.macro] };
+      body[`${d.kind}s`].push({ ...resource(c), blocks: r.blocks, wires: r.wires });
+      return body;
+    },
+    { lists: true },
+  );
 }
 
 function ungroupSelected() {
   const inst = selectedInstance.value;
   const d = doc.value;
   if (!inst || !d) return;
+  const inner = macros.value.find((x) => x.id === inst.macro)?.blocks || [];
+  guardLive([inst, ...inner], "Ungrouping starts the blocks that remember empty, and actions apply their input again at once.", () => ungroupNow(inst, d));
+}
+function ungroupNow(inst, d) {
   const m = { kind: "macro", id: inst.macro };
   edit("Ungroup", [d, m], (cur) => {
     const c = cur[keyOf(d)];
@@ -515,12 +669,12 @@ function ungroupSelected() {
     want = new Set(r.ids);
     const body = { graphs: [], macros: [] };
     body[`${d.kind}s`].push({ ...resource(c), blocks: r.blocks, wires: r.wires });
-    // The macro goes too when nothing else uses it.
+    // The macro goes too when nothing else uses it (read just now).
     const uses = (blocks) => blocks.some((b) => b.type === "macro" && b.macro === def.id);
-    const others = [...graphs.value.filter((g) => !(d.kind === "graph" && g.id === d.id)), ...macros.value.filter((x) => x.id !== def.id && !(d.kind === "macro" && x.id === d.id))];
+    const others = [...cur.graphs.filter((g) => !(d.kind === "graph" && g.id === d.id)), ...cur.macros.filter((x) => x.id !== def.id && !(d.kind === "macro" && x.id === d.id))];
     if (!uses(r.blocks) && !others.some((x) => uses(x.blocks))) body.delete_macros = [def.id];
     return body;
-  });
+  }, { lists: true });
 }
 
 function openInstance(b) {
@@ -609,16 +763,20 @@ function nodeData(b) {
     fired: fresh,
     issues: mine.map((i) => i.message),
     badPorts: Object.fromEntries(mine.filter((i) => i.port).map((i) => [i.port, i.message])),
+    warnings: detail.warnings.filter((w) => w.block === b.id).map((w) => w.message),
   };
 }
 
 // The list's value cell: a component of its own, so that a new value redraws only it.
 const LiveText = { props: { block: { type: Object, required: true } }, setup: (p) => () => shown(p.block) };
 
+// Only blocks whose drawing changed are redrawn.
 function showValues() {
   for (const n of nodes.value) {
     const b = blockOf(n.id);
-    if (b) n.data = nodeData(b);
+    if (!b) continue;
+    const data = nodeData(b);
+    if (JSON.stringify(data) !== JSON.stringify(n.data)) n.data = data;
   }
 }
 
@@ -660,7 +818,17 @@ function rebuild() {
   nextTick(() => (edges.value = drawn));
 }
 
-watch(() => (view.value ? JSON.stringify([keyOf(doc.value), view.value.blocks, view.value.wires, detail.ports, macros.value, catalog.value.length, issues.value, rejected.value]) : ""), rebuild, { immediate: true });
+// Redrawn when the open graph or macro (or a macro it uses) changes, not on every other mix change; the
+// rest is compared by reference.
+const drawnKey = computed(() => {
+  const v = view.value;
+  if (!v) return "";
+  const used = new Set(v.blocks.filter((b) => b.type === "macro").map((b) => b.macro));
+  return JSON.stringify([keyOf(doc.value), v.blocks, v.wires, macros.value.filter((m) => used.has(m.id))]);
+});
+watch([drawnKey, () => detail.ports, () => detail.warnings, () => catalog.value, issues, rejected], rebuild, { immediate: true });
+// Blocks that wait for their target (D164: valid, never acting).
+const waiting = computed(() => new Set(detail.warnings.map((w) => w.block)));
 // Another graph or macro: start with all of it in view.
 watch(
   () => (doc.value ? keyOf(doc.value) : ""),
@@ -713,6 +881,7 @@ function onConnectStart({ nodeId, handleId, handleType }) {
 
 onMounted(async () => {
   window.addEventListener("keydown", onKey);
+  window.addEventListener("pointerdown", onDown, true);
   refresh();
   timer = setInterval(refresh, 250);
   const c = await api.get("/api/v1/logic-blocks").catch(() => null);
@@ -721,6 +890,7 @@ onMounted(async () => {
 onUnmounted(() => {
   clearInterval(timer);
   window.removeEventListener("keydown", onKey);
+  window.removeEventListener("pointerdown", onDown, true);
 });
 </script>
 
@@ -740,8 +910,8 @@ onUnmounted(() => {
     <template v-if="graph">
       <div v-if="!openMacro" class="row" style="margin-top: 0.6rem">
         <input :value="graph.name" aria-label="Logic name" @change="patch('Rename', { name: $event.target.value })" />
-        <label class="check"><input type="checkbox" :checked="graph.enabled" @change="patch($event.target.checked ? 'Turn on' : 'Turn off', { enabled: $event.target.checked })" /> on</label>
-        <label class="check" title="values are computed, actions are listed below and not done"><input type="checkbox" :checked="graph.dry_run" @change="patch('Dry run', { dry_run: $event.target.checked })" /> dry run</label>
+        <label class="check"><input type="checkbox" :checked="graph.enabled" @change="setGraphs([graph.id], { enabled: $event.target.checked })" /> on</label>
+        <label class="check" title="values are computed, actions are listed below and not done"><input type="checkbox" :checked="graph.dry_run" @change="setGraphs([graph.id], { dry_run: $event.target.checked })" /> dry run</label>
         <ConfirmButton label="Remove" small @confirm="removeGraph(graph.id)" />
       </div>
 
@@ -758,6 +928,10 @@ onUnmounted(() => {
       </div>
 
       <div class="row tight ltools">
+        <span class="lstate" :class="state" data-state :title="state === 'live' ? 'Actions are done' : state === 'dry' ? 'Actions are listed, not done' : 'The graph does not run'">
+          {{ state === "live" ? (openMacro ? `LIVE in ${liveGraphs.length} graph${liveGraphs.length > 1 ? "s" : ""}` : "LIVE") : state === "dry" ? "DRY RUN" : "OFF" }}
+        </span>
+        <span v-if="waiting.size" class="lwait small" data-waiting>{{ waiting.size }} block{{ waiting.size > 1 ? "s" : "" }} without a target (inert until chosen)</span>
         <button class="btn small secondary" :disabled="!undoNext" :title="undoNext ? `Undo: ${undoNext} (Ctrl+Z)` : 'Nothing to undo'" aria-label="Undo" @click="undo">Undo</button>
         <button class="btn small secondary" :disabled="!redoNext" :title="redoNext ? `Redo: ${redoNext} (Ctrl+Shift+Z)` : 'Nothing to redo'" aria-label="Redo" @click="redo">Redo</button>
         <button class="btn small secondary" :disabled="!selectedIds.length" title="Copy the selected blocks and the cables between them (Ctrl+C)" aria-label="Copy blocks" @click="copy">Copy</button>
@@ -796,6 +970,24 @@ onUnmounted(() => {
           <button class="btn small" :disabled="!!groupProblem" @click="makeGroup">Create macro</button>
           <button class="btn small secondary" @click="grouping = null">Cancel</button>
           <span v-if="groupProblem" class="small" style="color: var(--bad)">{{ groupProblem }}</span>
+        </div>
+      </div>
+
+      <div v-if="choosing" class="lgroup" role="dialog" aria-label="Choose the target">
+        <div class="row tight">
+          <strong>{{ typeLabel(choosing.type) }}: choose what it acts on</strong>
+          <LogicParam v-for="p in choosing.needs" :key="p.name" :block="choosing.draft" :param="p" :options="optionsOf" @set="choose(p, $event)" />
+          <button class="btn small" :disabled="!chosen" @click="addChosen">Add</button>
+          <button class="btn small secondary" @click="choosing = null">Cancel</button>
+        </div>
+      </div>
+
+      <div v-if="confirming" class="lissues lconfirm" role="alertdialog" aria-label="Change a live graph">
+        <div><strong>This graph is live.</strong> {{ confirming.text }}</div>
+        <div class="row tight">
+          <button class="btn small danger" @click="confirmLive(false)">Do it live</button>
+          <button class="btn small" @click="confirmLive(true)">Switch to dry run first</button>
+          <button class="btn small secondary" @click="confirming = null">Cancel</button>
         </div>
       </div>
 
@@ -861,7 +1053,7 @@ onUnmounted(() => {
             <tr><th>Block</th><th>Type</th><th></th><th>Value</th><th></th></tr>
           </thead>
           <tbody>
-            <tr v-for="b in view.blocks" :key="b.id" :data-block="b.id" :class="{ chosen: selectedIds.includes(b.id) }">
+            <tr v-for="b in view.blocks" :key="b.id" :data-block="b.id" :class="{ chosen: selectedIds.includes(b.id), waiting: waiting.has(b.id) }">
               <td>{{ b.id }}</td>
               <td>{{ typeLabel(b.type) }}</td>
               <td class="lparams">

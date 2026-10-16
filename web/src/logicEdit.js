@@ -1,7 +1,7 @@
 // Logic editor helpers (§11.3): typed ports and the wiring rule, the undo history, the clipboard, and
 // grouping blocks into a macro and back. Pure functions except the two module-level stores, which
 // outlive the Logic tab so that undo and the clipboard survive switching tabs and graphs.
-import { reactive } from "vue";
+import { markRaw, reactive } from "vue";
 
 // A plain copy (structuredClone refuses Vue's reactive proxies).
 export const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -38,7 +38,7 @@ export function portsOf(b, catalog, macros) {
 // ---- resources, revisions and the undo history ------------------------------------------------
 
 // What GET adds to a graph or macro; a write takes the rest.
-const ADDED = ["values", "ports", "buttons", "actions", "revision"];
+const ADDED = ["values", "ports", "buttons", "actions", "revision", "warnings", "exposed"];
 export function resource(r) {
   if (!r) return null;
   const out = clone(r);
@@ -53,11 +53,17 @@ function canon(v) {
   return JSON.stringify(v);
 }
 export const same = (a, b) => canon(resource(a)) === canon(resource(b));
+// The same edit: equal but for "on" and "dry run", which are the operator's and never undone (D175).
+const edit = (r) => {
+  const o = resource(r);
+  if (o) delete o.enabled, delete o.dry_run;
+  return o;
+};
+export const sameEdit = (a, b) => canon(edit(a)) === canon(edit(b));
 
 // One history per document ("graph:<id>" or "macro:<id>"). An entry is one edit: for each graph or
-// macro it touched, the resource before and after (null: it did not exist) and the revisions the
-// server gave them. Undo writes `before` with the `after` revision, so the server refuses it (409)
-// when anyone changed that resource meanwhile; the history is then dropped.
+// macro it touched, the resource before and after (null: it did not exist). Undo reads each one again
+// and goes ahead only while it is still what this client left (D175).
 const LIMIT = 100;
 export const history = reactive({}); // doc key -> { undo: [entry], redo: [entry] }
 
@@ -67,26 +73,13 @@ export function historyOf(key) {
 
 export function record(key, entry) {
   const h = historyOf(key);
-  h.undo.push(entry);
+  h.undo.push(markRaw(entry));
   if (h.undo.length > LIMIT) h.undo.shift();
   h.redo = [];
 }
 
 export function forget(key) {
   delete history[key];
-}
-
-/** The batch body (POST /api/v1/logic-batch) that puts an entry's resources back (`back`) or forward again. */
-export function batchFor(entry, back) {
-  const body = { graphs: [], macros: [], delete_graphs: [], delete_macros: [] };
-  for (const c of entry.changes) {
-    const want = back ? c.before : c.after;
-    const now = back ? c.after : c.before;
-    const rev = back ? c.afterRev : c.beforeRev;
-    if (want) body[`${c.kind}s`].push(now && rev ? { ...want, revision: rev } : want);
-    else body[`delete_${c.kind}s`].push(c.id);
-  }
-  return body;
 }
 
 // ---- copy / paste -----------------------------------------------------------------------------

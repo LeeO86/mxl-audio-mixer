@@ -22,15 +22,17 @@ Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D174, X11–X16).
 - Safety (D169–D174): an action fed only by an unconnected macro input never runs; an action moved to another target acts on it at once (state is kept only for the same type and parameters); `edge` and timers do not fire on the first tick or on a re-wired input; NaN is no change and +∞ is the fader's maximum (NaN closed the fader); nested macros validate in linear time within an inlining budget, off the control lock, and a fader move no longer re-validates every graph; rate limits per action (20 ms, TSL 50 ms, webhooks 100 ms, plan changes 250 ms), one shared webhook client, at most 8 posts at once; TSL out switches a removed index off, splits at 2048 bytes and logs failures again after a recovery. an action block whose target is still empty (`""`) is valid but never acts and is listed in `warnings`; `logic-validate` honours revisions; a batch deleting a missing id is 400; descriptions have at most 1000 characters.
 - `tests/integration/logic.sh` runs in CI.
 
-The editor (the Logic tab; D175–D182):
+The editor (the Logic tab; D175–D184):
 
 - The Logic tab's canvas is the editor of §11.3: a palette built from the server's block catalog (drag a block onto the canvas, or click it); cables drawn between typed ports, coloured by type, and refused while they are drawn when the input cannot take them; zoom, pan, a minimap; multi-select (Ctrl-click, Shift-drag).
-- Undo and redo of every edit (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y, and buttons), per graph or macro, each one atomic batch. An undo that would overwrite another client's change is refused and the history of that graph is cleared.
+- Undo and redo of every edit (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y, and buttons), per graph or macro, each one atomic batch. An undo that would overwrite another client's change is refused and the history of that graph is cleared. With text selected on the page, Ctrl+C copies the text unless the canvas was clicked last.
 - Copy and paste of the selected blocks with the cables between them (Ctrl+C, Ctrl+V), with new ids, also into another graph or a macro.
 - Macros: group the selected blocks into a macro and choose its exposed ports (those a cable crosses are always exposed); open a macro instance (double-click or Open) and back by the breadcrumb; ungroup. Editing an open macro changes every instance.
 - Validation markers: a refused edit shows the server's issues in red on the blocks and ports, and the refused cables dashed, until the next edit.
 - The debug view: every block shows its live value (on/off, dB, a count for events, text); the list of the last actions marks the dry-run ones. Trigger blocks have a Fire button.
-- The list under the canvas edits every block parameter; a new block starts from the catalog's defaults.
+- The list under the canvas edits every block parameter. A new block gets no target by itself: its strip, snapshot, monitor, mic, … stays empty (inert, outlined in amber) until chosen, unless a strip is picked in the add row; a webhook asks for its URL first. A choice made with the arrow keys applies on Enter or when the field is left.
+- A new graph starts in dry run; the toolbar shows LIVE, DRY RUN or OFF. Undo and redo never switch a graph on, off or out of dry run.
+- In a live graph, paste, group and ungroup ask first when they touch actions or blocks that remember: pasted actions act at once, and grouped or ungrouped blocks start with empty memory. "Switch to dry run first" is offered.
 - Fixed: a number being typed in the logic list was reset by the next live-value poll.
 - `@vue-flow/minimap` and `@vue-flow/controls` (MIT) for the minimap and the zoom buttons.
 

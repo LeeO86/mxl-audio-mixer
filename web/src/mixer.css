@@ -306,6 +306,10 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .lnode .vue-flow__handle.bad, .lnode.bad { box-shadow: 0 0 0 2px var(--bad); }
 .lnode.bad { border-color: var(--bad); }
 .lnode .lbad { display: inline-block; margin-left: .35rem; padding: 0 .35rem; border-radius: 3px; background: var(--bad); color: #fff; font-size: .7rem; }
+.lnode.warn:not(.bad) { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
+.lnode .lwarn { display: inline-block; margin-left: .35rem; padding: 0 .35rem; border-radius: 3px; background: var(--warn); color: #20180a; font-size: .7rem; }
+.lwait { color: var(--warn); }
+.amtable tr.waiting td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 .lnode.fired .lval { background: var(--t-event); color: #fff; }
 .vue-flow__edge.typed .vue-flow__edge-path { stroke: var(--tc); stroke-width: 2; }
 .vue-flow__edge.typed.selected .vue-flow__edge-path { stroke-width: 4; }
@@ -319,6 +323,10 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .lcrumbs .btn[aria-current="true"] { background: var(--accent); color: #fff; }
 .lgroup, .lissues { border: 1px solid var(--border); border-radius: 8px; padding: .5rem .7rem; margin-top: .5rem; background: var(--panel2); }
 .lissues { border-color: var(--bad); }
+.lconfirm .row { margin-top: .4rem; }
+.lstate { font-size: .72rem; font-weight: 700; letter-spacing: .04em; padding: .15rem .5rem; border-radius: 4px; background: var(--chip); color: var(--muted); }
+.lstate.live { background: var(--bad); color: #fff; }
+.lstate.dry { background: var(--warn); color: #20180a; }
 .lissues > div + div { margin-top: .2rem; }
 .lgroupcols { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: .3rem 1rem; }
 .lgroupcols .check input[type="text"], .lgroupcols .check input:not([type]) { flex: 0 0 auto; }

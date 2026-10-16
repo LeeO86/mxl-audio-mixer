@@ -46,7 +46,11 @@ Ctrl+Shift+Z) of every edit; group blocks into a macro with the ports you choose
 open it (double-click, a breadcrumb back) and ungroup it; a refused edit shows the
 server's reasons as red markers on the blocks, ports and the dashed cable; every
 block shows its live value; soft keys, triggers, dry run and the list of the last
-actions; the list under the canvas edits every parameter),
+actions; the list under the canvas edits every parameter. A new graph starts in
+dry run, and the toolbar shows LIVE, DRY RUN or OFF; undo never changes that. A
+new block gets no target by itself (amber until one is chosen). In a live graph,
+paste, group and ungroup ask first: pasted actions act at once, and grouped or
+ungrouped blocks start with empty memory),
 **Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
 history), **Meters** (the bridge on dBFS, true peak or PPM EBU, BBC, Nordic, DIN at
 an alignment level, phase correlation; loudness; spectrum and goniometer of any
