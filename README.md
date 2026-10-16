@@ -242,9 +242,17 @@ is then 0. The file capability makes glibc run the binary in secure mode:
 **Network.** The API has no authentication: keep the web and NMOS ports on the pod
 network (the platform's ingress in front of the UI). The logic editor's webhook
 block posts only to `http://` and `https://` URLs; a failed post is a warning in
-the log (without the URL's credentials, query and fragment).
+the log (without the URL's credentials, query and fragment). Its HTTP trigger
+(`POST /api/v1/logic/<graph>/trigger/<block>`) is part of the same API, so it has
+no authentication either: anyone who reaches the web port can fire it. Give an
+outside system that should fire one a path through the platform's ingress with
+its own authentication, not the web port itself.
 
 ## Settings
+
+`MIXER_TEST_LOGIC_SWAP_DELAY_MS` is for `tests/integration/logic.sh` only (it delays
+the logic's plan changes and is logged as a warning at start): never set it in
+production.
 
 Environment first, then the JSON file `MIXER_CONFIG_FILE` (an object of these keys),
 then the defaults. Unknown environment variables are ignored; unknown file keys and
@@ -290,6 +298,8 @@ token.
 | `TSL_TCP_PORT` | 8911 | TSL UMD 5.0 over TCP (DLE/STX framing). |
 | `TSL_SCREEN` | -1 | Only this TSL screen; -1 is every screen. |
 | `TSL_MAP` | empty | display:index pairs, e.g. 0:1,1:2: the tally index a TSL display index drives; empty: the same number. |
+| `TSL_OUT_TARGET` | unset | host:port that the logic editor's tsl-out blocks send TSL UMD 5.0 to over UDP. Unset: no TSL output. |
+| `TSL_OUT_SCREEN` | 0 | TSL screen of the logic editor's TSL output, 0–65534. |
 | `PREVIEW_PUBLISH_URL` | unset | RTSP base URL of the shared MediaMTX. Unset: start a built-in MediaMTX and publish there. |
 | `PREVIEW_PATH_PREFIX` | mxl-audio-mixer | Path prefix of every stream: <prefix>/<monitor id>. |
 | `PREVIEW_WHEP_URL` | unset | Public base URL of WHEP and WHIP for the browser. Unset with the built-in MediaMTX: the page's host and MEDIAMTX_WHEP_PORT. |
@@ -314,7 +324,10 @@ for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true
 
 ## The mix
 
-Kept in `MIXER_STATE_DIR/mix.json` and in the show file. Signal ids (strips and
+Kept in `MIXER_STATE_DIR/mix.json` and in the show file. `mix.json` is written
+atomically: within about 0.6 s of fader and parameter changes (from the API or
+from logic, at most every 500 ms; a crash loses at most that much), at once
+after any other change, and at SIGTERM. Signal ids (strips and
 buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
 an id gets `strip-<n>` or `bus-<n>`.
 
@@ -617,6 +630,75 @@ of the first two channels; a full-scale sine reads 0 dB), their correlation and
 256 sample pairs for the goniometer, every 40 ms. Changing it swaps the plan
 without touching the audio.
 
+### Logic editor (§11)
+
+A logic graph (`/api/v1/logic`, the Logic tab) is blocks wired port to port,
+saved in the show. It is evaluated every 10 ms on the control engine (never on
+the DSP thread), in topological order. Each graph can be enabled or disabled;
+with `dry_run` it computes and lists its actions without running them.
+
+**Ports are typed:** `boolean`, `number`, `level` (dB), `event` (true for one
+tick) and `string`. An input converts what it receives: booleans, numbers and
+levels into each other (on is ≥ 0.5, true is 1); a value into an event fires when
+it turns on (not on the first tick); an event into a value is on for its tick;
+anything but an event into a string (numbers with up to two decimals). A string
+feeds only a string and an event never feeds a string. An input takes one wire;
+one without a wire reads off, 0 or empty. A loop must pass through a block that
+remembers (`edge`, `latch`, `toggle`, `counter`, `timer`, `delay`, `debounce`):
+those publish last tick's value.
+
+**Blocks** (`GET /api/v1/logic-blocks` lists each with its parameters and ports):
+- inputs: `const`, `text`, `button` (a soft key), `trigger` (fired by `POST
+  /api/v1/logic/<graph>/trigger/<block>`), `mute`, `pfl`, `fader`, `vad`, `level`,
+  `above` (a peak level with hysteresis), `loudness` (momentary, short-term,
+  integrated, range or true peak), `tally` (on air), `schedule` (UTC time of
+  day), `nmos-receiver` and `nmos-sender` (active), `link` (a remote-link peer is
+  up);
+- logic: `and`, `or`, `xor`, `not`, `compare` (`gt`, `lt`, `eq`, `ge`, `le`, `ne`),
+  `math` (`add`, `sub`, `mul`, `div`, `min`, `max`), `scale` (× factor + offset),
+  `map` (a curve through 2–16 points), `select` (one of 2–8 inputs), `edge`,
+  `latch`, `toggle`, `counter`, `timer` (a pulse), `delay`, `debounce`;
+- actions: `set-mute`, `set-fader` and `set-vca` (with `ramp_ms`), `set-param` (a
+  node parameter the DSP smooths, e.g. `threshold_db` or `bands/1/gain_db`, or
+  `bypass`; clamped to its range, ramped), `set-pfl`, `set-talk`, `set-publish`,
+  `set-monitor` (a monitor's source), `loudness-control` (start, stop, reset),
+  `recall` (a snapshot), `webhook` (POST `{"graph", "block", "value"}`), `tsl-out`
+  (TSL UMD 5.0 to `TSL_OUT_TARGET`: left lamp red, right lamp green, a label; on
+  every change and every second), `log` (a log line and a `logic` message on the
+  events WebSocket).
+
+Value actions (mute, faders, parameters, PFL, talk, publish, TSL) follow their
+input from the first tick on; event actions run when their input fires. An
+action whose input has no wire never runs, also through an unconnected macro
+input (a logic block in between is a source of its own: an unconnected macro
+input into `not` into `set-mute` still mutes, as an unwired `not` would at the
+top level), and neither does one whose target is still empty (`""`: listed in the
+graph's `warnings`, "choose a target"). Actions are the same changes the API makes, ramped and clamped the same
+way; NaN is no change, +∞ is a fader's maximum. Each action block runs at most
+every 20 ms (TSL 50 ms, a webhook 100 ms, changes that rewire the plan 250 ms;
+the newest value wins); at most 8 webhook posts run at once. A block keeps its
+state over an edit only while its type and parameters stay the same: an action
+moved to another target acts on it at once, the old target stays as it is.
+`edge`, timers and converted events never fire on the first tick or on a
+re-wired input. Disabling and enabling a graph, or a restart, resets toggles,
+latches and counters, and value actions apply their input again. A `tsl-out`
+index that goes away is switched off once.
+
+**Macros** (`/api/v1/logic-macros`, saved in the show as `logic_macros`) are
+sub-graphs used as a `macro` block: their `macro-in` and `macro-out` blocks are
+the instance's ports. Evaluation inlines every instance (its blocks are then
+`<instance>.<block>` in `values`, `buttons` and the action list), with its own
+state. A macro that uses itself is refused, macros nest at most 4 deep, and a
+graph has at most 256 blocks once inlined (32 graphs, 64 blocks per graph or
+macro, 32 macros).
+
+**Editing:** `PUT /api/v1/logic/<id>` replaces a whole graph, and `POST
+/api/v1/logic-batch` writes and deletes graphs and macros as one change. Both
+take a `revision` (from GET; it changes with every edit) and answer 409 when the
+graph changed meanwhile. A refused change answers 400 with `issues`: each with
+its `graph` or `macro`, `block`, `port`, `wire` and `message`.
+`POST /api/v1/logic-validate` checks the same body without applying it.
+
 ## Ports and exit codes
 
 | Port | Default | |
@@ -686,8 +768,12 @@ without touching the audio.
 | `GET`, `POST /api/v1/automixes`, `GET`, `PATCH`, `DELETE /api/v1/automixes/<id>` | auto-mixes (`name`, `enabled`, `last_mic_hold`, `vad_weighting`, `members`: strip ids, which keep a member's settings, or `{signal, weight_db, bypass}`); GET adds `gains_db` |
 | `GET`, `POST /api/v1/ducks`, `GET`, `PATCH`, `DELETE /api/v1/ducks/<id>` | ducks (`name`, `enabled`, `keys`, `targets`, `mode`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms`, `ratio` {`target_lu`, `overvoice_lu`, `max_reduction_db`, `speed`, `bed_voice`}, `channel_depth` {`front`, `center`, `lfe`, `surround`}, `recall_safe`; the fields of `ratio` and `channel_depth` given are set, the others kept); GET adds `active`, `gain_db` and for a ratio duck `control` (`state`: `release`, `duck`, `interview`, `overvoice`; `reduction_db`, `slow_db`, `mid_db`, `fast_db`, `target_lu`, `ratio_lu`, `dialogue_lufs`, `bed_lufs`) |
 | `GET /api/v1/autolevels`, `GET`, `PUT`, `DELETE /api/v1/autolevels/<signal>` | auto-levels (`enabled`, `target_lufs`, `speech_offset_lu`, `max_gain_db`, `min_gain_db`, `attack_ms`, `release_ms`, `freeze_lufs`, `recall_safe`; PUT sets the fields given, the others kept or the defaults); GET adds `state` (`gain_db`, `level_lufs`, `target_lufs`, `frozen`, `speech`) |
-| `GET`, `POST /api/v1/logic`, `GET`, `PATCH`, `DELETE /api/v1/logic/<id>` | logic graphs (§11): `name`, `description`, `enabled`, `dry_run`, `blocks` (tally on air, a timer, above a meter level with hysteresis, snapshot recall), `wires`; GET adds `values` and `buttons` |
+| `GET`, `POST /api/v1/logic`, `GET`, `PUT`, `PATCH`, `DELETE /api/v1/logic/<id>` | logic graphs (§11, above): `name`, `description`, `enabled`, `dry_run`, `blocks`, `wires`; PUT the whole graph; PUT and PATCH take `revision` (409 when stale); answers add `revision`, `ports`, `values`, `buttons` and `actions` (the last 20) |
 | `PUT /api/v1/logic/<id>/buttons/<block>` | a soft key (`{"pressed": true}`); not part of the show |
+| `POST /api/v1/logic/<id>/trigger/<block>` | fire a `trigger` block on the next tick (204; no body; no authentication, as the rest of the API) |
+| `GET`, `POST /api/v1/logic-macros`, `GET`, `PUT`, `PATCH`, `DELETE /api/v1/logic-macros/<id>` | logic macros: `name`, `description`, `blocks`, `wires`; answers add `revision`, `ports` and `exposed` (the instance's ports) |
+| `POST /api/v1/logic-batch`, `POST /api/v1/logic-validate` | `{"graphs", "macros", "delete_graphs", "delete_macros"}` as one change (409 `conflicts` on a stale `revision`), or only checked (`{"issues"}`) |
+| `GET /api/v1/logic-blocks` | every logic block type: `label`, `category`, `params`, `inputs`, `outputs`, `remembers` |
 | `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
 | `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
 | `GET /api/v1/preview` | the preview: `mode` (`own`, `shared`), the built-in MediaMTX (`child`: running, pid, restarts, last exit), `whep_url` or `whep_port`, every stream (path, state, frames, connects, error, readers, last listen) |
@@ -715,7 +801,9 @@ second (as `GET /api/v1/status`); `{"type": "mix", "revision", "mix", "latency_m
 on connect and within 40 ms of every change of the mix, from any client; `{"type": "meters",
 "meters", "loudness", "vad", "auto_db", "autolevels", "ducks"}` every 40 ms (`vad`: per analysed signal
 `active` and `probability`; `auto_db`: every auto gain, its deepest channel, `null` for −∞;
-`autolevels`: every auto-level's `state`; `ducks`: every ratio duck's `control`); and `{"type": "analysis", …}` for clients that
+`autolevels`: every auto-level's `state`; `ducks`: every ratio duck's `control`);
+`{"type": "logic", "graph", "block", "action", "dry_run", "t_ms"}` for every
+logic action (with `"log"` from a `log` block); and `{"type": "analysis", …}` for clients that
 asked. A client may send `{"type": "subscribe", "meters": [ids] | null, "meter_hz":
 25, "analysis": false}` to receive only some signals' meters, less often, or the
 analyser. Changes go through the REST API; every change answers with
@@ -783,7 +871,12 @@ output; two talkers taking turns with last-mic-hold), `tests/integration/link.sh
 (two mixers on the remote link: the gallery rides the far side, the return and
 the in-ears; a second master, a connection without hello and an oversized
 message refused; a hung master and a hung far side dropped within 5 s and
-reconnected, takeover deny meanwhile), `tests/perf/section16.sh` (the
+reconnected, takeover deny meanwhile), `tests/integration/logic.sh` (logic
+graphs end to end: an HTTP trigger mutes a strip, a soft key ramps its fader
+sample-exact, publishes a bus, sends TSL to a UDP listener and posts a webhook, a
+log line on the events WebSocket, dry run, a macro written in a batch, a type
+error and a stale revision refused, a logic unpublish and an API publish in the same
+fade both kept, `mix.json` coalesced and written at SIGTERM), `tests/perf/section16.sh` (the
 §16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
 the maintainers are in `tests/hw/`.

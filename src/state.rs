@@ -14,6 +14,41 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))
 }
 
+/// When to write a file that changes often (`mix.json`, D168): at most once per
+/// `delay`, `delay` after the first change since the last write. A crash loses at
+/// most that much.
+#[derive(Debug, Default)]
+pub struct Coalesce {
+    due: Option<std::time::Instant>,
+}
+
+impl Coalesce {
+    /// Something changed at `now`.
+    pub fn changed(&mut self, now: std::time::Instant, delay: std::time::Duration) {
+        self.due.get_or_insert(now + delay);
+    }
+
+    /// A write is waiting.
+    pub fn pending(&self) -> bool {
+        self.due.is_some()
+    }
+
+    /// It is time to write; the caller writes now.
+    pub fn take_due(&mut self, now: std::time::Instant) -> bool {
+        if self.due.is_some_and(|t| now >= t) {
+            self.due = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Write now whatever is waiting (shutdown, an operator's explicit action).
+    pub fn take(&mut self) -> bool {
+        self.due.take().is_some()
+    }
+}
+
 /// `MIXER_STATE_DIR` (G1): create it and prove it is writable, so a read-only
 /// mount fails the start instead of losing every change later.
 pub fn check_state_dir(dir: &Path) -> Result<(), String> {
@@ -77,5 +112,33 @@ mod tests {
         }];
         save_connections(&path, &saved).unwrap();
         assert_eq!(load_connections(&path), saved);
+    }
+
+    #[test]
+    fn writes_are_coalesced() {
+        use std::time::{Duration, Instant};
+        let delay = Duration::from_millis(500);
+        let start = Instant::now();
+        let mut c = Coalesce::default();
+        let mut writes = Vec::new();
+        // A fader moved every 10 ms for 2 s.
+        for tick in 0..200u64 {
+            let now = start + Duration::from_millis(tick * 10);
+            c.changed(now, delay);
+            if c.take_due(now) {
+                writes.push(tick);
+            }
+        }
+        assert_eq!(writes, vec![50, 101, 152], "every 500 ms, not 100 a second");
+        // What changed after the last write (from 1530 ms) is written 500 ms
+        // after its first change, though the fader stopped at 1990 ms.
+        assert!(c.pending());
+        assert!(!c.take_due(start + Duration::from_millis(2029)));
+        assert!(c.take_due(start + Duration::from_millis(2030)));
+        assert!(!c.pending());
+        // Shutdown writes at once; nothing waiting, nothing to write.
+        c.changed(start, delay);
+        assert!(c.take());
+        assert!(!c.take());
     }
 }

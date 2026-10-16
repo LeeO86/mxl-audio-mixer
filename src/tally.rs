@@ -344,6 +344,186 @@ pub fn wrap(packet: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One display of the logic editor's TSL output (`tsl-out`, D165).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutDisplay {
+    /// The left lamp (red: on air).
+    pub left: bool,
+    /// The right lamp (green: preview).
+    pub right: bool,
+    pub label: String,
+}
+
+/// Largest TSL 5.0 packet, PBC included (the protocol's limit).
+pub const MAX_PACKET: usize = 2048;
+/// Longest label sent, in UTF-16 units.
+const MAX_LABEL: usize = 128;
+
+/// TSL UMD 5.0 packets (PBC first, no DLE/STX) for `displays` on `screen`:
+/// labels in UTF-16 (at most 128 units), brightness full, text tally off; as
+/// many display messages per packet as fit in [`MAX_PACKET`] bytes.
+pub fn encode_out(screen: u16, displays: &BTreeMap<u16, OutDisplay>) -> Vec<Vec<u8>> {
+    let header = |screen: u16| {
+        let mut body = vec![0u8, 0, 0u8, 0x01];
+        body.extend_from_slice(&screen.to_le_bytes());
+        body
+    };
+    let mut packets = Vec::new();
+    let mut packet = header(screen);
+    for (index, d) in displays {
+        let control: u16 = (u16::from(d.right) << 1) | (u16::from(d.left) << 4) | (3 << 6);
+        let text: Vec<u8> = d
+            .label
+            .encode_utf16()
+            .take(MAX_LABEL)
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut message = Vec::with_capacity(6 + text.len());
+        message.extend_from_slice(&index.to_le_bytes());
+        message.extend_from_slice(&control.to_le_bytes());
+        message.extend_from_slice(&(text.len() as u16).to_le_bytes());
+        message.extend_from_slice(&text);
+        if packet.len() + message.len() > MAX_PACKET && packet.len() > 6 {
+            packets.push(std::mem::replace(&mut packet, header(screen)));
+        }
+        packet.extend_from_slice(&message);
+    }
+    if packet.len() > 6 {
+        packets.push(packet);
+    }
+    for p in &mut packets {
+        let pbc = (p.len() - 2) as u16;
+        p[..2].copy_from_slice(&pbc.to_le_bytes());
+    }
+    packets
+}
+
+/// The display that switches an index off: no lamps, no label.
+fn off() -> OutDisplay {
+    OutDisplay {
+        left: false,
+        right: false,
+        label: String::new(),
+    }
+}
+
+/// How often an index that left the output is sent off, a second apart.
+const OFF_REPEATS: u32 = 3;
+
+/// Shutdown: switch `indexes` off at `target` now (twice, 50 ms apart).
+pub async fn send_off(target: &str, screen: u16, indexes: &[u16]) {
+    if indexes.is_empty() {
+        return;
+    }
+    let displays: BTreeMap<u16, OutDisplay> = indexes.iter().map(|i| (*i, off())).collect();
+    let Ok(socket) = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await else {
+        return;
+    };
+    let Ok(Some(to)) = tokio::net::lookup_host(target).await.map(|mut a| a.next()) else {
+        return;
+    };
+    for round in 0..2 {
+        if round > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        for packet in encode_out(screen, &displays) {
+            let _ = socket.send_to(&packet, to).await;
+        }
+    }
+}
+
+/// Send the displays of `state` to `target` (`host:port`) over UDP: on every
+/// change and at least once a second (§10.3). An index that leaves the state
+/// (its block removed, its graph disabled or in dry run) is sent with its
+/// lamps off and no label three times, a second apart, so no lamp stays lit. The name is resolved again
+/// every 30 s. A failure is logged once until sending works again.
+pub fn spawn_sender(
+    target: String,
+    screen: u16,
+    mut state: tokio::sync::watch::Receiver<BTreeMap<u16, OutDisplay>>,
+) {
+    tokio::spawn(async move {
+        let socket = match tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("TSL output: {e}");
+                return;
+            }
+        };
+        let mut address: Option<(std::net::SocketAddr, Instant)> = None;
+        let mut warned = false;
+        let mut last: BTreeMap<u16, OutDisplay> = BTreeMap::new();
+        // Indexes switched off: how often sent, and when last.
+        let mut offs: BTreeMap<u16, (u32, Option<Instant>)> = BTreeMap::new();
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(1));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                changed = state.changed() => if changed.is_err() { return },
+                _ = every.tick() => {}
+            }
+            let current = state.borrow_and_update().clone();
+            for index in last.keys().filter(|i| !current.contains_key(i)) {
+                offs.entry(*index).or_insert((0, None));
+            }
+            offs.retain(|i, _| !current.contains_key(i));
+            last = current.clone();
+            let mut displays = current.clone();
+            let mut due = Vec::new();
+            for (index, (_, at)) in &offs {
+                if at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(950)) {
+                    displays.insert(*index, off());
+                    due.push(*index);
+                }
+            }
+            if displays.is_empty() {
+                continue;
+            }
+            if address.is_none_or(|(_, t)| t.elapsed().as_secs() >= 30) {
+                match tokio::net::lookup_host(target.as_str())
+                    .await
+                    .map(|mut a| a.next())
+                {
+                    Ok(Some(a)) => address = Some((a, Instant::now())),
+                    other => {
+                        if !warned {
+                            tracing::warn!("TSL output: cannot resolve {target}: {other:?}");
+                            warned = true;
+                        }
+                        if address.is_none() {
+                            continue;
+                        }
+                    }
+                }
+            }
+            let Some((to, _)) = address else { continue };
+            let mut sent = true;
+            for packet in encode_out(screen, &displays) {
+                if let Err(e) = socket.send_to(&packet, to).await {
+                    sent = false;
+                    if !warned {
+                        tracing::warn!("TSL output to {to}: {e}");
+                        warned = true;
+                    }
+                }
+            }
+            if sent {
+                if warned {
+                    tracing::info!("TSL output to {to}: sending again");
+                }
+                warned = false;
+                for index in due {
+                    if let Some((count, at)) = offs.get_mut(&index) {
+                        *count += 1;
+                        *at = Some(Instant::now());
+                    }
+                }
+                offs.retain(|_, (count, _)| *count < OFF_REPEATS);
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +604,67 @@ mod tests {
         let mut t = Tally::default();
         t.packet(&plain, &encode(7, &[(4, 2, 0, "")]));
         assert!(t.on_air(4));
+    }
+
+    #[test]
+    fn the_tsl_output_parses_back() {
+        let displays = BTreeMap::from([
+            (
+                3,
+                OutDisplay {
+                    left: true,
+                    right: false,
+                    label: "ON AIR".into(),
+                },
+            ),
+            (
+                9,
+                OutDisplay {
+                    left: false,
+                    right: true,
+                    label: "Stüdio".into(),
+                },
+            ),
+        ]);
+        let packets = encode_out(2, &displays);
+        assert_eq!(packets.len(), 1);
+        let back = parse(&packets[0]).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(
+            (back[0].screen, back[0].index, back[0].lh, back[0].rh),
+            (2, 3, 1, 0)
+        );
+        assert_eq!(back[0].label, "ON AIR");
+        assert_eq!(back[0].brightness, 3);
+        assert_eq!((back[1].index, back[1].lh, back[1].rh), (9, 0, 2));
+        assert_eq!(back[1].label, "Stüdio");
+        // 100 displays with long labels: split at 2048 bytes, nothing lost.
+        let many: BTreeMap<u16, OutDisplay> = (0..100)
+            .map(|i| {
+                (
+                    i,
+                    OutDisplay {
+                        left: true,
+                        right: false,
+                        label: "x".repeat(300),
+                    },
+                )
+            })
+            .collect();
+        let packets = encode_out(0, &many);
+        assert!(packets.iter().all(|p| p.len() <= MAX_PACKET));
+        assert!(packets.len() > 1);
+        assert_eq!(
+            packets
+                .iter()
+                .map(|p| parse(p).unwrap().len())
+                .sum::<usize>(),
+            100
+        );
+        assert_eq!(
+            parse(&packets[0]).unwrap()[0].label.len(),
+            128,
+            "labels are cut at 128"
+        );
     }
 }

@@ -17,10 +17,22 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::api::{apply, bad, body, conflict, internal, not_found, ramp, with_errors, ApiResult};
+use crate::api::{bad, body, conflict, internal, not_found, ramp, with_errors, ApiResult};
 use crate::history::now_ms;
 use crate::mix::show::{capture, recall, Filter, Layout, Snapshot};
 use crate::ops::App;
+
+/// A show action (snapshots, layouts, history) is the operator's explicit
+/// step: written to `mix.json` at once, not coalesced (D168).
+async fn apply(
+    app: &App,
+    ramp: u32,
+    change: impl FnOnce(&mut crate::mix::Mix) -> ApiResult<()>,
+) -> ApiResult<Vec<String>> {
+    let result = crate::api::apply(app, ramp, change).await;
+    app.control().flush_mix();
+    result
+}
 
 pub fn routes() -> Router<App> {
     Router::new()

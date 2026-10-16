@@ -13,6 +13,7 @@ current so that work can resume after an interruption.
 | M1–M6 skeleton, DSP core, processing, console, control room, preview, talkback, VCA, N-1 | done, **released in 1.0.0** (`14e9487`, 2026-10-13) |
 | M7 VAD, auto-level, auto-mix, ducking; the missing-sample split; ports 8190/3342 | done, **released in 1.1.0** (`ee2d06d`, 2026-10-14) |
 | M8a logic graphs | done, **released in 1.2.0** (`8e2aae6`, 2026-10-15); maintainers' hardware run 2026-10-15/16 (`docs/release-notes/1.2.0.md`) |
+| M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | branch `feat/logic-complete`, for 1.3.0 |
 | M9 remote link (master/slave) | done on `main` (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **1.3.0 in progress**, untagged |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
@@ -1804,3 +1805,244 @@ The audit of `09b5598` found the link failing forever on `wss://`, a takeover gu
 | D155 | `command` and the in-ears of `return` check that the link is up and queue under one lock; `ended` clears the queue under the same lock. At most 1024 commands wait per far side (503). | A command checked before and queued after the link dropped went out on the next connection. The queue is sent every 50 ms, so a full one is a stuck link. |
 | D156 | The token is compared as SHA-1 digests in constant time (`sha1`, already built for axum's WebSocket); a wrong one is logged at most every 10 s with a count. A user or password in a peer URL is refused. | The length showed in the time taken; a guessing peer was silent; a password in a URL would be shown by `GET /api/v1/config`. |
 | D157 | The master lists its slaves at start (down), and the RTT is dropped while a link is down. The timers delay after a stall instead of bursting. | A slave never reached was missing from the metrics and the console; a stale RTT read as a live one. |
+
+## M8b: the logic editor, complete (§11)
+
+M8a (1.2.0) evaluated number-only graphs with 23 block types. This part adds
+typed ports, the rest of §11.1's blocks, macros (§11.3) and an API the canvas
+can edit atomically with. The UI (canvas, palette, markers, copy/paste,
+undo/redo) is built in parallel against the shape below.
+
+### M8b: API shape (for the UI)
+
+**Signal types.** Every port has one of `boolean`, `number`, `level` (dB),
+`event` (a trigger that is true for one tick) and `string`.
+
+**Wires and conversions (D158).** A wire goes from an output to an input, and
+an input takes one wire. The input converts the value it receives, and no other
+conversion exists:
+
+| from \ to | boolean | number | level | event | string |
+| --- | --- | --- | --- | --- | --- |
+| boolean | = | 1 / 0 | 1 / 0 | fires when it turns on | `true` / `false` |
+| number | ≥ 0.5 | = | = | fires when it reaches 0.5 | formatted |
+| level | ≥ 0.5 | = | = | fires when it reaches 0.5 | formatted |
+| event | true on the tick it fires | 1 on that tick, else 0 | 1 on that tick, else 0 | = | **rejected** |
+| string | **rejected** | **rejected** | **rejected** | **rejected** | = |
+
+A value that converts to an event does not fire on the first tick the graph
+runs (D137). "Formatted" is the number with at most two decimals (`-12.5`,
+`-inf`). An input with no wire reads `false`, `0`, no event, or `""`.
+
+**Blocks.** `GET /api/v1/logic-blocks` lists every type with its category,
+parameters (name, kind, range, default, options), ports and whether it
+remembers. Params are fields of the block next to `id`, `type`, `x`, `y`, as in
+1.2. New in M8b are marked *new*.
+
+| Type | Params | Inputs | Outputs |
+| --- | --- | --- | --- |
+| **Inputs** | | | |
+| `const` | `value` number | | `out` number |
+| `text` *new* | `value` string (≤ 200) | | `out` string |
+| `button` | | | `out` boolean |
+| `trigger` *new* | | | `out` event: fired by `POST /api/v1/logic/<graph>/trigger/<block>` |
+| `mute` | `signal` | | `out` boolean |
+| `pfl` *new* | `signal` (strip, bus or VCA) | | `out` boolean: in PFL |
+| `fader` | `signal` | | `out` level |
+| `vad` | `signal` | | `out` boolean |
+| `level` | `signal` | | `out` level (peak dBFS, −200 for none) |
+| `above` | `signal`, `threshold_db`, `hysteresis_db` | | `out` boolean |
+| `loudness` *new* | `signal`, `measure`: `momentary` · `short-term` · `integrated` · `range` · `true-peak` | | `out` level (LUFS, LU, dBTP; −200 for none) |
+| `tally` | `index` | | `out` boolean |
+| `schedule` | `start_minute`, `end_minute` (UTC) | | `out` boolean |
+| `nmos-receiver` *new* | `input` (1–N) | | `out` boolean: the input's receiver is active (`master_enable`) |
+| `nmos-sender` *new* | `signal` | | `out` boolean: the signal's sender is active |
+| `link` *new* | `peer`: `master` or `s1`…`s4` | | `out` boolean: the remote link to that peer is up |
+| **Logic** | | | |
+| `and`, `or`, `xor` | | `a`, `b` boolean | `out` boolean |
+| `not` | | `in` boolean | `out` boolean |
+| `compare` | `op`: `gt` · `lt` · `eq` · `ge` *new* · `le` *new* · `ne` *new* | `a`, `b` number | `out` boolean |
+| `math` *new* | `op`: `add` · `sub` · `mul` · `div` · `min` · `max` | `a`, `b` number | `out` number (÷0 gives 0) |
+| `scale` *new* | `factor`, `offset` | `in` number | `out` number: in × factor + offset |
+| `map` *new* | `points`: 2–16 `[x, y]`, x rising | `in` number | `out` number: the curve through the points, flat outside them |
+| `select` *new* | `inputs` 2–8, `value_type` (not `event`) | `sel` number, `in0`…`in<n−1>` of `value_type` | `out` `value_type`: the input `sel` (rounded, clamped) |
+| `edge` | | `in` boolean | `out` event (was a number) |
+| `latch` | | `set`, `reset` boolean | `out` boolean |
+| `toggle` *new* | | `in` event | `out` boolean: flips on each event |
+| `counter` *new* | | `up`, `down`, `reset` event | `out` number |
+| `timer` | `ms` | `in` boolean | `out` boolean |
+| `delay` | `ms` | `in` boolean | `out` boolean |
+| `debounce` | `ms` | `in` boolean | `out` boolean |
+| **Actions** | | | |
+| `set-mute` | `signal` | `in` boolean | |
+| `set-fader` | `signal`, `ramp_ms` *new* (default 10) | `level` level | |
+| `set-vca` *new* | `vca`, `ramp_ms` | `level` level | |
+| `set-param` *new* | `signal`, `node`, `param` (a field, or a path such as `bands/1/gain_db`; `bypass`), `ramp_ms` | `value` number | |
+| `set-pfl` *new* | `signal` | `in` boolean | |
+| `set-talk` *new* | `mic`, `destination` | `in` boolean | |
+| `set-publish` *new* | `signal` | `in` boolean | |
+| `set-monitor` *new* | `monitor`, `source` (`{"signal": id}`, `{"input": n}` or `null`) | `in` event | |
+| `loudness-control` *new* | `signal`, `action`: `start` · `stop` · `reset` | `in` event | |
+| `recall` | `snapshot` | `in` event | |
+| `webhook` | `url` | `in` event | |
+| `tsl-out` *new* | `index` (0–65534) | `left`, `right` boolean, `label` string | |
+| `log` *new* | `message` (≤ 200) | `in` event, `value` string | |
+| **Macros** | | | |
+| `macro` *new* | `macro` (a macro id) | the macro's `macro-in` names | the macro's `macro-out` names |
+| `macro-in` *new* | `name`, `value_type` | | `out` `value_type` (only inside a macro) |
+| `macro-out` *new* | `name`, `value_type` | `in` `value_type` | (only inside a macro) |
+
+**Graph JSON.** As in 1.2 (`id`, `name`, `description`, `enabled`, `dry_run`,
+`blocks`, `wires`). `GET /api/v1/logic[/<id>]` adds:
+- `revision`: a digest of the graph (16 hex digits); it changes with any edit;
+- `ports`: `{block: {"inputs": [{name, type}], "outputs": [...]}}`, also for
+  `select` and macro instances;
+- `values`: `{block: value}` after the last tick: a boolean, a number (`null`
+  for ±∞), a string, or for an event output the number of times it has fired.
+  Blocks inside a macro instance are `<instance>.<block>` (nested:
+  `a.b.c`);
+- `buttons`: the soft keys held down (also `<instance>.<block>`);
+- `warnings`: blocks whose target is still `""` (`{"block", "message": "choose
+  a target"}`, the issue shape); valid, never acting (D164);
+- `actions`: the last 20 actions, newest last:
+  `{"t_ms", "block", "action", "dry_run"}` (`action` is readable text).
+
+**Editing (D161).**
+- `PUT /api/v1/logic/<id>`: the whole graph (creates it if missing). With
+  `"revision"` it is applied only if the graph still has that revision,
+  otherwise 409 `{"error", "revision": <current>}`. `PATCH` takes `revision` too.
+- `POST /api/v1/logic-batch`: `{"graphs": [graph…], "macros": [macro…],
+  "delete_graphs": [id…], "delete_macros": [id…]}`, each graph and macro whole
+  and optionally with `revision`. Applied as one change, or not at all. Answers
+  `{"graphs": [...], "macros": [...]}` (as GET). This is what "group into a
+  macro" (a new macro plus the graph that now uses it) and undo/redo use.
+- `POST /api/v1/logic-validate`: the same body as the batch; checks it against
+  the current mix without applying it and answers 200 `{"issues": [...]}`.
+- `GET, POST /api/v1/logic-macros`, `GET, PUT, PATCH, DELETE
+  /api/v1/logic-macros/<id>`: macros, as graphs.
+- `POST /api/v1/logic/<id>/trigger/<block>`: fires a `trigger` block on the next
+  tick (204). No body. Same access as the rest of the API (none: X13).
+- `PUT /api/v1/logic/<id>/buttons/<block>`: as in 1.2.
+
+**Validation errors (D162).** A refused logic change answers 400 with
+`{"error": "<the first issue as text>", "issues": [issue…]}`. An issue is
+`{"graph": id|null, "macro": id|null, "block": id|null, "port": name|null,
+"wire": index|null, "message": text}`: `graph` or `macro` is where it is,
+`block` and `port` are the marker's place (for a wire, its input end), `wire` the
+index in `wires`. Every issue of the body is listed, not only the first.
+
+**Macros (D163).** `logic_macros` in the show: `{id, name, description,
+blocks, wires}`. Its exposed ports are its `macro-in` blocks (instance inputs)
+and `macro-out` blocks (instance outputs), by `name`. A `macro` block in a graph
+(or in another macro) is an instance. Evaluation inlines every instance: a
+`macro-in` and a `macro-out` become a pass-through, the inner blocks
+`<instance>.<id>`. Each instance has its own state. Validation: a macro that
+uses itself (directly or through others) is refused; nesting is at most 4 deep;
+a graph has at most 256 blocks once inlined; loops are checked on the inlined
+graph. Up to 32 macros of 64 blocks each.
+
+**Events WebSocket.** Every action (and every dry-run action) is also sent as
+`{"type": "logic", "graph", "block", "action", "dry_run", "t_ms"}`; a `log`
+block sends `{"type": "logic", "graph", "block", "log": text, "dry_run", "t_ms"}`
+and writes the same text to the log (info).
+
+**Settings.** `TSL_OUT_TARGET` (`host:port`, unset: no TSL output) and
+`TSL_OUT_SCREEN` (0–65534, default 0); invalid values exit 78.
+
+### M8b: decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D158 | Five port types and the conversion table above. Numbers, levels and booleans convert into each other (≥ 0.5 is on, as in 1.2); anything but an event converts into a string; a string feeds only a string, an event only a non-string. | Every 1.2 graph (all numbers) stays valid without a migration. The rejections are the wires that cannot mean anything. |
+| D159 | No show-format change that needs a migration: graphs keep their JSON, `logic_macros` is a new optional key, the show file stays version 1. A 1.2 fixture with every block type loads and runs the same (test). Two behaviours change: an action whose input has no wire never acts (1.2 applied 0 at the first tick), and `edge` outputs an event. | Additive keys load on the new version; a version bump would make 1.3 shows unreadable to 1.2 for no gain, and 1.2 refuses unknown block types anyway. The unwired action was a surprise (an unwired `set-mute` unmuted at load). |
+| D160 | Evaluation compiles each enabled graph (macros inlined) into an index-based plan, rebuilt only when the graph or a macro changes; blocks run in topological order (ties by block order), the blocks that remember (`edge`, `latch`, `toggle`, `counter`, `timer`, `delay`, `debounce`) publish last tick's value, and their state is kept by block id across rebuilds. All on the control engine's 10 ms tick; nothing on the DSP thread. | Deterministic (§11.2). 1.2 searched the wires for every input on every tick; 32 × 256 inlined blocks at 100 Hz needs indexes. `toggle` and `counter` remember so loops through them stay legal. |
+| D161 | Whole-resource writes with an optional `revision` (a digest of the graph or macro), plus a batch over graphs and macros, applied in one `apply`. No per-operation patch language. | The canvas holds the whole graph anyway; copy/paste and undo/redo then send the graph they show. The digest needs no counter kept in the show, and two clients that saved the same content agree. |
+| D162 | Logic validation collects every issue with its graph or macro, block, port and wire; `Mix::validate` keeps returning the first as text. | Markers for the UI (§11.3) without a second validator. |
+| D163 | Macros are definitions in the show, used by instances, inlined for evaluation, with recursion, depth (4) and size (256 inlined blocks per graph) checks. No per-instance parameters: an instance is the definition. | §11.3 "sub-graphs with exposed ports". The limits keep the tick bounded: 32 graphs × 256 blocks. |
+| D164 | Actions become the same mix changes the API makes: mute, fader, VCA, a node parameter (only parameters the DSP smooths; ramped by `ramp_ms`, clamped to the parameter's range), PFL, talk, publish, monitor source, loudness start/stop/reset, snapshot recall. Value actions follow their input (on the first tick and on each change); event actions run when the event fires. Value changes are staged with their ramp first, then the changes that rewire the plan (fade, swap on a later tick, as recall did). In dry run nothing is executed; the action is listed and sent on the events socket. Disabling and enabling a graph, or a restart, resets its blocks' memory, and value actions apply their input again (D172). A block whose target is not chosen yet (`""` for its signal, VCA, snapshot, monitor, talkback mic or destination, or a `set-param`'s node or parameter) is valid and inert: it never acts, reads off, 0 or the floor, and is listed in the answer's `warnings` ("choose a target"), so the canvas never picks a target by itself (review of #32, S3). | §11.2 "actions become parameter messages". A structural node parameter (a filter slope, a delay time) would swap the plan on every change of a number. |
+| D165 | TSL out sends UMD 5.0 over UDP to one `TSL_OUT_TARGET`, screen `TSL_OUT_SCREEN`, from a task off the control tick: the full state of every `tsl-out` block (left lamp red, right lamp green, label UTF-16) on every change and every second. | §10.3's own rules for a TSL sender. The tick only hands over the state. |
+| D166 | `trigger` fires on the tick after its POST; several POSTs in one tick are one event. | A trigger is an event; the tick is the clock. |
+
+### M8b: answers to the UI agent (2026-10-16)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | `GET /api/v1/logic-blocks` shape | An array of `{"type", "label", "category", "params", "inputs", "outputs", "remembers"}`; a param is `{"name", "kind", "min"?, "max"?, "default"?, "options"?, "max_length"?}` with `kind` one of `number`, `integer`, `string`, `url`, `signal` (strip or bus), `signal-or-vca`, `vca`, `snapshot`, `monitor`, `mic`, `destination`, `macro`, `node`, `param`, `peer`, `enum`, `port-type`, `points`, `source`. `select` and `macro` list the ports of their default parameters; a graph's `ports` has the real ones. |
+| 2 | Do PUT, PATCH and batch answers carry `revision` and `ports`? | Yes: every answer is the full GET object. A stale revision is 409 `{"error", "revision"}`; in a batch 409 `{"error", "conflicts": [{"graph" or "macro", "revision"}]}` and nothing is applied. |
+| 3 | Macro GET | `revision`, `ports` (per inner block, as a graph's) and `exposed` (`{"inputs", "outputs"}`: the instance's typed ports, in block order). Live values exist per graph only, as `<instance>.<block>`. |
+| 4 | Is `.` refused in block ids? | Yes: ids are 1–32 characters a-z, 0-9 and `-`, not starting with `-`. Ungrouping must keep the 32-character and 64-block limits. |
+| 5 | Macro ids `macro-<n>` | Fine (`POST /api/v1/logic-macros` without an id picks the same). |
+| 6 | Plan numbers | The backend uses D158–D174 and X11–X19 (in the end D158–D174, X11–X16); the UI D175 and X20 on. |
+
+### M8b: deviations
+
+| # | Spec | Deviation | Reason |
+| --- | --- | --- | --- |
+| X11 | §11.1 "timer/clock (TAI-based)" | No clock block: `timer` is the pulse, `schedule` the UTC minute of the day. | A show needs the time of day (the schedule); a raw TAI number has no consumer yet. |
+| X12 | §11.1 "mute/PFL state", "PFL" | `pfl` reads PFL only and `set-pfl` sets it; AFL is not read or set by logic, and `set-pfl` off ends only a PFL. | §11.1 names PFL; an AFL the operator set stays theirs. |
+| X13 | §11.1 "webhook/HTTP endpoint" | The trigger has no authentication (as the whole API, README "Network") and carries no value. | A secret on one endpoint would suggest a protection the rest of the API does not have; the platform's ingress is where authentication belongs. |
+| X14 | §11.1 "set any node parameter" | Only parameters the DSP smooths, and `bypass`. Structural ones (band types, filter mode and slope, delay time, limiter look-ahead, detector) are refused at validation. Out-of-range values are clamped to the parameter's range. | A structural change swaps the plan; a logic value can change every 10 ms. |
+| X15 | §11.3 "sub-graphs (macros)" | No per-instance parameters: an instance is its definition, and a block in a macro that names a signal names it in every instance. | The first slice of macros; parameters would need a template model in the show. |
+| X16 | §11.1 "TSL tally out" | One UDP target per mixer (`TSL_OUT_TARGET`, `TSL_OUT_SCREEN`); no TCP; the text tally lamp stays off; two blocks with the same index: the last graph wins. | The tally targets on the platform take UDP; a target per block would be a setting per show. |
+
+### M8b: results (dev host)
+
+- Unit tests: every block (`src/logic/tests.rs`), the conversions and type
+  checks, validation issues with block and port, macros (inlining, state per
+  instance, recursion, depth, size, loops through a macro), `set-param` (smoothed
+  only, clamping), the TSL encoder (parsed back by the receiver), a 1.2.0 show
+  with every 1.2 block type (loads, validates, writes back the same), the
+  catalog and revisions, the settings.
+- The tick at the limits (32 graphs × 256 inlined blocks, 8192 blocks): 0.41 ms
+  per 10 ms tick in a release build (2.0 ms in a debug build; the unit test
+  `the_tick_stays_cheap_at_the_limits` requires below 10 ms), on the control
+  thread with the control lock held. A show's few graphs take microseconds.
+- `tests/integration/logic.sh` (new, in CI) passes in the lab's test image: a
+  trigger mutes and unmutes a strip, a soft key ramps its fader (−6.02 dB,
+  sample-exact on the output), publishes a bus (a plan swap from the tick), sends
+  TSL (screen 4, index 7, red, "LOGIC", repeated every second) and posts the
+  webhook body; the log line arrives on the events WebSocket; dry run lists and
+  then applies; a macro and its graph in one batch; the 400 issue names block
+  `n`, port `in`, wire 0; a stale revision is 409; deleting a used macro is 400.
+
+### M8b: findings, fixed before the release
+
+Two problems found while building M8b; both were in 1.2.0 too (recall, and
+`set-fader` and the API's faders), and both are fixed (maintainer's request,
+2026-10-16).
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D167 | The API and the logic share one change lock (`App::changes` is `Control::changes`). A logic change that rewires the plan (PFL, talk, publish, monitor source, recall) waits for the lock on the control tick (`try_lock`, once per tick), and holds it from its stage until its swap. The newest action of a block replaces an older one still waiting; after 1 s of waiting it is reported once (WARN, naming the action) and keeps waiting. A change that fails to stage makes its blocks forget what they applied, so they act again with their current input (at most every 250 ms, D173), warned once until one succeeds. Value changes (mutes, faders, VCAs, smoothed parameters) are staged under the same lock, the newest per block waiting a tick while the API holds it; if one ever rewires the plan, the lock is held until its swap. A retry after a failure is not listed or sent on the events socket again (the warning is the one entry). A test-only `MIXER_TEST_LOGIC_SWAP_DELAY_MS` is logged as a warning at start. | The logic staged without the lock: an API change that staged while the logic's swap waited for its fade replaced it, and the logic, which had marked it applied, never sent it again. Waiting on the tick keeps the control thread from blocking. |
+| D168 | `mix.json` is written at most every 500 ms after a value change (`state::Coalesce`, checked on the 100 ms tick: up to about 0.6 s): the revision, the clients and the show history follow at once, only the file waits. A change that swaps the plan, a show action (snapshots, layouts, history, import) and SIGTERM write at once; the end of the shutdown (after the NMOS deregistration, also after a timeout) writes again what came in meanwhile, trying the control lock for about 200 ms. The write stays atomic (a temporary file, renamed). | A level into `set-fader`, or an operator riding a fader, saved the whole mix up to 100 times a second onto the `/config` volume. A crash now loses at most the last 0.6 s of fader moves. |
+
+Tests: `logic::tests::a_rewiring_change_waits_for_the_change_lock`,
+`state::tests::writes_are_coalesced`; `tests/integration/logic.sh` has the
+logic unpublish a bus while the API publishes another inside the logic's fade,
+three times: neither is lost. The fade is widened to 400 ms by a test-only
+setting, `MIXER_TEST_LOGIC_SWAP_DELAY_MS`, read from the environment and not
+listed with the settings. Against `ffd50ca` (before D167) with the same hook
+patched in, the check failed in round 1 every time (both buses stayed
+published, so the logic's unpublish was lost). Without the hook the two
+requests did not overlap reliably. It also checks that a fader change reaches
+`mix.json` within 0.7 s but not at once, and that SIGTERM writes the last one.
+
+### M8b: the review of `cfebe08` (2026-10-17)
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D169 | Validation is linear in the macros: each macro's depth is computed once (memoised, with the cycle found on the way), the macros that use a bad or missing one are a fixed point over the macros, and an inlining counts macro instances as well as blocks against a budget of 512 (`MAX_EXPANDED`, twice the 256 inlined blocks). A logic edit through the API is validated off the control lock (`spawn_blocking`, under the change lock); only its graphs and macros are then taken into the mix. | Four levels of 64 nested instances without blocks of their own took 9.2 s in a release build while holding the control mutex (the tick, the meters, the API and `/readyz` froze). The budget bounds the walk; the memo bounds the depth checks. |
+| D170 | Not a number at a value action is no change (no action, not counted as a change); +∞ is the fader's maximum, −∞ closes it; `set-param` does nothing with NaN and clamps ±∞ to the parameter's range. | NaN read as −∞ closed the fader on every tick. |
+| D171 | `stage` validates the logic only when the graphs, the macros or what they name changed (`logic::Context`: the strips and buses with their chains' node ids, types and structure, VCAs, talkback mics and destinations, monitors). | A fader move re-validated every graph: 14–30 ms at the limits on each move. |
+| D172 | A block keeps its memory over an edit only while its type and parameters stay the same. An action moved to another target acts on the new one at once with the current input; the old target stays as it is. An input wired to another block starts over: its first value is not an edge. `edge` and `timer` do not take the first tick as a rise. Disabling and enabling a graph, or a restart, resets every block's memory (toggles, latches, counters); value actions then apply their input again on the first tick (D164). | A `set-mute` moved from vox to music kept "applied" and never muted music; a `tsl-out` moved to another index kept sending the old one; a recall fed by an input that was on at start fired after every restart. |
+| D173 | Rate limits per action block: mute, fader, VCA and parameter at most every 20 ms, TSL out every 50 ms, a webhook every 100 ms (one post per window; the others are dropped); a value held back is sent as the newest value when the block may run again. Changes that rewire the plan at most every 250 ms (the newest of a block wins). Webhooks share one HTTP client, at most 8 posts at once (another is dropped with a warning). | A noisy input could make the mixer rewire, post or send TSL 100 times a second. |
+| D174 | TSL out: an index that leaves the output (its block removed or moved, its graph disabled or in dry run) is sent with its lamps off and no label three times, a second apart; at SIGTERM every lit index is sent off at once; a packet is at most 2048 bytes (TSL 5.0), more displays go in more packets, labels are cut at 128 UTF-16 units; a failure is logged once until sending works again. | A lamp stayed lit after its block went; 100 displays with long labels made one oversized datagram; a failure was logged only once for ever. |
+
+Also: `check_param` tries small and large steps, relative and absolute (a delay of 0 ms, 0.5 ms or 20 samples is structural, X14); `POST /api/v1/logic-validate` answers 400 and 409 as the batch would (missing deletions, stale revisions) and validates the proposed graphs off the control lock; a batch that deletes a missing graph or macro is 400; a description has at most 1000 characters.
+
+Tests: `an_unconnected_macro_input_drives_no_action` (B1),
+`a_changed_action_acts_on_its_new_target_at_once` (B2),
+`edges_need_a_rise_they_saw`, `not_a_number_is_no_change_and_infinity_is_clamped`
+(B3), `nested_macros_validate_quickly_within_a_budget` (B4, under 1 s in a debug
+build), `webhooks_and_faders_are_rate_limited`, `small_structural_values_are_found`,
+`descriptions_are_limited`, the TSL encoder's 2048-byte split.

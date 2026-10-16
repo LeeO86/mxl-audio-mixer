@@ -43,6 +43,31 @@ pub enum PatchState {
     Missing,
 }
 
+/// A change of parameter values is written to `mix.json` at most this often,
+/// this long after it (D168). Plan changes, shutdown and the operator's
+/// explicit show actions write at once.
+pub const SAVE_DELAY: Duration = Duration::from_millis(500);
+
+/// `MIXER_TEST_LOGIC_SWAP_DELAY_MS` (test only, at most 5 s): a logic swap
+/// waits this much longer, so `tests/integration/logic.sh` can put an API change
+/// inside the window. Warned at start when set.
+fn test_swap_delay() -> Duration {
+    let ms = std::env::var("MIXER_TEST_LOGIC_SWAP_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(5_000);
+    if ms > 0 {
+        tracing::warn!(
+            "MIXER_TEST_LOGIC_SWAP_DELAY_MS={ms}: logic plan changes are delayed by {ms} ms; for tests only, never in production"
+        );
+    }
+    Duration::from_millis(ms)
+}
+
+/// Logic webhook posts running at once.
+pub const MAX_WEBHOOKS: usize = 8;
+
 /// A momentary talk not repeated within this long ends (a client that went away).
 pub const MOMENTARY_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -74,8 +99,30 @@ pub struct Control {
     pub revision: u64,
     structure: Option<u64>,
     pending: Option<Mix>,
-    /// When a logic recall faded nodes out, swap the plan at this time.
+    /// When a logic change faded nodes out, swap the plan at this time.
     logic_swap_at: Option<Instant>,
+    /// The API's change lock (`App::changes`): a logic change that rewires the
+    /// plan takes it too, and holds it until its swap (D167).
+    pub changes: std::sync::Arc<tokio::sync::Mutex<()>>,
+    logic_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    /// Test only (`MIXER_TEST_LOGIC_SWAP_DELAY_MS`): a logic swap waits this
+    /// much longer after its fade, so a test can put an API change inside the
+    /// window (`tests/integration/logic.sh`). 0 otherwise.
+    logic_swap_delay: Duration,
+    logic_waiting: crate::logic::Waiting,
+    /// Logic mutes, faders, VCAs and parameters waiting for the change lock
+    /// (the newest per block).
+    logic_values: Vec<crate::logic::Action>,
+    /// Logic blocks whose rewiring change failed (warned once).
+    logic_failing: std::collections::BTreeSet<(String, String)>,
+    /// The logic last found valid, with what it named (D171).
+    logic_valid: Option<(
+        Vec<crate::mix::logic::Graph>,
+        Vec<crate::mix::logic::Macro>,
+        crate::mix::logic::Context,
+    )>,
+    /// `mix.json` is written at most every [`SAVE_DELAY`] (D168).
+    mix_save: crate::state::Coalesce,
     block: u32,
     read_offset: u32,
     input_count: usize,
@@ -90,6 +137,16 @@ pub struct Control {
     pub auto: crate::auto::Auto,
     /// Logic graphs (§11).
     pub logic: crate::logic::Logic,
+    /// Logic actions and log lines for the events socket (JSON text).
+    pub logic_events: tokio::sync::broadcast::Sender<String>,
+    /// Remote-link peers that are up, for the logic `link` block.
+    pub link_up: std::collections::BTreeSet<String>,
+    /// Loudness of the signals logic graphs read, refreshed at the meter rate.
+    logic_loudness: BTreeMap<String, crate::loudness::LoudnessValues>,
+    /// The logic editor's TSL output (`TSL_OUT_TARGET`), when configured.
+    pub tsl_out: Option<tokio::sync::watch::Sender<BTreeMap<u16, crate::tally::OutDisplay>>>,
+    /// Each `tsl-out` block's display, by graph and block.
+    tsl_displays: BTreeMap<(String, String), (u16, crate::tally::OutDisplay)>,
     /// The slave's remote link (§13): the master that holds it, takeover deny.
     pub link: crate::link::Takeover,
 }
@@ -124,6 +181,14 @@ impl Control {
             structure: None,
             pending: None,
             logic_swap_at: None,
+            changes: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            logic_guard: None,
+            logic_swap_delay: test_swap_delay(),
+            logic_waiting: crate::logic::Waiting::default(),
+            logic_values: Vec::new(),
+            logic_failing: std::collections::BTreeSet::new(),
+            mix_save: crate::state::Coalesce::default(),
+            logic_valid: None,
             block: config.block_samples,
             read_offset: config.read_offset_samples,
             input_count: config.input_flows,
@@ -134,6 +199,11 @@ impl Control {
             step_counts: BTreeMap::new(),
             auto: crate::auto::Auto::new(),
             logic: crate::logic::Logic::default(),
+            logic_events: tokio::sync::broadcast::channel(256).0,
+            link_up: std::collections::BTreeSet::new(),
+            logic_loudness: BTreeMap::new(),
+            tsl_out: None,
+            tsl_displays: BTreeMap::new(),
             link: crate::link::Takeover::new(
                 config.link_role == crate::config::LinkRole::Slave && config.link_takeover_deny,
             ),
@@ -147,122 +217,430 @@ impl Control {
             .unwrap_or(0)
     }
 
-    fn post_webhook(url: String) {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build();
-                let sent = match client {
-                    Ok(client) => client
-                        .post(&url)
-                        .json(&serde_json::json!({"value": 1}))
-                        .send()
-                        .await
-                        .and_then(|r| r.error_for_status())
-                        .map(|_| ()),
-                    Err(e) => Err(e),
-                };
-                if let Err(e) = sent {
-                    tracing::warn!("logic webhook {}: {}", redact_url(&url), e.without_url());
-                }
-            });
-        }
+    /// POST a logic webhook: one shared client (5 s timeout), at most
+    /// [`MAX_WEBHOOKS`] posts at once; one more is dropped with a warning (D173).
+    fn post_webhook(url: String, graph: String, block: String) {
+        static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+        static RUNNING: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .ok()
+        });
+        let Some(client) = client.clone() else {
+            tracing::warn!("logic webhook: no HTTP client");
+            return;
+        };
+        let running = RUNNING
+            .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_WEBHOOKS)))
+            .clone();
+        let Ok(permit) = running.try_acquire_owned() else {
+            tracing::warn!(
+                "logic webhook {}: {MAX_WEBHOOKS} posts are still running; this one was dropped",
+                redact_url(&url)
+            );
+            return;
+        };
+        handle.spawn(async move {
+            let _permit = permit;
+            let sent = client
+                .post(&url)
+                .json(&serde_json::json!({"graph": graph, "block": block, "value": 1}))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .map(|_| ());
+            if let Err(e) = sent {
+                tracing::warn!("logic webhook {}: {}", redact_url(&url), e.without_url());
+            }
+        });
     }
 
-    /// Logic graphs (§11.2), on the same 10 ms tick as the auto engine.
-    pub fn logic_tick(&mut self) {
+    /// What the logic blocks read this tick.
+    fn logic_inputs(&self) -> LogicInputs {
         use crate::mix::logic::BlockKind;
-        if self.logic_swap_at.is_some_and(|t| Instant::now() >= t) {
-            self.logic_swap_at = None;
-            if let Err(e) = self.swap() {
-                tracing::warn!("logic recall: {e}");
-            }
-        }
-        if self.pending.is_some() {
-            return;
-        }
-        let speech: std::collections::BTreeMap<String, bool> = self
+        let speech = self
             .auto
             .vads
             .iter()
             .map(|(s, v)| (s.clone(), v.state.speech_active))
             .collect();
-        let mut level_db = std::collections::BTreeMap::new();
-        for g in &self.mix.logic {
-            for b in &g.blocks {
-                if let BlockKind::Level { signal } | BlockKind::Above { signal, .. } = &b.kind {
+        let mut level_db = BTreeMap::new();
+        let mut nmos = std::collections::BTreeSet::new();
+        for b in self.mix.logic_blocks() {
+            let key = match &b.kind {
+                BlockKind::Level { signal } | BlockKind::Above { signal, .. } => {
                     if let Some(db) = self.meters.peak_dbfs(signal) {
                         level_db.insert(signal.clone(), db);
                     }
+                    continue;
                 }
+                BlockKind::NmosReceiver { input } => {
+                    (mxl_nmos::Role::Receiver, format!("in-{input}"))
+                }
+                BlockKind::NmosSender { signal } => {
+                    (mxl_nmos::Role::Sender, crate::outputs::nmos_key(signal))
+                }
+                _ => continue,
+            };
+            if self
+                .node
+                .active(key.0, &key.1)
+                .is_some_and(|a| a.master_enable)
+            {
+                nmos.insert(key.1);
             }
         }
+        let pfl = self
+            .compiler
+            .solo
+            .iter()
+            .filter(|(_, k)| **k == crate::mix::room::SoloKind::Pfl)
+            .map(|(s, _)| s.clone())
+            .collect();
+        (speech, level_db, pfl, nmos)
+    }
+
+    /// Logic graphs (§11.2), on the same 10 ms tick as the auto engine. The
+    /// actions become the changes the API makes (D164): mutes, faders, VCAs and
+    /// node parameters ramp (grouped by ramp); PFL, talk, publish, monitor
+    /// source and recall are staged last, and swap the plan on a later tick if
+    /// they rewire it.
+    pub fn logic_tick(&mut self) {
+        use crate::logic::Act;
+        if self.logic_swap_at.is_some_and(|t| Instant::now() >= t) {
+            self.logic_swap_at = None;
+            if let Err(e) = self.swap() {
+                tracing::warn!("logic: {e}");
+            }
+            // The API may change the mix again.
+            self.logic_guard = None;
+        }
+        if self.pending.is_some() {
+            return;
+        }
+        let (speech, level_db, pfl, nmos) = self.logic_inputs();
         let on_air = self.tally.on_air_indexes();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         let actions = self.logic.tick(&crate::logic::Readings {
             mix: &self.mix,
             speech: &speech,
             level_db: &level_db,
             on_air: &on_air,
             minute_of_day: Self::minute_of_day(),
+            pfl: &pfl,
+            loudness: &self.logic_loudness,
+            nmos: &nmos,
+            link: &self.link_up,
+            now_ms: now.as_millis() as u64,
         });
-        if actions.is_empty() {
-            return;
-        }
-        let mut next = self.mix.clone();
-        let mut recalling = false;
+        self.update_tsl_out();
         for a in actions {
-            if let Some(url) = a.webhook {
-                Self::post_webhook(url);
+            let text = a.act.describe();
+            let mut event = serde_json::json!({
+                "type": "logic",
+                "graph": a.graph,
+                "block": a.block,
+                "action": text,
+                "dry_run": a.dry_run,
+                "t_ms": now.as_millis() as u64,
+            });
+            if let Act::Log { text } = &a.act {
+                event["log"] = serde_json::json!(text);
+                tracing::info!(graph = %a.graph, block = %a.block, dry_run = a.dry_run, "logic: {text}");
+            } else if a.dry_run {
+                tracing::info!(graph = %a.graph, block = %a.block, "logic dry run: {text}");
+            }
+            // A retry of a failed change is not listed again (warned once).
+            if !a.retry {
+                let _ = self.logic_events.send(event.to_string());
+            }
+            if a.dry_run {
                 continue;
             }
-            if let Some(id) = a.recall {
-                let Some(snap) = next.snapshots.iter().find(|s| s.id == id).cloned() else {
-                    tracing::warn!("logic recall: snapshot {id} does not exist");
-                    continue;
-                };
-                crate::mix::show::recall(&mut next, &snap, &crate::mix::show::Filter::default());
-                recalling = true;
+            if matches!(
+                a.act,
+                Act::Pfl { .. }
+                    | Act::Talk { .. }
+                    | Act::Publish { .. }
+                    | Act::Monitor { .. }
+                    | Act::Recall { .. }
+            ) {
+                self.logic_waiting.push(a);
                 continue;
             }
-            let fader = a.fader_db.map(crate::logic::clamp_fader);
-            for s in next.strips.iter_mut().filter(|s| s.id == a.signal) {
-                if let Some(m) = a.mute {
-                    s.mute = m;
+            match a.act {
+                Act::Webhook { url } => Self::post_webhook(url, a.graph, a.block),
+                Act::Loudness { signal, action } => {
+                    if let Err(e) = self.loudness.control(&signal, action.name()) {
+                        tracing::warn!("logic {}: {e}", a.graph);
+                    }
                 }
-                if let Some(db) = fader {
-                    s.fader_db = db;
+                Act::Log { .. } => {}
+                Act::Tsl {
+                    index,
+                    left,
+                    right,
+                    label,
+                } => {
+                    self.tsl_displays.insert(
+                        (a.graph, a.block),
+                        (index, crate::tally::OutDisplay { left, right, label }),
+                    );
                 }
-            }
-            for b in next.buses.iter_mut().filter(|b| b.id == a.signal) {
-                if let Some(m) = a.mute {
-                    b.mute = m;
+                Act::Mute { .. } | Act::Fader { .. } | Act::Vca { .. } | Act::Param { .. } => {
+                    // The newest value of a block waits for the change lock.
+                    self.logic_values
+                        .retain(|x| !(x.graph == a.graph && x.block == a.block));
+                    self.logic_values.push(a);
                 }
-                if let Some(db) = fader {
-                    b.fader_db = db;
-                }
+                _ => {}
             }
         }
-        if next == self.mix {
+        self.update_tsl_out();
+        if !self.run_values() {
             return;
         }
-        match self.stage(next, crate::engine::FADE_SAMPLES) {
+        self.run_waiting();
+    }
+
+    /// Stage the waiting mutes, faders, VCAs and parameters under the change
+    /// lock, grouped by ramp; they wait a tick while an API change holds it
+    /// (D167). False when a swap is now pending.
+    fn run_values(&mut self) -> bool {
+        use crate::logic::Act;
+        if self.logic_values.is_empty() {
+            return true;
+        }
+        let Ok(guard) = self.changes.clone().try_lock_owned() else {
+            return true;
+        };
+        let mut guard = Some(guard);
+        let samples = |ms: f64| (ms * 48.0).round() as u32;
+        let mut ramps: BTreeMap<u32, Vec<Act>> = BTreeMap::new();
+        for a in std::mem::take(&mut self.logic_values) {
+            let ramp = match &a.act {
+                Act::Fader { ramp_ms, .. }
+                | Act::Vca { ramp_ms, .. }
+                | Act::Param { ramp_ms, .. } => samples(*ramp_ms),
+                _ => FADE_SAMPLES,
+            };
+            ramps.entry(ramp).or_default().push(a.act);
+        }
+        for (ramp, acts) in ramps {
+            let mut next = self.mix.clone();
+            for act in acts {
+                apply_value_act(&mut next, act);
+            }
+            if next != self.mix && !self.stage_logic(next, ramp, &mut guard) {
+                tracing::warn!(
+                    "logic: a change waits for the plan; later actions of this tick were dropped"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The logic changes that rewire the plan, when the change lock is free:
+    /// staged together; the lock is held until the swap (D167).
+    fn run_waiting(&mut self) {
+        use crate::logic::{Act, Taken};
+        let (guard, actions) = match self.logic_waiting.take(&self.changes, Instant::now()) {
+            Taken::Idle | Taken::Wait => return,
+            Taken::Late(actions) => {
+                for a in actions {
+                    tracing::warn!(
+                        graph = %a.graph,
+                        block = %a.block,
+                        "logic: {} waits: the mix has been changing for 1 s",
+                        a.act.describe()
+                    );
+                }
+                return;
+            }
+            Taken::Go(guard, actions) => (guard, actions),
+        };
+        let described: Vec<String> = actions
+            .iter()
+            .map(|a| format!("{} {}: {}", a.graph, a.block, a.act.describe()))
+            .collect();
+        let blocks: Vec<(String, String)> = actions
+            .iter()
+            .map(|a| (a.graph.clone(), a.block.clone()))
+            .collect();
+        let mut next = self.mix.clone();
+        let solo_before = self.compiler.solo.clone();
+        let talk_before = self.compiler.talking.clone();
+        for act in actions.into_iter().map(|a| a.act) {
+            match act {
+                Act::Pfl { signal, on } => {
+                    if on {
+                        self.set_solo(&signal, Some(crate::mix::room::SoloKind::Pfl));
+                    } else if self.compiler.solo.get(&signal)
+                        == Some(&crate::mix::room::SoloKind::Pfl)
+                    {
+                        self.set_solo(&signal, None);
+                    }
+                }
+                Act::Talk {
+                    mic,
+                    destination,
+                    on,
+                } => {
+                    if let Err(e) = self.set_talk(&mic, &destination, on, false) {
+                        tracing::warn!("logic: {e}");
+                    }
+                }
+                Act::Publish { signal, on } => {
+                    if !on {
+                        next.outputs.retain(|o| o.signal != signal);
+                    } else if next.output(&signal).is_none() && next.kind(&signal).is_some() {
+                        next.outputs.push(crate::mix::model::Output {
+                            signal,
+                            format: None,
+                            commit_samples: None,
+                        });
+                    }
+                }
+                Act::Monitor { monitor, source } => {
+                    for m in next
+                        .control_room
+                        .monitors
+                        .iter_mut()
+                        .filter(|m| m.id == monitor)
+                    {
+                        m.source = source.clone();
+                    }
+                }
+                Act::Recall { snapshot } => {
+                    let Some(snap) = next.snapshots.iter().find(|s| s.id == snapshot).cloned()
+                    else {
+                        tracing::warn!("logic recall: snapshot {snapshot} does not exist");
+                        continue;
+                    };
+                    crate::mix::show::recall(
+                        &mut next,
+                        &snap,
+                        &crate::mix::show::Filter::default(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        // Solo and talk live in the compiler: they need a stage too.
+        if next == self.mix
+            && self.compiler.solo == solo_before
+            && self.compiler.talking == talk_before
+        {
+            return;
+        }
+        match self.stage(next, FADE_SAMPLES) {
             Ok(Staged::Done) => {}
-            Ok(Staged::Swap { wait }) if recalling => {
-                if wait {
-                    self.logic_swap_at = Some(Instant::now() + fade_wait(self.block));
-                } else if let Err(e) = self.swap() {
-                    tracing::warn!("logic recall: {e}");
+            Ok(Staged::Swap { wait: true }) => {
+                self.logic_swap_at =
+                    Some(Instant::now() + fade_wait(self.block) + self.logic_swap_delay);
+                self.logic_guard = Some(guard);
+            }
+            Ok(Staged::Swap { wait: false }) => {
+                if let Err(e) = self.swap() {
+                    tracing::warn!("logic: {e} ({})", described.join("; "));
                 }
             }
-            Ok(Staged::Swap { .. }) => {
-                tracing::warn!(
-                    "logic asked for a change that rewires the plan; it was not applied"
-                );
-                self.pending = None;
+            Err(e) => {
+                // Not applied: the blocks act again with their current input
+                // (at most every 250 ms); warned once until one succeeds.
+                for (g, b) in &blocks {
+                    self.logic.forget(g, b);
+                }
+                if blocks.iter().any(|k| self.logic_failing.insert(k.clone())) {
+                    tracing::warn!("logic: {e}; not applied: {}", described.join("; "));
+                }
+                return;
             }
-            Err(e) => tracing::warn!("logic: {e}"),
         }
+        for k in &blocks {
+            self.logic_failing.remove(k);
+        }
+    }
+
+    /// Stage a logic value change under the change lock (`guard`); a swap
+    /// happens now or after the fade, holding the lock until then. False when a
+    /// swap is pending.
+    fn stage_logic(
+        &mut self,
+        next: Mix,
+        ramp: u32,
+        guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> bool {
+        match self.stage(next, ramp) {
+            Ok(Staged::Done) => true,
+            Ok(Staged::Swap { wait: true }) => {
+                self.logic_swap_at =
+                    Some(Instant::now() + fade_wait(self.block) + self.logic_swap_delay);
+                self.logic_guard = guard.take();
+                false
+            }
+            Ok(Staged::Swap { wait: false }) => {
+                if let Err(e) = self.swap() {
+                    tracing::warn!("logic: {e}");
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!("logic: {e}");
+                true
+            }
+        }
+    }
+
+    /// Shutdown: the indexes the logic's TSL output has lit, emptied so the
+    /// sender switches them off too.
+    pub fn tsl_off(&mut self) -> Vec<u16> {
+        let indexes = self.tsl_displays.values().map(|(i, _)| *i).collect();
+        self.tsl_displays.clear();
+        if let Some(tx) = &self.tsl_out {
+            tx.send_replace(BTreeMap::new());
+        }
+        indexes
+    }
+
+    /// Hand the `tsl-out` displays of the running graphs to the TSL sender.
+    fn update_tsl_out(&mut self) {
+        let mix = &self.mix;
+        self.tsl_displays.retain(|(g, b), (index, _)| {
+            mix.logic_graph(g).is_some_and(|g| {
+                g.enabled
+                    && !g.dry_run
+                    && matches!(
+                        mix.logic_block_at(&g.id, b),
+                        Some(crate::mix::logic::BlockKind::TslOut { index: i }) if i == index
+                    )
+            })
+        });
+        let Some(tx) = &self.tsl_out else {
+            return;
+        };
+        let displays: BTreeMap<u16, crate::tally::OutDisplay> = self
+            .tsl_displays
+            .values()
+            .map(|(i, d)| (*i, d.clone()))
+            .collect();
+        tx.send_if_modified(|current| {
+            if *current == displays {
+                false
+            } else {
+                *current = displays;
+                true
+            }
+        });
     }
 
     /// The control engine's tick (§8, every [`crate::auto::TICK`]): VADs,
@@ -294,6 +672,11 @@ impl Control {
         self.engine.collect();
         self.inputs.tick(&mut self.engine);
         self.history.tick(&self.mix);
+        if self.mix_save.take_due(Instant::now()) {
+            if let Err(e) = self.write_mix() {
+                tracing::error!("saving the mix: {e}");
+            }
+        }
     }
 
     /// The meter tick (§7, 25 Hz): meters, loudness, the analyser.
@@ -301,6 +684,21 @@ impl Control {
         self.meters.tick();
         let true_peaks = self.meters.true_peaks();
         self.loudness.tick(&true_peaks);
+        let read: std::collections::BTreeSet<&str> = self
+            .mix
+            .logic_blocks()
+            .filter_map(|b| match &b.kind {
+                crate::mix::logic::BlockKind::Loudness { signal, .. } => Some(signal.as_str()),
+                _ => None,
+            })
+            .collect();
+        self.logic_loudness = if read.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut all = self.loudness.values(&self.mix.settings);
+            all.retain(|s, _| read.contains(s.as_str()));
+            all
+        };
         self.analyser.tick(&mut self.engine.analysis);
     }
 
@@ -676,6 +1074,31 @@ impl Control {
             .expire(&mut c.engine, |id| ids.iter().any(|x| x == id))
     }
 
+    /// Validate the logic of `next`, unless it and what it names are what was
+    /// last found valid: a fader move does not check every graph again (D171).
+    fn check_logic(&mut self, next: &Mix) -> Result<(), String> {
+        let context = crate::mix::logic::Context::of(next);
+        let same = self
+            .logic_valid
+            .as_ref()
+            .is_some_and(|(g, m, c)| *g == next.logic && *m == next.logic_macros && *c == context);
+        if !same {
+            crate::mix::logic::validate(next)?;
+            self.logic_valid = Some((next.logic.clone(), next.logic_macros.clone(), context));
+        }
+        Ok(())
+    }
+
+    /// The logic of `mix` was validated (off the control lock): the next stage
+    /// need not do it again.
+    pub fn logic_validated(&mut self, mix: &Mix) {
+        self.logic_valid = Some((
+            mix.logic.clone(),
+            mix.logic_macros.clone(),
+            crate::mix::logic::Context::of(mix),
+        ));
+    }
+
     /// Check `next` and start applying it. Parameter-only changes ramp over `ramp`
     /// samples and are done; anything else fades the affected nodes out and needs
     /// [`Control::swap`] after [`fade_wait`].
@@ -683,7 +1106,8 @@ impl Control {
         if self.link.refuses() {
             return Err("the master is disconnected and local takeover is denied".into());
         }
-        next.validate(self.input_count, self.block)?;
+        next.validate_except_logic(self.input_count, self.block)?;
+        self.check_logic(&next)?;
         self.compiler.afv = self.afv_targets(&next);
         self.compiler.auto = self.auto.compile_gains(&next);
         self.compiler.vad_slots = self.auto.assign(&next);
@@ -767,7 +1191,7 @@ impl Control {
                 let specs = self.specs(&self.mix);
                 self.outputs.sync(&mut self.engine, &self.node, &specs);
             }
-            self.save()?;
+            self.changed();
             return Ok(Staged::Done);
         }
         let mut wait = false;
@@ -839,15 +1263,37 @@ impl Control {
         Ok(errors)
     }
 
-    fn save(&mut self) -> Result<(), String> {
+    /// A change of the mix: clients reload it; `mix.json` follows within
+    /// [`SAVE_DELAY`] (D168).
+    fn changed(&mut self) {
         self.revision += 1;
+        self.history.changed(&self.mix);
+        self.mix_save.changed(Instant::now(), SAVE_DELAY);
+    }
+
+    /// A change of the mix, written to `mix.json` at once.
+    fn save(&mut self) -> Result<(), String> {
+        self.changed();
+        self.mix_save.take();
+        self.write_mix()
+    }
+
+    fn write_mix(&self) -> Result<(), String> {
         let body = serde_json::json!({"version": 1, "mix": self.mix});
         crate::state::write_atomic(
             &self.mix_path,
             &serde_json::to_vec_pretty(&body).unwrap_or_default(),
-        )?;
-        self.history.changed(&self.mix);
-        Ok(())
+        )
+    }
+
+    /// Write `mix.json` now if a change waits (shutdown, an operator's explicit
+    /// show action).
+    pub fn flush_mix(&mut self) {
+        if self.mix_save.take() {
+            if let Err(e) = self.write_mix() {
+                tracing::error!("saving the mix: {e}");
+            }
+        }
     }
 
     /// The patch state of each channel of `strip`.
@@ -893,8 +1339,72 @@ impl Control {
 
     /// Stop the DSP thread (fading the outputs), then release readers and writers (G8).
     pub fn stop(&mut self) {
+        self.flush_mix();
         self.engine.stop();
         self.inputs.release();
+    }
+}
+
+/// Speech, peak levels, signals in PFL and active NMOS keys, for the logic tick.
+type LogicInputs = (
+    BTreeMap<String, bool>,
+    BTreeMap<String, f64>,
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+);
+
+/// A logic mute, fader, VCA or node parameter on `mix`, clamped as the API
+/// clamps it.
+fn apply_value_act(mix: &mut Mix, act: crate::logic::Act) {
+    use crate::logic::Act;
+    match act {
+        Act::Mute { signal, on } => {
+            for s in mix.strips.iter_mut().filter(|s| s.id == signal) {
+                s.mute = on;
+            }
+            for b in mix.buses.iter_mut().filter(|b| b.id == signal) {
+                b.mute = on;
+            }
+        }
+        Act::Fader { signal, db, .. } => {
+            let db = crate::logic::clamp_fader(db);
+            for s in mix.strips.iter_mut().filter(|s| s.id == signal) {
+                s.fader_db = db;
+            }
+            for b in mix.buses.iter_mut().filter(|b| b.id == signal) {
+                b.fader_db = db;
+            }
+        }
+        Act::Vca { vca, db, .. } => {
+            for v in mix.vcas.iter_mut().filter(|v| v.id == vca) {
+                v.fader_db = crate::logic::clamp_fader(db);
+            }
+        }
+        Act::Param {
+            signal,
+            node,
+            param,
+            value,
+            ..
+        } => {
+            let chain = mix
+                .strips
+                .iter_mut()
+                .find(|s| s.id == signal)
+                .map(|s| &mut s.chain)
+                .or_else(|| {
+                    mix.buses
+                        .iter_mut()
+                        .find(|b| b.id == signal)
+                        .map(|b| &mut b.chain)
+                });
+            if let Some(p) = chain.and_then(|c| c.iter_mut().find(|p| p.id == node)) {
+                if let Err(e) = crate::mix::logic::set_param_clamped(p, &param, value) {
+                    tracing::warn!("logic: {signal} {node}: {e}");
+                }
+            }
+        }
+        _ => {}
     }
 }
 

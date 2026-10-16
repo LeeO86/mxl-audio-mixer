@@ -173,6 +173,11 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/logic.sh (logic graphs, macros, TSL out, webhooks)
+        run: tests/integration/logic.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
       - name: tests/integration/widgets.sh (headless Chrome)
         run: tests/integration/widgets.sh
         env:

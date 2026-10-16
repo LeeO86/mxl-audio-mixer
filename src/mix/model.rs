@@ -435,6 +435,9 @@ pub struct Mix {
     /// Logic graphs (§11).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logic: Vec<super::logic::Graph>,
+    /// Logic macros: sub-graphs used as blocks (§11.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logic_macros: Vec<super::logic::Macro>,
 }
 
 /// What a signal id names.
@@ -506,6 +509,13 @@ impl Mix {
     /// Check everything the compiler and the API rely on. `inputs` is the number
     /// of inputs, `block` the block size.
     pub fn validate(&self, inputs: usize, block: u32) -> Result<(), String> {
+        self.validate_except_logic(inputs, block)?;
+        super::logic::validate(self)
+    }
+
+    /// [`Mix::validate`] without the logic graphs and macros, which the
+    /// control side checks only when they or what they name change (D171).
+    pub fn validate_except_logic(&self, inputs: usize, block: u32) -> Result<(), String> {
         let mut ids = BTreeSet::new();
         for id in self
             .strips
@@ -536,7 +546,6 @@ impl Mix {
         super::room::validate(self, inputs)?;
         super::vca::validate(self)?;
         super::auto::validate(self)?;
-        super::logic::validate(self)?;
         for s in &self.strips {
             check_name(&s.name)?;
             if let Some(a) = &s.afv {

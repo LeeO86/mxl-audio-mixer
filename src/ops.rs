@@ -328,6 +328,7 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
             Ok(errors) => output_errors = errors,
             Err(r) => return *r,
         }
+        app.control().flush_mix();
     }
     let failed = app.node.restore(show.connections).await;
     Json(json!({
@@ -697,7 +698,7 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "logic_actions_total",
         "counter",
-        "Logic actions run (mute, fader, recall, webhook), per graph.",
+        "Logic actions run (not dry run), per graph.",
         control
             .logic
             .actions
