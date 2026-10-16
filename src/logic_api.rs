@@ -30,7 +30,7 @@ use sha1::{Digest, Sha1};
 
 use crate::api::{apply_held, bad, body, conflict, not_found, ApiResult};
 use crate::engine::FADE_SAMPLES;
-use crate::mix::logic::{issues, Block, BlockKind, Graph, Issue, Macro, Wire};
+use crate::mix::logic::{issues, warnings, Block, BlockKind, Graph, Issue, Macro, Wire};
 use crate::mix::Mix;
 use crate::ops::App;
 
@@ -80,6 +80,7 @@ fn json_graph(app: &App, g: &Graph) -> Value {
     let mut j = json!(g);
     j["revision"] = json!(revision(g));
     j["ports"] = block_ports(&g.blocks, &c.mix.logic_macros);
+    j["warnings"] = json!(warnings(&g.blocks));
     j["values"] = c.logic.values(&g.id).unwrap_or(Value::Null);
     j["buttons"] = json!(c.logic.pressed(&g.id));
     j["actions"] = json!(c.logic.recent(&g.id));
@@ -90,6 +91,7 @@ fn json_macro(macros: &[Macro], m: &Macro) -> Value {
     let mut j = json!(m);
     j["revision"] = json!(revision(m));
     j["ports"] = block_ports(&m.blocks, macros);
+    j["warnings"] = json!(warnings(&m.blocks));
     j["exposed"] = json!(BlockKind::Macro {
         macro_id: m.id.clone()
     }
@@ -168,7 +170,9 @@ fn stale(id: &str, current: &str) -> Box<Response> {
 /// back what it got.
 fn take_revision(v: &mut Value) -> ApiResult<Option<String>> {
     if let Some(o) = v.as_object_mut() {
-        for k in ["ports", "values", "buttons", "actions", "exposed"] {
+        for k in [
+            "ports", "values", "buttons", "actions", "exposed", "warnings",
+        ] {
             o.remove(k);
         }
     }

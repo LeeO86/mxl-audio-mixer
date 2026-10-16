@@ -666,7 +666,8 @@ those publish last tick's value.
 Value actions (mute, faders, parameters, PFL, talk, publish, TSL) follow their
 input from the first tick on; event actions run when their input fires. An
 action whose input has no wire never runs, also through an unconnected macro
-input. Actions are the same changes the API makes, ramped and clamped the same
+input, and neither does one whose target is still empty (`""`: listed in the
+graph's `warnings`, "choose a target"). Actions are the same changes the API makes, ramped and clamped the same
 way; NaN is no change, +∞ is a fader's maximum. Each action block runs at most
 every 20 ms (TSL 50 ms, a webhook 100 ms, changes that rewire the plan 250 ms;
 the newest value wins); at most 8 webhook posts run at once. A block keeps its

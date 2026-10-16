@@ -626,6 +626,25 @@ impl BlockKind {
         }
     }
 
+    /// A target the block needs (a signal, VCA, snapshot, monitor, talkback
+    /// mic or destination, a node or parameter) is not chosen yet (`""`). Such
+    /// a block validates, never acts, reads off, 0 or the floor, and is listed
+    /// in the graph's `warnings` (D164).
+    pub fn target_unset(&self) -> bool {
+        match self {
+            Self::Recall { snapshot } => snapshot.is_empty(),
+            Self::SetTalk { mic, destination } => mic.is_empty() || destination.is_empty(),
+            Self::SetMonitor { monitor, .. } => monitor.is_empty(),
+            Self::SetParam {
+                signal,
+                node,
+                param,
+                ..
+            } => signal.is_empty() || node.is_empty() || param.is_empty(),
+            _ => self.signal().is_some_and(str::is_empty),
+        }
+    }
+
     /// The strip, bus or VCA the block names.
     pub fn signal(&self) -> Option<&str> {
         match self {
@@ -827,6 +846,23 @@ impl Context {
                 .collect(),
         }
     }
+}
+
+/// Blocks whose target is not chosen yet ([`BlockKind::target_unset`]): not
+/// errors, but markers for the UI ("choose a target").
+pub fn warnings(blocks: &[Block]) -> Vec<Issue> {
+    blocks
+        .iter()
+        .filter(|b| b.kind.target_unset())
+        .map(|b| Issue {
+            graph: None,
+            macro_id: None,
+            block: Some(b.id.clone()),
+            port: None,
+            wire: None,
+            message: "choose a target".into(),
+        })
+        .collect()
 }
 
 /// The first problem, as text, for [`Mix::validate`].
@@ -1167,6 +1203,10 @@ type BlockCheck = Result<(), (Option<&'static str>, String)>;
 /// A block's parameters against the mix; the error may name a port.
 fn check_block(mix: &Mix, kind: &BlockKind, in_macro: bool) -> BlockCheck {
     let plain = |r: Result<(), String>| r.map_err(|e| (None, e));
+    if kind.target_unset() {
+        // Not chosen yet: valid, inert, listed in `warnings` (D164).
+        return Ok(());
+    }
     if let Some(s) = kind.signal() {
         let vca_ok = matches!(
             kind,

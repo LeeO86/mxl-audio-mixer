@@ -696,7 +696,8 @@ impl Run {
             }
             return Value::Bool(left);
         }
-        if !self.wired(i, 0) {
+        if !self.wired(i, 0) || kind.target_unset() {
+            // No input, or no target chosen yet: it never acts (D164).
             return Value::default_of(self.plan.blocks[i].ports.inputs[0].ty);
         }
         let v = self.read(i, 0);

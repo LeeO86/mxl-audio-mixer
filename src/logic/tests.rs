@@ -1422,3 +1422,86 @@ fn webhooks_and_faders_are_rate_limited() {
     assert_eq!(faders.len(), 20, "40 changes in 400 ms: one per 20 ms");
     assert_eq!(faders[1], -2.0, "the newest value");
 }
+
+#[test]
+fn an_action_without_a_target_is_valid_and_never_acts() {
+    // A new block from the palette has no target yet (D164).
+    let mix = mix_of(
+        vec![
+            block("c", K::Const { value: 1.0 }),
+            block(
+                "m",
+                K::SetMute {
+                    signal: String::new(),
+                },
+            ),
+            block(
+                "f",
+                K::SetFader {
+                    signal: String::new(),
+                    ramp_ms: 10.0,
+                },
+            ),
+            block(
+                "v",
+                K::SetVca {
+                    vca: String::new(),
+                    ramp_ms: 10.0,
+                },
+            ),
+            block(
+                "p",
+                K::SetParam {
+                    signal: "vox".into(),
+                    node: String::new(),
+                    param: String::new(),
+                    ramp_ms: 10.0,
+                },
+            ),
+            block(
+                "t",
+                K::SetTalk {
+                    mic: String::new(),
+                    destination: String::new(),
+                },
+            ),
+            block(
+                "mon",
+                K::SetMonitor {
+                    monitor: String::new(),
+                    source: None,
+                },
+            ),
+            block(
+                "r",
+                K::Recall {
+                    snapshot: String::new(),
+                },
+            ),
+            block(
+                "in",
+                K::Mute {
+                    signal: String::new(),
+                },
+            ),
+        ],
+        vec![
+            out("c", "m", "in"),
+            out("c", "f", "level"),
+            out("c", "v", "level"),
+            out("c", "p", "value"),
+            out("c", "t", "in"),
+            out("in", "mon", "in"),
+            out("in", "r", "in"),
+        ],
+    );
+    let w = crate::mix::logic::warnings(&mix.logic[0].blocks);
+    let marked: Vec<&str> = w.iter().filter_map(|i| i.block.as_deref()).collect();
+    assert_eq!(marked, ["m", "f", "v", "p", "t", "mon", "r", "in"]);
+    assert!(w.iter().all(|i| i.message == "choose a target"));
+    let mut logic = Logic::default();
+    for _ in 0..3 {
+        assert!(tick(&mut logic, &mix).is_empty());
+    }
+    assert_eq!(value(&logic, "in"), json!(false));
+}
