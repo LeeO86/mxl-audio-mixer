@@ -36,6 +36,86 @@ pub struct Config {
     pub verify: bool,
     pub rt_priority: Option<i32>,
     pub cpu: Option<usize>,
+    /// What [`reserve_core`] did with the other threads, for the report.
+    pub core: String,
+}
+
+/// The CPUs of `cpu`'s core other than itself (SMT siblings, from sysfs).
+fn siblings(cpu: usize) -> Option<Vec<usize>> {
+    let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut out = Vec::new();
+    for part in text.trim().split(',').filter(|p| !p.is_empty()) {
+        let (a, b) = part.split_once('-').unwrap_or((part, part));
+        if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+            out.extend((a..=b).filter(|c| *c != cpu));
+        }
+    }
+    Some(out)
+}
+
+/// The CPUs the other threads may use, kept off `cpu` and its SMT siblings when
+/// there are CPUs on another core (else off `cpu` only), as the mixer does.
+fn other_cpus(cpus: &[usize], cpu: usize, siblings: Option<&[usize]>) -> Vec<usize> {
+    let core: Vec<usize> = std::iter::once(cpu)
+        .chain(siblings.unwrap_or_default().iter().copied())
+        .collect();
+    let rest: Vec<usize> = cpus.iter().copied().filter(|c| !core.contains(c)).collect();
+    if rest.is_empty() {
+        cpus.iter().copied().filter(|c| *c != cpu).collect()
+    } else {
+        rest
+    }
+}
+
+/// Keep every thread started after this call off the block thread's core (its
+/// CPU and that CPU's SMT siblings). Call before any thread starts. Returns a
+/// note for the report.
+pub fn reserve_core(cpu: usize) -> String {
+    // SAFETY: plain libc calls on zeroed CPU sets for the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) != 0 {
+            return "CPUs unknown".into();
+        }
+        let cpus: Vec<usize> = (0..libc::CPU_SETSIZE as usize)
+            .filter(|c| libc::CPU_ISSET(*c, &set))
+            .collect();
+        let sib = siblings(cpu);
+        let rest = other_cpus(&cpus, cpu, sib.as_deref());
+        if rest.is_empty() {
+            return "no other CPU for the other threads".into();
+        }
+        let mut narrowed: libc::cpu_set_t = std::mem::zeroed();
+        for c in &rest {
+            libc::CPU_SET(*c, &mut narrowed);
+        }
+        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &narrowed) != 0 {
+            return format!(
+                "keeping the other threads off CPU {cpu}'s core failed ({})",
+                std::io::Error::last_os_error()
+            );
+        }
+        let list = rest
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let outside: Vec<String> = sib
+            .unwrap_or_default()
+            .iter()
+            .filter(|s| !cpus.contains(s))
+            .map(|s| s.to_string())
+            .collect();
+        if outside.is_empty() {
+            format!("other threads on CPU {list}")
+        } else {
+            format!(
+                "other threads on CPU {list}; the core is shared with CPU {}, outside this process",
+                outside.join(",")
+            )
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -118,6 +198,9 @@ fn set_up_thread(config: &Config, shared: &Shared) {
     // SAFETY: plain prctl on the current thread.
     if unsafe { libc::prctl(libc::PR_SET_TIMERSLACK, 1u64, 0u64, 0u64, 0u64) } == 0 {
         notes.push("timer slack 1 ns".to_string());
+    }
+    if !config.core.is_empty() {
+        notes.push(config.core.clone());
     }
     if let Some(cpu) = config.cpu {
         // SAFETY: plain libc calls on the current thread.
@@ -260,4 +343,18 @@ pub fn run(
     *shared.arrival_lag.lock().unwrap() = lag;
     drop(writer);
     let _ = done.send(());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::other_cpus;
+
+    #[test]
+    fn the_other_threads_keep_off_the_block_threads_core() {
+        assert_eq!(other_cpus(&[3, 4, 11, 12], 11, Some(&[3])), [4, 12]);
+        assert_eq!(other_cpus(&[3, 11], 11, Some(&[3])), [3]);
+        assert_eq!(other_cpus(&[20, 21, 23], 23, Some(&[47])), [20, 21]);
+        assert_eq!(other_cpus(&[0, 1], 1, None), [0]);
+        assert!(other_cpus(&[5], 5, Some(&[])).is_empty());
+    }
 }

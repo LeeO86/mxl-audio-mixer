@@ -69,7 +69,7 @@ start_tone "$WORK/mxl/tones" "$LATE" --domain-id "$DOMAIN" --delay-ms 30
 wait_until 10 "late flow" test -d "$WORK/mxl/tones/$LATE.mxl-flow"
 route 3 "$DOMAIN" "$LATE"
 wait_until 10 "input 3 running" is_state 3 running
-wait_until 15 "the automatic delay of input 3 above 30 ms" python3 -c "import json,urllib.request; d=json.load(urllib.request.urlopen('$WEB/api/v1/inputs/3')); exit(0 if d['effective_delay_ms'] > 30 else 1)"
+wait_until 15 "the automatic delay of input 3 above 30 ms" python3 -c "import json,urllib.request as u; d=json.load(u.build_opener(u.ProxyHandler({})).open('$WEB/api/v1/inputs/3')); exit(0 if d['effective_delay_ms'] > 30 else 1)"
 sleep 2
 quiet 3 5 || fail "input 3 lost samples after the delay settled"
 log "input 3: effective delay $(input 3 effective_delay_ms) ms, arrival lag p99.9 $(json "$WEB/api/v1/inputs/3" "d['arrival_lag_ms']['p999']") ms"

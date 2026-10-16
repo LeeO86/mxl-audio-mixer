@@ -27,8 +27,45 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# The tone writers off the DSP thread's core (the mixer's rule: the last CPU whose
+# SMT siblings are all ours) and, with MIXER_RT_PRIORITY and the right to use it,
+# at SCHED_FIFO 4 below the DSP thread, so a late source measures the writers less
+# and the mixer more.
+TONE_CPUS=$(python3 - <<'EOF'
+import os
+cpus = sorted(os.sched_getaffinity(0))
+def siblings(c):
+    try:
+        text = open(f"/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list").read().strip()
+    except OSError:
+        return None
+    out = []
+    for part in text.split(","):
+        a, _, b = part.partition("-")
+        out += range(int(a), int(b or a) + 1)
+    return out
+if len(cpus) > 1:
+    dsp = next((c for c in reversed(cpus) if (s := siblings(c)) is not None and set(s) <= set(cpus)), cpus[-1])
+    core = set(siblings(dsp) or []) | {dsp}
+    print(",".join(str(c) for c in cpus if c not in core))
+EOF
+)
+TONE=()
+[[ -n "$TONE_CPUS" ]] && TONE+=(taskset -c "$TONE_CPUS")
+TONE_PRIORITY=""
+# Only a priority the mixer takes (an integer 1-49); "off", "false" or 0 leave
+# the writers SCHED_OTHER.
+if [[ "${MIXER_RT_PRIORITY:-}" =~ ^[0-9]+$ ]] && ((10#$MIXER_RT_PRIORITY >= 1 && 10#$MIXER_RT_PRIORITY <= 49)); then
+    TONE_PRIORITY=$((10#$MIXER_RT_PRIORITY > 4 ? 10#$MIXER_RT_PRIORITY - 4 : 1))
+    if chrt -f "$TONE_PRIORITY" true 2>/dev/null; then
+        TONE+=(chrt -f "$TONE_PRIORITY")
+    else
+        TONE_PRIORITY=""
+    fi
+fi
+echo "tone writers: CPUs ${TONE_CPUS:-any}, $([[ -n "$TONE_PRIORITY" ]] && echo "SCHED_FIFO $TONE_PRIORITY" || echo SCHED_OTHER)"
 for f in 1 2 3 4 5 6 7 8; do
-    "$BIN/mxl-mixer-tone" --domain "$WORK/mxl/tones" --flow "00000000-0000-4000-8000-00000000000$f" \
+    "${TONE[@]}" "$BIN/mxl-mixer-tone" --domain "$WORK/mxl/tones" --flow "00000000-0000-4000-8000-00000000000$f" \
         --domain-id "$DOMAIN" --channels 8 >/dev/null 2>&1 &
     PIDS+=($!)
 done

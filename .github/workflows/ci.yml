@@ -34,7 +34,7 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq libclang-dev shellcheck
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo fmt --check && cargo clippy --all-targets -- -D warnings
+      - run: cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
         working-directory: spikes/m0
       - run: shellcheck -x tests/integration/*.sh tests/hw/*/run.sh tests/perf/*.sh scripts/build-mxl.sh scripts/demo.sh ci/amwa.sh
       - uses: actions/setup-node@v4

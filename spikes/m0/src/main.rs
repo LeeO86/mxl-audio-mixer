@@ -116,8 +116,19 @@ enum ReaderRequest {
     Close,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Before any thread: the runtime's workers and the NMOS threads keep off the
+    // block thread's core, as the mixer's threads do (D124).
+    let spike_cpu = env("SPIKE_CPU").and_then(|v| v.parse::<usize>().ok());
+    let core = spike_cpu.map(rt::reserve_core).unwrap_or_default();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run(spike_cpu, core));
+}
+
+async fn run(spike_cpu: Option<usize>, core: String) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -157,7 +168,8 @@ async fn main() {
         rt_priority: env("MIXER_RT_PRIORITY")
             .map(|v| v.parse().unwrap_or(0))
             .filter(|p| *p > 0),
-        cpu: env("SPIKE_CPU").and_then(|v| v.parse().ok()),
+        cpu: spike_cpu,
+        core,
     };
     let duration_s: u64 = env_num("SPIKE_DURATION_S", 0);
     if let Err(err) = ensure_output_domain(&paths.output, domain_id, &settings.label, history_ns) {

@@ -12,7 +12,24 @@ MINUTES="${1:-10}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 OUT="${OUT:-$PWD/m0-block-clock-$(date -u +%Y%m%dT%H%M%SZ)}"
-CPU="${SPIKE_CPU:-$(python3 -c 'import os; print(sorted(os.sched_getaffinity(0))[-1])')}"
+# The mixer's rule: the last CPU whose SMT siblings are all ours (a whole core).
+CPU="${SPIKE_CPU:-}"
+[[ -n "$CPU" ]] || CPU=$(python3 - <<'EOF'
+import os
+cpus = sorted(os.sched_getaffinity(0))
+def whole(c):
+    try:
+        text = open(f"/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list").read().strip()
+    except OSError:
+        return False
+    sib = set()
+    for part in text.split(","):
+        a, _, b = part.partition("-")
+        sib |= set(range(int(a), int(b or a) + 1))
+    return sib <= set(cpus)
+print(next((c for c in reversed(cpus) if whole(c)), cpus[-1]))
+EOF
+)
 PRIORITY="${MIXER_RT_PRIORITY:-49}"
 PORT="${NMOS_PORT:-3399}"
 DOMAIN_ROOT="$(mktemp -d /dev/shm/m0-hw.XXXXXX)"
