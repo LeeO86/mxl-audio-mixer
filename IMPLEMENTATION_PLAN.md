@@ -3,23 +3,24 @@
 Decisions, deviations and results against `SPECIFICATION.md` (Draft v0.3). Kept
 current so that work can resume after an interruption.
 
-## Status (2026-10-11)
+## Status (2026-10-16)
 
 | Step | State |
 | --- | --- |
-| M0a `mxl-nmos` extracted and tested | done: PRs 1–3 merged, **v0.1.0 released** (`88e04c5`); **v0.1.1** (`f949a69`, PRs 5–7: DNS names, scheduled activations on time) |
-| M0a Strom switched to the crate | patches against Strom `c2e27a6` in `LeeO86/mxl-nmos` `contrib/strom-switch/` (PR 4); the maintainer applies them in Strom (this environment cannot push there) |
-| M0b spike: NMOS audio receiver + sender on real flows, AMWA | done (below) |
-| M0c spike: MXL float32 read/write on the TAI block clock, jitter | done on the dev VM (below); real-time run: `tests/hw/m0-block-clock` (maintainers) |
-| M1 skeleton, config, ops, metrics, CI, image, MXL I/O | done, merged (PRs 1 and 2) |
-| M2 plan compiler and DSP core, buses, sends, outputs, meters, input patch | done, merged (PR 3) |
-| M3 EQ, filters, dynamics, de-esser, delay; delay compensation; true peak and loudness | done, in review (branch `cursor/m3-eq-dynamics-loudness-4d44`, PR 4) |
+| M0a `mxl-nmos` extracted and tested | done: **v0.1.1** (`f949a69`), the mixer depends on the tag |
+| M0a Strom switched to the crate | patches in `LeeO86/mxl-nmos` `contrib/strom-switch/` (PR 4), applied by the maintainer |
+| M0b, M0c spikes (NMOS on real flows, AMWA; MXL on the TAI block clock) | done; real-time run: `tests/hw/m0-block-clock` (maintainers) |
+| M1–M6 skeleton, DSP core, processing, console, control room, preview, talkback, VCA, N-1 | done, **released in 1.0.0** (`14e9487`, 2026-10-13) |
+| M7 VAD, auto-level, auto-mix, ducking; the missing-sample split; ports 8190/3342 | done, **released in 1.1.0** (`ee2d06d`, 2026-10-14) |
+| M8a logic graphs | done, **released in 1.2.0** (`8e2aae6`, 2026-10-15); maintainers' hardware run 2026-10-15/16 (`docs/release-notes/1.2.0.md`) |
+| M9 remote link (master/slave) | done on `main` (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **1.3.0 in progress**, untagged |
+| M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
 
-- `mxl-nmos` v0.1.1 is released; the mixer depends on the tag.
-- Strom: the four patches are in `mxl-nmos` `contrib/strom-switch/` (README: how to apply).
-- This repo: `main` has M0–M2; M3 is on `cursor/m3-eq-dynamics-loudness-4d44`.
+- `main` is 1.3.0 in progress (`Cargo.toml` 1.3.0); the tag waits for the
+  maintainers' run. Release notes: `docs/release-notes/1.3.0.md` (its digest and
+  "Tested" are filled at the tag).
 - Environment: `docs/development.md`.
 
 ## Decisions
@@ -1795,7 +1796,7 @@ The audit of `09b5598` found the link failing forever on `wss://`, a takeover gu
 | D147 | Both sides ping every second; a side that has heard nothing for 5 s, or whose send has waited 5 s, closes the link. The master gives up a connection attempt after 10 s and retries every 2 s. It no longer reconnects every hour. | A hung peer kept the link "up" for ever. Five missed pings ride out a WAN hiccup; meters (10 Hz) keep the slave's side busy anyway. The hourly reconnect let takeover deny lock the far side for 2 s an hour. |
 | D148 | The slave takes one master at a time: a second gets an `ack` with "another master is connected" and is closed. Only the connection that holds the link brings it down. The master's own changes set `remote_write` around `stage`. | A closing extra connection used to set `link_up=false` under a live master; `remote_write` was reset before `stage` ran, so the master was then locked out too. |
 | D149 | A hello must come within 5 s; a link message may have 4 MiB at most (axum's default is 64 MiB). | An unauthenticated socket held its task and up to 64 MiB for ever. A desk or a push is a part of the mix, which the API takes up to 2 MB. |
-| D150 | A message type a side does not know is ignored and logged once per connection; a `command` it cannot parse gets a refusing `ack` with its `seq`. A push carries a `seq` (absent from older masters: 0). | Different versions keep the link. |
+| D150 | A message type a side does not know is ignored and logged once per connection; a `command` or `push` it cannot parse gets a refusing `ack` with its `seq`. A push carries a `seq` (absent from older masters: 0). | Different versions keep the link. |
 | D151 | The RTT is a side's own ping coming back as a pong, on its monotonic clock. The slave's `remote_link_up{peer="master"}` follows the connection. | The master subtracted the slave's wall clock from its own. |
 | D152 | A slave's id is its place in `MIXER_LINK_PEERS` (`s1` is the first). The URLs must be `ws://` or `wss://` with a host and a valid port, each slave once (by scheme, host, port and path; exit 78). | Ids followed the order in which slaves first answered, so `ret-s1` could change slave after a restart. |
 | D153 | `return` is refused when `ret-<peer>` is another signal. | It took a new `ret-<n>` instead, and left one more bus and published output behind on every rebuild. |

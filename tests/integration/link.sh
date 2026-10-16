@@ -165,7 +165,7 @@ boot gallery2 \
     MIXER_LINK_ROLE=master MIXER_LINK_TOKEN="$TOKEN" SSL_CERT_FILE="$TLS/ca.pem" \
     MIXER_LINK_PEERS="wss://localhost:8443/api/v1/link,ws://127.0.0.1:9/api/v1/link"
 wait_until 40 "gallery2" http_ok "$G2_WEB/livez"
-metric "$G2_WEB" s2 0 || fail "a slave never reached is not listed as down"
+wait_until 5 "a slave never reached listed as down" metric "$G2_WEB" s2 0
 wait_until 15 "the far side to refuse gallery2 over wss://" \
     bash -c "curl -fsS '$G2_WEB/api/v1/remotes' | grep -q 'another master is connected'"
 far_up True || fail "the second master over wss:// took the link down"

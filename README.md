@@ -5,7 +5,8 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Status: milestone 5 in progress** (§19). Settings, probes, metrics, the NMOS node with its
+**Status: 1.3.0 in progress** (§19: milestone 9, the remote link); 1.0.0, 1.1.0
+and 1.2.0 are released (milestones 0–8; notes in `docs/release-notes/`). Settings, probes, metrics, the NMOS node with its
 MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
 and re-created flows, arrival lag and automatic delay); the mix: input patch,
 strips (trim, polarity, fader, mute, pan/balance/width), buses, a send matrix with
@@ -18,7 +19,9 @@ history; the web UI (console, processing editor, routing matrix, snapshots,
 metering) with live updates over a WebSocket; widgets for operator screens
 (`strip`, `fader-bank`, `loudness`, `monitor`); tally (TSL UMD 5.0) and
 audio-follows-video; the control room (monitors, PFL/AFL, solo-in-place, MXL
-monitor outputs, oscillator).
+monitor outputs, oscillator); talkback and browser monitoring; VCAs, mute groups,
+N-1 and group operations; voice detection, auto-level, auto-mix and ducking;
+logic graphs; master/slave remote production.
 
 ## Web UI
 
@@ -254,7 +257,7 @@ token.
 | --- | --- | --- |
 | `HOST_ID` | the host name | Instance name; the default node label and the start of the default NMOS seed. |
 | `WEB_PORT` | 8190 | Port of the web UI, the API, /livez, /readyz and /metrics. 1.0.0 used 8160. |
-| `NMOS_PORT` | 3342 | Port of the IS-04 Node API and the IS-05 Connection API. The events WebSocket is the next port (3343). 1.0.0 used 3312. |
+| `NMOS_PORT` | 3342 | Port of the IS-04 Node API and the IS-05 Connection API. The next port (3343) is reserved for IS-07 events; not opened in this release. 1.0.0 used 3312. |
 | `NMOS_SEED` | <HOST_ID>-mixer | Seed of every NMOS id, the output domain id and the MXL flow ids (UUIDv5). |
 | `NMOS_LABEL` | <HOST_ID> | Node label; the Device is "<label> Audio Mixer". |
 | `NMOS_TAGS` | {} | JSON object of tag name to string arrays, on the Node and the Device. |
@@ -619,7 +622,7 @@ without touching the audio.
 | Port | Default | |
 | --- | --- | --- |
 | `WEB_PORT` | 8190 | web UI, API, events WebSocket, probes, metrics |
-| `NMOS_PORT` | 3342 | IS-04 Node API, IS-05 Connection API (events WebSocket on 3343) |
+| `NMOS_PORT` | 3342 | IS-04 Node API, IS-05 Connection API (3343 is reserved for IS-07 events; not opened in this release) |
 | `TSL_UDP_PORT` (udp) | 8910 | TSL UMD 5.0 tally, only with `TSL_ENABLE=true` |
 | `TSL_TCP_PORT` (tcp) | 8911 | TSL UMD 5.0 tally (DLE/STX framing), only with `TSL_ENABLE=true` |
 | `MEDIAMTX_RTSP_PORT` | 8954 | the built-in MediaMTX's RTSP, on 127.0.0.1 (without `PREVIEW_PUBLISH_URL`) |

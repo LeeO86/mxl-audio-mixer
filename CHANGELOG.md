@@ -40,9 +40,16 @@ Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D157).
 - README: `MIXER_LINK_TOKEN` is a secret (the README said no setting was); `SSL_CERT_FILE`/`SSL_CERT_DIR` for a private CA.
 - CI runs `tests/integration/link.sh`, which now also checks a hung master and far side, takeover deny, a second master, a silent and an oversized connection, and `wss://` through a TLS proxy with a private CA.
 
-## 1.2.0 (in progress)
+### Documentation
 
-Milestone 8 (§19: the logic editor).
+- Release notes for 1.2.0 (`docs/release-notes/1.2.0.md`: the image digest, the hardware run) and 1.3.0 (`docs/release-notes/1.3.0.md`: every setting, ports, volumes, widgets, metric families, what the platform must set, upgrade notes, the catalog facts).
+- README: the status line; port 3343 is reserved for IS-07 events and not opened. The specification lists the settings it did not name (§14.1). The plan's status table is current.
+- The link's token digest is computed once.
+
+## 1.2.0 (2026-10-15)
+
+Milestone 8 (§19: the logic editor). Release notes:
+`docs/release-notes/1.2.0.md`.
 
 ### Milestone 8 (part 1): logic graphs
 
@@ -60,9 +67,10 @@ Milestone 8 (§19: the logic editor).
   changes; `dry_run` computes without acting. `/api/v1/logic`. The Logic tab
   draws the cables and lists the same graph under them.
 
-## 1.1.0 (in progress, after 1.0.0)
+## 1.1.0 (2026-10-14)
 
-Milestone 7 (§19: VAD, auto-level, auto-mix, ducking).
+Milestone 7 (§19: VAD, auto-level, auto-mix, ducking). Release notes:
+`docs/release-notes/1.1.0.md`.
 
 ### Breaking default: ports
 
