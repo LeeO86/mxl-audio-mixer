@@ -62,7 +62,7 @@ wait_until 8 "in-ear for the presenter" http_ok "$FAR_WEB/api/v1/buses/iem-prese
 python3 - "$FAR_WEB" <<'PY' || fail "the in-ear is not the other voices plus the return"
 import json, sys, urllib.request
 base = sys.argv[1]
-sends = json.load(urllib.request.urlopen(base + "/api/v1/sends"))
+sends = json.load(urllib.request.build_opener(urllib.request.ProxyHandler({})).open(base + "/api/v1/sends"))
 ears = [s["from"] for s in sends if s["to"] == "iem-presenter"]
 assert sorted(ears) == ["gallery", "guest-a", "guest-b"], ears
 assert all(s["from"] != "presenter" for s in sends if s["to"] == "iem-presenter")

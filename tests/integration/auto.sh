@@ -149,7 +149,11 @@ for attempt in 1 2 3; do
     DELAY=$(json "$WEB/api/v1/inputs/2" "round(d['effective_delay_ms'] * 48)")
     "$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds 17 --dump "$WORK/duck.txt" >/dev/null
     [[ "$(inputs_moved)" == "$before" ]] && break
-    log "an input was late during the ducking dump (attempt $attempt); measuring again"
+    if ((attempt < 3)); then
+        log "an input was late during the ducking dump (attempt $attempt); measuring again"
+    else
+        log "an input was late during the ducking dump (attempt $attempt); using the last dump"
+    fi
 done
 python3 - "$WORK/duck.txt" "$ONSET" "$END" "$DELAY" <<'EOF' || fail "ducking"
 import math, sys

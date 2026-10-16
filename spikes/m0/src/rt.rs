@@ -90,7 +90,12 @@ pub fn reserve_core(cpu: usize) -> String {
         for c in &rest {
             libc::CPU_SET(*c, &mut narrowed);
         }
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &narrowed);
+        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &narrowed) != 0 {
+            return format!(
+                "keeping the other threads off CPU {cpu}'s core failed ({})",
+                std::io::Error::last_os_error()
+            );
+        }
         let list = rest
             .iter()
             .map(|c| c.to_string())

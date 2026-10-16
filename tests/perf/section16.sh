@@ -53,8 +53,10 @@ EOF
 TONE=()
 [[ -n "$TONE_CPUS" ]] && TONE+=(taskset -c "$TONE_CPUS")
 TONE_PRIORITY=""
-if [[ -n "${MIXER_RT_PRIORITY:-}" ]]; then
-    TONE_PRIORITY=$((MIXER_RT_PRIORITY > 4 ? MIXER_RT_PRIORITY - 4 : 1))
+# Only a priority the mixer takes (an integer 1-49); "off", "false" or 0 leave
+# the writers SCHED_OTHER.
+if [[ "${MIXER_RT_PRIORITY:-}" =~ ^[0-9]+$ ]] && ((10#$MIXER_RT_PRIORITY >= 1 && 10#$MIXER_RT_PRIORITY <= 49)); then
+    TONE_PRIORITY=$((10#$MIXER_RT_PRIORITY > 4 ? 10#$MIXER_RT_PRIORITY - 4 : 1))
     if chrt -f "$TONE_PRIORITY" true 2>/dev/null; then
         TONE+=(chrt -f "$TONE_PRIORITY")
     else

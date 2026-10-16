@@ -175,7 +175,8 @@ async fn run(mut config: Config) -> ExitCode {
     if let Err(e) = check_ports(&config) {
         return fail(EX_UNAVAILABLE, e);
     }
-    // A failed ensure may leave a directory it made; remove it only then.
+    // A failed ensure may leave a directory or a domain_def.json it made;
+    // remove the domain only then.
     let existed = config.output_domain_dir.exists();
     let (created, foreign) = match domain::ensure_output_domain(
         &config.output_domain_dir,
@@ -195,7 +196,7 @@ async fn run(mut config: Config) -> ExitCode {
         }
         Err(e) => {
             return abort(
-                !existed,
+                !existed || e.created,
                 &config,
                 EX_CONFIG,
                 format!("MXL output domain: {e}"),
