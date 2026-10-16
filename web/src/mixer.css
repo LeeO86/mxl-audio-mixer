@@ -288,14 +288,48 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .lpalette .pitem:hover { border-color: var(--accent); }
 .logiccanvas { height: 62vh; min-height: 320px; }
 .lnode { min-width: 140px; }
-.gnode.k-in, .lpalette .k-in { border-left-color: var(--accent); }
+.gnode.k-input, .lpalette .k-input { border-left-color: var(--accent); }
 .gnode.k-logic, .lpalette .k-logic { border-left-color: var(--muted); }
-.gnode.k-act, .lpalette .k-act { border-left-color: var(--warn); }
+.gnode.k-action, .lpalette .k-action { border-left-color: var(--warn); }
+.gnode.k-macro, .lpalette .k-macro { border-left-color: var(--t-event); }
+.lnode.instance { border-style: double; border-width: 3px 3px 3px 4px; }
+/* Port types (§11.1): the handle, the cable from it and the legend share the colour. */
+:root { --t-boolean: #3fb968; --t-number: #4da3ff; --t-level: #e0c23a; --t-event: #c678dd; --t-string: #56b6c2; }
+.t-boolean { --tc: var(--t-boolean); } .t-number { --tc: var(--t-number); } .t-level { --tc: var(--t-level); } .t-event { --tc: var(--t-event); } .t-string { --tc: var(--t-string); }
+.lnode .lrow { display: flex; justify-content: space-between; gap: .8rem; font-size: .68rem; color: var(--muted); line-height: 1.35; }
+.lnode .lin, .lnode .lout { position: relative; min-height: 1em; }
+.lnode .lin { padding-left: .1rem; } .lnode .lout { padding-right: .1rem; text-align: right; }
+.lnode .lin .vue-flow__handle { left: calc(-0.6rem - 2px); }
+.lnode .lout .vue-flow__handle { right: calc(-0.6rem - 1px); left: auto; }
+.lnode .vue-flow__handle.typed { background: var(--tc); }
+.lnode .vue-flow__handle.nope { opacity: .2; }
+.lnode .vue-flow__handle.bad, .lnode.bad { box-shadow: 0 0 0 2px var(--bad); }
+.lnode.bad { border-color: var(--bad); }
+.lnode .lbad { display: inline-block; margin-left: .35rem; padding: 0 .35rem; border-radius: 3px; background: var(--bad); color: #fff; font-size: .7rem; }
+.lnode.fired .lval { background: var(--t-event); color: #fff; }
+.vue-flow__edge.typed .vue-flow__edge-path { stroke: var(--tc); stroke-width: 2; }
+.vue-flow__edge.typed.selected .vue-flow__edge-path { stroke-width: 4; }
+.vue-flow__edge.ghost .vue-flow__edge-path { stroke-dasharray: 5 4; opacity: .7; }
+.vue-flow__edge.bad .vue-flow__edge-path { stroke: var(--bad); stroke-width: 3; }
+.vue-flow__connection-path { stroke: var(--text); stroke-dasharray: 4 3; }
+.llegend { display: flex; flex-wrap: wrap; gap: .3rem .8rem; align-items: center; margin-top: .3rem; }
+.ltype { display: inline-flex; align-items: center; gap: .25rem; }
+.ltype i, .ldot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--tc); }
+.lcrumbs { display: flex; flex-wrap: wrap; gap: .3rem .5rem; align-items: center; margin-top: .5rem; padding: 0; background: none; border: none; }
+.lcrumbs .btn[aria-current="true"] { background: var(--accent); color: #fff; }
+.lgroup, .lissues { border: 1px solid var(--border); border-radius: 8px; padding: .5rem .7rem; margin-top: .5rem; background: var(--panel2); }
+.lissues { border-color: var(--bad); }
+.lissues > div + div { margin-top: .2rem; }
+.lgroupcols { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: .3rem 1rem; }
+.lgroupcols .check input[type="text"], .lgroupcols .check input:not([type]) { flex: 0 0 auto; }
+.lact { padding: .1rem 0; } .lact .pill { margin-left: .4rem; }
 .lnode .lfoot { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-top: .15rem; }
 .lval { font-size: .72rem; font-weight: 600; font-variant-numeric: tabular-nums; padding: 0 .35rem; border-radius: 3px; background: var(--chip); color: var(--text); white-space: nowrap; }
 .lval.on { background: var(--ok); color: #fff; }
 .lval.off { color: var(--muted); }
 .amtable tr.chosen td { background: var(--chip); }
+.ltable { overflow-x: auto; margin-top: .6rem; }
+.lparams select { width: auto; max-width: 14rem; }
 .lparams { display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
 .vue-flow__controls { box-shadow: none; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .vue-flow__controls-button { background: var(--panel2); border-bottom: 1px solid var(--border); }

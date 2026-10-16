@@ -36,7 +36,17 @@ a send's tap, gain, mute, phase and block delay; publishing outputs), **Graph**
 (the routing as a graph, read-write: inputs, strips, buses, monitors and outputs
 with their patches, sends, mix-minus, monitor sources and outputs; draw from a
 strip or bus to a bus to send, click a send to edit it, Delete removes it; nodes
-in columns by routing depth, moved ones kept in the browser),
+in columns by routing depth, moved ones kept in the browser), **Logic** (logic
+graphs, §11: drag blocks in from the palette or click them; draw cables between
+ports, coloured by type (boolean, number, level, event, text), where an input that
+cannot take the cable is dimmed while drawing; zoom, pan and a minimap; select
+several blocks (Ctrl-click, Shift-drag), copy and paste them with their cables
+(Ctrl+C, Ctrl+V, also into another graph), Delete; undo and redo (Ctrl+Z,
+Ctrl+Shift+Z) of every edit; group blocks into a macro with the ports you choose,
+open it (double-click, a breadcrumb back) and ungroup it; a refused edit shows the
+server's reasons as red markers on the blocks, ports and the dashed cable; every
+block shows its live value; soft keys, triggers, dry run and the list of the last
+actions; the list under the canvas edits every parameter),
 **Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
 history), **Meters** (the bridge on dBFS, true peak or PPM EBU, BBC, Nordic, DIN at
 an alignment level, phase correlation; loudness; spectrum and goniometer of any
@@ -848,7 +858,9 @@ layouts, show history, PPM, correlation, the analyser, the events WebSocket),
 `tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
 checked on the API and on the other client; tally and AFV; a toggle pressed twice
 around a late mix; listening to a monitor with `MEDIAMTX_BIN`; talkback latched,
-held and listen-back; a send drawn and deleted in the graph),
+held and listen-back; a send drawn and deleted in the graph; the logic editor,
+`web/tests/logic.mjs`: palette, cables, undo and redo, copy and paste, typed ports,
+validation markers, macros, dry run),
 `tests/integration/room.sh` (a published monitor sample-exact with level, dim,
 cut and checks; PFL, AFL, interlock, solo-in-place; an input source; the
 oscillator with pink noise and a sweep), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and

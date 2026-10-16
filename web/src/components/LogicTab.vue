@@ -1,9 +1,12 @@
 <script setup>
-// Logic graphs (§11): blocks wired together, evaluated at 100 Hz. The canvas (§11.3) takes blocks from
-// the palette (drag or click), draws cables between ports, zooms and pans; every edit is one step of
-// undo and redo, and selected blocks copy and paste with their wires. The list under it edits the same
-// graph. Live values are polled while the tab is open.
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+// Logic graphs (§11): blocks with typed ports wired together, evaluated at 100 Hz. The canvas (§11.3)
+// takes blocks from the palette (drag or click; the palette is the server's block catalog), draws
+// cables between ports of types that convert (D158), zooms and pans, groups blocks into macros and
+// opens them. Every edit is one atomic batch (POST /api/v1/logic-batch) and one step of undo and redo;
+// selected blocks copy and paste with their cables. A refused edit shows the server's issues as red
+// markers on the blocks, ports and cables (D162). The list under the canvas edits the same graph or
+// macro. Live values, soft keys and the action log (dry run) are polled while the tab is open.
+import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch } from "vue";
 import { VueFlow, useVueFlow } from "@vue-flow/core";
 import { MiniMap } from "@vue-flow/minimap";
 import { Controls } from "@vue-flow/controls";
@@ -13,149 +16,231 @@ import "@vue-flow/controls/dist/style.css";
 import ConfirmButton from "./ConfirmButton.vue";
 import LogicNode from "./LogicNode.vue";
 import { api, fmtDb } from "../api.js";
-import { act, live, signals } from "../store.js";
-import { clipboard, copyOf, forget, freshId, history, historyOf, pasted, record, sameGraph } from "../logicEdit.js";
+import { act, live, room, signalOf, signals, vcas } from "../store.js";
+import { PORT_TYPES, batchFor, boundary, canWire, clipboard, copyOf, forget, freshId, group, history, historyOf, pasted, portName, portsOf, record, resource, same, ungroup } from "../logicEdit.js";
 
 const { applyNodeChanges, applyEdgeChanges, fitView, screenToFlowCoordinate, getSelectedNodes, getSelectedEdges } = useVueFlow("logic");
 
+const MAX_BLOCKS = 64;
 const graphs = computed(() => live.mix?.logic || []);
+const polledMacros = ref([]);
+const macros = computed(() => live.mix?.logic_macros || polledMacros.value);
+const snapshots = computed(() => live.mix?.snapshots || []);
 const selected = ref("");
 const graph = computed(() => graphs.value.find((g) => g.id === selected.value) || graphs.value[0] || null);
 const name = ref("");
+
+// ---- the block catalog (GET /api/v1/logic-blocks) ---------------------------------------------
+
+const catalog = ref([]);
+const entryOf = (type) => catalog.value.find((e) => e.type === type);
+const categoryOf = (type) =>
+  String(entryOf(type)?.category || "logic")
+    .toLowerCase()
+    .replace(/s$/, "");
+const typeLabel = (type) => entryOf(type)?.label || type;
+const CATEGORIES = [
+  ["input", "Inputs"],
+  ["logic", "Logic"],
+  ["action", "Actions"],
+  ["macro", "Macros"],
+];
+const PEERS = ["master", "s1", "s2", "s3", "s4"];
+
+// ---- what the canvas shows: the graph, or a macro opened from one of its instances -------------
+
+const path = ref([]); // [{ instance, macro }] from the graph down to the open macro
+const openMacro = computed(() => {
+  const top = path.value.at(-1);
+  return top ? macros.value.find((m) => m.id === top.macro) || null : null;
+});
+const doc = computed(() => (openMacro.value ? { kind: "macro", id: openMacro.value.id } : graph.value ? { kind: "graph", id: graph.value.id } : null));
+const view = computed(() => openMacro.value || graph.value);
+const prefix = computed(() => path.value.map((p) => `${p.instance}.`).join(""));
+const keyOf = (d) => `${d.kind}:${d.id}`;
+const urlOf = (d) => (d.kind === "graph" ? `/api/v1/logic/${d.id}` : `/api/v1/logic-macros/${d.id}`);
+watch(
+  () => graph.value?.id,
+  () => (path.value = []),
+);
+watch(openMacro, (m) => {
+  if (!m && path.value.length) path.value = [];
+});
+
+// ---- polled: live values, soft keys, actions, ports -------------------------------------------
+
 // Updated in place, so that only what shows a value redraws on each poll: redrawing the whole tab would
 // reset a number being typed in the list.
 const values = reactive({});
-const buttons = ref([]);
+const detail = reactive({ buttons: [], actions: [], ports: {} });
+const fired = {}; // block -> last event count seen
 let timer = 0;
+let polls = 0;
 
-// [type, label, palette group]
-const TYPES = [
-  ["const", "Number", "in"],
-  ["button", "Button", "in"],
-  ["mute", "Mute state", "in"],
-  ["fader", "Fader", "in"],
-  ["vad", "Voice", "in"],
-  ["level", "Level", "in"],
-  ["above", "Above", "in"],
-  ["tally", "On air", "in"],
-  ["schedule", "Schedule", "in"],
-  ["and", "AND", "logic"],
-  ["or", "OR", "logic"],
-  ["xor", "XOR", "logic"],
-  ["not", "NOT", "logic"],
-  ["compare", "Compare", "logic"],
-  ["edge", "Rising edge", "logic"],
-  ["latch", "Latch", "logic"],
-  ["timer", "Timer", "logic"],
-  ["delay", "Delay", "logic"],
-  ["debounce", "Debounce", "logic"],
-  ["set-mute", "Set mute", "act"],
-  ["set-fader", "Set fader", "act"],
-  ["recall", "Recall", "act"],
-  ["webhook", "Webhook", "act"],
-];
-const GROUPS = [
-  ["in", "Inputs"],
-  ["logic", "Logic"],
-  ["act", "Actions"],
-];
-const typeLabel = (type) => TYPES.find((t) => t[0] === type)?.[1] || type;
-const groupOf = (type) => TYPES.find((t) => t[0] === type)?.[2] || "logic";
-const withSignal = ["mute", "fader", "vad", "level", "above", "set-mute", "set-fader"];
-const MS_TYPES = ["timer", "delay", "debounce"];
-const sinks = ["set-mute", "set-fader", "recall", "webhook"];
-const inputsOf = {
-  and: ["a", "b"],
-  or: ["a", "b"],
-  xor: ["a", "b"],
-  compare: ["a", "b"],
-  not: ["in"],
-  edge: ["in"],
-  latch: ["set", "reset"],
-  timer: ["in"],
-  delay: ["in"],
-  debounce: ["in"],
-  recall: ["in"],
-  webhook: ["in"],
-  "set-mute": ["in"],
-  "set-fader": ["level"],
-};
-// The ranges the server accepts (src/mix/logic.rs).
-const minute = (n) => Number.isInteger(n) && n >= 0 && n <= 1439;
-const CHECK = {
-  value: (n) => Number.isFinite(n),
-  index: (n) => Number.isInteger(n) && n >= 0 && n <= 65535,
-  ms: (n) => Number.isFinite(n) && n >= 0 && n <= 86400000,
-  threshold_db: (n) => Number.isFinite(n) && n >= -120 && n <= 20,
-  hysteresis_db: (n) => Number.isFinite(n) && n >= 0 && n <= 60,
-  start_minute: minute,
-  end_minute: minute,
+async function refresh() {
+  const g = graph.value;
+  if (polls++ % 4 === 0 && !live.mix?.logic_macros) polledMacros.value = (await api.get("/api/v1/logic-macros").catch(() => null)) || polledMacros.value;
+  if (!g) return;
+  const d = await api.get(`/api/v1/logic/${g.id}`).catch(() => null);
+  if (!d || g.id !== graph.value?.id) return;
+  const v = d.values || {};
+  for (const k of Object.keys(values)) if (!(k in v)) delete values[k];
+  Object.assign(values, v);
+  // Only real changes: the list is drawn from these, and a redraw would reset a number being typed.
+  const changed = (k, v) => JSON.stringify(v) !== JSON.stringify(detail[k]) && (detail[k] = v);
+  changed("buttons", d.buttons || []);
+  changed("actions", d.actions || []);
+  let p = d.ports || {};
+  if (openMacro.value) p = (await api.get(`/api/v1/logic-macros/${openMacro.value.id}`).catch(() => null))?.ports || {};
+  changed("ports", p);
+  showValues();
+}
+
+const ports = (b) => detail.ports[b.id] || portsOf(b, catalog.value, macros.value);
+const valueOf = (b) => values[prefix.value + b.id];
+const typeOf = (b) => {
+  const p = ports(b);
+  return p.outputs[0]?.type || p.inputs[0]?.type || "";
 };
 
-const addType = ref("const");
-const addSignal = ref("");
-const addIndex = ref("");
-const addMs = ref("");
-const addThreshold = ref("");
-const addHysteresis = ref("");
-const addSnapshot = ref("");
-const addUrl = ref("");
-const addStart = ref("");
-const addEnd = ref("");
-const snapshots = computed(() => live.mix?.snapshots || []);
-const wire = ref({ from: "", to: "", port: "in" });
+function shown(b) {
+  const v = valueOf(b);
+  if (v === undefined) return "";
+  const t = typeOf(b);
+  if (typeof v === "boolean") return v ? "on" : "off";
+  if (typeof v === "string") return v.length > 24 ? `“${v.slice(0, 23)}…”` : `“${v}”`;
+  if (t === "event") return `×${v}`;
+  if (v === null) return t === "level" ? "−∞ dB" : "±∞";
+  if (t === "level") return `${fmtDb(v)} dB`;
+  if (t === "boolean") return v >= 0.5 ? "on" : "off";
+  return String(Number(Number(v).toFixed(2)));
+}
+function isOn(b) {
+  const v = valueOf(b);
+  if (typeof v === "boolean") return v;
+  return typeOf(b) === "boolean" && typeof v === "number" ? v >= 0.5 : null;
+}
 
-// ---- edits ------------------------------------------------------------------------------------
-// One change at a time, each read from the server first: two quick edits would otherwise each send the
-// graph they saw, and the slower one would erase the other. A change of blocks or wires is recorded for
-// undo with the graph before it and the graph the server answered.
+const pressed = (b) => detail.buttons.includes(b.id);
+function press(b, down) {
+  return act(() => api.put(`/api/v1/logic/${graph.value.id}/buttons/${b.id}`, { pressed: down }));
+}
+function fire(b) {
+  return act(() => api.post(`/api/v1/logic/${graph.value.id}/trigger/${b.id}`));
+}
+const when = (t) => (t > 1e12 ? new Date(t).toLocaleTimeString() : `${t} ms`);
+
+// ---- edits: one batch each, recorded for undo -------------------------------------------------
+
+const issues = ref([]); // the last refused edit's issues (D162)
+const rejected = ref(null); // { key, res }: what that edit wanted the open graph or macro to be
+
 let queued = Promise.resolve();
 // A failed step must not stop the ones after it.
 const failed = (e) => (live.actionError = e.message);
-function commit(label, mutate, id = graph.value?.id) {
-  if (!id) return queued;
-  queued = queued.then(async () => {
-    const current = await api.get(`/api/v1/logic/${id}`).catch(() => null);
-    if (!current) return;
-    const body = mutate(current);
-    if (!body) return;
-    const done = await act(() => api.patch(`/api/v1/logic/${id}`, body));
-    if (done && done !== true && !sameGraph(current, done)) record(id, label, current, done);
-  }).catch(failed);
+
+// POST /api/v1/logic-batch: the answer, or { conflict } on 409, or nothing (issues shown).
+async function send(body, want) {
+  try {
+    const done = await api.post("/api/v1/logic-batch", body);
+    live.actionError = "";
+    issues.value = [];
+    rejected.value = null;
+    return done;
+  } catch (e) {
+    if (e.status === 409) return { conflict: true };
+    // A refused edit's issues are shown on the canvas and in the box above it, not in the banner.
+    if (e.status === 400 && Array.isArray(e.data?.issues) && e.data.issues.length) {
+      issues.value = e.data.issues;
+      rejected.value = want || null;
+    } else live.actionError = e.message;
+    return null;
+  }
+}
+
+// Reads `reads` (graphs and macros), lets `build` make the new resources, writes them as one batch with
+// the revisions read (a 409 means someone else changed them: nothing is written) and records the edit
+// in the open document's history. `build` returns the batch body, a string (why not), or null.
+function edit(label, reads, build) {
+  const d = doc.value;
+  if (!d) return queued;
+  const key = keyOf(d);
+  queued = queued
+    .then(async () => {
+      const cur = {};
+      for (const r of reads) cur[keyOf(r)] = await api.get(urlOf(r)).catch(() => null);
+      const made = build(cur);
+      if (!made) return;
+      if (typeof made === "string") {
+        live.actionError = made;
+        return;
+      }
+      const body = { graphs: [], macros: [], delete_graphs: [], delete_macros: [], ...made };
+      for (const kind of ["graph", "macro"]) body[`${kind}s`] = body[`${kind}s`].map((r) => ({ ...resource(r), ...(cur[`${kind}:${r.id}`]?.revision ? { revision: cur[`${kind}:${r.id}`].revision } : {}) }));
+      const mine = body[`${d.kind}s`].find((r) => r.id === d.id);
+      const done = await send(body, mine && { key, res: mine });
+      if (done?.conflict) live.actionError = "Changed elsewhere meanwhile; nothing was written. Try again.";
+      if (!done || done.conflict) return;
+      const changes = [];
+      for (const kind of ["graph", "macro"]) {
+        for (const r of body[`${kind}s`]) {
+          const before = cur[`${kind}:${r.id}`];
+          const after = (done[`${kind}s`] || []).find((x) => x.id === r.id);
+          if (!before || !same(before, after)) changes.push({ kind, id: r.id, before: resource(before), after: resource(after), beforeRev: before?.revision, afterRev: after?.revision });
+        }
+        for (const id of body[`delete_${kind}s`]) changes.push({ kind, id, before: resource(cur[`${kind}:${id}`]), after: null, beforeRev: cur[`${kind}:${id}`]?.revision });
+      }
+      if (changes.length && label) record(key, { label, changes });
+    })
+    .catch(failed);
   return queued;
 }
 
-function patch(body) {
-  return commit("", () => body);
+// An edit of the open graph or macro only: `mutate` gets it and returns the fields to change.
+function commit(label, mutate) {
+  const d = doc.value;
+  return edit(label, d ? [d] : [], (cur) => {
+    const c = cur[keyOf(d)];
+    const fields = c && mutate(c);
+    return fields ? { [`${d.kind}s`]: [{ ...resource(c), ...fields }] } : null;
+  });
 }
+const patch = (label, body) => commit(label, () => body);
 
-// Undo (back) or redo, only while the server still has what this client last wrote.
+// Undo (back) or redo: the entry's resources as they were, refused (409) if changed meanwhile.
 function step(back) {
-  const id = graph.value?.id;
-  if (!id) return queued;
-  queued = queued.then(async () => {
-    const h = historyOf(id);
-    const from = back ? h.undo : h.redo;
-    const entry = from.at(-1);
-    if (!entry) return;
-    const current = await api.get(`/api/v1/logic/${id}`).catch(() => null);
-    if (!current) return;
-    if (!sameGraph(current, back ? entry.after : entry.before)) {
-      forget(id);
-      live.notice = "The graph was changed elsewhere: its undo history is cleared.";
-      return;
-    }
-    const done = await act(() => api.patch(`/api/v1/logic/${id}`, back ? entry.before : entry.after), `${back ? "Undone" : "Redone"}: ${entry.label}.`);
-    if (!done) return;
-    from.pop();
-    (back ? h.redo : h.undo).push(entry);
-  }).catch(failed);
+  const d = doc.value;
+  if (!d) return queued;
+  const key = keyOf(d);
+  queued = queued
+    .then(async () => {
+      const h = historyOf(key);
+      const from = back ? h.undo : h.redo;
+      const entry = from.at(-1);
+      if (!entry) return;
+      const done = await send(batchFor(entry, back));
+      if (done?.conflict) {
+        forget(key);
+        live.notice = "Changed elsewhere meanwhile: the undo history of this graph is cleared.";
+        return;
+      }
+      if (!done) return;
+      for (const c of entry.changes) {
+        const now = (done[`${c.kind}s`] || []).find((x) => x.id === c.id);
+        if (back) c.beforeRev = now?.revision;
+        else c.afterRev = now?.revision;
+      }
+      from.pop();
+      (back ? h.redo : h.undo).push(entry);
+      live.notice = `${back ? "Undone" : "Redone"}: ${entry.label}.`;
+    })
+    .catch(failed);
   return queued;
 }
 const undo = () => step(true);
 const redo = () => step(false);
-const undoNext = computed(() => history[graph.value?.id]?.undo.at(-1)?.label || "");
-const redoNext = computed(() => history[graph.value?.id]?.redo.at(-1)?.label || "");
+const undoNext = computed(() => (doc.value ? history[keyOf(doc.value)]?.undo.at(-1)?.label || "" : ""));
+const redoNext = computed(() => (doc.value ? history[keyOf(doc.value)]?.redo.at(-1)?.label || "" : ""));
 
 async function addGraph() {
   const body = {};
@@ -168,64 +253,79 @@ async function addGraph() {
 }
 
 async function removeGraph(id) {
-  if (await act(() => api.del(`/api/v1/logic/${id}`))) forget(id);
+  if (await act(() => api.del(`/api/v1/logic/${id}`))) forget(`graph:${id}`);
 }
 
-// The parameters a new block starts with: the fields next to "+ Block" when filled, else a default. A
-// string is why the block cannot be made.
-function paramsFor(type) {
-  const p = {};
-  const num = (field, raw, fallback) => {
-    if (String(raw).trim() === "") return fallback;
-    const n = Number(raw);
-    return CHECK[field](n) ? n : undefined;
-  };
-  if (withSignal.includes(type)) {
-    p.signal = addSignal.value || signals.value[0]?.id;
-    if (!p.signal) return "This block needs a strip or bus, and there is none.";
+// ---- blocks and their parameters --------------------------------------------------------------
+
+const addType = ref("const");
+const addSignal = ref("");
+
+// The choices of a parameter, [{ id, name }], or null for a typed value.
+function optionsOf(p, b) {
+  if (p.options) return p.options.map((o) => (typeof o === "object" ? { id: o.id ?? o.value, name: o.name ?? o.label ?? o.id ?? o.value } : { id: o, name: o }));
+  const named = (list) => list.map((x) => ({ id: x.id, name: x.name || x.id }));
+  if (p.kind === "signal") return named(signals.value);
+  if (p.kind === "signal-or-vca") return named([...signals.value, ...vcas.value]);
+  if (p.kind === "vca") return named(vcas.value);
+  if (p.kind === "snapshot") return named(snapshots.value);
+  if (p.kind === "monitor") return named(room.value.monitors || []);
+  if (p.kind === "mic") return named(room.value.talkback?.mics || []);
+  if (p.kind === "destination") return named(room.value.talkback?.destinations || []);
+  if (p.kind === "node") return (signalOf(b?.signal)?.chain || []).map((n) => ({ id: n.id, name: `${n.id} (${n.type})` }));
+  if (p.kind === "macro") return named(macros.value);
+  if (p.kind === "peer") return PEERS.map((x) => ({ id: x, name: x }));
+  if (p.kind === "port-type") return PORT_TYPES.filter((t) => t !== "event" || b?.type === "macro-in" || b?.type === "macro-out").map((t) => ({ id: t, name: t }));
+  return null;
+}
+const JSON_KINDS = ["points", "source"];
+const NUMBER_KINDS = ["number", "integer"];
+
+// The parameters a new block starts with: the catalog's defaults, else the first strip, snapshot, ...,
+// 1000 ms, the lowest number allowed, `bypass` for a node parameter. A string is why the block cannot be
+// made.
+function paramsFor(type, inView) {
+  const e = entryOf(type);
+  const out = {};
+  for (const p of e?.params || []) {
+    let v = p.default ?? (p.kind === "source" ? null : undefined);
+    if (p.name === "name" && (type === "macro-in" || type === "macro-out")) v = freshId(type === "macro-in" ? "in" : "out", new Set(inView.filter((b) => b.type === type).map((b) => b.name)));
+    if (v === undefined && p.name === "ms") v = 1000;
+    if (v === undefined && p.kind === "url") v = "http://example.invalid/";
+    if (v === undefined && p.kind === "param") v = "bypass";
+    if (v === undefined) {
+      const opts = optionsOf(p, { type, ...out });
+      if (opts) v = (p.kind === "signal" && opts.some((o) => o.id === addSignal.value) ? addSignal.value : opts[0]?.id) ?? undefined;
+      else if (NUMBER_KINDS.includes(p.kind)) v = Math.max(p.min ?? 0, Math.min(p.max ?? 0, 0));
+      else if (p.kind === "boolean") v = false;
+      else if (p.kind === "points") v = [
+          [0, 0],
+          [1, 1],
+        ];
+      else v = "";
+    }
+    if (v === undefined) return `${typeLabel(type)} needs a ${p.kind}, and there is none yet.`;
+    out[p.name] = v;
   }
-  if (type === "const") p.value = 0;
-  if (type === "compare") p.op = "gt";
-  if (type === "tally" && (p.index = num("index", addIndex.value, 1)) === undefined) return "The on-air index is 0 to 65535.";
-  if (MS_TYPES.includes(type) && (p.ms = num("ms", addMs.value, 1000)) === undefined) return "The time is 0 to 86400000 ms.";
-  if (type === "schedule") {
-    p.start_minute = num("start_minute", addStart.value, 480);
-    p.end_minute = num("end_minute", addEnd.value, 1080);
-    if (p.start_minute === undefined || p.end_minute === undefined) return "Schedule minutes are 0 to 1439.";
-  }
-  if (type === "above") {
-    p.threshold_db = num("threshold_db", addThreshold.value, -40);
-    p.hysteresis_db = num("hysteresis_db", addHysteresis.value, 6);
-    if (p.threshold_db === undefined || p.hysteresis_db === undefined) return "The threshold is −120 to 20 dB, the hysteresis 0 to 60 dB.";
-  }
-  if (type === "recall") {
-    p.snapshot = addSnapshot.value || snapshots.value[0]?.id;
-    if (!p.snapshot) return "A recall needs a snapshot, and there is none.";
-  }
-  if (type === "webhook") {
-    if (!/^https?:\/\//.test(addUrl.value)) return "Enter the webhook's http(s) URL next to + Block first.";
-    p.url = addUrl.value;
-  }
-  return p;
+  return out;
 }
 
-// A new block at `at` (canvas coordinates), or in a row when not given; it is selected.
-function place(type, at) {
-  const params = paramsFor(type);
+// A new block at `at` (canvas coordinates), or in a row; it is selected. `extra` sets parameters.
+function place(type, at, extra = {}) {
+  const v = view.value;
+  if (!v) return;
+  const params = paramsFor(type, v.blocks);
   if (typeof params === "string") {
     live.actionError = params;
     return;
   }
   commit(`Add ${typeLabel(type)}`, (g) => {
+    if (g.blocks.length >= MAX_BLOCKS) return void (live.actionError = `A graph or macro holds at most ${MAX_BLOCKS} blocks.`);
     const id = freshId(type, new Set(g.blocks.map((b) => b.id)));
-    const pos = at || { x: 40 + g.blocks.length * 220, y: 80 };
+    const pos = at || { x: 40 + (g.blocks.length % 5) * 220, y: 80 + Math.floor(g.blocks.length / 5) * 140 };
     want = new Set([id]);
-    return { blocks: [...g.blocks, { id, type, x: Math.round(pos.x), y: Math.round(pos.y), ...params }] };
+    return { blocks: [...g.blocks, { id, type, x: Math.round(pos.x), y: Math.round(pos.y), ...params, ...extra }] };
   });
-}
-
-function addBlock() {
-  place(addType.value);
 }
 
 function removeBlock(id) {
@@ -235,33 +335,61 @@ function removeBlock(id) {
   }));
 }
 
-function setField(b, field, raw) {
-  const value = field in CHECK ? Number(raw) : raw;
-  if (field in CHECK ? !CHECK[field](value) : !value) return;
-  if (field === "url" && !/^https?:\/\//.test(value)) return;
-  commit(`Set ${b.id}`, (g) => ({ blocks: g.blocks.map((x) => (x.id === b.id ? { ...x, [field]: value } : x)) }));
+function setParam(b, p, raw) {
+  let value = raw;
+  if (NUMBER_KINDS.includes(p.kind)) {
+    value = Number(raw);
+    if (!Number.isFinite(value) || (p.kind === "integer" && !Number.isInteger(value))) return void (live.actionError = `${b.id}: ${p.name} must be ${p.kind === "integer" ? "a whole number" : "a number"}.`);
+  } else if (JSON_KINDS.includes(p.kind)) {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return void (live.actionError = `${b.id}: ${p.name} is not valid JSON.`);
+    }
+  }
+  commit(`Set ${b.id} ${p.name}`, (g) => ({ blocks: g.blocks.map((x) => (x.id === b.id ? { ...x, [p.name]: value } : x)) }));
 }
+
+const paramsOf = (b) => (entryOf(b.type)?.params || []).filter((p) => p.name !== "x" && p.name !== "y");
+
+function labelOf(b) {
+  const label = typeLabel(b.type);
+  if (b.type === "macro") return `${macros.value.find((m) => m.id === b.macro)?.name || b.macro}`;
+  if (b.type === "schedule") return `${label}: ${hhmm(b.start_minute)}–${hhmm(b.end_minute)}`;
+  const p = paramsOf(b).find((q) => q.kind !== "port-type" && b[q.name] !== undefined && b[q.name] !== null && typeof b[q.name] !== "object" && b[q.name] !== "");
+  if (!p) return label;
+  const v = b[p.name];
+  const opt = optionsOf(p, b)?.find((o) => o.id === v);
+  const unit = /_ms$|^ms$/.test(p.name) ? " ms" : /_db$/.test(p.name) ? " dB" : "";
+  return `${label}: ${opt?.name ?? v}${unit}`;
+}
+const hhmm = (m) => `${String(Math.floor((m || 0) / 60)).padStart(2, "0")}:${String((m || 0) % 60).padStart(2, "0")}`;
+
+// ---- cables -----------------------------------------------------------------------------------
 
 const wireKey = (w) => `${w.from_block}.${w.from_port}>${w.to_block}.${w.to_port}`;
+const wire = ref({ from: "", fromPort: "", to: "", port: "" });
+const blockOf = (id) => view.value?.blocks.find((b) => b.id === id);
+const outsOf = (id) => (blockOf(id) ? ports(blockOf(id)).outputs : []);
+const insOf = (id) => (blockOf(id) ? ports(blockOf(id)).inputs : []);
+const portType = (id, side, name) => (side === "out" ? outsOf(id) : insOf(id)).find((p) => p.name === name)?.type;
 
-function addWire() {
-  const { from, to, port } = wire.value;
-  if (!from || !to || !port) return;
-  connect(from, to, port);
-}
-
-function connect(from, to, port) {
+function connect(from, fromPort, to, port) {
   commit("Connect", (g) => {
     const wires = g.wires.filter((w) => !(w.to_block === to && w.to_port === port));
-    return { wires: [...wires, { from_block: from, from_port: "out", to_block: to, to_port: port }] };
+    return { wires: [...wires, { from_block: from, from_port: fromPort, to_block: to, to_port: port }] };
   });
+}
+
+function addWire() {
+  const { from, fromPort, to, port } = wire.value;
+  if (!from || !fromPort || !to || !port) return;
+  connect(from, fromPort, to, port);
 }
 
 function removeWire(w) {
   commit("Delete cable", (g) => ({ wires: g.wires.filter((x) => wireKey(x) !== wireKey(w)) }));
 }
-
-const portsOf = (id) => inputsOf[graph.value?.blocks.find((b) => b.id === id)?.type] || [];
 
 // ---- selection, delete, copy, paste ------------------------------------------------------------
 
@@ -287,26 +415,29 @@ function removeDoomed() {
 }
 
 const selectedIds = computed(() => getSelectedNodes.value.map((n) => n.id));
+const selectedInstance = computed(() => (selectedIds.value.length === 1 && blockOf(selectedIds.value[0])?.type === "macro" ? blockOf(selectedIds.value[0]) : null));
 function deleteSelection() {
   for (const id of selectedIds.value) doom("blocks", id);
-  for (const e of getSelectedEdges.value) doom("wires", e.id);
+  for (const e of getSelectedEdges.value) if (!e.data?.ghost) doom("wires", e.id);
 }
 
 function copy() {
-  const g = graph.value;
+  const v = view.value;
   const ids = selectedIds.value;
-  if (!g || !ids.length) return false;
-  Object.assign(clipboard, copyOf(g, ids), { pastes: 0 });
+  if (!v || !ids.length) return false;
+  Object.assign(clipboard, copyOf(v, ids), { pastes: 0 });
   live.notice = `${ids.length} block${ids.length > 1 ? "s" : ""} copied.`;
   return true;
 }
 
-// The clipboard into the open graph (any graph), with new ids, moved down and right a bit more on each paste.
+// The clipboard into the open graph or macro (any one), with new ids, a bit further down and right on
+// each paste.
 function paste() {
-  if (!graph.value || !clipboard.blocks.length) return false;
+  if (!view.value || !clipboard.blocks.length) return false;
   const clip = { blocks: clipboard.blocks, wires: clipboard.wires };
   const offset = 40 * ++clipboard.pastes;
   commit(`Paste ${clip.blocks.length} block${clip.blocks.length > 1 ? "s" : ""}`, (g) => {
+    if (g.blocks.length + clip.blocks.length > MAX_BLOCKS) return void (live.actionError = `Pasting gives ${g.blocks.length + clip.blocks.length} blocks; a graph or macro holds at most ${MAX_BLOCKS}.`);
     const p = pasted(g, clip, offset);
     want = new Set(p.ids);
     return { blocks: [...g.blocks, ...p.blocks], wires: [...g.wires, ...p.wires] };
@@ -316,7 +447,7 @@ function paste() {
 
 // Ctrl/Cmd + Z, Shift+Z (or Y), C, V while no text field has the focus.
 function onKey(e) {
-  if (!graph.value || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+  if (!view.value || !(e.ctrlKey || e.metaKey) || e.altKey) return;
   if (e.target?.closest?.("input, textarea, select, [contenteditable='true']")) return;
   const k = e.key.toLowerCase();
   let done = true;
@@ -328,12 +459,93 @@ function onKey(e) {
   if (done) e.preventDefault();
 }
 
+// ---- macros (D163) ----------------------------------------------------------------------------
+
+const grouping = ref(null); // { ids, name, inputs, outputs } while the group dialog is open
+
+function startGroup() {
+  const v = view.value;
+  const ids = selectedIds.value;
+  if (!v || !ids.length) return;
+  if (ids.some((id) => ["macro-in", "macro-out"].includes(blockOf(id)?.type))) return void (live.actionError = "A macro's own inputs and outputs cannot be grouped.");
+  grouping.value = { ids, name: "", ...boundary(v, ids, ports) };
+}
+
+const groupProblem = computed(() => {
+  const gp = grouping.value;
+  if (!gp) return "";
+  for (const side of ["inputs", "outputs"]) {
+    const names = gp[side].filter((p) => p.expose).map((p) => portName(p.name));
+    if (new Set(names).size !== names.length) return `Two exposed ${side} have the same name.`;
+  }
+  return "";
+});
+
+function makeGroup() {
+  const gp = grouping.value;
+  const d = doc.value;
+  if (!gp || !d || groupProblem.value) return;
+  grouping.value = null;
+  const exposed = { inputs: gp.inputs.map((p) => ({ ...p, name: portName(p.name) })), outputs: gp.outputs.map((p) => ({ ...p, name: portName(p.name) })) };
+  edit("Group into macro", [d], (cur) => {
+    const c = cur[keyOf(d)];
+    if (!c) return null;
+    const macroId = freshId("macro", new Set(macros.value.map((m) => m.id)));
+    const instanceId = freshId("macro", new Set(c.blocks.map((b) => b.id)));
+    const r = group(c, gp.ids, exposed, { macroId, name: gp.name.trim() || macroId, instanceId });
+    want = new Set([instanceId]);
+    const body = { graphs: [], macros: [r.macro] };
+    body[`${d.kind}s`].push({ ...resource(c), blocks: r.blocks, wires: r.wires });
+    return body;
+  });
+}
+
+function ungroupSelected() {
+  const inst = selectedInstance.value;
+  const d = doc.value;
+  if (!inst || !d) return;
+  const m = { kind: "macro", id: inst.macro };
+  edit("Ungroup", [d, m], (cur) => {
+    const c = cur[keyOf(d)];
+    const def = cur[keyOf(m)];
+    if (!c || !def) return `Macro ${inst.macro} does not exist.`;
+    const r = ungroup(c, inst.id, def);
+    if (r.blocks.length > MAX_BLOCKS) return `Ungrouping gives ${r.blocks.length} blocks; a graph or macro holds at most ${MAX_BLOCKS}.`;
+    want = new Set(r.ids);
+    const body = { graphs: [], macros: [] };
+    body[`${d.kind}s`].push({ ...resource(c), blocks: r.blocks, wires: r.wires });
+    // The macro goes too when nothing else uses it.
+    const uses = (blocks) => blocks.some((b) => b.type === "macro" && b.macro === def.id);
+    const others = [...graphs.value.filter((g) => !(d.kind === "graph" && g.id === d.id)), ...macros.value.filter((x) => x.id !== def.id && !(d.kind === "macro" && x.id === d.id))];
+    if (!uses(r.blocks) && !others.some((x) => uses(x.blocks))) body.delete_macros = [def.id];
+    return body;
+  });
+}
+
+function openInstance(b) {
+  if (b?.type !== "macro") return;
+  path.value = [...path.value, { instance: b.id, macro: b.macro }];
+}
+
 // ---- palette ----------------------------------------------------------------------------------
+
+const palette = computed(() => {
+  const inMacro = !!openMacro.value;
+  const groups = CATEGORIES.map(([id, caption]) => ({
+    id,
+    caption,
+    items: catalog.value.filter((e) => categoryOf(e.type) === id && e.type !== "macro" && (inMacro || (e.type !== "macro-in" && e.type !== "macro-out"))).map((e) => ({ key: e.type, type: e.type, label: e.label || e.type })),
+  }));
+  const own = groups.find((g) => g.id === "macro");
+  // Each macro is a palette item: it adds an instance.
+  own.items.push(...macros.value.filter((m) => m.id !== openMacro.value?.id).map((m) => ({ key: `macro:${m.id}`, type: "macro", label: m.name || m.id, extra: { macro: m.id } })));
+  return groups.filter((g) => g.items.length);
+});
 
 const DRAG = "application/x-mixer-logic-block";
 const canvas = ref(null);
-function onPaletteDrag(e, type) {
-  e.dataTransfer.setData(DRAG, type);
+function onPaletteDrag(e, item) {
+  e.dataTransfer.setData(DRAG, item.key);
   e.dataTransfer.effectAllowed = "copy";
 }
 function onDragOver(e) {
@@ -341,125 +553,123 @@ function onDragOver(e) {
   e.preventDefault();
   e.dataTransfer.dropEffect = "copy";
 }
+const itemOf = (key) => palette.value.flatMap((g) => g.items).find((i) => i.key === key);
 function onDrop(e) {
-  const type = e.dataTransfer?.getData(DRAG);
-  if (!type) return;
+  const item = itemOf(e.dataTransfer?.getData(DRAG));
+  if (!item) return;
   e.preventDefault();
   const at = screenToFlowCoordinate({ x: e.clientX, y: e.clientY });
-  place(type, { x: at.x - 70, y: at.y - 20 });
+  place(item.type, { x: at.x - 70, y: at.y - 20 }, item.extra);
 }
 // A click (or a touch, where dragging does not work) puts the block in the middle of the view.
-function addFromPalette(type) {
+function addFromPalette(item) {
   const r = canvas.value?.getBoundingClientRect();
-  if (!r) return place(type);
-  const n = (graph.value?.blocks.length || 0) % 6;
+  if (!r) return place(item.type, undefined, item.extra);
+  const n = (view.value?.blocks.length || 0) % 6;
   const at = screenToFlowCoordinate({ x: r.left + r.width / 2 + n * 16, y: r.top + r.height / 2 + n * 16 });
-  place(type, { x: at.x - 70, y: at.y - 20 });
-}
-
-// ---- live values ------------------------------------------------------------------------------
-
-async function refresh() {
-  const g = graph.value;
-  if (!g) return;
-  const d = await api.get(`/api/v1/logic/${g.id}`).catch(() => null);
-  if (d) {
-    const v = d.values || {};
-    for (const k of Object.keys(values)) if (!(k in v)) delete values[k];
-    Object.assign(values, v);
-    showValues();
-    buttons.value = d.buttons || [];
-  }
-}
-
-function press(block, pressed) {
-  const g = graph.value;
-  return act(() => api.put(`/api/v1/logic/${g.id}/buttons/${block.id}`, { pressed }));
-}
-
-const DB = new Set(["fader", "level", "set-fader"]);
-const NUMERIC = new Set(["const", ...DB]);
-function shown(b) {
-  const v = values[b.id];
-  if (v === undefined || v === null) return "";
-  if (DB.has(b.type)) return `${fmtDb(v)} dB`;
-  return NUMERIC.has(b.type) ? String(Number(Number(v).toFixed(2))) : v >= 0.5 ? "on" : "off";
-}
-function isOn(b) {
-  const v = values[b.id];
-  return NUMERIC.has(b.type) || v === undefined || v === null ? null : v >= 0.5;
-}
-
-function labelOf(b) {
-  const type = typeLabel(b.type);
-  if (b.type === "tally") return `${type}: ${b.index}`;
-  if (b.type === "timer") return `${type}: ${b.ms} ms`;
-  if (b.type === "recall") return `${type}: ${snapshots.value.find((s) => s.id === b.snapshot)?.name || b.snapshot}`;
-  if (b.type === "delay" || b.type === "debounce") return `${type}: ${b.ms} ms`;
-  if (b.type === "schedule") return `${type}: ${b.start_minute}–${b.end_minute}`;
-  if (b.type === "webhook") return type;
-  const who = b.signal ? signals.value.find((s) => s.id === b.signal)?.name || b.signal : "";
-  return who ? `${type}: ${who}` : type;
+  place(item.type, { x: at.x - 70, y: at.y - 20 }, item.extra);
 }
 
 // ---- canvas -----------------------------------------------------------------------------------
 
 const nodes = ref([]);
 const edges = ref([]);
+let want = null; // block ids to select once they are drawn (a paste, a new block)
 // Fit shows the whole graph, but a few blocks are not blown up past 125 %.
 const FIT = { padding: 0.2, maxZoom: 1.25 };
 const fit = () => fitView(FIT);
-let want = null; // block ids to select once they are drawn (a paste, a new block)
+const drawing = ref(null);
+provide("logicDrawing", drawing);
+
+// The open document's issues: on a block (and port), or on a cable by its index in the refused wires.
+const here = computed(() => {
+  const d = doc.value;
+  return d ? issues.value.filter((i) => (d.kind === "graph" ? i.graph === d.id && !i.macro : i.macro === d.id)) : [];
+});
+const where = (i) => [i.macro ? `macro ${i.macro}` : i.graph ? `graph ${i.graph}` : "", i.block, i.port].filter(Boolean).join(" · ");
 
 function nodeData(b) {
-  return { id: b.id, label: labelOf(b), note: b.id, kind: groupOf(b.type), inputs: inputsOf[b.type] || [], output: !sinks.includes(b.type), live: shown(b), on: isOn(b) };
+  const p = ports(b);
+  const mine = here.value.filter((i) => i.block === b.id);
+  const v = valueOf(b);
+  const event = typeOf(b) === "event" && typeof v === "number";
+  const fresh = event && fired[b.id] !== undefined && v > fired[b.id];
+  if (event) fired[b.id] = v;
+  return {
+    id: b.id,
+    label: labelOf(b),
+    note: b.id,
+    kind: b.type === "macro" ? "macro" : categoryOf(b.type),
+    instance: b.type === "macro",
+    inputs: p.inputs,
+    outputs: p.outputs,
+    live: shown(b),
+    on: isOn(b),
+    fired: fresh,
+    issues: mine.map((i) => i.message),
+    badPorts: Object.fromEntries(mine.filter((i) => i.port).map((i) => [i.port, i.message])),
+  };
+}
+
+// The list's value cell: a component of its own, so that a new value redraws only it.
+const LiveText = { props: { block: { type: Object, required: true } }, setup: (p) => () => shown(p.block) };
+
+function showValues() {
+  for (const n of nodes.value) {
+    const b = blockOf(n.id);
+    if (b) n.data = nodeData(b);
+  }
+}
+
+function edgeOf(w, cls = "") {
+  const t = portType(w.from_block, "out", w.from_port) || "number";
+  return { id: wireKey(w), source: w.from_block, target: w.to_block, sourceHandle: w.from_port, targetHandle: w.to_port, class: `typed t-${t} ${cls}`, data: w };
 }
 
 function rebuild() {
-  const g = graph.value;
-  if (!g) {
+  const v = view.value;
+  if (!v) {
     nodes.value = [];
     edges.value = [];
     return;
   }
   let keep = new Set(nodes.value.filter((n) => n.selected).map((n) => n.id));
-  if (want && g.blocks.some((b) => want.has(b.id))) {
+  if (want && v.blocks.some((b) => want.has(b.id))) {
     keep = want;
     want = null;
   }
-  nodes.value = g.blocks.map((b) => ({
-    id: b.id,
-    type: "logic",
-    position: { x: b.x || 0, y: b.y || 0 },
-    selected: keep.has(b.id),
-    data: nodeData(b),
-  }));
-  const drawn = g.wires.map((w) => ({
-    id: wireKey(w),
-    source: w.from_block,
-    target: w.to_block,
-    sourceHandle: "out",
-    targetHandle: w.to_port,
-    label: w.to_port,
-    data: w,
-  }));
+  // Cables whose blocks go (another graph or macro opened) go at once; the new ones follow the new blocks.
+  const ids = new Set(v.blocks.map((b) => b.id));
+  edges.value = edges.value.filter((e) => ids.has(e.source) && ids.has(e.target));
+  // The same blocks in the same places: new data only. Replacing the nodes would let a cable drawn in
+  // the same tick (a refused one) look for blocks that are being swapped.
+  const now = nodes.value;
+  const same = now.length === v.blocks.length && v.blocks.every((b, i) => now[i].id === b.id && now[i].position.x === (b.x || 0) && now[i].position.y === (b.y || 0));
+  if (same) for (const [i, b] of v.blocks.entries()) Object.assign(now[i], { selected: keep.has(b.id), data: nodeData(b) });
+  else nodes.value = v.blocks.map((b) => ({ id: b.id, type: "logic", position: { x: b.x || 0, y: b.y || 0 }, selected: keep.has(b.id), data: nodeData(b) }));
+  // A refused edit's cables stay drawn, dashed, until the next edit; those with an issue are red.
+  const bad = new Set(here.value.filter((i) => Number.isInteger(i.wire)).map((i) => i.wire));
+  const tried = rejected.value?.key === keyOf(doc.value) ? rejected.value.res.wires || [] : [];
+  const badKeys = new Set(tried.filter((_, i) => bad.has(i)).map(wireKey));
+  const have = new Set(v.wires.map(wireKey));
+  const drawn = [
+    ...v.wires.map((w) => edgeOf(w, badKeys.has(wireKey(w)) ? "bad" : "")),
+    ...tried.filter((w) => !have.has(wireKey(w)) && ids.has(w.from_block) && ids.has(w.to_block)).map((w) => ({ ...edgeOf(w, `ghost${badKeys.has(wireKey(w)) ? " bad" : ""}`), selectable: false, data: { ...w, ghost: true } })),
+  ];
   nextTick(() => (edges.value = drawn));
 }
 
-watch(() => (graph.value ? JSON.stringify({ b: graph.value.blocks, w: graph.value.wires }) : ""), rebuild, { immediate: true });
-function showValues() {
-  for (const n of nodes.value) {
-    const b = graph.value?.blocks.find((x) => x.id === n.id);
-    if (b) n.data = nodeData(b);
-  }
-}
-// The list's value cell: a component of its own, so that a new value redraws only it.
-const LiveText = { props: { block: { type: Object, required: true } }, setup: (p) => () => shown(p.block) };
-// Another graph: start with all of it in view.
+watch(() => (view.value ? JSON.stringify([keyOf(doc.value), view.value.blocks, view.value.wires, detail.ports, macros.value, catalog.value.length, issues.value, rejected.value]) : ""), rebuild, { immediate: true });
+// Another graph or macro: start with all of it in view.
 watch(
-  () => graph.value?.id,
+  () => (doc.value ? keyOf(doc.value) : ""),
   () => setTimeout(fit, 50),
 );
+
+function dismissIssues() {
+  issues.value = [];
+  rejected.value = null;
+}
 
 function onNodesChange(changes) {
   applyNodeChanges(changes.filter((c) => c.type !== "remove"));
@@ -467,7 +677,7 @@ function onNodesChange(changes) {
 }
 function onEdgesChange(changes) {
   applyEdgeChanges(changes.filter((c) => c.type !== "remove"));
-  for (const c of changes) if (c.type === "remove") doom("wires", c.id);
+  for (const c of changes) if (c.type === "remove" && !edges.value.find((e) => e.id === c.id)?.data?.ghost) doom("wires", c.id);
 }
 function onDragStop({ node, nodes: dragged }) {
   const moved = Object.fromEntries((dragged?.length ? dragged : [node]).map((n) => [n.id, { x: Math.round(n.position.x), y: Math.round(n.position.y) }]));
@@ -483,20 +693,29 @@ function onDragStop({ node, nodes: dragged }) {
     return any ? { blocks } : null;
   });
 }
+// D158: only an output into an input of a type it converts to; never a block into itself. Vue Flow
+// also asks for the cables it is given (they have an id): those are drawn as they are, a refused one too.
 function isValidConnection(c) {
   if (c.id) return true;
-  const ports = inputsOf[graph.value?.blocks.find((b) => b.id === c.target)?.type] || [];
-  return c.source !== c.target && ports.includes(c.targetHandle) && (c.sourceHandle === "out" || !c.sourceHandle);
+  if (c.source === c.target) return false;
+  const from = portType(c.source, "out", c.sourceHandle);
+  const to = portType(c.target, "in", c.targetHandle);
+  return !!from && !!to && canWire(from, to);
 }
 function onConnect(c) {
-  if (!isValidConnection(c) || c.id) return;
-  connect(c.source, c.target, c.targetHandle);
+  if (isValidConnection(c)) connect(c.source, c.sourceHandle, c.target, c.targetHandle);
+}
+function onConnectStart({ nodeId, handleId, handleType }) {
+  const type = portType(nodeId, handleType === "source" ? "out" : "in", handleId);
+  drawing.value = type ? { type, from: handleType } : null;
 }
 
-onMounted(() => {
+onMounted(async () => {
+  window.addEventListener("keydown", onKey);
   refresh();
   timer = setInterval(refresh, 250);
-  window.addEventListener("keydown", onKey);
+  const c = await api.get("/api/v1/logic-blocks").catch(() => null);
+  catalog.value = Array.isArray(c) ? c : c?.blocks || [];
 });
 onUnmounted(() => {
   clearInterval(timer);
@@ -507,7 +726,7 @@ onUnmounted(() => {
 <template>
   <div class="panel">
     <h3>Logic</h3>
-    <p class="muted">Blocks run 100 times a second. A loop is allowed when an edge, a latch, a timer, a delay or a debounce is in it, because those remember. Actions run when their input changes. A timer stays on for its duration after its input rises. Above stays on until the level falls by its hysteresis. Recall runs a snapshot when its input rises.</p>
+    <p class="muted">Blocks run 100 times a second. A cable joins an output to an input; the input converts what it gets, but a text feeds only text and an event never feeds text. A loop needs a block that remembers in it (edge, latch, toggle, counter, timer, delay, debounce). In dry run the actions are listed below instead of done.</p>
     <div class="row">
       <select :value="graph?.id || ''" aria-label="Logic graph" @change="selected = $event.target.value">
         <option value="">graph…</option>
@@ -518,39 +737,91 @@ onUnmounted(() => {
     </div>
 
     <template v-if="graph">
-      <div class="row" style="margin-top: 0.6rem">
-        <input :value="graph.name" aria-label="Logic name" @change="patch({ name: $event.target.value })" />
-        <label class="check"><input type="checkbox" :checked="graph.enabled" @change="patch({ enabled: $event.target.checked })" /> on</label>
-        <label class="check" title="values are computed, actions do not run"><input type="checkbox" :checked="graph.dry_run" @change="patch({ dry_run: $event.target.checked })" /> dry run</label>
+      <div v-if="!openMacro" class="row" style="margin-top: 0.6rem">
+        <input :value="graph.name" aria-label="Logic name" @change="patch('Rename', { name: $event.target.value })" />
+        <label class="check"><input type="checkbox" :checked="graph.enabled" @change="patch($event.target.checked ? 'Turn on' : 'Turn off', { enabled: $event.target.checked })" /> on</label>
+        <label class="check" title="values are computed, actions are listed below and not done"><input type="checkbox" :checked="graph.dry_run" @change="patch('Dry run', { dry_run: $event.target.checked })" /> dry run</label>
         <ConfirmButton label="Remove" small @confirm="removeGraph(graph.id)" />
+      </div>
+
+      <div class="lcrumbs" role="navigation" aria-label="Macro path">
+        <button class="btn small secondary" :aria-current="!openMacro" @click="path = []">{{ graph.name }}</button>
+        <template v-for="(p, i) in path" :key="i">
+          <span class="muted">›</span>
+          <button class="btn small secondary" :aria-current="i === path.length - 1" :title="`instance ${p.instance}`" @click="path = path.slice(0, i + 1)">{{ macros.find((m) => m.id === p.macro)?.name || p.macro }}</button>
+        </template>
+        <template v-if="openMacro">
+          <input :value="openMacro.name" aria-label="Macro name" style="width: 12rem" @change="patch('Rename macro', { name: $event.target.value })" />
+          <span class="muted small">Editing this macro changes every instance of it.</span>
+        </template>
       </div>
 
       <div class="row tight ltools">
         <button class="btn small secondary" :disabled="!undoNext" :title="undoNext ? `Undo: ${undoNext} (Ctrl+Z)` : 'Nothing to undo'" aria-label="Undo" @click="undo">Undo</button>
         <button class="btn small secondary" :disabled="!redoNext" :title="redoNext ? `Redo: ${redoNext} (Ctrl+Shift+Z)` : 'Nothing to redo'" aria-label="Redo" @click="redo">Redo</button>
         <button class="btn small secondary" :disabled="!selectedIds.length" title="Copy the selected blocks and the cables between them (Ctrl+C)" aria-label="Copy blocks" @click="copy">Copy</button>
-        <button class="btn small secondary" :disabled="!clipboard.blocks.length" title="Paste into this graph (Ctrl+V)" aria-label="Paste blocks" @click="paste">Paste</button>
+        <button class="btn small secondary" :disabled="!clipboard.blocks.length" title="Paste here (Ctrl+V)" aria-label="Paste blocks" @click="paste">Paste</button>
         <button class="btn small secondary" :disabled="!selectedIds.length && !getSelectedEdges.length" title="Delete the selected blocks and cables (Delete)" aria-label="Delete selection" @click="deleteSelection">Delete</button>
+        <button class="btn small secondary" :disabled="!selectedIds.length" title="Put the selected blocks into a macro" @click="startGroup">Group into macro</button>
+        <button class="btn small secondary" :disabled="!selectedInstance" title="Open the selected macro (or double-click it)" aria-label="Open macro" @click="openInstance(selectedInstance)">Open</button>
+        <button class="btn small secondary" :disabled="!selectedInstance" title="Replace the selected macro by its blocks" @click="ungroupSelected">Ungroup</button>
         <button class="btn small secondary" @click="fit">Fit</button>
-        <span class="muted small lhint">Shift-drag selects an area; Ctrl-click adds a block to the selection.</span>
+        <span class="lhint muted small">Shift-drag selects an area; Ctrl-click adds a block to the selection.</span>
+      </div>
+      <div class="llegend small muted">
+        Ports:
+        <span v-for="t in PORT_TYPES" :key="t" class="ltype"><i :class="`t-${t}`"></i>{{ t }}</span>
+      </div>
+
+      <div v-if="grouping" class="lgroup" role="dialog" aria-label="Group into macro">
+        <div class="row tight">
+          <strong>Group {{ grouping.ids.length }} block{{ grouping.ids.length > 1 ? "s" : "" }} into a macro</strong>
+          <input v-model="grouping.name" placeholder="macro name" aria-label="New macro name" style="width: 14rem" />
+        </div>
+        <p class="note">Choose the ports the macro shows outside. A port a cable from the rest of the graph uses is always shown.</p>
+        <div class="lgroupcols">
+          <div v-for="side in ['inputs', 'outputs']" :key="side">
+            <div class="group-caption">{{ side }}</div>
+            <label v-for="p in grouping[side]" :key="`${p.block}.${p.port}`" class="check">
+              <input v-model="p.expose" type="checkbox" :disabled="p.crossing" :aria-label="`Expose ${p.block} ${p.port}`" />
+              <i class="ldot" :class="`t-${p.type}`"></i>
+              {{ p.block }}.{{ p.port }} as
+              <input v-model="p.name" :aria-label="`Name of ${p.block} ${p.port}`" style="width: 8rem" />
+            </label>
+            <div v-if="!grouping[side].length" class="muted small">none</div>
+          </div>
+        </div>
+        <div class="row tight">
+          <button class="btn small" :disabled="!!groupProblem" @click="makeGroup">Create macro</button>
+          <button class="btn small secondary" @click="grouping = null">Cancel</button>
+          <span v-if="groupProblem" class="small" style="color: var(--bad)">{{ groupProblem }}</span>
+        </div>
+      </div>
+
+      <div v-if="issues.length" class="lissues" role="alert">
+        <div class="row tight">
+          <strong>Not saved: {{ issues.length }} problem{{ issues.length > 1 ? "s" : "" }}</strong>
+          <button class="btn small secondary" @click="dismissIssues">Dismiss</button>
+        </div>
+        <div v-for="(i, n) in issues" :key="n" class="small" :data-issue-text="i.block || ''">{{ where(i) }}{{ where(i) ? ": " : "" }}{{ i.message }}</div>
       </div>
 
       <div class="logiceditor">
         <aside class="lpalette" aria-label="Block palette">
-          <template v-for="[group, caption] in GROUPS" :key="group">
-            <div class="group-caption">{{ caption }}</div>
+          <template v-for="g in palette" :key="g.id">
+            <div class="group-caption">{{ g.caption }}</div>
             <button
-              v-for="[type, label] in TYPES.filter((t) => t[2] === group)"
-              :key="type"
+              v-for="item in g.items"
+              :key="item.key"
               class="pitem"
-              :class="`k-${group}`"
+              :class="`k-${g.id}`"
               draggable="true"
-              :data-palette="type"
-              :title="`Drag onto the canvas, or click to add ${label}`"
-              @dragstart="onPaletteDrag($event, type)"
-              @click="addFromPalette(type)"
+              :data-palette="item.key"
+              :title="`Drag onto the canvas, or click to add ${item.label}`"
+              @dragstart="onPaletteDrag($event, item)"
+              @click="addFromPalette(item)"
             >
-              {{ label }}
+              {{ item.label }}
             </button>
           </template>
         </aside>
@@ -563,14 +834,18 @@ onUnmounted(() => {
             :is-valid-connection="isValidConnection"
             :delete-key-code="['Delete', 'Backspace']"
             :multi-selection-key-code="['Meta', 'Control']"
+            :zoom-on-double-click="false"
             :min-zoom="0.2"
             :max-zoom="3"
-            @pane-ready="fit"
             class="graph"
+            @pane-ready="fit"
             @nodes-change="onNodesChange"
             @edges-change="onEdgesChange"
             @node-drag-stop="onDragStop"
+            @node-double-click="openInstance(blockOf($event.node.id))"
             @connect="onConnect"
+            @connect-start="onConnectStart"
+            @connect-end="drawing = null"
           >
             <template #node-logic="p"><LogicNode :data="p.data" /></template>
             <MiniMap pannable zoomable :width="160" :height="100" />
@@ -579,93 +854,79 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <table class="amtable" style="margin-top: 0.6rem">
-        <thead>
-          <tr><th>Block</th><th>Type</th><th></th><th>Value</th><th></th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="b in graph.blocks" :key="b.id" :data-block="b.id" :class="{ chosen: selectedIds.includes(b.id) }">
-            <td>{{ b.id }}</td>
-            <td>{{ typeLabel(b.type) }}</td>
-            <td class="lparams">
-              <select v-if="withSignal.includes(b.type)" :value="b.signal" :aria-label="`${b.id} signal`" @change="setField(b, 'signal', $event.target.value)">
-                <option v-for="s in signals" :key="s.id" :value="s.id">{{ s.name }}</option>
-              </select>
-              <input v-if="b.type === 'const'" type="number" :value="b.value" :aria-label="`${b.id} value`" style="width: 5rem" @change="setField(b, 'value', $event.target.value)" />
-              <input v-if="b.type === 'tally'" type="number" min="0" max="65535" :value="b.index" :aria-label="`${b.id} index`" style="width: 5rem" @change="setField(b, 'index', $event.target.value)" />
-              <input v-if="MS_TYPES.includes(b.type)" type="number" min="0" max="86400000" :value="b.ms" :aria-label="`${b.id} milliseconds`" style="width: 6rem" @change="setField(b, 'ms', $event.target.value)" />
-              <template v-if="b.type === 'above'">
-                <input type="number" min="-120" max="20" :value="b.threshold_db" :aria-label="`${b.id} threshold`" style="width: 5rem" @change="setField(b, 'threshold_db', $event.target.value)" />
-                <input type="number" min="0" max="60" :value="b.hysteresis_db" :aria-label="`${b.id} hysteresis`" style="width: 4rem" @change="setField(b, 'hysteresis_db', $event.target.value)" />
-              </template>
-              <template v-if="b.type === 'schedule'">
-                <input type="number" min="0" max="1439" :value="b.start_minute" :aria-label="`${b.id} start minute`" style="width: 5rem" @change="setField(b, 'start_minute', $event.target.value)" />
-                <input type="number" min="0" max="1439" :value="b.end_minute" :aria-label="`${b.id} end minute`" style="width: 5rem" @change="setField(b, 'end_minute', $event.target.value)" />
-              </template>
-              <input v-if="b.type === 'webhook'" :value="b.url" :aria-label="`${b.id} URL`" style="width: 14rem" @change="setField(b, 'url', $event.target.value)" />
-              <select v-if="b.type === 'compare'" :value="b.op" :aria-label="`${b.id} comparison`" @change="setField(b, 'op', $event.target.value)">
-                <option value="gt">a &gt; b</option>
-                <option value="lt">a &lt; b</option>
-                <option value="eq">a = b</option>
-              </select>
-              <select v-if="b.type === 'recall'" :value="b.snapshot" :aria-label="`${b.id} snapshot`" @change="setField(b, 'snapshot', $event.target.value)">
-                <option v-for="s in snapshots" :key="s.id" :value="s.id">{{ s.name }}</option>
-              </select>
-              <button v-if="b.type === 'button'" class="btn small" :class="{ primary: buttons.includes(b.id) }" :aria-pressed="buttons.includes(b.id)" @click="press(b, !buttons.includes(b.id))">
-                {{ buttons.includes(b.id) ? "Pressed" : "Press" }}
-              </button>
-            </td>
-            <td class="num" :data-value="b.id"><LiveText :block="b" /></td>
-            <td><button class="btn small secondary" :aria-label="`Remove ${b.id}`" @click="removeBlock(b.id)">×</button></td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="ltable">
+        <table class="amtable">
+          <thead>
+            <tr><th>Block</th><th>Type</th><th></th><th>Value</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="b in view.blocks" :key="b.id" :data-block="b.id" :class="{ chosen: selectedIds.includes(b.id) }">
+              <td>{{ b.id }}</td>
+              <td>{{ typeLabel(b.type) }}</td>
+              <td class="lparams">
+                <template v-for="p in paramsOf(b)" :key="p.name">
+                  <select v-if="optionsOf(p, b)" :value="b[p.name]" :aria-label="`${b.id} ${p.name}`" :title="p.name" @change="setParam(b, p, $event.target.value)">
+                    <option v-for="o in optionsOf(p, b)" :key="o.id" :value="o.id">{{ o.name }}</option>
+                  </select>
+                  <label v-else-if="p.kind === 'boolean'" class="check"><input type="checkbox" :checked="b[p.name]" :aria-label="`${b.id} ${p.name}`" @change="setParam(b, p, $event.target.checked)" /> {{ p.name }}</label>
+                  <input v-else-if="NUMBER_KINDS.includes(p.kind)" type="number" :min="p.min" :max="p.max" :step="p.kind === 'integer' ? 1 : 'any'" :value="b[p.name]" :aria-label="`${b.id} ${p.name}`" :title="p.name" style="width: 6rem" @change="setParam(b, p, $event.target.value)" />
+                  <input v-else-if="JSON_KINDS.includes(p.kind)" :value="JSON.stringify(b[p.name])" :aria-label="`${b.id} ${p.name}`" :title="`${p.name} (JSON)`" style="width: 12rem" @change="setParam(b, p, $event.target.value)" />
+                  <input v-else :value="b[p.name]" :aria-label="`${b.id} ${p.name}`" :placeholder="p.name" style="width: 12rem" @change="setParam(b, p, $event.target.value)" />
+                </template>
+                <template v-if="!openMacro">
+                  <button v-if="b.type === 'button'" class="btn small" :aria-pressed="pressed(b)" @click="press(b, !pressed(b))">{{ pressed(b) ? "Pressed" : "Press" }}</button>
+                  <button v-if="b.type === 'trigger'" class="btn small" :aria-label="`Fire ${b.id}`" @click="fire(b)">Fire</button>
+                </template>
+                <button v-if="b.type === 'macro'" class="btn small secondary" :aria-label="`Open ${b.id}`" @click="openInstance(b)">Open</button>
+              </td>
+              <td class="num" :data-value="b.id"><LiveText :block="b" /></td>
+              <td><button class="btn small secondary" :aria-label="`Remove ${b.id}`" @click="removeBlock(b.id)">×</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
       <div class="row" style="margin-top: 0.4rem">
         <select v-model="addType" aria-label="Block type">
-          <option v-for="[id, label] in TYPES" :key="id" :value="id">{{ label }}</option>
+          <option v-for="e in catalog.filter((x) => x.type !== 'macro' && (openMacro || !x.type.startsWith('macro-')))" :key="e.type" :value="e.type">{{ e.label || e.type }}</option>
         </select>
-        <select v-if="withSignal.includes(addType)" v-model="addSignal" aria-label="Block signal">
+        <select v-model="addSignal" aria-label="Block signal" title="the strip or bus a new block reads or sets">
           <option value="">signal…</option>
           <option v-for="s in signals" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
-        <input v-if="addType === 'tally'" v-model="addIndex" type="number" min="0" max="65535" placeholder="index" aria-label="Tally index" style="width: 5rem" />
-        <input v-if="MS_TYPES.includes(addType)" v-model="addMs" type="number" min="0" max="86400000" placeholder="ms" aria-label="Timer milliseconds" style="width: 6rem" />
-        <template v-if="addType === 'schedule'">
-          <input v-model="addStart" type="number" min="0" max="1439" placeholder="start min" aria-label="Schedule start minute" style="width: 6rem" />
-          <input v-model="addEnd" type="number" min="0" max="1439" placeholder="end min" aria-label="Schedule end minute" style="width: 6rem" />
-        </template>
-        <input v-if="addType === 'webhook'" v-model="addUrl" placeholder="https://…" aria-label="Webhook URL" style="width: 14rem" />
-        <template v-if="addType === 'above'">
-          <input v-model="addThreshold" type="number" min="-120" max="20" placeholder="dB" aria-label="Threshold dB" style="width: 5rem" />
-          <input v-model="addHysteresis" type="number" min="0" max="60" placeholder="hyst" aria-label="Hysteresis dB" style="width: 4rem" />
-        </template>
-        <select v-if="addType === 'recall'" v-model="addSnapshot" aria-label="Snapshot">
-          <option value="">snapshot…</option>
-          <option v-for="s in snapshots" :key="s.id" :value="s.id">{{ s.name }}</option>
-        </select>
-        <button class="btn small" @click="addBlock">+ Block</button>
+        <button class="btn small" @click="place(addType)">+ Block</button>
       </div>
 
-      <div class="caption" style="margin-top: 0.8rem">Wires</div>
-      <div v-for="w in graph.wires" :key="wireKey(w)" class="row" :data-wire="`${w.from_block}-${w.to_block}-${w.to_port}`">
-        <span>{{ w.from_block }} → {{ w.to_block }}.{{ w.to_port }}</span>
+      <div class="caption" style="margin-top: 0.8rem">Cables</div>
+      <div v-for="w in view.wires" :key="wireKey(w)" class="row" :data-wire="`${w.from_block}-${w.to_block}-${w.to_port}`">
+        <span>{{ w.from_block }}.{{ w.from_port }} → {{ w.to_block }}.{{ w.to_port }}</span>
         <button class="btn small secondary" :aria-label="`Remove wire ${w.from_block} to ${w.to_block}`" @click="removeWire(w)">×</button>
       </div>
       <div class="row">
-        <select v-model="wire.from" aria-label="Wire from">
+        <select v-model="wire.from" aria-label="Wire from" @change="wire.fromPort = outsOf(wire.from)[0]?.name || ''">
           <option value="">from…</option>
-          <option v-for="b in graph.blocks.filter((b) => !sinks.includes(b.type))" :key="b.id" :value="b.id">{{ b.id }}</option>
+          <option v-for="b in view.blocks.filter((x) => outsOf(x.id).length)" :key="b.id" :value="b.id">{{ b.id }}</option>
         </select>
-        <select v-model="wire.to" aria-label="Wire to" @change="wire.port = portsOf(wire.to)[0] || ''">
+        <select v-model="wire.fromPort" aria-label="Wire from port">
+          <option v-for="p in outsOf(wire.from)" :key="p.name" :value="p.name">{{ p.name }} ({{ p.type }})</option>
+        </select>
+        <select v-model="wire.to" aria-label="Wire to" @change="wire.port = insOf(wire.to)[0]?.name || ''">
           <option value="">to…</option>
-          <option v-for="b in graph.blocks.filter((b) => inputsOf[b.type])" :key="b.id" :value="b.id">{{ b.id }}</option>
+          <option v-for="b in view.blocks.filter((x) => insOf(x.id).length)" :key="b.id" :value="b.id">{{ b.id }}</option>
         </select>
         <select v-model="wire.port" aria-label="Wire port">
-          <option v-for="p in portsOf(wire.to)" :key="p" :value="p">{{ p }}</option>
+          <option v-for="p in insOf(wire.to)" :key="p.name" :value="p.name">{{ p.name }} ({{ p.type }})</option>
         </select>
         <button class="btn small" @click="addWire">+ Wire</button>
       </div>
+
+      <template v-if="!openMacro">
+        <div class="caption" style="margin-top: 0.8rem">Actions{{ graph.dry_run ? " (dry run: not done)" : "" }}</div>
+        <div v-if="!detail.actions.length" class="muted small">None yet.</div>
+        <div v-for="(a, i) in [...detail.actions].reverse()" :key="i" class="small lact" :data-action="a.block">
+          <span class="muted num">{{ when(a.t_ms) }}</span> {{ a.block }}: {{ a.action }}<span v-if="a.dry_run" class="pill warn">dry run</span>
+        </div>
+      </template>
     </template>
   </div>
 </template>

@@ -1,7 +1,8 @@
 // Browser check of the logic editor (§11.3) against a running mixer with strips (tests/integration/ui.sh
-// sets up the show): the palette (click and drag), cables, live values, undo and redo, copy and paste
-// within and between graphs, Delete, zoom, pan and the minimap, and the narrow layout. Every edit is
-// checked on the API. Screenshots go to <out dir>.
+// sets up the show): the palette (click and drag, from the block catalog), cables, live values, undo and
+// redo, copy and paste within and between graphs, Delete, zoom, pan and the minimap, typed ports and a
+// refused cable, validation markers, macros (group, open, ungroup), dry run, events, and the narrow
+// layout. Every edit is checked on the API. Screenshots go to <out dir>.
 //
 // node web/tests/logic.mjs <http base> <out dir>
 import { mkdirSync } from "node:fs";
@@ -104,7 +105,7 @@ try {
   await until("redo: const 1", async () => (await graphOf(g.id)).blocks.find((b) => b.id === "const-1").value === 1);
   await page.getByRole("button", { name: "Redo" }).click();
   await until("redo: the cable", async () => (await graphOf(g.id)).wires.length === 1);
-  if (!(await page.getByRole("button", { name: "Redo" }).isDisabled())) throw new Error("Redo still enabled");
+  await until("nothing left to redo", () => page.getByRole("button", { name: "Redo" }).isDisabled());
   pass("undo and redo: Ctrl+Z twice, Ctrl+Shift+Z and the Redo button, each one edit");
 
   // Multi-select, copy, paste: new ids, the cable between them, moved 40 px; one undo removes the paste.
@@ -189,6 +190,137 @@ try {
   if ((await page.locator(".vue-flow__minimap .vue-flow__minimap-node").count()) !== 4) throw new Error("the minimap does not show the 4 blocks");
   pass("zoom (controls, wheel), pan (drag) and the minimap");
 
+  // The palette is the server's block catalog.
+  const catalog = await api("/api/v1/logic-blocks");
+  // Every type but the macro ones, and each macro of the show (it adds an instance).
+  const listed = catalog.filter((e) => e.type !== "macro" && !e.type.startsWith("macro-")).length + (await api("/api/v1/logic-macros")).length;
+  if ((await page.locator(".lpalette .pitem").count()) !== listed) throw new Error(`palette: ${await page.locator(".lpalette .pitem").count()} items, the catalog lists ${listed}`);
+  pass(`palette: the ${listed} block types and macros of GET /api/v1/logic-blocks and /api/v1/logic-macros`);
+
+  // Typed ports: colours, and a cable the input cannot convert is refused while it is drawn.
+  const m = await api("/api/v1/logic", {
+    method: "POST",
+    headers: json,
+    body: JSON.stringify({
+      name: "Macro",
+      blocks: [
+        { id: "const-1", type: "const", value: 1, x: 0, y: 0 },
+        { id: "not-1", type: "not", x: 260, y: 0 },
+        { id: "or-1", type: "or", x: 520, y: 0 },
+        { id: "set-mute-1", type: "set-mute", signal: "gtr", x: 780, y: 0 },
+        { id: "text-1", type: "text", value: "hello", x: 0, y: 170 },
+        { id: "trigger-1", type: "trigger", x: 0, y: 300 },
+        { id: "toggle-1", type: "toggle", x: 260, y: 300 },
+      ],
+      wires: [
+        { from_block: "const-1", from_port: "out", to_block: "not-1", to_port: "in" },
+        { from_block: "not-1", from_port: "out", to_block: "or-1", to_port: "a" },
+        { from_block: "trigger-1", from_port: "out", to_block: "toggle-1", to_port: "in" },
+      ],
+    }),
+  });
+  made.push(m.id);
+  muted.add("gtr");
+  await page.getByLabel("Logic graph", { exact: true }).selectOption(m.id);
+  await node("text-1").waitFor();
+  await page.getByRole("button", { name: "Fit" }).click();
+  await page.waitForTimeout(400);
+  const handle = (id, side, port) => `.vue-flow__node[data-id="${id}"] .vue-flow__handle.${side}[data-handleid="${port}"]`;
+  const cls = async (sel) => (await page.locator(sel).getAttribute("class")) || "";
+  if (!(await cls(handle("const-1", "source", "out"))).includes("t-number")) throw new Error("const-1 out is not a number port");
+  if (!(await cls(handle("set-mute-1", "target", "in"))).includes("t-boolean")) throw new Error("set-mute-1 in is not a boolean port");
+  if (!(await cls(handle("text-1", "source", "out"))).includes("t-string")) throw new Error("text-1 out is not a string port");
+  const drag = async (fromSel, toSel, during) => {
+    const a = await center(fromSel);
+    const z = await center(toSel);
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move((a.x + z.x) / 2, (a.y + z.y) / 2, { steps: 8 });
+    if (during) await during();
+    await page.mouse.move(z.x, z.y, { steps: 8 });
+    await page.mouse.up();
+  };
+  await drag(handle("text-1", "source", "out"), handle("set-mute-1", "target", "in"), async () => {
+    if (!(await cls(handle("set-mute-1", "target", "in"))).includes("nope")) throw new Error("the boolean input is not dimmed while a text cable is drawn");
+    if ((await cls(handle("or-1", "target", "a"))).includes("nope") !== true) throw new Error("or-1 a (boolean) is not dimmed for a text cable");
+  });
+  await page.waitForTimeout(600);
+  if ((await graphOf(m.id)).wires.length !== 3) throw new Error("a text was wired into a boolean input");
+  pass("typed ports: coloured handles; a text cable cannot reach a boolean input, which is dimmed while drawing");
+
+  // A loop without a block that remembers is refused: the issues show as markers and the cable stays dashed.
+  await drag(handle("or-1", "source", "out"), handle("not-1", "target", "in"));
+  await page.locator(".lissues").waitFor({ timeout: 5000 });
+  await until("a marker", async () => (await page.locator(".lnode.bad, .lnode .vue-flow__handle.bad, .vue-flow__edge.bad").count()) > 0);
+  await page.locator(".vue-flow__edge.ghost").first().waitFor({ state: "attached", timeout: 3000 });
+  if (!(await graphOf(m.id)).wires.some((w) => w.from_block === "const-1")) throw new Error("the refused loop was saved");
+  await page.screenshot({ path: `${out}/logic-markers.png` });
+  await page.locator(".lissues").getByRole("button", { name: "Dismiss" }).click();
+  await until("markers cleared", async () => (await page.locator(".lissues, .vue-flow__edge.ghost, .lnode.bad").count()) === 0);
+  pass("validation: a refused loop shows the server's issues on the blocks, ports and the dashed cable; Dismiss clears them");
+
+  // Group not-1 into a macro: its two cables cross the group, so its in and out are exposed.
+  await node("not-1").click();
+  await page.getByRole("button", { name: "Group into macro" }).click();
+  await page.getByLabel("New macro name").fill("Inverter");
+  if (!(await page.getByLabel("Expose not-1 in").isChecked()) || !(await page.getByLabel("Expose not-1 in").isDisabled())) throw new Error("not-1 in must be exposed");
+  await page.getByRole("button", { name: "Create macro" }).click();
+  const grouped = await until("grouped", async () => {
+    const d = await graphOf(m.id);
+    return d.blocks.some((b) => b.type === "macro") && !d.blocks.some((b) => b.id === "not-1") ? d : null;
+  });
+  const inst = grouped.blocks.find((b) => b.type === "macro");
+  const macro = await api(`/api/v1/logic-macros/${inst.macro}`);
+  if (macro.name !== "Inverter" || !macro.blocks.some((b) => b.type === "macro-in" && b.name === "in") || !macro.blocks.some((b) => b.type === "macro-out" && b.name === "out")) throw new Error(`macro: ${JSON.stringify(macro)}`);
+  if (!grouped.wires.some((w) => w.from_block === "const-1" && w.to_block === inst.id && w.to_port === "in")) throw new Error(`instance wires: ${JSON.stringify(grouped.wires)}`);
+  if (!grouped.wires.some((w) => w.from_block === inst.id && w.from_port === "out" && w.to_block === "or-1")) throw new Error(`instance wires: ${JSON.stringify(grouped.wires)}`);
+  await focusCanvas();
+  await page.keyboard.press(`${mod}+z`);
+  await until("undo the group: not-1 back, the macro gone", async () => (await graphOf(m.id)).blocks.some((b) => b.id === "not-1") && !(await api("/api/v1/logic-macros")).some((x) => x.id === inst.macro));
+  await page.keyboard.press(`${mod}+Shift+z`);
+  await until("redo the group", async () => (await graphOf(m.id)).blocks.some((b) => b.id === inst.id) && (await api("/api/v1/logic-macros")).some((x) => x.id === inst.macro));
+  pass("group into a macro with the crossing ports exposed, as one batch; undo and redo restore graph and macro together");
+
+  // Open it: the breadcrumb, the macro's blocks and the instance's live values.
+  await node(inst.id).dblclick();
+  await page.locator('.lcrumbs button[aria-current="true"]', { hasText: "Inverter" }).waitFor({ timeout: 3000 });
+  await node("not-1").waitFor();
+  await page.locator('[data-live="not-1"]', { hasText: "off" }).waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/logic-macro.png` });
+  await page.locator(".lcrumbs button", { hasText: "Macro" }).first().click();
+  await node(inst.id).waitFor();
+  pass("open a macro: breadcrumb, its blocks with the instance's live values, back to the graph");
+
+  // Ungroup: the blocks come back with the cables; the macro, now unused, goes.
+  await node(inst.id).click();
+  await page.getByRole("button", { name: "Ungroup" }).click();
+  const flat = await until("ungrouped", async () => {
+    const d = await graphOf(m.id);
+    return d.blocks.some((b) => b.type === "not") && !d.blocks.some((b) => b.type === "macro") ? d : null;
+  });
+  const inner = flat.blocks.find((b) => b.type === "not").id;
+  if (!flat.wires.some((w) => w.from_block === "const-1" && w.to_block === inner) || !flat.wires.some((w) => w.from_block === inner && w.to_block === "or-1")) throw new Error(`ungrouped wires: ${JSON.stringify(flat.wires)}`);
+  if ((await api("/api/v1/logic-macros")).some((x) => x.id === inst.macro)) throw new Error("the unused macro was kept");
+  pass(`ungroup: ${inner} back in the graph with its cables, the unused macro removed`);
+
+  // Dry run: the action is listed, not done.
+  await page.getByLabel("dry run").check();
+  await until("dry run on", async () => (await graphOf(m.id)).dry_run === true);
+  await page.getByLabel("const-1 value", { exact: true }).fill("0");
+  await page.getByLabel("const-1 value", { exact: true }).press("Enter");
+  await page.getByLabel("Wire from", { exact: true }).selectOption(inner);
+  await page.getByLabel("Wire to", { exact: true }).selectOption("set-mute-1");
+  await page.getByRole("button", { name: "+ Wire" }).click();
+  await page.locator('[data-action="set-mute-1"]', { hasText: "dry run" }).first().waitFor({ timeout: 5000 });
+  if ((await api("/api/v1/strips/gtr")).mute) throw new Error("dry run muted Guitar");
+  pass("dry run: the action is listed with its dry-run mark, Guitar is not muted");
+
+  // Events: Fire counts on the trigger and flips the toggle.
+  await page.getByRole("button", { name: "Fire trigger-1" }).click();
+  await page.locator('[data-live="trigger-1"]', { hasText: "×1" }).waitFor({ timeout: 3000 });
+  await page.locator('[data-live="toggle-1"]', { hasText: "on" }).waitFor({ timeout: 3000 });
+  pass("events: the trigger shows its count, the toggle flipped");
+
   // Narrow screen: the palette goes above the canvas, no horizontal scroll.
   await page.setViewportSize({ width: 420, height: 900 });
   await page.waitForTimeout(300);
@@ -207,6 +339,7 @@ try {
   throw e;
 } finally {
   for (const id of made) await api(`/api/v1/logic/${id}`, { method: "DELETE" }).catch(() => {});
+  for (const x of (await api("/api/v1/logic-macros").catch(() => [])) || []) if (x.name === "Inverter") await api(`/api/v1/logic-macros/${x.id}`, { method: "DELETE" }).catch(() => {});
   for (const id of muted) await api(`/api/v1/strips/${id}`, { method: "PATCH", headers: json, body: JSON.stringify({ mute: false }) }).catch(() => {});
   await browser.close();
 }
