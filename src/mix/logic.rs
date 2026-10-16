@@ -33,6 +33,11 @@ pub const MAX_SELECT: u8 = 8;
 pub const MAX_POINTS: usize = 16;
 /// Characters of a `text` value or a `log` message.
 pub const MAX_TEXT: usize = 200;
+/// Characters of a graph's or macro's description.
+pub const MAX_DESCRIPTION: usize = 1000;
+/// Blocks and macro instances one inlining visits (D169): bounds the work of
+/// nested instances that hold no blocks of their own.
+pub const MAX_EXPANDED: usize = 2 * MAX_INLINED;
 /// Longest timer, delay or debounce: one day.
 pub const MAX_MS: f64 = 86_400_000.0;
 
@@ -769,6 +774,61 @@ impl At<'_> {
     }
 }
 
+/// What logic validation reads of the mix besides the graphs and macros: the
+/// strips and buses with their chains' structure, VCAs, talkback mics and
+/// destinations, monitors (D171). Equal contexts and equal logic validate the
+/// same.
+/// A chain node as logic validation sees it: id, type, structure.
+type NodeShape = (String, &'static str, u64);
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Context {
+    signals: Vec<(String, Vec<NodeShape>)>,
+    vcas: Vec<String>,
+    mics: Vec<String>,
+    destinations: Vec<String>,
+    monitors: Vec<String>,
+}
+
+impl Context {
+    pub fn of(mix: &Mix) -> Self {
+        let chain = |c: &[Proc]| {
+            c.iter()
+                .map(|p| (p.id.clone(), p.kind.type_name(), p.kind.signature()))
+                .collect()
+        };
+        Self {
+            signals: mix
+                .strips
+                .iter()
+                .map(|s| (s.id.clone(), chain(&s.chain)))
+                .chain(mix.buses.iter().map(|b| (b.id.clone(), chain(&b.chain))))
+                .collect(),
+            vcas: mix.vcas.iter().map(|v| v.id.clone()).collect(),
+            mics: mix
+                .control_room
+                .talkback
+                .mics
+                .iter()
+                .map(|m| m.id.clone())
+                .collect(),
+            destinations: mix
+                .control_room
+                .talkback
+                .destinations
+                .iter()
+                .map(|d| d.id.clone())
+                .collect(),
+            monitors: mix
+                .control_room
+                .monitors
+                .iter()
+                .map(|m| m.id.clone())
+                .collect(),
+        }
+    }
+}
+
 /// The first problem, as text, for [`Mix::validate`].
 pub fn validate(mix: &Mix) -> Result<(), String> {
     match issues(mix).first() {
@@ -797,6 +857,7 @@ pub fn issues(mix: &Mix) -> Vec<Issue> {
         ));
     }
     let macros = &mix.logic_macros;
+    let depths = depths(macros);
     let mut bad_macros = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for m in macros {
@@ -812,16 +873,25 @@ pub fn issues(mix: &Mix) -> Vec<Issue> {
             out.push(at.issue(None, None, None, e));
         }
         check_level(mix, at, &m.blocks, &m.wires, true, &mut out);
-        if let Some((block, message)) = recursion(macros, m) {
+        if m.description.chars().count() > MAX_DESCRIPTION {
+            out.push(at.issue(
+                None,
+                None,
+                None,
+                format!("a description has at most {MAX_DESCRIPTION} characters"),
+            ));
+        }
+        if let Some((block, message)) = recursion(&depths, m) {
             out.push(at.issue(Some(&block), None, None, message));
         }
         if out.len() > before {
             bad_macros.insert(m.id.as_str());
         }
     }
+    let bad_macros = spoiled(macros, &bad_macros);
     // A macro on its own: loops inside it, and its size once inlined.
     for m in macros {
-        if bad_macros.contains(m.id.as_str()) || uses_bad(macros, &m.blocks, &bad_macros) {
+        if bad_macros.contains(m.id.as_str()) {
             continue;
         }
         if let Some(i) = check_inlined(At::Macro(&m.id), &m.blocks, &m.wires, macros) {
@@ -841,6 +911,14 @@ pub fn issues(mix: &Mix) -> Vec<Issue> {
         if let Err(e) = check_name(&format!("logic {}", g.id), &g.name) {
             out.push(at.issue(None, None, None, e));
         }
+        if g.description.chars().count() > MAX_DESCRIPTION {
+            out.push(at.issue(
+                None,
+                None,
+                None,
+                format!("a description has at most {MAX_DESCRIPTION} characters"),
+            ));
+        }
         check_level(mix, at, &g.blocks, &g.wires, false, &mut out);
         if out.len() == before && !uses_bad(macros, &g.blocks, &bad_macros) {
             if let Some(i) = check_inlined(at, &g.blocks, &g.wires, macros) {
@@ -851,67 +929,101 @@ pub fn issues(mix: &Mix) -> Vec<Issue> {
     out
 }
 
-fn uses_bad(macros: &[Macro], blocks: &[Block], bad: &BTreeSet<&str>) -> bool {
-    blocks.iter().any(|b| match &b.kind {
-        BlockKind::Macro { macro_id } => {
-            bad.contains(macro_id.as_str())
-                || macros
-                    .iter()
-                    .find(|m| &m.id == macro_id)
-                    .is_none_or(|m| uses_bad(macros, &m.blocks, bad))
-        }
-        _ => false,
-    })
-}
-
-/// A macro that uses itself (directly or through others), or nests deeper than
-/// [`MAX_DEPTH`]: the instance block of `m` where it starts, and why.
-fn recursion(macros: &[Macro], m: &Macro) -> Option<(String, String)> {
-    fn depth<'a>(
+/// Every macro's depth (itself and the macros inside it), or why it has none:
+/// it uses itself. Computed once per validation, each macro once (D169).
+fn depths(macros: &[Macro]) -> BTreeMap<&str, Result<usize, String>> {
+    fn visit<'a>(
+        id: &'a str,
         macros: &'a [Macro],
-        m: &'a Macro,
+        memo: &mut BTreeMap<&'a str, Result<usize, String>>,
         stack: &mut Vec<&'a str>,
     ) -> Result<usize, String> {
-        if let Some(start) = stack.iter().position(|s| *s == m.id) {
+        if let Some(r) = memo.get(id) {
+            return r.clone();
+        }
+        if let Some(start) = stack.iter().position(|s| *s == id) {
             return Err(format!(
-                "macro {} uses itself ({} → {})",
-                m.id,
-                stack[start..].join(" → "),
-                m.id
+                "macro {id} uses itself ({} → {id})",
+                stack[start..].join(" → ")
             ));
         }
-        stack.push(&m.id);
-        let mut deepest = 0;
+        let Some(m) = macros.iter().find(|m| m.id == id) else {
+            return Ok(0);
+        };
+        stack.push(id);
+        let mut result = Ok(0);
         for b in &m.blocks {
             if let BlockKind::Macro { macro_id } = &b.kind {
-                if let Some(inner) = macros.iter().find(|x| &x.id == macro_id) {
-                    deepest = deepest.max(depth(macros, inner, stack)?);
+                match visit(macro_id, macros, memo, stack) {
+                    Ok(d) => result = result.map(|r: usize| r.max(d)),
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
                 }
             }
         }
         stack.pop();
-        Ok(deepest + 1)
+        let r = result.map(|d| d + 1);
+        memo.insert(id, r.clone());
+        r
     }
+    let mut memo = BTreeMap::new();
+    for m in macros {
+        let _ = visit(&m.id, macros, &mut memo, &mut Vec::new());
+    }
+    memo
+}
+
+/// A macro that uses itself (directly or through others), or nests deeper than
+/// [`MAX_DEPTH`]: the instance block of `m` where it starts, and why.
+fn recursion(
+    depths: &BTreeMap<&str, Result<usize, String>>,
+    m: &Macro,
+) -> Option<(String, String)> {
     for b in &m.blocks {
         let BlockKind::Macro { macro_id } = &b.kind else {
             continue;
         };
-        let Some(inner) = macros.iter().find(|x| &x.id == macro_id) else {
-            continue;
-        };
-        let mut stack = vec![m.id.as_str()];
-        match depth(macros, inner, &mut stack) {
-            Err(e) => return Some((b.id.clone(), e)),
-            Ok(d) if d + 1 > MAX_DEPTH => {
+        match depths.get(macro_id.as_str()) {
+            Some(Err(e)) => return Some((b.id.clone(), e.clone())),
+            Some(Ok(d)) if d + 1 > MAX_DEPTH => {
                 return Some((
                     b.id.clone(),
                     format!("macros nest at most {MAX_DEPTH} deep"),
                 ))
             }
-            Ok(_) => {}
+            _ => {}
         }
     }
     None
+}
+
+/// The macros that are bad or use a bad or missing macro, at any depth: a
+/// fixed point over the macros, not a walk of every instance (D169).
+fn spoiled<'a>(macros: &'a [Macro], bad: &BTreeSet<&'a str>) -> BTreeSet<&'a str> {
+    let mut out = bad.clone();
+    loop {
+        let before = out.len();
+        for m in macros {
+            if !out.contains(m.id.as_str()) && uses_bad(macros, &m.blocks, &out) {
+                out.insert(&m.id);
+            }
+        }
+        if out.len() == before {
+            return out;
+        }
+    }
+}
+
+/// `blocks` use a macro in `bad` or a missing one (directly; see [`spoiled`]).
+fn uses_bad(macros: &[Macro], blocks: &[Block], bad: &BTreeSet<&str>) -> bool {
+    blocks.iter().any(|b| match &b.kind {
+        BlockKind::Macro { macro_id } => {
+            bad.contains(macro_id.as_str()) || !macros.iter().any(|m| &m.id == macro_id)
+        }
+        _ => false,
+    })
 }
 
 /// Inline and check loops and size; the issue names the top-level block.
@@ -1253,17 +1365,23 @@ pub fn check_param(p: &Proc, param: &str) -> Result<(), String> {
         .ok_or_else(|| format!("node {} has no parameter {param}", p.id))?
         .as_f64()
         .ok_or_else(|| format!("{param} is not a number"))?;
-    let d = (current.abs() * 0.01).max(0.01);
-    for candidate in [current + d, current - d] {
-        if let Ok(q) = with_param(p, param, candidate) {
-            if q.kind.validate().is_ok() {
-                return if q.kind.signature() == p.kind.signature() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "{param} changes the node's structure; logic sets only smoothed parameters"
-                    ))
-                };
+    // Small and large steps, relative and absolute: a delay of 0 ms or 20
+    // samples moves its structure only by a whole sample or more.
+    let steps = [
+        (current.abs() * 0.01).max(0.01),
+        (current.abs() * 0.5).max(1.0),
+        (current.abs() * 2.0).max(10.0),
+        1000.0,
+    ];
+    for d in steps {
+        for candidate in [current + d, current - d] {
+            let Ok(q) = with_param(p, param, candidate) else {
+                continue;
+            };
+            if q.kind.validate().is_ok() && q.kind.signature() != p.kind.signature() {
+                return Err(format!(
+                    "{param} changes the node's structure; logic sets only smoothed parameters"
+                ));
             }
         }
     }
@@ -1273,6 +1391,10 @@ pub fn check_param(p: &Proc, param: &str) -> Result<(), String> {
 /// Set `param` of `p` to `value`, or as close to it as the parameter's range
 /// allows (a bisection from the current value). Structural changes are refused.
 pub fn set_param_clamped(p: &mut Proc, param: &str, value: f64) -> Result<(), String> {
+    if value.is_nan() {
+        // Not a number: no change (D170).
+        return Ok(());
+    }
     if param == "bypass" {
         p.bypass = value >= 0.5;
         return Ok(());
@@ -1337,6 +1459,8 @@ pub struct FlatWire {
 pub struct Flat {
     pub blocks: Vec<FlatBlock>,
     pub wires: Vec<FlatWire>,
+    /// Macro instances visited, for the [`MAX_EXPANDED`] budget.
+    instances: usize,
 }
 
 fn pass_ports(kind: &BlockKind) -> Option<Ports> {
@@ -1386,6 +1510,12 @@ fn expand(
         if let BlockKind::Macro { macro_id } = &b.kind {
             if depth > MAX_DEPTH {
                 return Err(format!("macros nest at most {MAX_DEPTH} deep"));
+            }
+            flat.instances += 1;
+            if flat.instances + flat.blocks.len() > MAX_EXPANDED {
+                return Err(format!(
+                    "at most {MAX_EXPANDED} blocks and macro instances with the macros inlined"
+                ));
             }
             let m = macros
                 .iter()
@@ -2031,5 +2161,93 @@ pub(crate) mod tests {
                 ramp_ms: 10.0
             }
         );
+    }
+
+    #[test]
+    fn nested_macros_validate_quickly_within_a_budget() {
+        // B4 (D169): 4 levels of 64 instances each, no blocks of their own,
+        // would be 64^4 instances; the budget stops the inlining early, and
+        // each macro's depth is computed once.
+        let level = |id: &str, inner: Option<&str>| Macro {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            blocks: match inner {
+                Some(inner) => (0..64)
+                    .map(|n| {
+                        block(
+                            &format!("i{n}"),
+                            BlockKind::Macro {
+                                macro_id: inner.into(),
+                            },
+                        )
+                    })
+                    .collect(),
+                None => vec![block("n", BlockKind::Not)],
+            },
+            wires: vec![],
+        };
+        let mut m = Mix {
+            logic_macros: vec![
+                level("a", Some("b")),
+                level("b", Some("c")),
+                level("c", Some("d")),
+                level("d", None),
+            ],
+            ..Mix::default()
+        };
+        m.logic.push(graph(
+            (0..64)
+                .map(|n| {
+                    block(
+                        &format!("g{n}"),
+                        BlockKind::Macro {
+                            macro_id: "a".into(),
+                        },
+                    )
+                })
+                .collect(),
+            vec![],
+        ));
+        let start = std::time::Instant::now();
+        let found = issues(&m);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            found.iter().any(|i| i.message.contains("inlined")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn small_structural_values_are_found() {
+        // A delay of 0 ms, 0.5 ms or 20 samples changes its structure by a
+        // whole sample or more (X14).
+        for (time, unit) in [(0.0, "ms"), (0.5, "ms"), (20.0, "samples")] {
+            let p: Proc = serde_json::from_value(serde_json::json!({
+                "id": "d", "type": "delay", "time": time, "unit": unit
+            }))
+            .unwrap();
+            assert!(check_param(&p, "time").is_err(), "{time} {unit}");
+        }
+        let mut p: Proc = serde_json::from_value(serde_json::json!({
+            "id": "c", "type": "compressor", "threshold_db": -20.0, "ratio": 4.0,
+            "knee_db": 6.0, "attack_ms": 10.0, "release_ms": 100.0, "makeup_db": 0.0,
+            "detector": "peak"
+        }))
+        .unwrap();
+        let before = p.clone();
+        set_param_clamped(&mut p, "threshold_db", f64::NAN).unwrap();
+        assert_eq!(p, before, "NaN changes nothing");
+    }
+
+    #[test]
+    fn descriptions_are_limited() {
+        let mut m = mix_with(vec![], vec![]);
+        m.logic[0].description = "x".repeat(MAX_DESCRIPTION + 1);
+        assert!(issues(&m)[0].message.contains("description"));
     }
 }

@@ -188,6 +188,15 @@ pub async fn apply(
     change: impl FnOnce(&mut Mix) -> ApiResult<()>,
 ) -> ApiResult<Vec<String>> {
     let _serial = app.changes.lock().await;
+    apply_held(app, ramp, change).await
+}
+
+/// [`apply`] for a caller that already holds `app.changes`.
+pub async fn apply_held(
+    app: &App,
+    ramp: u32,
+    change: impl FnOnce(&mut Mix) -> ApiResult<()>,
+) -> ApiResult<Vec<String>> {
     let staged = {
         let mut control = app.control();
         let mut next = control.mix.clone();

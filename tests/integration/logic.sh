@@ -15,7 +15,7 @@ TSL_PORT=${LOGIC_TEST_TSL:-8930}
 HOOK_PORT=${LOGIC_TEST_HOOK:-8931}
 start_tone "$WORK/mxl/tones" "$FLOW" --domain-id "$DOMAIN" --channels 2
 wait_until 10 "tone flow" test -d "$WORK/mxl/tones/$FLOW.mxl-flow"
-start_mixer NMOS_SEED=it-logic TSL_OUT_TARGET="127.0.0.1:$TSL_PORT" TSL_OUT_SCREEN=4
+start_mixer NMOS_SEED=it-logic TSL_OUT_TARGET="127.0.0.1:$TSL_PORT" TSL_OUT_SCREEN=4 MIXER_TEST_LOGIC_SWAP_DELAY_MS=400
 route 1 "$DOMAIN" "$FLOW"
 wait_until 5 "input 1 running" is_state 1 running
 
@@ -207,30 +207,28 @@ wait_until 3 "aux unmuted" is "$WEB/api/v1/buses/aux" "d['mute']" False
 [[ "$(json "$WEB/api/v1/logic-macros/inv" "d['exposed']['inputs'][0]['name']")" == x ]] || fail "exposed ports"
 pass "batch: a macro and its graph; not(key) mutes aux, values as m1.n"
 
-# A logic change that rewires the plan and an API change that rewires it, at
-# the same moment: both stay (they share the change lock).
+# A logic change that rewires the plan, and an API change inside its fade
+# (MIXER_TEST_LOGIC_SWAP_DELAY_MS widens the fade to 400 ms): both stay, because
+# they share the change lock. Before D167 the API's change replaced the logic's
+# staged plan, and the unpublish was lost.
 api POST /api/v1/buses '{"id": "aux2", "name": "Aux 2", "format": "stereo"}' >/dev/null
 api POST /api/v1/buses '{"id": "aux3", "name": "Aux 3", "format": "stereo"}' >/dev/null
 api PUT /api/v1/logic/race '{"name": "Race", "blocks": [{"id": "key", "type": "button"}, {"id": "pub", "type": "set-publish", "signal": "aux2"}],
   "wires": [{"from_block": "key", "from_port": "out", "to_block": "pub", "to_port": "in"}]}' >/dev/null
-published() { json "$WEB/api/v1/outputs" "sorted(o['signal'] for o in d if o['signal'] in ('aux2', 'aux3'))"; }
-for round in 1 2 3 4 5; do
-    api PUT /api/v1/logic/race/buttons/key '{"pressed": true}' >/dev/null &
-    a=$!
-    api PUT /api/v1/outputs/aux3 >/dev/null &
-    b=$!
-    wait "$a" "$b"
-    wait_until 5 "aux2 and aux3 published (round $round)" is "$WEB/api/v1/outputs" "sorted(o['signal'] for o in d if o['signal'] in ('aux2', 'aux3'))" "['aux2', 'aux3']"
-    api PUT /api/v1/logic/race/buttons/key '{"pressed": false}' >/dev/null &
-    a=$!
-    api DELETE /api/v1/outputs/aux3 >/dev/null &
-    b=$!
-    wait "$a" "$b"
-    wait_until 5 "aux2 and aux3 unpublished (round $round)" is "$WEB/api/v1/outputs" "sorted(o['signal'] for o in d if o['signal'] in ('aux2', 'aux3'))" "[]"
+both="sorted(o['signal'] for o in d if o['signal'] in ('aux2', 'aux3'))"
+for round in 1 2 3; do
+    api PUT /api/v1/logic/race/buttons/key '{"pressed": true}' >/dev/null
+    wait_until 5 "aux2 published (round $round)" is "$WEB/api/v1/outputs" "$both" "['aux2']"
+    sleep 0.3
+    # The logic unpublishes aux2 (a fade, then the swap 400 ms later) ...
+    api PUT /api/v1/logic/race/buttons/key '{"pressed": false}' >/dev/null
+    sleep 0.1
+    # ... and the API publishes aux3 meanwhile.
+    api PUT /api/v1/outputs/aux3 >/dev/null
+    wait_until 5 "aux2 unpublished, aux3 published (round $round)" is "$WEB/api/v1/outputs" "$both" "['aux3']"
+    api DELETE /api/v1/outputs/aux3 >/dev/null
 done
-sleep 0.5
-[[ "$(published)" == "[]" ]] || fail "after the races: $(published)"
-pass "a logic publish and an API publish at once, 5 times: neither lost"
+pass "a logic unpublish and an API publish inside its fade, 3 times: neither lost"
 
 # Refusals.
 code=$(curl -s -o "$WORK/bad.json" -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/logic/bad" \

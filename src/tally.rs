@@ -354,40 +354,55 @@ pub struct OutDisplay {
     pub label: String,
 }
 
-/// Most displays in one packet (a UDP datagram stays far below 64 KiB).
-const DISPLAYS_PER_PACKET: usize = 64;
+/// Largest TSL 5.0 packet, PBC included (the protocol's limit).
+pub const MAX_PACKET: usize = 2048;
+/// Longest label sent, in UTF-16 units.
+const MAX_LABEL: usize = 128;
 
 /// TSL UMD 5.0 packets (PBC first, no DLE/STX) for `displays` on `screen`:
-/// labels in UTF-16, brightness full, text tally off.
+/// labels in UTF-16 (at most 128 units), brightness full, text tally off; as
+/// many display messages per packet as fit in [`MAX_PACKET`] bytes.
 pub fn encode_out(screen: u16, displays: &BTreeMap<u16, OutDisplay>) -> Vec<Vec<u8>> {
-    let all: Vec<(&u16, &OutDisplay)> = displays.iter().collect();
-    all.chunks(DISPLAYS_PER_PACKET)
-        .map(|chunk| {
-            let mut body = vec![0u8, 0x01];
-            body.extend_from_slice(&screen.to_le_bytes());
-            for (index, d) in chunk {
-                let control: u16 = (u16::from(d.right) << 1) | (u16::from(d.left) << 4) | (3 << 6);
-                let text: Vec<u8> = d
-                    .label
-                    .encode_utf16()
-                    .take(256)
-                    .flat_map(u16::to_le_bytes)
-                    .collect();
-                body.extend_from_slice(&index.to_le_bytes());
-                body.extend_from_slice(&control.to_le_bytes());
-                body.extend_from_slice(&(text.len() as u16).to_le_bytes());
-                body.extend_from_slice(&text);
-            }
-            let mut packet = (body.len() as u16).to_le_bytes().to_vec();
-            packet.extend_from_slice(&body);
-            packet
-        })
-        .collect()
+    let header = |screen: u16| {
+        let mut body = vec![0u8, 0, 0u8, 0x01];
+        body.extend_from_slice(&screen.to_le_bytes());
+        body
+    };
+    let mut packets = Vec::new();
+    let mut packet = header(screen);
+    for (index, d) in displays {
+        let control: u16 = (u16::from(d.right) << 1) | (u16::from(d.left) << 4) | (3 << 6);
+        let text: Vec<u8> = d
+            .label
+            .encode_utf16()
+            .take(MAX_LABEL)
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut message = Vec::with_capacity(6 + text.len());
+        message.extend_from_slice(&index.to_le_bytes());
+        message.extend_from_slice(&control.to_le_bytes());
+        message.extend_from_slice(&(text.len() as u16).to_le_bytes());
+        message.extend_from_slice(&text);
+        if packet.len() + message.len() > MAX_PACKET && packet.len() > 6 {
+            packets.push(std::mem::replace(&mut packet, header(screen)));
+        }
+        packet.extend_from_slice(&message);
+    }
+    if packet.len() > 6 {
+        packets.push(packet);
+    }
+    for p in &mut packets {
+        let pbc = (p.len() - 2) as u16;
+        p[..2].copy_from_slice(&pbc.to_le_bytes());
+    }
+    packets
 }
 
 /// Send the displays of `state` to `target` (`host:port`) over UDP: on every
-/// change and at least once a second (§10.3). The name is resolved again
-/// every 30 s.
+/// change and at least once a second (§10.3). An index that leaves the state
+/// (its block removed, its graph disabled or in dry run) is sent once with its
+/// lamps off and no label, so no lamp stays lit. The name is resolved again
+/// every 30 s. A failure is logged once until sending works again.
 pub fn spawn_sender(
     target: String,
     screen: u16,
@@ -403,6 +418,7 @@ pub fn spawn_sender(
         };
         let mut address: Option<(std::net::SocketAddr, Instant)> = None;
         let mut warned = false;
+        let mut last: BTreeMap<u16, OutDisplay> = BTreeMap::new();
         let mut every = tokio::time::interval(std::time::Duration::from_secs(1));
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -410,7 +426,18 @@ pub fn spawn_sender(
                 changed = state.changed() => if changed.is_err() { return },
                 _ = every.tick() => {}
             }
-            let displays = state.borrow_and_update().clone();
+            let current = state.borrow_and_update().clone();
+            let mut displays = current.clone();
+            for index in last.keys().filter(|i| !current.contains_key(i)) {
+                displays.insert(
+                    *index,
+                    OutDisplay {
+                        left: false,
+                        right: false,
+                        label: String::new(),
+                    },
+                );
+            }
             if displays.is_empty() {
                 continue;
             }
@@ -432,13 +459,23 @@ pub fn spawn_sender(
                 }
             }
             let Some((to, _)) = address else { continue };
+            let mut sent = true;
             for packet in encode_out(screen, &displays) {
                 if let Err(e) = socket.send_to(&packet, to).await {
+                    sent = false;
                     if !warned {
                         tracing::warn!("TSL output to {to}: {e}");
                         warned = true;
                     }
                 }
+            }
+            if sent {
+                if warned {
+                    tracing::info!("TSL output to {to}: sending again");
+                }
+                warned = false;
+                // The indexes switched off have been sent once.
+                last = current;
             }
         }
     });
@@ -558,6 +595,7 @@ mod tests {
         assert_eq!(back[0].brightness, 3);
         assert_eq!((back[1].index, back[1].lh, back[1].rh), (9, 0, 2));
         assert_eq!(back[1].label, "Stüdio");
+        // 100 displays with long labels: split at 2048 bytes, nothing lost.
         let many: BTreeMap<u16, OutDisplay> = (0..100)
             .map(|i| {
                 (
@@ -565,19 +603,25 @@ mod tests {
                     OutDisplay {
                         left: true,
                         right: false,
-                        label: String::new(),
+                        label: "x".repeat(300),
                     },
                 )
             })
             .collect();
         let packets = encode_out(0, &many);
-        assert_eq!(packets.len(), 2);
+        assert!(packets.iter().all(|p| p.len() <= MAX_PACKET));
+        assert!(packets.len() > 1);
         assert_eq!(
             packets
                 .iter()
                 .map(|p| parse(p).unwrap().len())
                 .sum::<usize>(),
             100
+        );
+        assert_eq!(
+            parse(&packets[0]).unwrap()[0].label.len(),
+            128,
+            "labels are cut at 128"
         );
     }
 }

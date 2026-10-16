@@ -477,6 +477,17 @@ async fn run(mut config: Config) -> ExitCode {
             deadline.as_secs()
         );
     }
+    // D168: changes that came in during the shutdown are written too (also
+    // after a timeout). A control engine still busy is not waited for.
+    match control.try_lock() {
+        Ok(mut c) => c.flush_mix(),
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().flush_mix(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            tracing::error!(
+                "the control engine is busy: the last changes of the mix were not written"
+            )
+        }
+    }
     if term {
         ExitCode::from(EX_TERM)
     } else {

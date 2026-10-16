@@ -8,7 +8,7 @@ Milestone 9 (§13: master/slave remote link).
 
 ### Logic editor
 
-Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D168, X11–X16).
+Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D174, X11–X16).
 
 - Typed ports (`boolean`, `number`, `level`, `event`, `string`) and type-checked wires with fixed conversions; every 1.2.0 graph stays valid.
 - New blocks: `text`, `trigger` (`POST /api/v1/logic/<graph>/trigger/<block>`), `pfl`, `loudness`, `nmos-receiver`, `nmos-sender`, `link`; `toggle`, `counter`, `math`, `scale`, `map`, `select`, `compare` `ge`/`le`/`ne`; `set-vca`, `set-param`, `set-pfl`, `set-talk`, `set-publish`, `set-monitor`, `loudness-control`, `tsl-out`, `log`. `set-fader` and `set-vca` take `ramp_ms`.
@@ -18,7 +18,8 @@ Milestone 8, part 2 (§11; IMPLEMENTATION_PLAN M8b, D158–D168, X11–X16).
 - New settings `TSL_OUT_TARGET` and `TSL_OUT_SCREEN` (TSL UMD 5.0 over UDP, on every change and every second; invalid values exit 78).
 - The webhook block posts `{"graph", "block", "value"}` as documented (it posted only `value`).
 - Fixed: a logic change that rewires the plan (publish, PFL, talk, monitor source, snapshot recall; recall was affected in 1.2.0 too) could be lost when an API change staged during its fade. Logic and the API now share one change lock (D167).
-- `mix.json` is written at most every 500 ms after a parameter change (faders from the API or from logic), at once after a plan change, a show action (snapshots, layouts, history, import) and at SIGTERM; it was written on every change, up to 100 times a second (D168).
+- `mix.json` is written within about 0.6 s after a parameter change (faders from the API or from logic; at most every 500 ms), at once after a plan change, a show action (snapshots, layouts, history, import) and at SIGTERM, and again at the end of the shutdown; it was written on every change, up to 100 times a second (D168).
+- Safety (D169–D174): an action fed only by an unconnected macro input never runs; an action moved to another target acts on it at once (state is kept only for the same type and parameters); `edge` and timers do not fire on the first tick or on a re-wired input; NaN is no change and +∞ is the fader's maximum (NaN closed the fader); nested macros validate in linear time within an inlining budget, off the control lock, and a fader move no longer re-validates every graph; rate limits per action (20 ms, TSL 50 ms, webhooks 100 ms, plan changes 250 ms), one shared webhook client, at most 8 posts at once; TSL out switches a removed index off, splits at 2048 bytes and logs failures again after a recovery. `logic-validate` honours revisions; a batch deleting a missing id is 400; descriptions have at most 1000 characters.
 - `tests/integration/logic.sh` runs in CI.
 
 ### Platform readiness

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 
-use crate::api::{apply, bad, body, conflict, not_found, ApiResult};
+use crate::api::{apply_held, bad, body, conflict, not_found, ApiResult};
 use crate::engine::FADE_SAMPLES;
 use crate::mix::logic::{issues, Block, BlockKind, Graph, Issue, Macro, Wire};
 use crate::mix::Mix;
@@ -125,16 +125,29 @@ fn refused(issues: &[Issue]) -> Box<Response> {
 }
 
 /// Apply a change of the logic; refused with the issues if the logic is not
-/// valid afterwards.
+/// valid afterwards. The graphs are validated off the control lock, under the
+/// change lock, and the stage then does not validate them again (D171).
 async fn change(app: &App, f: impl FnOnce(&mut Mix) -> ApiResult<()>) -> ApiResult<()> {
-    apply(app, FADE_SAMPLES, |mix| {
-        f(mix)?;
-        let found = issues(mix);
-        if found.is_empty() {
-            Ok(())
-        } else {
-            Err(refused(&found))
-        }
+    let _serial = app.changes.lock().await;
+    let mut candidate = app.control().mix.clone();
+    f(&mut candidate)?;
+    let (candidate, found) = tokio::task::spawn_blocking(move || {
+        let found = issues(&candidate);
+        (candidate, found)
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?;
+    if !found.is_empty() {
+        return Err(refused(&found));
+    }
+    // Only the graphs and macros are taken over: the rest of the mix may have
+    // moved meanwhile (logic faders, the link). If what they name moved, the
+    // stage validates them again.
+    app.control().logic_validated(&candidate);
+    apply_held(app, FADE_SAMPLES, move |mix| {
+        mix.logic = candidate.logic;
+        mix.logic_macros = candidate.logic_macros;
+        Ok(())
     })
     .await
     .map(|_| ())
@@ -605,6 +618,21 @@ impl Batch {
         })
     }
 
+    /// 400 when a deletion names a graph or macro that does not exist.
+    fn missing(&self, mix: &Mix) -> ApiResult<()> {
+        for id in &self.delete_graphs {
+            if mix.logic_graph(id).is_none() {
+                return Err(bad(format!("logic {id} does not exist")));
+            }
+        }
+        for id in &self.delete_macros {
+            if mix.logic_macro(id).is_none() {
+                return Err(bad(format!("logic macro {id} does not exist")));
+            }
+        }
+        Ok(())
+    }
+
     /// Apply to `mix`; the revisions that do not match.
     fn apply(self, mix: &mut Mix) -> Vec<Value> {
         let mut conflicts = Vec::new();
@@ -649,21 +677,8 @@ async fn batch(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
         let graph_ids: Vec<String> = b.graphs.iter().map(|(g, _)| g.id.clone()).collect();
         let macro_ids: Vec<String> = b.macros.iter().map(|(m, _)| m.id.clone()).collect();
         change(&app, |mix| {
-            let conflicts = b.apply(mix);
-            if conflicts.is_empty() {
-                Ok(())
-            } else {
-                Err(Box::new(
-                    (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "error": "a graph or macro changed since its revision was read",
-                            "conflicts": conflicts,
-                        })),
-                    )
-                        .into_response(),
-                ))
-            }
+            b.missing(mix)?;
+            conflicted(b.apply(mix))
         })
         .await?;
         let graphs: Vec<Value> = graph_ids.iter().map(|id| one_value(&app, id)).collect();
@@ -673,13 +688,35 @@ async fn batch(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
     .await
 }
 
-/// A batch checked against the current mix, not applied.
+/// 409 when a revision did not match.
+fn conflicted(conflicts: Vec<Value>) -> ApiResult<()> {
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    Err(Box::new(
+        (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "a graph or macro changed since its revision was read",
+                "conflicts": conflicts,
+            })),
+        )
+            .into_response(),
+    ))
+}
+
+/// The proposed graphs and macros (the batch on the current mix) checked, not
+/// applied: 200 `{"issues"}`, or 400 and 409 as the batch would answer.
 async fn validate(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
     run(async {
         let b = Batch::parse(&bytes)?;
         let mut mix = app.control().mix.clone();
-        b.apply(&mut mix);
-        Ok(Json(json!({"issues": issues(&mix)})).into_response())
+        b.missing(&mix)?;
+        conflicted(b.apply(&mut mix))?;
+        let found = tokio::task::spawn_blocking(move || issues(&mix))
+            .await
+            .map_err(|e| bad(e.to_string()))?;
+        Ok(Json(json!({"issues": found})).into_response())
     })
     .await
 }

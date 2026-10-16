@@ -1,4 +1,4 @@
-//! The runtime, block by block (D158–D166).
+//! The runtime, block by block (D158–D174).
 
 use super::*;
 use crate::mix::logic::tests::{block, graph, wire};
@@ -497,6 +497,7 @@ fn tally_on_air_mutes_when_the_lamp_is_lit() {
             on: false
         }]
     );
+    tick(&mut logic, &mix); // an action runs at most every 20 ms
     let lit = logic.tick(&Readings {
         on_air: &on,
         ..Readings::quiet(&mix)
@@ -826,6 +827,9 @@ fn every_action_says_what_it_asks() {
             },
         ]
     );
+    for _ in 0..4 {
+        tick(&mut logic, &mix); // TSL runs at most every 50 ms
+    }
     logic.set_button("g", "b", true);
     assert_eq!(tick(&mut logic, &mix).len(), 4, "pfl, talk, publish, tsl");
     // The edge fires one tick later: the event actions.
@@ -943,6 +947,7 @@ fn macros_run_inlined_with_state_per_instance() {
         }],
         "not(off) mutes, in the same tick: inlined, no delay"
     );
+    tick(&mut logic, &mix); // an action runs at most every 20 ms
     logic.set_button("g", "b", true);
     assert_eq!(
         tick(&mut logic, &mix),
@@ -1001,6 +1006,7 @@ fn evaluation_order_is_deterministic() {
             on: false
         }]
     );
+    tick(&mut logic, &mix); // an action runs at most every 20 ms
     logic.set_button("g", "b", true);
     assert_eq!(
         tick(&mut logic, &mix),
@@ -1103,42 +1109,316 @@ fn the_tick_stays_cheap_at_the_limits() {
 
 #[test]
 fn a_rewiring_change_waits_for_the_change_lock() {
+    use std::time::{Duration, Instant};
     let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let mut w = Waiting::default();
-    assert!(matches!(w.take(&lock), Taken::Idle));
-    let publish = Action {
+    let t0 = Instant::now();
+    assert!(matches!(w.take(&lock, t0), Taken::Idle));
+    let publish = |on| Action {
         graph: "g".into(),
         block: "pub".into(),
         dry_run: false,
         act: Act::Publish {
             signal: "aux".into(),
-            on: true,
+            on,
         },
     };
-    w.push(publish.clone());
+    w.push(publish(true));
     // An API change holds the lock: the action waits, then goes once it is free.
     let held = lock.clone().try_lock_owned().unwrap();
     for _ in 0..10 {
-        assert!(matches!(w.take(&lock), Taken::Wait));
+        assert!(matches!(w.take(&lock, t0), Taken::Wait));
     }
     drop(held);
-    let Taken::Go(guard, acts) = w.take(&lock) else {
+    let Taken::Go(guard, acts) = w.take(&lock, t0) else {
         panic!("the lock is free")
     };
-    assert_eq!(acts, vec![publish.clone()]);
+    assert_eq!(acts, vec![publish(true)]);
     // The logic holds the lock until its swap: the API waits meanwhile.
     assert!(lock.try_lock().is_err());
     drop(guard);
     assert!(lock.try_lock().is_ok());
-    // A lock held for a second gives the actions up (the caller warns).
-    w.push(publish.clone());
-    let _held = lock.clone().try_lock_owned().unwrap();
-    for _ in 1..MAX_WAIT_TICKS {
-        assert!(matches!(w.take(&lock), Taken::Wait));
-    }
-    let Taken::Dropped(acts) = w.take(&lock) else {
-        panic!("given up after 1 s")
+    // At most one rewiring change per 250 ms; the newest of a block wins.
+    w.push(publish(false));
+    w.push(publish(true));
+    assert!(matches!(
+        w.take(&lock, t0 + Duration::from_millis(100)),
+        Taken::Wait
+    ));
+    let Taken::Go(_, acts) = w.take(&lock, t0 + Duration::from_millis(250)) else {
+        panic!("250 ms later")
     };
-    assert_eq!(acts, vec![publish]);
-    assert!(matches!(w.take(&lock), Taken::Idle));
+    assert_eq!(acts, vec![publish(true)]);
+    // A lock held for a second is reported once; the action keeps waiting.
+    w.push(publish(false));
+    let later = t0 + Duration::from_secs(1);
+    let held = lock.clone().try_lock_owned().unwrap();
+    for _ in 1..MAX_WAIT_TICKS {
+        assert!(matches!(w.take(&lock, later), Taken::Wait));
+    }
+    assert!(matches!(w.take(&lock, later), Taken::Late(a) if a == vec![publish(false)]));
+    assert!(matches!(w.take(&lock, later), Taken::Wait));
+    drop(held);
+    assert!(matches!(w.take(&lock, later), Taken::Go(_, a) if a == vec![publish(false)]));
+    assert!(matches!(w.take(&lock, later), Taken::Idle));
+}
+
+#[test]
+fn an_unconnected_macro_input_drives_no_action() {
+    // B1 (D159): the macro's actions hang off its exposed inputs only.
+    let mut mix = mix_of(vec![], vec![]);
+    mix.logic_macros.push(Macro {
+        id: "act".into(),
+        name: "Act".into(),
+        description: String::new(),
+        blocks: vec![
+            block(
+                "lvl",
+                K::MacroIn {
+                    name: "lvl".into(),
+                    value_type: PortType::Level,
+                },
+            ),
+            block(
+                "on",
+                K::MacroIn {
+                    name: "on".into(),
+                    value_type: PortType::Boolean,
+                },
+            ),
+            block(
+                "fader",
+                K::SetFader {
+                    signal: "vox".into(),
+                    ramp_ms: 10.0,
+                },
+            ),
+            block(
+                "mute",
+                K::SetMute {
+                    signal: "vox".into(),
+                },
+            ),
+        ],
+        wires: vec![out("lvl", "fader", "level"), out("on", "mute", "in")],
+    });
+    mix.logic[0] = graph(
+        vec![block(
+            "m",
+            K::Macro {
+                macro_id: "act".into(),
+            },
+        )],
+        vec![],
+    );
+    assert_eq!(crate::mix::logic::issues(&mix), vec![]);
+    let mut logic = Logic::default();
+    for _ in 0..3 {
+        assert!(
+            tick(&mut logic, &mix).is_empty(),
+            "no fader 0 dB, no unmute"
+        );
+    }
+    // Wired outside, it acts.
+    mix.logic[0]
+        .blocks
+        .push(block("k", K::Const { value: -6.0 }));
+    mix.logic[0].wires.push(wire("k", "out", "m", "lvl"));
+    assert_eq!(
+        tick(&mut logic, &mix),
+        vec![Act::Fader {
+            signal: "vox".into(),
+            db: -6.0,
+            ramp_ms: 10.0
+        }]
+    );
+}
+
+#[test]
+fn a_changed_action_acts_on_its_new_target_at_once() {
+    // B2 (D172): state is kept only for the same type and parameters.
+    let mut mix = mix_of(
+        vec![
+            block("c", K::Const { value: 1.0 }),
+            block(
+                "m",
+                K::SetMute {
+                    signal: "vox".into(),
+                },
+            ),
+        ],
+        vec![out("c", "m", "in")],
+    );
+    let mut logic = Logic::default();
+    assert_eq!(
+        tick(&mut logic, &mix),
+        vec![Act::Mute {
+            signal: "vox".into(),
+            on: true
+        }]
+    );
+    tick(&mut logic, &mix);
+    mix.logic[0].blocks[1].kind = K::SetMute {
+        signal: "music".into(),
+    };
+    assert_eq!(
+        tick(&mut logic, &mix),
+        vec![Act::Mute {
+            signal: "music".into(),
+            on: true
+        }],
+        "music mutes; vox stays as it is"
+    );
+    // Another type with the same id starts over too.
+    mix.logic[0].blocks[1].kind = K::SetPfl {
+        signal: "music".into(),
+    };
+    tick(&mut logic, &mix);
+    assert_eq!(logic.recent("g").last().unwrap().action, "PFL music on");
+    // A TSL block moved to another index sends there.
+    mix.logic[0].blocks[1].kind = K::TslOut { index: 3 };
+    mix.logic[0].wires[0] = out("c", "m", "left");
+    assert_eq!(
+        tick(&mut logic, &mix),
+        vec![Act::Tsl {
+            index: 3,
+            left: true,
+            right: false,
+            label: String::new()
+        }]
+    );
+}
+
+#[test]
+fn edges_need_a_rise_they_saw() {
+    // An input already on at the start, or a wire moved to a source that is
+    // on, is not a rise: no recall after a restart or an edit (D172).
+    let mut mix = mix_of(
+        vec![
+            block("off", K::Const { value: 0.0 }),
+            block("on", K::Const { value: 1.0 }),
+            block("e", K::Edge),
+            block(
+                "r",
+                K::Recall {
+                    snapshot: "s".into(),
+                },
+            ),
+        ],
+        vec![out("on", "e", "in"), out("off", "r", "in")],
+    );
+    let mut logic = Logic::default();
+    for _ in 0..3 {
+        tick(&mut logic, &mix);
+    }
+    assert_eq!(value(&logic, "e"), json!(0), "on from the start: no edge");
+    mix.logic[0].wires[1] = out("on", "r", "in");
+    assert!(
+        (0..3).all(|_| tick(&mut logic, &mix).is_empty()),
+        "a wire moved from off to on does not fire the recall"
+    );
+}
+
+#[test]
+fn not_a_number_is_no_change_and_infinity_is_clamped() {
+    // B3 (D170).
+    let mut mix = mix_of(
+        vec![
+            block(
+                "l",
+                K::Level {
+                    signal: "vox".into(),
+                },
+            ),
+            block(
+                "f",
+                K::SetFader {
+                    signal: "vox".into(),
+                    ramp_ms: 10.0,
+                },
+            ),
+        ],
+        vec![out("l", "f", "level")],
+    );
+    mix.logic[0]
+        .blocks
+        .push(block("z", K::Const { value: 0.0 }));
+    let mut logic = Logic::default();
+    let at = |logic: &mut Logic, db: f64| {
+        let level = BTreeMap::from([("vox".to_string(), db)]);
+        let acts: Vec<Act> = logic
+            .tick(&Readings {
+                level_db: &level,
+                ..Readings::quiet(&mix)
+            })
+            .into_iter()
+            .map(|a| a.act)
+            .collect();
+        acts
+    };
+    assert!(at(&mut logic, f64::NAN).is_empty(), "NaN does nothing");
+    assert!(at(&mut logic, f64::NAN).is_empty());
+    assert_eq!(at(&mut logic, -10.0).len(), 1);
+    for _ in 0..5 {
+        assert!(at(&mut logic, f64::NAN).is_empty(), "and is not a change");
+    }
+    let inf = at(&mut logic, f64::INFINITY);
+    assert_eq!(inf.len(), 1);
+    assert!(at(&mut logic, f64::INFINITY).is_empty());
+    assert_eq!(
+        clamp_fader(f64::INFINITY).0,
+        crate::mix::model::MAX_FADER_DB
+    );
+    assert_eq!(clamp_fader(f64::NEG_INFINITY).0, f64::NEG_INFINITY);
+}
+
+#[test]
+fn webhooks_and_faders_are_rate_limited() {
+    // D173: a webhook at most every 100 ms, a fader at most every 20 ms; the
+    // newest fader value goes out when it may.
+    let mix = mix_of(
+        vec![
+            block("b", K::Button),
+            block(
+                "w",
+                K::Webhook {
+                    url: "http://h/x".into(),
+                },
+            ),
+            block(
+                "l",
+                K::Level {
+                    signal: "vox".into(),
+                },
+            ),
+            block(
+                "f",
+                K::SetFader {
+                    signal: "vox".into(),
+                    ramp_ms: 10.0,
+                },
+            ),
+        ],
+        vec![out("b", "w", "in"), out("l", "f", "level")],
+    );
+    let mut logic = Logic::default();
+    let mut posts = 0;
+    let mut faders = Vec::new();
+    for n in 0..40 {
+        logic.set_button("g", "b", n % 2 == 1);
+        let level = BTreeMap::from([("vox".to_string(), -f64::from(n))]);
+        for a in logic.tick(&Readings {
+            level_db: &level,
+            ..Readings::quiet(&mix)
+        }) {
+            match a.act {
+                Act::Webhook { .. } => posts += 1,
+                Act::Fader { db, .. } => faders.push(db),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(posts, 4, "20 rises in 400 ms: one post per 100 ms");
+    assert_eq!(faders.len(), 20, "40 changes in 400 ms: one per 20 ms");
+    assert_eq!(faders[1], -2.0, "the newest value");
 }

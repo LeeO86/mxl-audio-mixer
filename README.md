@@ -321,9 +321,9 @@ for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true
 ## The mix
 
 Kept in `MIXER_STATE_DIR/mix.json` and in the show file. `mix.json` is written
-atomically: within 0.5 s of fader and parameter changes (from the API or from
-logic; a crash loses at most that much), at once after any other change, and at
-SIGTERM. Signal ids (strips and
+atomically: within about 0.6 s of fader and parameter changes (from the API or
+from logic, at most every 500 ms; a crash loses at most that much), at once
+after any other change, and at SIGTERM. Signal ids (strips and
 buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
 an id gets `strip-<n>` or `bus-<n>`.
 
@@ -665,8 +665,17 @@ those publish last tick's value.
 
 Value actions (mute, faders, parameters, PFL, talk, publish, TSL) follow their
 input from the first tick on; event actions run when their input fires. An
-action whose input has no wire never runs. Actions are the same changes the API
-makes, ramped and clamped the same way.
+action whose input has no wire never runs, also through an unconnected macro
+input. Actions are the same changes the API makes, ramped and clamped the same
+way; NaN is no change, +∞ is a fader's maximum. Each action block runs at most
+every 20 ms (TSL 50 ms, a webhook 100 ms, changes that rewire the plan 250 ms;
+the newest value wins); at most 8 webhook posts run at once. A block keeps its
+state over an edit only while its type and parameters stay the same: an action
+moved to another target acts on it at once, the old target stays as it is.
+`edge`, timers and converted events never fire on the first tick or on a
+re-wired input. Disabling and enabling a graph, or a restart, resets toggles,
+latches and counters, and value actions apply their input again. A `tsl-out`
+index that goes away is switched off once.
 
 **Macros** (`/api/v1/logic-macros`, saved in the show as `logic_macros`) are
 sub-graphs used as a `macro` block: their `macro-in` and `macro-out` blocks are
@@ -859,7 +868,8 @@ reconnected, takeover deny meanwhile), `tests/integration/logic.sh` (logic
 graphs end to end: an HTTP trigger mutes a strip, a soft key ramps its fader
 sample-exact, publishes a bus, sends TSL to a UDP listener and posts a webhook, a
 log line on the events WebSocket, dry run, a macro written in a batch, a type
-error and a stale revision refused), `tests/perf/section16.sh` (the
+error and a stale revision refused, a logic unpublish and an API publish in the same
+fade both kept, `mix.json` coalesced and written at SIGTERM), `tests/perf/section16.sh` (the
 §16-shaped load), `ci/amwa.sh off` (AMWA IS-04-01, IS-05-01,
 IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests for
 the maintainers are in `tests/hw/`.

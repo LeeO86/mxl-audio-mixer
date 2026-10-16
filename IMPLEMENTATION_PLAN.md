@@ -1957,7 +1957,7 @@ and writes the same text to the log (info).
 | D161 | Whole-resource writes with an optional `revision` (a digest of the graph or macro), plus a batch over graphs and macros, applied in one `apply`. No per-operation patch language. | The canvas holds the whole graph anyway; copy/paste and undo/redo then send the graph they show. The digest needs no counter kept in the show, and two clients that saved the same content agree. |
 | D162 | Logic validation collects every issue with its graph or macro, block, port and wire; `Mix::validate` keeps returning the first as text. | Markers for the UI (§11.3) without a second validator. |
 | D163 | Macros are definitions in the show, used by instances, inlined for evaluation, with recursion, depth (4) and size (256 inlined blocks per graph) checks. No per-instance parameters: an instance is the definition. | §11.3 "sub-graphs with exposed ports". The limits keep the tick bounded: 32 graphs × 256 blocks. |
-| D164 | Actions become the same mix changes the API makes: mute, fader, VCA, a node parameter (only parameters the DSP smooths; ramped by `ramp_ms`, clamped to the parameter's range), PFL, talk, publish, monitor source, loudness start/stop/reset, snapshot recall. Value actions follow their input (on the first tick and on each change); event actions run when the event fires. Value changes are staged with their ramp first, then the changes that rewire the plan (fade, swap on a later tick, as recall did). In dry run nothing is executed; the action is listed and sent on the events socket. | §11.2 "actions become parameter messages". A structural node parameter (a filter slope, a delay time) would swap the plan on every change of a number. |
+| D164 | Actions become the same mix changes the API makes: mute, fader, VCA, a node parameter (only parameters the DSP smooths; ramped by `ramp_ms`, clamped to the parameter's range), PFL, talk, publish, monitor source, loudness start/stop/reset, snapshot recall. Value actions follow their input (on the first tick and on each change); event actions run when the event fires. Value changes are staged with their ramp first, then the changes that rewire the plan (fade, swap on a later tick, as recall did). In dry run nothing is executed; the action is listed and sent on the events socket. Disabling and enabling a graph, or a restart, resets its blocks' memory, and value actions apply their input again (D172). | §11.2 "actions become parameter messages". A structural node parameter (a filter slope, a delay time) would swap the plan on every change of a number. |
 | D165 | TSL out sends UMD 5.0 over UDP to one `TSL_OUT_TARGET`, screen `TSL_OUT_SCREEN`, from a task off the control tick: the full state of every `tsl-out` block (left lamp red, right lamp green, label UTF-16) on every change and every second. | §10.3's own rules for a TSL sender. The tick only hands over the state. |
 | D166 | `trigger` fires on the tick after its POST; several POSTs in one tick are one event. | A trigger is an event; the tick is the clock. |
 
@@ -1970,7 +1970,7 @@ and writes the same text to the log (info).
 | 3 | Macro GET | `revision`, `ports` (per inner block, as a graph's) and `exposed` (`{"inputs", "outputs"}`: the instance's typed ports, in block order). Live values exist per graph only, as `<instance>.<block>`. |
 | 4 | Is `.` refused in block ids? | Yes: ids are 1–32 characters a-z, 0-9 and `-`, not starting with `-`. Ungrouping must keep the 32-character and 64-block limits. |
 | 5 | Macro ids `macro-<n>` | Fine (`POST /api/v1/logic-macros` without an id picks the same). |
-| 6 | Plan numbers | The backend uses D158–D174 and X11–X19; the UI D175 and X20 on. |
+| 6 | Plan numbers | The backend uses D158–D174 and X11–X19 (in the end D158–D174, X11–X16); the UI D175 and X20 on. |
 
 ### M8b: deviations
 
@@ -2011,11 +2011,36 @@ Two problems found while building M8b; both were in 1.2.0 too (recall, and
 
 | # | Decision | Reason |
 | --- | --- | --- |
-| D167 | The API and the logic share one change lock (`App::changes` is `Control::changes`). A logic change that rewires the plan (PFL, talk, publish, monitor source, recall) waits for the lock on the control tick (`try_lock`, once per tick), and holds it from its stage until its swap. If the lock stays taken for 1 s, the waiting actions are given up with a warning that names each action. Value changes (mutes, faders, VCAs, parameters) never swap and need no lock. | The logic staged without the lock: an API change that staged while the logic's swap waited for its fade replaced it, and the logic, which had marked it applied, never sent it again. Waiting on the tick keeps the control thread from blocking. |
-| D168 | `mix.json` is written at most every 500 ms after a value change (`state::Coalesce`): the revision, the clients and the show history follow at once, only the file waits. A change that swaps the plan, a show action (snapshots, layouts, history, import) and SIGTERM write at once. The write stays atomic (a temporary file, renamed). | A level into `set-fader`, or an operator riding a fader, saved the whole mix up to 100 times a second onto the `/config` volume. A crash now loses at most the last 0.5 s of fader moves. |
+| D167 | The API and the logic share one change lock (`App::changes` is `Control::changes`). A logic change that rewires the plan (PFL, talk, publish, monitor source, recall) waits for the lock on the control tick (`try_lock`, once per tick), and holds it from its stage until its swap. The newest action of a block replaces an older one still waiting; after 1 s of waiting it is reported once (WARN, naming the action) and keeps waiting. A change that fails to stage makes its blocks forget what they applied, so they act again with their current input (at most every 250 ms, D173), warned once until one succeeds. A value change (mute, fader, VCA, smoothed parameter) never rewires the plan; if one ever does, it takes the lock too, or logs an error and still swaps (its nodes are already fading). | The logic staged without the lock: an API change that staged while the logic's swap waited for its fade replaced it, and the logic, which had marked it applied, never sent it again. Waiting on the tick keeps the control thread from blocking. |
+| D168 | `mix.json` is written at most every 500 ms after a value change (`state::Coalesce`, checked on the 100 ms tick: up to about 0.6 s): the revision, the clients and the show history follow at once, only the file waits. A change that swaps the plan, a show action (snapshots, layouts, history, import) and SIGTERM write at once; the end of the shutdown (after the NMOS deregistration, also after a timeout) writes again what came in meanwhile. The write stays atomic (a temporary file, renamed). | A level into `set-fader`, or an operator riding a fader, saved the whole mix up to 100 times a second onto the `/config` volume. A crash now loses at most the last 0.6 s of fader moves. |
 
 Tests: `logic::tests::a_rewiring_change_waits_for_the_change_lock`,
-`state::tests::writes_are_coalesced`; `tests/integration/logic.sh` publishes one
-bus by logic and another by the API at the same moment five times (neither is
-lost), checks that a fader change reaches `mix.json` within 0.7 s but not at
-once, and that SIGTERM writes the last one.
+`state::tests::writes_are_coalesced`; `tests/integration/logic.sh` has the
+logic unpublish a bus while the API publishes another inside the logic's fade,
+three times: neither is lost. The fade is widened to 400 ms by a test-only
+setting, `MIXER_TEST_LOGIC_SWAP_DELAY_MS`, read from the environment and not
+listed with the settings. Against `ffd50ca` (before D167) with the same hook
+patched in, the check failed in round 1 every time (both buses stayed
+published, so the logic's unpublish was lost). Without the hook the two
+requests did not overlap reliably. It also checks that a fader change reaches
+`mix.json` within 0.7 s but not at once, and that SIGTERM writes the last one.
+
+### M8b: the review of `cfebe08` (2026-10-17)
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D169 | Validation is linear in the macros: each macro's depth is computed once (memoised, with the cycle found on the way), the macros that use a bad or missing one are a fixed point over the macros, and an inlining counts macro instances as well as blocks against a budget of 512 (`MAX_EXPANDED`, twice the 256 inlined blocks). A logic edit through the API is validated off the control lock (`spawn_blocking`, under the change lock); only its graphs and macros are then taken into the mix. | Four levels of 64 nested instances without blocks of their own took 9.2 s in a release build while holding the control mutex (the tick, the meters, the API and `/readyz` froze). The budget bounds the walk; the memo bounds the depth checks. |
+| D170 | Not a number at a value action is no change (no action, not counted as a change); +∞ is the fader's maximum, −∞ closes it; `set-param` does nothing with NaN and clamps ±∞ to the parameter's range. | NaN read as −∞ closed the fader on every tick. |
+| D171 | `stage` validates the logic only when the graphs, the macros or what they name changed (`logic::Context`: the strips and buses with their chains' node ids, types and structure, VCAs, talkback mics and destinations, monitors). | A fader move re-validated every graph: 14–30 ms at the limits on each move. |
+| D172 | A block keeps its memory over an edit only while its type and parameters stay the same. An action moved to another target acts on the new one at once with the current input; the old target stays as it is. An input wired to another block starts over: its first value is not an edge. `edge` and `timer` do not take the first tick as a rise. Disabling and enabling a graph, or a restart, resets every block's memory (toggles, latches, counters); value actions then apply their input again on the first tick (D164). | A `set-mute` moved from vox to music kept "applied" and never muted music; a `tsl-out` moved to another index kept sending the old one; a recall fed by an input that was on at start fired after every restart. |
+| D173 | Rate limits per action block: mute, fader, VCA and parameter at most every 20 ms, TSL out every 50 ms, a webhook every 100 ms (one post per window; the others are dropped); a value held back is sent as the newest value when the block may run again. Changes that rewire the plan at most every 250 ms (the newest of a block wins). Webhooks share one HTTP client, at most 8 posts at once (another is dropped with a warning). | A noisy input could make the mixer rewire, post or send TSL 100 times a second. |
+| D174 | TSL out: an index that leaves the output (its block removed or moved, its graph disabled or in dry run) is sent once with its lamps off and no label; a packet is at most 2048 bytes (TSL 5.0), more displays go in more packets, labels are cut at 128 UTF-16 units; a failure is logged once until sending works again. | A lamp stayed lit after its block went; 100 displays with long labels made one oversized datagram; a failure was logged only once for ever. |
+
+Also: `check_param` tries small and large steps, relative and absolute (a delay of 0 ms, 0.5 ms or 20 samples is structural, X14); `POST /api/v1/logic-validate` answers 400 and 409 as the batch would (missing deletions, stale revisions) and validates the proposed graphs off the control lock; a batch that deletes a missing graph or macro is 400; a description has at most 1000 characters.
+
+Tests: `an_unconnected_macro_input_drives_no_action` (B1),
+`a_changed_action_acts_on_its_new_target_at_once` (B2),
+`edges_need_a_rise_they_saw`, `not_a_number_is_no_change_and_infinity_is_clamped`
+(B3), `nested_macros_validate_quickly_within_a_budget` (B4, under 1 s in a debug
+build), `webhooks_and_faders_are_rate_limited`, `small_structural_values_are_found`,
+`descriptions_are_limited`, the TSL encoder's 2048-byte split.

@@ -312,12 +312,35 @@ struct State {
     n: f64,
     count: f64,
     applied: Option<Applied>,
+    /// Edge and timer: the input has been seen once (the first tick is not a
+    /// rise, D172).
+    seen: bool,
+    /// The tick this action last ran (the rate limit, D173).
+    last_run: Option<u64>,
+}
+
+/// Fewest ticks between two runs of one action block (D173): value actions
+/// 20 ms, TSL 50 ms, webhooks 100 ms. A value held back is the newest one
+/// when the block may run again.
+fn min_ticks(kind: &BlockKind) -> u64 {
+    match kind {
+        BlockKind::Webhook { .. } => 10,
+        BlockKind::TslOut { .. } => 5,
+        BlockKind::SetMute { .. }
+        | BlockKind::SetFader { .. }
+        | BlockKind::SetVca { .. }
+        | BlockKind::SetParam { .. } => 2,
+        _ => 0,
+    }
 }
 
 struct Plan {
     blocks: Vec<FlatBlock>,
     /// Per block and input: the block that feeds it.
     inputs: Vec<Vec<Option<usize>>>,
+    /// Per block and input: a value reaches it. An input wired to a macro's
+    /// exposed input that is itself unwired outside is not driven (D159).
+    driven: Vec<Vec<bool>>,
     /// The blocks that do not remember, in order.
     order: Vec<usize>,
     /// The blocks that remember.
@@ -341,7 +364,24 @@ impl Plan {
         let stateful = (0..flat.blocks.len())
             .filter(|i| flat.blocks[*i].kind.remembers())
             .collect();
+        // Follow pass-throughs (macro-in, macro-out) back to a real source.
+        let is_pass =
+            |k: &BlockKind| matches!(k, BlockKind::MacroIn { .. } | BlockKind::MacroOut { .. });
+        let source_driven = |mut src: usize| loop {
+            if !is_pass(&flat.blocks[src].kind) {
+                return true;
+            }
+            match inputs[src][0] {
+                Some(next) => src = next,
+                None => return false,
+            }
+        };
+        let driven = inputs
+            .iter()
+            .map(|ins| ins.iter().map(|s| s.is_some_and(source_driven)).collect())
+            .collect();
         Ok(Self {
+            driven,
             order: order
                 .into_iter()
                 .filter(|i| !flat.blocks[*i].kind.remembers())
@@ -364,6 +404,8 @@ struct Run {
     /// Times each block's value fired as an event.
     fired: Vec<u64>,
     dry_run: bool,
+    /// Ticks run, for the rate limits (D173).
+    tick: u64,
 }
 
 impl Run {
@@ -371,17 +413,30 @@ impl Run {
         let plan = Plan::new(g, macros)?;
         // A change of dry run is noticed by the caller (it resets what was applied).
         let dry_run = old.as_ref().map_or(g.dry_run, |o| o.dry_run);
-        let mut kept: BTreeMap<String, (State, Value, u64)> = BTreeMap::new();
+        let tick = old.as_ref().map_or(0, |o| o.tick);
+        // A block keeps its memory only while its type and parameters stay
+        // the same (D172): a set-mute moved to another signal acts on it at
+        // once; the old target stays as it is.
+        type Kept = (BlockKind, Vec<Option<String>>, State, Value, u64);
+        let mut kept: BTreeMap<String, Kept> = BTreeMap::new();
         if let Some(old) = old {
-            for (((b, s), v), f) in old
+            let sources = |i: usize| -> Vec<Option<String>> {
+                old.plan.inputs[i]
+                    .iter()
+                    .map(|s| s.map(|s| old.plan.blocks[s].id.clone()))
+                    .collect()
+            };
+            let from: Vec<Vec<Option<String>>> = (0..old.plan.blocks.len()).map(sources).collect();
+            for ((((b, s), v), f), src) in old
                 .plan
                 .blocks
                 .iter()
                 .zip(old.states)
                 .zip(old.outs)
                 .zip(old.fired)
+                .zip(from)
             {
-                kept.insert(b.id.clone(), (s, v, f));
+                kept.insert(b.id.clone(), (b.kind.clone(), src, s, v, f));
             }
         }
         let mut states = Vec::new();
@@ -394,9 +449,25 @@ impl Run {
                 .first()
                 .or(b.ports.inputs.first())
                 .map_or(PortType::Number, |p| p.ty);
-            let (mut s, v, f) = kept
-                .remove(&b.id)
-                .unwrap_or_else(|| (State::default(), Value::default_of(ty), 0));
+            let fresh = || (State::default(), Value::default_of(ty), 0);
+            let (mut s, v, f) = match kept.remove(&b.id) {
+                Some((kind, src, s, v, f)) if kind == b.kind => {
+                    let mut s = s;
+                    // An input wired to another block starts over: its new
+                    // value is not an edge (D172).
+                    for (k, now) in plan.inputs[i].iter().enumerate() {
+                        let now = now.map(|n| &plan.blocks[n].id);
+                        if src.get(k).cloned().flatten().as_ref() != now {
+                            if let Some(c) = s.conv.get_mut(k) {
+                                *c = None;
+                            }
+                            s.seen = false;
+                        }
+                    }
+                    (s, v, f)
+                }
+                _ => fresh(),
+            };
             s.conv.resize(plan.inputs[i].len(), None);
             states.push(s);
             outs.push(v);
@@ -409,6 +480,7 @@ impl Run {
             outs,
             fired,
             dry_run,
+            tick,
         })
     }
 
@@ -421,8 +493,9 @@ impl Run {
         }
     }
 
+    /// A value reaches input `k` of block `i` (also through macro ports).
     fn wired(&self, i: usize, k: usize) -> bool {
-        self.plan.inputs[i].get(k).is_some_and(Option::is_some)
+        self.plan.driven[i].get(k).copied().unwrap_or(false)
     }
 
     fn tick(
@@ -432,6 +505,7 @@ impl Run {
         triggered: &BTreeSet<String>,
     ) -> Vec<(String, Act)> {
         let mut acts = Vec::new();
+        self.tick += 1;
         let plan = self.plan.clone();
         for &i in &plan.order {
             let b = &plan.blocks[i];
@@ -595,6 +669,10 @@ impl Run {
         kind: &BlockKind,
         acts: &mut Vec<(String, Act)>,
     ) -> Value {
+        let tick = self.tick;
+        let ready = self.states[i]
+            .last_run
+            .is_none_or(|t| tick >= t + min_ticks(kind));
         if let BlockKind::TslOut { index } = kind {
             if !(0..3).any(|k| self.wired(i, k)) {
                 return Value::Bool(false);
@@ -603,8 +681,9 @@ impl Run {
             let right = self.read(i, 1).truthy();
             let label = self.read(i, 2).text();
             let now = Applied::Tsl(left, right, label.clone());
-            if self.states[i].applied.as_ref() != Some(&now) {
+            if ready && self.states[i].applied.as_ref() != Some(&now) {
                 self.states[i].applied = Some(now);
+                self.states[i].last_run = Some(tick);
                 acts.push((
                     id.to_string(),
                     Act::Tsl {
@@ -623,8 +702,9 @@ impl Run {
         let v = self.read(i, 0);
         let mut follow_bool = |s: &mut State, act: &dyn Fn(bool) -> Act| {
             let on = v.truthy();
-            if s.applied != Some(Applied::Bool(on)) {
+            if ready && s.applied != Some(Applied::Bool(on)) {
                 s.applied = Some(Applied::Bool(on));
+                s.last_run = Some(tick);
                 acts.push((id.to_string(), act(on)));
             }
         };
@@ -649,19 +729,23 @@ impl Run {
             }),
             BlockKind::SetFader { .. } | BlockKind::SetVca { .. } | BlockKind::SetParam { .. } => {
                 let x = v.num();
-                let changed = match s.applied {
-                    Some(Applied::Num(p)) => {
-                        let tolerance = if matches!(kind, BlockKind::SetParam { .. }) {
-                            1e-6 * p.abs().max(1.0)
-                        } else {
-                            0.05
-                        };
-                        !(p == x || (p - x).abs() <= tolerance)
-                    }
-                    _ => true,
-                };
+                // Not a number is no change (D170); +∞ and −∞ are clamped.
+                let changed = !x.is_nan()
+                    && ready
+                    && match s.applied {
+                        Some(Applied::Num(p)) => {
+                            let tolerance = if matches!(kind, BlockKind::SetParam { .. }) {
+                                1e-6 * p.abs().max(1.0)
+                            } else {
+                                0.05
+                            };
+                            !(p == x || (p - x).abs() <= tolerance)
+                        }
+                        _ => true,
+                    };
                 if changed {
                     s.applied = Some(Applied::Num(x));
+                    s.last_run = Some(tick);
                     acts.push((
                         id.to_string(),
                         match kind {
@@ -692,7 +776,11 @@ impl Run {
                     ));
                 }
             }
+            BlockKind::Webhook { .. } if !ready => {
+                // At most one post per 100 ms per block (D173).
+            }
             _ if v.truthy() => {
+                s.last_run = Some(tick);
                 let act = match kind {
                     BlockKind::SetMonitor { monitor, source } => Act::Monitor {
                         monitor: monitor.clone(),
@@ -731,8 +819,9 @@ impl Run {
             BlockKind::Edge => {
                 let cur = self.read(i, 0).truthy();
                 let s = &mut self.states[i];
-                let rose = cur && !s.prev;
+                let rose = s.seen && cur && !s.prev;
                 s.prev = cur;
+                s.seen = true;
                 Value::Event(rose)
             }
             BlockKind::Latch => {
@@ -768,10 +857,11 @@ impl Run {
             BlockKind::Timer { ms } => {
                 let cur = self.read(i, 0).truthy();
                 let s = &mut self.states[i];
-                if cur && !s.prev {
+                if s.seen && cur && !s.prev {
                     s.n = pulse_ticks(*ms);
                 }
                 s.prev = cur;
+                s.seen = true;
                 let running = s.n > 0.0;
                 if running {
                     s.n -= 1.0;
@@ -877,6 +967,16 @@ impl Logic {
             .insert(block.to_string());
     }
 
+    /// Forget what action `block` of `graph` applied, so it runs again with
+    /// its current input (a change that could not be applied).
+    pub fn forget(&mut self, graph: &str, block: &str) {
+        if let Some(run) = self.runs.get_mut(graph) {
+            if let Some(i) = run.plan.blocks.iter().position(|b| b.id == block) {
+                run.states[i].applied = None;
+            }
+        }
+    }
+
     /// Each block's value after the last tick, as JSON (`values` in the API).
     pub fn values(&self, graph: &str) -> Option<Json> {
         self.runs.get(graph).map(Run::values)
@@ -971,50 +1071,66 @@ impl Logic {
     }
 }
 
-/// Ticks a logic change that rewires the plan waits for the change lock (1 s).
+/// Ticks a logic change that rewires the plan may wait for the change lock
+/// before it is reported (1 s); it keeps waiting.
 pub const MAX_WAIT_TICKS: u32 = 100;
+/// Least time between two logic changes that rewire the plan (D173).
+pub const REWIRE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Logic changes that rewire the plan (PFL, talk, publish, monitor source,
 /// recall), waiting for the API's change lock, so an API change and a logic
-/// change never overwrite each other's staged plan (D167).
+/// change never overwrite each other's staged plan (D167). The newest action
+/// of a block replaces an older one still waiting.
 #[derive(Default)]
 pub struct Waiting {
     actions: Vec<Action>,
     ticks: u32,
+    last_go: Option<std::time::Instant>,
 }
 
 /// What [`Waiting::take`] found.
 pub enum Taken {
     /// Nothing waits.
     Idle,
-    /// The lock is held by a change of the mix; try again next tick.
+    /// The lock is held, or the last change was less than
+    /// [`REWIRE_INTERVAL`] ago; try again next tick.
     Wait,
+    /// The lock has been held for [`MAX_WAIT_TICKS`]: these still wait (the
+    /// caller warns once).
+    Late(Vec<Action>),
     /// The lock, held until the change is swapped in, and the actions.
     Go(tokio::sync::OwnedMutexGuard<()>, Vec<Action>),
-    /// The lock was held for [`MAX_WAIT_TICKS`]: these are given up.
-    Dropped(Vec<Action>),
 }
 
 impl Waiting {
     pub fn push(&mut self, a: Action) {
+        self.actions
+            .retain(|x| !(x.graph == a.graph && x.block == a.block));
         self.actions.push(a);
     }
 
     /// One try per tick.
-    pub fn take(&mut self, lock: &std::sync::Arc<tokio::sync::Mutex<()>>) -> Taken {
+    pub fn take(
+        &mut self,
+        lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
+        now: std::time::Instant,
+    ) -> Taken {
         if self.actions.is_empty() {
             return Taken::Idle;
+        }
+        if self.last_go.is_some_and(|t| now < t + REWIRE_INTERVAL) {
+            return Taken::Wait;
         }
         match lock.clone().try_lock_owned() {
             Ok(guard) => {
                 self.ticks = 0;
+                self.last_go = Some(now);
                 Taken::Go(guard, std::mem::take(&mut self.actions))
             }
             Err(_) => {
                 self.ticks += 1;
-                if self.ticks >= MAX_WAIT_TICKS {
-                    self.ticks = 0;
-                    Taken::Dropped(std::mem::take(&mut self.actions))
+                if self.ticks == MAX_WAIT_TICKS {
+                    Taken::Late(self.actions.clone())
                 } else {
                     Taken::Wait
                 }
@@ -1077,12 +1193,13 @@ fn fader(mix: &Mix, signal: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Clamp a fader a logic graph asked for.
+/// Clamp a fader a logic graph asked for: at most `MAX_FADER_DB` (also +∞),
+/// −∞ closes it. Not a number never gets here (D170).
 pub fn clamp_fader(db: f64) -> Db {
-    Db(if db.is_finite() {
-        db.min(crate::mix::model::MAX_FADER_DB)
-    } else {
+    Db(if db == f64::NEG_INFINITY || db.is_nan() {
         f64::NEG_INFINITY
+    } else {
+        db.min(crate::mix::model::MAX_FADER_DB)
     })
 }
 

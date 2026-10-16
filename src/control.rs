@@ -48,6 +48,9 @@ pub enum PatchState {
 /// explicit show actions write at once.
 pub const SAVE_DELAY: Duration = Duration::from_millis(500);
 
+/// Logic webhook posts running at once.
+pub const MAX_WEBHOOKS: usize = 8;
+
 /// A momentary talk not repeated within this long ends (a client that went away).
 pub const MOMENTARY_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -85,7 +88,19 @@ pub struct Control {
     /// plan takes it too, and holds it until its swap (D167).
     pub changes: std::sync::Arc<tokio::sync::Mutex<()>>,
     logic_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    /// Test only (`MIXER_TEST_LOGIC_SWAP_DELAY_MS`): a logic swap waits this
+    /// much longer after its fade, so a test can put an API change inside the
+    /// window (`tests/integration/logic.sh`). 0 otherwise.
+    logic_swap_delay: Duration,
     logic_waiting: crate::logic::Waiting,
+    /// Logic blocks whose rewiring change failed (warned once).
+    logic_failing: std::collections::BTreeSet<(String, String)>,
+    /// The logic last found valid, with what it named (D171).
+    logic_valid: Option<(
+        Vec<crate::mix::logic::Graph>,
+        Vec<crate::mix::logic::Macro>,
+        crate::mix::logic::Context,
+    )>,
     /// `mix.json` is written at most every [`SAVE_DELAY`] (D168).
     mix_save: crate::state::Coalesce,
     block: u32,
@@ -148,8 +163,17 @@ impl Control {
             logic_swap_at: None,
             changes: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             logic_guard: None,
+            logic_swap_delay: Duration::from_millis(
+                std::env::var("MIXER_TEST_LOGIC_SWAP_DELAY_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    .min(5_000),
+            ),
             logic_waiting: crate::logic::Waiting::default(),
+            logic_failing: std::collections::BTreeSet::new(),
             mix_save: crate::state::Coalesce::default(),
+            logic_valid: None,
             block: config.block_samples,
             read_offset: config.read_offset_samples,
             input_count: config.input_flows,
@@ -178,27 +202,48 @@ impl Control {
             .unwrap_or(0)
     }
 
+    /// POST a logic webhook: one shared client (5 s timeout), at most
+    /// [`MAX_WEBHOOKS`] posts at once; one more is dropped with a warning (D173).
     fn post_webhook(url: String, graph: String, block: String) {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build();
-                let sent = match client {
-                    Ok(client) => client
-                        .post(&url)
-                        .json(&serde_json::json!({"graph": graph, "block": block, "value": 1}))
-                        .send()
-                        .await
-                        .and_then(|r| r.error_for_status())
-                        .map(|_| ()),
-                    Err(e) => Err(e),
-                };
-                if let Err(e) = sent {
-                    tracing::warn!("logic webhook {}: {}", redact_url(&url), e.without_url());
-                }
-            });
-        }
+        static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+        static RUNNING: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .ok()
+        });
+        let Some(client) = client.clone() else {
+            tracing::warn!("logic webhook: no HTTP client");
+            return;
+        };
+        let running = RUNNING
+            .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_WEBHOOKS)))
+            .clone();
+        let Ok(permit) = running.try_acquire_owned() else {
+            tracing::warn!(
+                "logic webhook {}: {MAX_WEBHOOKS} posts are still running; this one was dropped",
+                redact_url(&url)
+            );
+            return;
+        };
+        handle.spawn(async move {
+            let _permit = permit;
+            let sent = client
+                .post(&url)
+                .json(&serde_json::json!({"graph": graph, "block": block, "value": 1}))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .map(|_| ());
+            if let Err(e) = sent {
+                tracing::warn!("logic webhook {}: {}", redact_url(&url), e.without_url());
+            }
+        });
     }
 
     /// What the logic blocks read this tick.
@@ -363,14 +408,14 @@ impl Control {
     /// staged together; the lock is held until the swap (D167).
     fn run_waiting(&mut self) {
         use crate::logic::{Act, Taken};
-        let (guard, actions) = match self.logic_waiting.take(&self.changes) {
+        let (guard, actions) = match self.logic_waiting.take(&self.changes, Instant::now()) {
             Taken::Idle | Taken::Wait => return,
-            Taken::Dropped(actions) => {
+            Taken::Late(actions) => {
                 for a in actions {
                     tracing::warn!(
                         graph = %a.graph,
                         block = %a.block,
-                        "logic: {} given up: the mix was being changed for 1 s",
+                        "logic: {} waits: the mix has been changing for 1 s",
                         a.act.describe()
                     );
                 }
@@ -381,6 +426,10 @@ impl Control {
         let described: Vec<String> = actions
             .iter()
             .map(|a| format!("{} {}: {}", a.graph, a.block, a.act.describe()))
+            .collect();
+        let blocks: Vec<(String, String)> = actions
+            .iter()
+            .map(|a| (a.graph.clone(), a.block.clone()))
             .collect();
         let mut next = self.mix.clone();
         let solo_before = self.compiler.solo.clone();
@@ -451,7 +500,8 @@ impl Control {
         match self.stage(next, FADE_SAMPLES) {
             Ok(Staged::Done) => {}
             Ok(Staged::Swap { wait: true }) => {
-                self.logic_swap_at = Some(Instant::now() + fade_wait(self.block));
+                self.logic_swap_at =
+                    Some(Instant::now() + fade_wait(self.block) + self.logic_swap_delay);
                 self.logic_guard = Some(guard);
             }
             Ok(Staged::Swap { wait: false }) => {
@@ -459,7 +509,20 @@ impl Control {
                     tracing::warn!("logic: {e} ({})", described.join("; "));
                 }
             }
-            Err(e) => tracing::warn!("logic: {e}; not applied: {}", described.join("; ")),
+            Err(e) => {
+                // Not applied: the blocks act again with their current input
+                // (at most every 250 ms); warned once until one succeeds.
+                for (g, b) in &blocks {
+                    self.logic.forget(g, b);
+                }
+                if blocks.iter().any(|k| self.logic_failing.insert(k.clone())) {
+                    tracing::warn!("logic: {e}; not applied: {}", described.join("; "));
+                }
+                return;
+            }
+        }
+        for k in &blocks {
+            self.logic_failing.remove(k);
         }
     }
 
@@ -468,13 +531,36 @@ impl Control {
     fn stage_logic(&mut self, next: Mix, ramp: u32) -> bool {
         match self.stage(next, ramp) {
             Ok(Staged::Done) => true,
-            Ok(Staged::Swap { wait: true }) => {
-                self.logic_swap_at = Some(Instant::now() + fade_wait(self.block));
-                false
-            }
-            Ok(Staged::Swap { wait: false }) => {
-                if let Err(e) = self.swap() {
-                    tracing::warn!("logic: {e}");
+            Ok(Staged::Swap { wait }) => {
+                // A mute, fader, VCA or smoothed parameter never rewires the
+                // plan; if one does, it takes the change lock like the others.
+                match self.changes.clone().try_lock_owned() {
+                    Ok(guard) if wait => {
+                        self.logic_swap_at =
+                            Some(Instant::now() + fade_wait(self.block) + self.logic_swap_delay);
+                        self.logic_guard = Some(guard);
+                        return false;
+                    }
+                    Ok(_guard) => {
+                        if let Err(e) = self.swap() {
+                            tracing::warn!("logic: {e}");
+                        }
+                    }
+                    Err(_) => {
+                        // The nodes are already fading: the swap must follow.
+                        tracing::error!(
+                            "logic: a value change rewired the plan while the mix was being changed"
+                        );
+                        if wait {
+                            self.logic_swap_at = Some(
+                                Instant::now() + fade_wait(self.block) + self.logic_swap_delay,
+                            );
+                            return false;
+                        }
+                        if let Err(e) = self.swap() {
+                            tracing::warn!("logic: {e}");
+                        }
+                    }
                 }
                 true
             }
@@ -488,9 +574,15 @@ impl Control {
     /// Hand the `tsl-out` displays of the running graphs to the TSL sender.
     fn update_tsl_out(&mut self) {
         let mix = &self.mix;
-        self.tsl_displays.retain(|(g, b), _| {
-            mix.logic_graph(g)
-                .is_some_and(|g| g.enabled && !g.dry_run && mix.logic_block_at(&g.id, b).is_some())
+        self.tsl_displays.retain(|(g, b), (index, _)| {
+            mix.logic_graph(g).is_some_and(|g| {
+                g.enabled
+                    && !g.dry_run
+                    && matches!(
+                        mix.logic_block_at(&g.id, b),
+                        Some(crate::mix::logic::BlockKind::TslOut { index: i }) if i == index
+                    )
+            })
         });
         let Some(tx) = &self.tsl_out else {
             return;
@@ -941,6 +1033,31 @@ impl Control {
             .expire(&mut c.engine, |id| ids.iter().any(|x| x == id))
     }
 
+    /// Validate the logic of `next`, unless it and what it names are what was
+    /// last found valid: a fader move does not check every graph again (D171).
+    fn check_logic(&mut self, next: &Mix) -> Result<(), String> {
+        let context = crate::mix::logic::Context::of(next);
+        let same = self
+            .logic_valid
+            .as_ref()
+            .is_some_and(|(g, m, c)| *g == next.logic && *m == next.logic_macros && *c == context);
+        if !same {
+            crate::mix::logic::validate(next)?;
+            self.logic_valid = Some((next.logic.clone(), next.logic_macros.clone(), context));
+        }
+        Ok(())
+    }
+
+    /// The logic of `mix` was validated (off the control lock): the next stage
+    /// need not do it again.
+    pub fn logic_validated(&mut self, mix: &Mix) {
+        self.logic_valid = Some((
+            mix.logic.clone(),
+            mix.logic_macros.clone(),
+            crate::mix::logic::Context::of(mix),
+        ));
+    }
+
     /// Check `next` and start applying it. Parameter-only changes ramp over `ramp`
     /// samples and are done; anything else fades the affected nodes out and needs
     /// [`Control::swap`] after [`fade_wait`].
@@ -948,7 +1065,8 @@ impl Control {
         if self.link.refuses() {
             return Err("the master is disconnected and local takeover is denied".into());
         }
-        next.validate(self.input_count, self.block)?;
+        next.validate_except_logic(self.input_count, self.block)?;
+        self.check_logic(&next)?;
         self.compiler.afv = self.afv_targets(&next);
         self.compiler.auto = self.auto.compile_gains(&next);
         self.compiler.vad_slots = self.auto.assign(&next);
