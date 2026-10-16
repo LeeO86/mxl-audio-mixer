@@ -13,6 +13,8 @@ export async function exchange(path, { method = "GET", body, text = false } = {}
     headers,
     body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
     cache: "no-store",
+    // A hung request ends after 30 s, so a poll waiting for it carries on.
+    signal: AbortSignal.timeout(30000),
   });
   const raw = await resp.text();
   let data = raw;

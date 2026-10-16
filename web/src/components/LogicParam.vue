@@ -2,8 +2,9 @@
 // One parameter of a logic block in the list (§11.3), edited by its catalog kind. A component of its own:
 // the Logic tab redraws often (ports, actions, selection), and a redraw of a plain input would put the
 // stored value back over a number being typed. A choice made with the keyboard (arrow keys step through
-// a <select> and fire "change" at every step) applies on Enter or when the field is left, so stepping
-// past strips does not move an action to each of them; a mouse choice applies at once.
+// a <select> and fire "change" at every step) applies on Enter or when the field is left, and Escape
+// puts the stored one back, so stepping past strips does not move an action to each of them; a mouse
+// choice applies at once.
 import { ref } from "vue";
 
 const props = defineProps({
@@ -25,6 +26,11 @@ function settle() {
   pending.value = null;
   keyed.value = false;
 }
+function cancel(e) {
+  pending.value = null;
+  keyed.value = false;
+  e.target.value = empty() ? "" : props.block[props.param.name];
+}
 const empty = () => props.block[props.param.name] === undefined || props.block[props.param.name] === null || props.block[props.param.name] === "";
 </script>
 
@@ -36,7 +42,8 @@ const empty = () => props.block[props.param.name] === undefined || props.block[p
     :title="props.param.name"
     @pointerdown="keyed = false"
     @keydown.enter="settle"
-    @keydown="$event.key !== 'Enter' && $event.key !== 'Tab' && (keyed = true)"
+    @keydown.esc="cancel"
+    @keydown="!['Enter', 'Tab', 'Escape'].includes($event.key) && (keyed = true)"
     @blur="settle"
     @change="picked($event.target.value)"
   >

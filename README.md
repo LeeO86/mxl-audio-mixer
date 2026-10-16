@@ -48,9 +48,10 @@ server's reasons as red markers on the blocks, ports and the dashed cable; every
 block shows its live value; soft keys, triggers, dry run and the list of the last
 actions; the list under the canvas edits every parameter. A new graph starts in
 dry run, and the toolbar shows LIVE, DRY RUN or OFF; undo never changes that. A
-new block gets no target by itself (amber until one is chosen). In a live graph,
-paste, group and ungroup ask first: pasted actions act at once, and grouped or
-ungrouped blocks start with empty memory),
+new block gets no target by itself (amber until one is chosen: an action without
+one never acts, an input without one reads off, 0 or the floor). In a live graph,
+paste, group, ungroup, undo and redo ask first when they make actions or blocks
+that remember: those actions act at once, and re-made blocks start empty),
 **Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
 history), **Meters** (the bridge on dBFS, true peak or PPM EBU, BBC, Nordic, DIN at
 an alignment level, phase correlation; loudness; spectrum and goniometer of any

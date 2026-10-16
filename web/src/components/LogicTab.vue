@@ -84,7 +84,16 @@ function forgetShown() {
   for (const k of Object.keys(fired)) delete fired[k];
   Object.assign(detail, { buttons: [], actions: [], ports: {}, warnings: [] });
 }
-watch(() => (doc.value ? keyOf(doc.value) : ""), forgetShown);
+watch(
+  () => (doc.value ? keyOf(doc.value) : ""),
+  () => {
+    forgetShown();
+    // A dialog belongs to the graph or macro it was opened in.
+    confirming.value = null;
+    choosing.value = null;
+    grouping.value = null;
+  },
+);
 
 // One poll at a time; an answer for a graph or macro that is no longer open is dropped.
 async function refresh() {
@@ -158,7 +167,8 @@ let queued = Promise.resolve();
 // A failed step must not stop the ones after it.
 const failed = (e) => (live.actionError = e.message);
 
-// POST /api/v1/logic-batch: the answer, or { conflict } on 409, or nothing (issues shown).
+// POST /api/v1/logic-batch: the answer, { conflict } on 409, { refused } on 400 (issues shown), or
+// nothing (the request failed: network, 5xx).
 async function send(body, want) {
   try {
     const done = await api.post("/api/v1/logic-batch", body);
@@ -173,7 +183,7 @@ async function send(body, want) {
       issues.value = e.data.issues;
       rejected.value = want || null;
     } else live.actionError = e.message;
-    return null;
+    return e.status === 400 ? { refused: true } : null;
   }
 }
 
@@ -206,7 +216,7 @@ function edit(label, reads, build, { lists = false } = {}) {
       const mine = body[`${d.kind}s`].find((r) => r.id === d.id);
       const done = await send(body, mine && { key, res: mine });
       if (done?.conflict) live.actionError = "Changed elsewhere meanwhile; nothing was written. Try again.";
-      if (!done || done.conflict) return;
+      if (!done || done.conflict || done.refused) return;
       const changes = [];
       for (const kind of ["graph", "macro"]) {
         for (const r of body[`${kind}s`]) {
@@ -235,26 +245,55 @@ const patch = (label, body) => commit(label, () => body);
 
 // "On" and "dry run" of graphs: the operator's switches, written at once and never undone or redone (an
 // undo must not take a graph live).
+// Resolves to whether every graph was written.
 function setGraphs(ids, fields) {
+  let ok = false;
   queued = queued
     .then(async () => {
       const body = { graphs: [] };
       for (const id of ids) {
         const c = await api.get(`/api/v1/logic/${id}`).catch(() => null);
-        if (c) body.graphs.push({ ...resource(c), ...fields, revision: c.revision });
+        if (!c) return void (live.actionError = `Graph ${id} could not be read; nothing was written.`);
+        body.graphs.push({ ...resource(c), ...fields, revision: c.revision });
       }
-      if (body.graphs.length && (await send(body))?.conflict) live.actionError = "Changed elsewhere meanwhile; nothing was written. Try again.";
+      const done = await send(body);
+      if (done?.conflict) live.actionError = "Changed elsewhere meanwhile; nothing was written. Try again.";
+      ok = !!done && !done.conflict && !done.refused;
     })
     .catch(failed);
-  return queued;
+  return queued.then(() => ok);
+}
+// A switch in the settings row; it flips back when the write fails.
+async function toggle(e, field) {
+  const box = e.target;
+  if (!(await setGraphs([graph.value.id], { [field]: box.checked }))) box.checked = !box.checked;
 }
 
 // Undo (back) or redo. Each graph and macro of the entry is read again and must still be what this client
 // left (else the history is cleared: someone else changed it); it is written back with the revision just
-// read, keeping its "on" and "dry run". A refused step (400) is dropped from the history.
+// read, keeping its "on" and "dry run". A refused step (400) is dropped from the history; a failed one
+// (network, 5xx) stays. In a live graph, a step that re-makes actions or blocks that remember asks first.
 function step(back) {
   const d = doc.value;
   if (!d) return queued;
+  const key = keyOf(d);
+  // What the step would re-make, against the graphs and macros as they are now (read, not the last push).
+  queued = queued
+    .then(async () => {
+      const entry = history[key]?.[back ? "undo" : "redo"].at(-1);
+      if (!entry) return;
+      const remade = [];
+      for (const c of entry.changes) {
+        const had = (await api.get(urlOf(c)).catch(() => null))?.blocks || [];
+        const want = back ? c.before : c.after;
+        remade.push(...(want?.blocks || []).filter((b) => !had.some((x) => x.id === b.id && same({ blocks: [x] }, { blocks: [b] }))));
+      }
+      guardLive(remade, `${back ? "Undo" : "Redo"} of "${entry.label}" re-makes blocks: actions among them act at once, and blocks that remember start empty.`, () => stepNow(back, d));
+    })
+    .catch(failed);
+  return queued;
+}
+function stepNow(back, d) {
   const key = keyOf(d);
   const cleared = () => {
     forget(key);
@@ -283,8 +322,9 @@ function step(back) {
       }
       const done = await send(body);
       if (done?.conflict) return cleared();
-      from.pop();
       if (!done) return;
+      from.pop();
+      if (done.refused) return;
       (back ? h.redo : h.undo).push(entry);
       live.notice = `${back ? "Undone" : "Redone"}: ${entry.label}.`;
     })
@@ -394,6 +434,8 @@ function place(type, at, extra = {}) {
   if (typeof r === "string") return void (live.actionError = r);
   const needs = r.needs.filter((p) => !(p.name in extra));
   if (needs.length) choosing.value = { type, at, extra, needs, draft: { id: "new", type, ...r.params, ...extra } };
+  // A new action has no wired input, so it does nothing yet; a macro instance's inner actions may act.
+  else if (type === "macro") guardLive([{ type }], "A macro's actions act at once, with whatever its inputs read.", () => add(type, at, { ...r.params, ...extra }));
   else add(type, at, { ...r.params, ...extra });
 }
 const chosen = computed(() => choosing.value?.needs.every((p) => choosing.value.draft[p.name] !== undefined && choosing.value.draft[p.name] !== ""));
@@ -494,7 +536,7 @@ const liveGraphs = computed(() => {
   if (!openMacro.value) return running.filter((g) => g.id === graph.value?.id);
   return running.filter((g) => uses(g.blocks, openMacro.value.id));
 });
-const state = computed(() => (!graph.value ? "" : openMacro.value ? (liveGraphs.value.length ? "live" : "dry") : !graph.value.enabled ? "off" : graph.value.dry_run ? "dry" : "live"));
+const state = computed(() => (!graph.value ? "" : openMacro.value ? (liveGraphs.value.length ? "live" : "off") : !graph.value.enabled ? "off" : graph.value.dry_run ? "dry" : "live"));
 
 // Group, ungroup and paste re-make blocks: in a live graph, actions among them apply at once and blocks
 // that remember start empty (D172). Then the operator confirms, or goes to dry run first.
@@ -504,11 +546,15 @@ function guardLive(blocks, text, run) {
   if (liveGraphs.value.length && risky(blocks)) confirming.value = { text, run };
   else run();
 }
-function confirmLive(dryFirst) {
+// "Switch to dry run first" goes ahead only when the switch was written.
+async function confirmLive(dryFirst) {
   const c = confirming.value;
   confirming.value = null;
   if (!c) return;
-  if (dryFirst) setGraphs(liveGraphs.value.map((g) => g.id), { dry_run: true });
+  if (dryFirst && !(await setGraphs(liveGraphs.value.map((g) => g.id), { dry_run: true }))) {
+    live.actionError = `Not switched to dry run, so nothing was changed. ${live.actionError || ""}`.trim();
+    return;
+  }
   c.run();
 }
 
@@ -911,8 +957,8 @@ onUnmounted(() => {
     <template v-if="graph">
       <div v-if="!openMacro" class="row" style="margin-top: 0.6rem">
         <input :value="graph.name" aria-label="Logic name" @change="patch('Rename', { name: $event.target.value })" />
-        <label class="check"><input type="checkbox" :checked="graph.enabled" @change="setGraphs([graph.id], { enabled: $event.target.checked })" /> on</label>
-        <label class="check" title="values are computed, actions are listed below and not done"><input type="checkbox" :checked="graph.dry_run" @change="setGraphs([graph.id], { dry_run: $event.target.checked })" /> dry run</label>
+        <label class="check"><input type="checkbox" :checked="graph.enabled" @change="toggle($event, 'enabled')" /> on</label>
+        <label class="check" title="values are computed, actions are listed below and not done"><input type="checkbox" :checked="graph.dry_run" @change="toggle($event, 'dry_run')" /> dry run</label>
         <ConfirmButton label="Remove" small @confirm="removeGraph(graph.id)" />
       </div>
 
@@ -930,7 +976,7 @@ onUnmounted(() => {
 
       <div class="row tight ltools">
         <span class="lstate" :class="state" data-state :title="state === 'live' ? 'Actions are done' : state === 'dry' ? 'Actions are listed, not done' : 'The graph does not run'">
-          {{ state === "live" ? (openMacro ? `LIVE in ${liveGraphs.length} graph${liveGraphs.length > 1 ? "s" : ""}` : "LIVE") : state === "dry" ? "DRY RUN" : "OFF" }}
+          {{ state === "live" ? (openMacro ? `LIVE in ${liveGraphs.length} graph${liveGraphs.length > 1 ? "s" : ""}` : "LIVE") : state === "dry" ? "DRY RUN" : openMacro ? "NOT USED LIVE" : "OFF" }}
         </span>
         <span v-if="waiting.size" class="lwait small" data-waiting>{{ waiting.size }} block{{ waiting.size > 1 ? "s" : "" }} without a target (inert until chosen)</span>
         <button class="btn small secondary" :disabled="!undoNext" :title="undoNext ? `Undo: ${undoNext} (Ctrl+Z)` : 'Nothing to undo'" aria-label="Undo" @click="undo">Undo</button>

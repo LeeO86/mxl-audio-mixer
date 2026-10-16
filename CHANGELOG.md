@@ -30,9 +30,9 @@ The editor (the Logic tab; D175–D184):
 - Macros: group the selected blocks into a macro and choose its exposed ports (those a cable crosses are always exposed); open a macro instance (double-click or Open) and back by the breadcrumb; ungroup. Editing an open macro changes every instance.
 - Validation markers: a refused edit shows the server's issues in red on the blocks and ports, and the refused cables dashed, until the next edit.
 - The debug view: every block shows its live value (on/off, dB, a count for events, text); the list of the last actions marks the dry-run ones. Trigger blocks have a Fire button.
-- The list under the canvas edits every block parameter. A new block gets no target by itself: its strip, snapshot, monitor, mic, … stays empty (inert, outlined in amber) until chosen, unless a strip is picked in the add row; a webhook asks for its URL first. A choice made with the arrow keys applies on Enter or when the field is left.
+- The list under the canvas edits every block parameter. A new block gets no target by itself: its strip, snapshot, monitor, mic, … stays empty (outlined in amber) until chosen, unless a strip is picked in the add row; an action without a target never acts, an input without one reads off, 0 or the floor and still drives what it is wired to. A webhook asks for its URL first. A choice made with the arrow keys applies on Enter or when the field is left; Escape puts the old one back.
 - A new graph starts in dry run; the toolbar shows LIVE, DRY RUN or OFF. Undo and redo never switch a graph on, off or out of dry run.
-- In a live graph, paste, group and ungroup ask first when they touch actions or blocks that remember: pasted actions act at once, and grouped or ungrouped blocks start with empty memory. "Switch to dry run first" is offered.
+- In a live graph, paste, group, ungroup, undo, redo and a new macro instance ask first when they (re)make actions or blocks that remember: those actions act at once, and re-made blocks start with empty memory. "Switch to dry run first" is offered; if that switch fails, nothing is changed.
 - Fixed: a number being typed in the logic list was reset by the next live-value poll.
 - `@vue-flow/minimap` and `@vue-flow/controls` (MIT) for the minimap and the zoom buttons.
 

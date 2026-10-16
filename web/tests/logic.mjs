@@ -106,6 +106,21 @@ try {
   if (at.x < dropped.x || at.x > dropped.x + dropped.width || at.y < dropped.y - 10 || at.y > dropped.y + dropped.height + 10) throw new Error(`dropped at ${JSON.stringify(dropped)}, not at ${JSON.stringify(at)}`);
   pass("palette: a click adds a block, a drag drops one where it lands; an action starts without a target, marked, until one is chosen");
 
+  // Arrow keys step through the choices without applying them; Escape puts the old one back, Enter applies.
+  const target = page.getByLabel("set-mute-1 signal", { exact: true });
+  await target.focus();
+  await target.press("ArrowDown");
+  await page.waitForTimeout(500);
+  if ((await graphOf(g.id)).blocks.find((b) => b.id === "set-mute-1").signal !== "vox") throw new Error("an arrow key moved the action");
+  await target.press("Escape");
+  if ((await target.inputValue()) !== "vox") throw new Error("Escape did not put vox back");
+  await target.press("ArrowDown");
+  await target.press("Enter");
+  await until("Enter applies", async () => (await graphOf(g.id)).blocks.find((b) => b.id === "set-mute-1").signal !== "vox");
+  await target.selectOption("vox");
+  await until("back on vox", async () => (await graphOf(g.id)).blocks.find((b) => b.id === "set-mute-1").signal === "vox");
+  pass("a target chosen with the arrow keys applies on Enter only; Escape puts it back");
+
   // Value, then a cable: the live value of the action shows "on".
   // Typed, then the tab redraws a few times (polls, ports, selection) before Enter: the number stays.
   await page.getByLabel("const-1 value").fill("1");
@@ -324,7 +339,10 @@ try {
   await focusCanvas();
   await page.keyboard.press(`${mod}+z`);
   await until("undo the group: not-1 back, the macro gone", async () => (await graphOf(m.id)).blocks.some((b) => b.id === "not-1") && !(await api("/api/v1/logic-macros")).some((x) => x.id === inst.macro));
+  // The graph is live and the redo re-makes the macro instance: it asks first.
   await page.keyboard.press(`${mod}+Shift+z`);
+  await page.getByRole("alertdialog", { name: "Change a live graph" }).waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Do it live" }).click();
   await until("redo the group", async () => (await graphOf(m.id)).blocks.some((b) => b.id === inst.id) && (await api("/api/v1/logic-macros")).some((x) => x.id === inst.macro));
   pass("group into a macro with the crossing ports exposed, as one batch; undo and redo restore graph and macro together");
 
@@ -367,9 +385,27 @@ try {
 
   // Ungroup in a live graph asks first; "switch to dry run first" does that, then ungroups. The blocks
   // come back with the cables; the macro, now unused, goes.
+  const liveDialog = page.getByRole("alertdialog", { name: "Change a live graph" });
+  const stillGrouped = async () => (await graphOf(m.id)).blocks.some((b) => b.type === "macro");
   await node(inst.id).click();
   await page.getByRole("button", { name: "Ungroup" }).click();
-  await page.getByRole("alertdialog", { name: "Change a live graph" }).waitFor({ timeout: 3000 });
+  await liveDialog.waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.waitForTimeout(500);
+  if (!(await stillGrouped())) throw new Error("Cancel ungrouped");
+  // The switch to dry run fails: nothing else is written.
+  await page.route("**/api/v1/logic-batch", (r) => r.fulfill({ status: 500, contentType: "application/json", body: '{"error":"test: refused"}' }), { times: 1 });
+  await node(inst.id).click();
+  await page.getByRole("button", { name: "Ungroup" }).click();
+  await liveDialog.waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Switch to dry run first" }).click();
+  await page.locator(".banner", { hasText: "Not switched to dry run" }).waitFor({ timeout: 3000 });
+  await page.waitForTimeout(500);
+  if (!(await stillGrouped()) || (await graphOf(m.id)).dry_run) throw new Error("a failed switch to dry run still changed the graph");
+  pass("a live graph: Cancel changes nothing; a failed switch to dry run changes nothing");
+  await node(inst.id).click();
+  await page.getByRole("button", { name: "Ungroup" }).click();
+  await liveDialog.waitFor({ timeout: 3000 });
   await page.getByRole("button", { name: "Switch to dry run first" }).click();
   const flat = await until("ungrouped", async () => {
     const d = await graphOf(m.id);
@@ -425,6 +461,28 @@ try {
   await page.locator(".banner", { hasText: "at most 64" }).waitFor({ timeout: 3000 });
   if ((await graphOf(big.id)).blocks.length !== 64) throw new Error("the ungroup past 64 blocks was written");
   pass("ungroup past 64 blocks: refused with a message, nothing written");
+
+  // "Do it live": a toggle pasted into a live graph; redo of a paste asks again.
+  const lg = await api("/api/v1/logic", { method: "POST", headers: json, body: JSON.stringify({ name: "Live", blocks: [{ id: "toggle-1", type: "toggle", x: 0, y: 0 }] }) });
+  made.push(lg.id);
+  await page.getByLabel("Logic graph", { exact: true }).selectOption(lg.id);
+  await page.locator("[data-state]", { hasText: "LIVE" }).waitFor({ timeout: 3000 });
+  await node("toggle-1").click();
+  await page.keyboard.press(`${mod}+c`);
+  await page.keyboard.press(`${mod}+v`);
+  await liveDialog.waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Do it live" }).click();
+  await until("pasted live", async () => (await graphOf(lg.id)).blocks.some((b) => b.id === "toggle-2"));
+  if ((await graphOf(lg.id)).dry_run) throw new Error("Do it live switched to dry run");
+  await focusCanvas();
+  await page.keyboard.press(`${mod}+z`);
+  await until("paste undone", async () => !(await graphOf(lg.id)).blocks.some((b) => b.id === "toggle-2"));
+  await page.keyboard.press(`${mod}+Shift+z`);
+  await liveDialog.waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.waitForTimeout(500);
+  if ((await graphOf(lg.id)).blocks.some((b) => b.id === "toggle-2")) throw new Error("a cancelled redo was written");
+  pass("a live graph: Do it live pastes and stays live; a redo that re-makes a block asks again, Cancel keeps it undone");
 
   // Narrow screen: the palette goes above the canvas, no horizontal scroll.
   await page.setViewportSize({ width: 420, height: 900 });
