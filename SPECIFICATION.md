@@ -644,6 +644,27 @@ labels, real-time) in **Appendix B**. These appendices are the contract. In part
 - G11 image as uid 1000, tags `X.Y.Z`/`X.Y`/`X`, `git-<sha7>`, `nightly-dev`, label
   `io.dmf.mxl.revision`; G12 Kubernetes example on the pod network; G13 docs; G14 tests.
 
+### 14.1 Further settings
+
+Besides the settings named in the sections above, the mixer has these (the
+README's Settings table is the complete list, with every default):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `HOST_ID` | the host name | Instance name; the default node label and the start of the default `NMOS_SEED`. |
+| `MIXER_CONFIG_FILE` | unset | JSON file with any of the settings (the environment wins, G1). |
+| `MIXER_STATE_DIR` | `/config` | Everything the mixer writes itself (show file, connections, history); must be writable, else exit 78. |
+| `MIXER_LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug`, `trace`. |
+| `MIXER_BLOCK_SAMPLES` | 96 | DSP block size at 48 kHz: 48, 96, 144 or 240 (§4.4). |
+| `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move this long is stalled and re-opened (§4.2). |
+| `MIXER_INPUT_DELAY_MAX_MS` | 150 | Upper limit of an input's automatic extra delay (§4.2). |
+| `MIXER_INPUT_DELAY_CONFIRM` | false | An automatic delay change waits for the operator instead of applying with a fade. |
+| `MEDIAMTX_BIN` | `mediamtx` | The built-in MediaMTX executable (Appendix B.1). |
+| `MIXER_LINK_ROLE` | `off` | Remote link (§13): `off`, `master` or `slave`. |
+| `MIXER_LINK_TOKEN` | unset | The link's pre-shared token, 8–200 bytes; a secret (G1), never shown or exported. |
+| `MIXER_LINK_PEERS` | unset | Master: 1–4 `ws://` or `wss://` slave URLs, each once, no user or password (else exit 78). |
+| `MIXER_LINK_TAKEOVER` | `allow` | Slave: `allow` or `deny` local changes while its master is gone. |
+
 ---
 
 ## 15. Metrics (prefix `mxl_audio_mixer_`)

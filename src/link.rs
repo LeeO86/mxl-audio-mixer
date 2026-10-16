@@ -618,11 +618,17 @@ fn set_fader(mix: &mut Mix, signal: &str, db: f64) -> bool {
     false
 }
 
+pub(crate) type Digest = [u8; 20];
+
+pub(crate) fn digest(token: &str) -> Digest {
+    use sha1::Digest as _;
+    sha1::Sha1::digest(token).into()
+}
+
 /// Compares SHA-1 digests in constant time, so neither the content nor the
 /// length of the token shows in the time taken.
-fn token_ok(got: &str, want: &str) -> bool {
-    use sha1::Digest;
-    let (got, want) = (sha1::Sha1::digest(got), sha1::Sha1::digest(want));
+fn token_ok(got: &str, want: &Digest) -> bool {
+    let got = digest(got);
     got.iter()
         .zip(want.iter())
         .fold(0u8, |d, (a, b)| d | (a ^ b))
@@ -681,7 +687,7 @@ async fn slave(mut socket: WebSocket, app: App) {
     let Some(Msg::Hello { token, label, .. }) = hello else {
         return;
     };
-    if !token_ok(&token, &app.config.link_token) {
+    if !token_ok(&token, &app.config.link_token_digest) {
         note_bad_token();
         refuse(&mut socket, "token").await;
         return;
@@ -1390,8 +1396,8 @@ mod tests {
             },
         )
         .is_err());
-        assert!(token_ok("secret-token", "secret-token"));
-        assert!(!token_ok("secret-token", "secret-tokEn"));
+        assert!(token_ok("secret-token", &digest("secret-token")));
+        assert!(!token_ok("secret-token", &digest("secret-tokEn")));
     }
 
     #[test]
@@ -1802,7 +1808,7 @@ mod tests {
         assert!(!metrics(&peers)
             .iter()
             .any(|l| l.starts_with("remote_link_rtt_ms")));
-        assert!(!token_ok("secret-token-and-more", "secret-token"));
-        assert!(!token_ok("", "secret-token"));
+        assert!(!token_ok("secret-token-and-more", &digest("secret-token")));
+        assert!(!token_ok("", &digest("secret-token")));
     }
 }
