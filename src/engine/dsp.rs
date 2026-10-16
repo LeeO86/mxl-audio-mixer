@@ -209,7 +209,8 @@ pub(super) fn run(
         mut analysis,
         mut vad,
     } = taps;
-    let notes = crate::timing::set_up_dsp_thread(config.rt_priority, config.cpu);
+    let (notes, realtime) = crate::timing::set_up_dsp_thread(config.rt_priority, config.cpu);
+    counters.realtime.store(realtime, Ordering::Relaxed);
     tracing::info!("DSP thread: {notes}");
     if let Ok(mut s) = scheduling.lock() {
         *s = notes;

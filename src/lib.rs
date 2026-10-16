@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod api;
 pub mod auto;
 pub mod auto_api;
+pub mod caps;
 pub mod config;
 pub mod control;
 pub mod dsp;

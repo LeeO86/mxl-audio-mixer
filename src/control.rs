@@ -160,12 +160,20 @@ impl Control {
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(5))
                     .build();
-                if let Ok(client) = client {
-                    let _ = client
-                        .post(url)
+                let sent = match client {
+                    Ok(client) => client
+                        .post(&url)
                         .json(&serde_json::json!({"value": 1}))
                         .send()
-                        .await;
+                        .await
+                        .and_then(|r| r.error_for_status())
+                        .map(|_| ()),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = sent {
+                    // Without the query: it may carry a token.
+                    let target = url.split(['?', '#']).next().unwrap_or_default();
+                    tracing::warn!("logic webhook {target}: {}", e.without_url());
                 }
             });
         }

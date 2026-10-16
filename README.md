@@ -182,6 +182,7 @@ other formats downmixed) and publishes it over RTSP to MediaMTX as
 scripts/build-mxl.sh                               # libmxl at the pin, into /opt/mxl
 (cd web && npm ci && npm run build)                # the web UI (Node 22); without it the binary serves a note
 cargo build --release
+mkdir -p /dev/shm/mxl                              # the scan path must exist
 LD_LIBRARY_PATH=/opt/mxl/lib NMOS_HOST_ADDRESS=192.0.2.10 MXL_DOMAIN_SCAN_PATH=/dev/shm/mxl \
     MIXER_STATE_DIR=/tmp/mixer target/release/mxl-audio-mixer
 ```
@@ -209,13 +210,33 @@ conventions; `deploy/grafana/` has a dashboard. The development set-up is in
 On the platform: the MXL root at `/Volumes/mxl` (hostPath), a writable `/config`,
 the pod IP in `NMOS_HOST_ADDRESS`, the registry in `NMOS_REGISTRY_ADDRESS` /
 `NMOS_REGISTRY_PORT`, and the node's kernel TAI offset set (CLOCK_TAI = UTC + 37 s).
-Guaranteed QoS with whole CPUs for the DSP thread; `MIXER_RT_PRIORITY` (≤ 49) needs
-the `SYS_NICE` capability. The DSP thread runs on the last of the pod's CPUs and
-needs its whole physical core: with SMT, the static CPU manager's
-`full-pcpus-only` (or SMT off). The mixer keeps its other threads (the meters,
-the API, the preview) off that core when it has CPUs on another one;
-`dsp.scheduling` in `GET /api/v1/status` says what the core is like, and a
-warning is logged when its sibling is outside the pod's CPUs.
+
+**CPUs.** Guaranteed QoS (requests = limits) with an **even** number of whole CPUs
+on a node with the static CPU manager: 2 at least (one physical core), 4
+preferred. The DSP thread runs on the last of the pod's CPUs whose SMT siblings
+are all in the pod (a whole core), so no other workload runs on its sibling; the
+mixer keeps its other threads (the meters, the API, the preview) off that core
+when it has CPUs on another one. With 2 CPUs they share the DSP thread's core
+(its sibling); with 4 they get a core of their own. The kubelet's
+`reservedSystemCPUs` should cover the system daemons and the unpinned pods, so
+nothing else lands on the pod's cores. `full-pcpus-only` is recommended (it
+guarantees whole cores), not required: with an even request the static policy
+hands out whole cores when they are free. Check `dsp.scheduling` in
+`GET /api/v1/status`: "a core of its own" is right; "outside this process" means
+the sibling belongs to another workload (also a warning in the log).
+
+**Real time.** `MIXER_RT_PRIORITY` (≤ 49, e.g. 49) runs the DSP thread
+`SCHED_FIFO`. The image gives the binary `CAP_SYS_NICE` as a permitted file
+capability; with `SYS_NICE` in the container's capabilities
+(`capabilities: {drop: [ALL], add: [SYS_NICE]}`) the mixer raises it at start and
+logs `effective capabilities: sys_nice`. Without it the mixer starts anyway, runs
+the DSP thread `SCHED_OTHER` and logs a warning; `mxl_audio_mixer_dsp_realtime`
+is then 0.
+
+**Network.** The API has no authentication: keep the web and NMOS ports on the pod
+network (the platform's ingress in front of the UI). The logic editor's webhook
+block posts only to `http://` and `https://` URLs; a failed post is a warning in
+the log (without the URL's query).
 
 ## Settings
 
@@ -238,14 +259,14 @@ origin. No setting is a secret.
 | `NMOS_QUERY_ADDRESS` | registry address | IPv4 address or DNS name of the Query API, used for readiness. |
 | `NMOS_QUERY_PORT` | registration port + 1 | Query API port. |
 | `NMOS_DNS_SD` | false | mDNS/DNS-SD browsing and advertisement (needs a build with the dns-sd feature). |
-| `MXL_DOMAIN_SCAN_PATH` | /Volumes/mxl | Parent of the MXL domain directories; input domains (mirrors included) are found below it. |
-| `MXL_OUTPUT_DOMAIN_DIR` | <scan path>/mixer-<first 8 hex of the domain id> | The mixer's own output domain. Created if missing. |
-| `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 of NMOS_SEED | Id of the own output domain. |
+| `MXL_DOMAIN_SCAN_PATH` | /Volumes/mxl | Parent of the MXL domain directories (an existing absolute directory, else exit 78); input domains (mirrors included) are found below it. |
+| `MXL_OUTPUT_DOMAIN_DIR` | <scan path>/mixer-<first 8 hex of the domain id> | The mixer's own output domain, a directory directly below the scan path (else exit 78). Created if missing; the only directory MXL_CLEANUP_ON_EXIT removes. |
+| `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 of NMOS_SEED | Id of the own output domain. An existing domain_def.json with another id is kept (a warning), never overwritten. |
 | `MXL_HISTORY_DURATION_NS` | 200000000 | history_duration written into a new output domain. |
 | `MXL_CLEANUP_ON_EXIT` | false | Remove the own output domain directory on SIGTERM. |
 | `SHUTDOWN_TIMEOUT_S` | 10 | Time for the SIGTERM sequence (1–120). |
 | `MIXER_CONFIG_FILE` | unset | JSON file with any of these settings (environment wins). |
-| `MIXER_STATE_DIR` | /config | Directory of everything the mixer writes itself (show file, connections). |
+| `MIXER_STATE_DIR` | /config | Directory of everything the mixer writes itself (show file, connections); must be writable, else exit 78. |
 | `MIXER_LOG_LEVEL` | info | Log level: error, warn, info, debug, trace. |
 | `MIXER_INPUT_FLOWS` | 16 | Number of MXL audio inputs (NMOS receivers), 1–256. |
 | `MIXER_BLOCK_SAMPLES` | 96 | DSP block size in samples at 48 kHz: 48, 96, 144 or 240. |
@@ -564,8 +585,8 @@ without touching the audio.
 | Exit code | Meaning |
 | --- | --- |
 | 0 | stopped by Ctrl-C |
-| 75 | a port cannot be bound (TSL ports with `TSL_ENABLE=true`, the built-in MediaMTX's ports without `PREVIEW_PUBLISH_URL`), or the DSP thread cannot start |
-| 78 | invalid configuration, libmxl missing, output domain id clash |
+| 75 | a port cannot be bound (TSL ports with `TSL_ENABLE=true`, the built-in MediaMTX's ports without `PREVIEW_PUBLISH_URL`), libmxl cannot be loaded, or the DSP thread cannot start. Every port is checked before the output domain is created, and a failed start removes a domain it created. |
+| 78 | invalid configuration: an invalid setting, `MXL_DOMAIN_SCAN_PATH` missing or not a directory, `MXL_OUTPUT_DOMAIN_DIR` not directly below it, `MIXER_STATE_DIR` not writable, an unreadable `domain_def.json` |
 | 143 | SIGTERM: media stopped, MXL released, node deregistered, own domain removed with `MXL_CLEANUP_ON_EXIT=true`, within `SHUTDOWN_TIMEOUT_S` |
 
 ## API
@@ -656,7 +677,7 @@ analyser. Changes go through the REST API; every change answers with
 ## Metrics
 
 `dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`,
-`plan_swaps_total`, `plan_compile_seconds` (last compile), `meter_drops_total`
+`dsp_realtime` (1 when the DSP thread runs `SCHED_FIFO`), `plan_swaps_total`, `plan_compile_seconds` (last compile), `meter_drops_total`
 (metered blocks the meter thread did not get), `vad_drops_total` (tapped blocks
 the control engine did not get), `signals`,
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
@@ -669,7 +690,9 @@ and per input: `input_state`,
 `input_effective_delay_ms`, `input_late_samples_total`
 (the source had not written the samples yet), `input_overrun_samples_total`
 (the ring had already overwritten them), `input_missing_samples_total`
-(both, and any other failed read), `input_reopens_total`; `process_cpu_seconds_total`,
+(both, and any other failed read), `input_reopens_total`; `logic_ticks_total`,
+`logic_actions_total{graph}`; with the remote link, `remote_link_up{peer}` and
+`remote_link_rtt_ms{peer}`; `process_cpu_seconds_total`,
 `process_resident_memory_bytes`. All prefixed `mxl_audio_mixer_`.
 
 ## Tests

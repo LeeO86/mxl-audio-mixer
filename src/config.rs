@@ -33,14 +33,14 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "NMOS_QUERY_ADDRESS", default: "registry address", description: "IPv4 address or DNS name of the Query API, used for readiness." },
     Setting { name: "NMOS_QUERY_PORT", default: "registration port + 1", description: "Query API port." },
     Setting { name: "NMOS_DNS_SD", default: "false", description: "mDNS/DNS-SD browsing and advertisement (needs a build with the dns-sd feature)." },
-    Setting { name: "MXL_DOMAIN_SCAN_PATH", default: "/Volumes/mxl", description: "Parent of the MXL domain directories; input domains (mirrors included) are found below it." },
-    Setting { name: "MXL_OUTPUT_DOMAIN_DIR", default: "<scan path>/mixer-<first 8 hex of the domain id>", description: "The mixer's own output domain. Created if missing." },
-    Setting { name: "MXL_OUTPUT_DOMAIN_ID", default: "UUIDv5 of NMOS_SEED", description: "Id of the own output domain." },
+    Setting { name: "MXL_DOMAIN_SCAN_PATH", default: "/Volumes/mxl", description: "Parent of the MXL domain directories (an existing absolute directory, else exit 78); input domains (mirrors included) are found below it." },
+    Setting { name: "MXL_OUTPUT_DOMAIN_DIR", default: "<scan path>/mixer-<first 8 hex of the domain id>", description: "The mixer's own output domain, a directory directly below the scan path (else exit 78). Created if missing; the only directory MXL_CLEANUP_ON_EXIT removes." },
+    Setting { name: "MXL_OUTPUT_DOMAIN_ID", default: "UUIDv5 of NMOS_SEED", description: "Id of the own output domain. An existing domain_def.json with another id is kept (a warning), never overwritten." },
     Setting { name: "MXL_HISTORY_DURATION_NS", default: "200000000", description: "history_duration written into a new output domain." },
     Setting { name: "MXL_CLEANUP_ON_EXIT", default: "false", description: "Remove the own output domain directory on SIGTERM." },
     Setting { name: "SHUTDOWN_TIMEOUT_S", default: "10", description: "Time for the SIGTERM sequence (1–120)." },
     Setting { name: "MIXER_CONFIG_FILE", default: "unset", description: "JSON file with any of these settings (environment wins)." },
-    Setting { name: "MIXER_STATE_DIR", default: "/config", description: "Directory of everything the mixer writes itself (show file, connections)." },
+    Setting { name: "MIXER_STATE_DIR", default: "/config", description: "Directory of everything the mixer writes itself (show file, connections); must be writable, else exit 78." },
     Setting { name: "MIXER_LOG_LEVEL", default: "info", description: "Log level: error, warn, info, debug, trace." },
     Setting { name: "MIXER_INPUT_FLOWS", default: "16", description: "Number of MXL audio inputs (NMOS receivers), 1–256." },
     Setting { name: "MIXER_BLOCK_SAMPLES", default: "96", description: "DSP block size in samples at 48 kHz: 48, 96, 144 or 240." },
@@ -378,6 +378,20 @@ impl Parser<'_> {
                 &output_domain_id.simple().to_string()[..8]
             )),
         };
+        if !scan_path.is_absolute() {
+            return err(format!(
+                "MXL_DOMAIN_SCAN_PATH must be an absolute path, got {}",
+                scan_path.display()
+            ));
+        }
+        // The only directory the mixer writes as its own, and removes on exit.
+        if !crate::mxlio::domain::is_child_of(&output_domain_dir, &scan_path) {
+            return err(format!(
+                "MXL_OUTPUT_DOMAIN_DIR must be an absolute path directly below MXL_DOMAIN_SCAN_PATH ({}), got {}",
+                scan_path.display(),
+                output_domain_dir.display()
+            ));
+        }
         let history_duration_ns: u64 =
             self.int("MXL_HISTORY_DURATION_NS", 200_000_000, 1, 60_000_000_000)?;
         let cleanup_on_exit = self.boolean("MXL_CLEANUP_ON_EXIT", false)?;
@@ -629,6 +643,18 @@ impl Parser<'_> {
 }
 
 impl Config {
+    /// The id in force when an existing `domain_def.json` has another one (G2):
+    /// it is kept, and `GET /api/v1/config` shows it.
+    pub fn set_output_domain_id(&mut self, id: Uuid) {
+        self.output_domain_id = id;
+        let text = self.value_text("MXL_OUTPUT_DOMAIN_ID");
+        for (name, value, _) in &mut self.values {
+            if *name == "MXL_OUTPUT_DOMAIN_ID" {
+                *value = text.clone();
+            }
+        }
+    }
+
     fn value_text(&self, name: &str) -> String {
         let opt = |v: Option<String>| v.unwrap_or_default();
         match name {
@@ -1033,6 +1059,31 @@ mod tests {
         assert_eq!(c.output_commit_samples, 480);
         assert_eq!(c.read_offset_samples, 24);
         assert_eq!(c.block_period(), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn the_output_domain_is_directly_below_the_scan_path() {
+        let c = load_vars(&[
+            ("MXL_DOMAIN_SCAN_PATH", "/dev/shm/mxl/"),
+            ("MXL_OUTPUT_DOMAIN_DIR", "/dev/shm/mxl/mix1"),
+        ])
+        .unwrap();
+        assert_eq!(c.output_domain_dir, PathBuf::from("/dev/shm/mxl/mix1"));
+        for dir in [
+            "/Volumes",
+            "/Volumes/mxl",
+            "/Volumes/mxl/a/b",
+            "/Volumes/mxl/..",
+            "/tmp/mix1",
+            "mix1",
+        ] {
+            let e = load_vars(&[("MXL_OUTPUT_DOMAIN_DIR", dir)]).unwrap_err();
+            assert!(
+                e.0.contains("directly below MXL_DOMAIN_SCAN_PATH"),
+                "{dir}: {e}"
+            );
+        }
+        assert!(load_vars(&[("MXL_DOMAIN_SCAN_PATH", "mxl")]).is_err());
     }
 }
 

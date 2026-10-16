@@ -14,6 +14,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/target/release}"
 WORK="$(mktemp -d /dev/shm/mixer-demo.XXXXXX)"
+mkdir -p "$WORK/mxl"
 WEB="http://127.0.0.1:${WEB_PORT:-8190}"
 NMOS="http://127.0.0.1:${NMOS_PORT:-3342}"
 FLOW=11111111-2222-4333-8444-555555555555

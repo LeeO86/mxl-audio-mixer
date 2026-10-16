@@ -201,6 +201,8 @@ pub struct EngineCounters {
     /// VAD tap records the VAD ring had no room for.
     pub vad_drops: AtomicU64,
     pub running: AtomicBool,
+    /// The DSP thread runs `SCHED_FIFO`.
+    pub realtime: AtomicBool,
     pub stop: AtomicBool,
     pub inputs: Vec<InputCounters>,
     pub outputs: Vec<OutputCounters>,
@@ -220,6 +222,7 @@ impl EngineCounters {
             meter_drops: AtomicU64::new(0),
             vad_drops: AtomicU64::new(0),
             running: AtomicBool::new(false),
+            realtime: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             inputs: (0..inputs).map(|_| InputCounters::default()).collect(),
             outputs: (0..MAX_OUTPUTS)

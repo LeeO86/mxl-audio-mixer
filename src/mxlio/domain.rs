@@ -50,27 +50,43 @@ pub fn scan(scan_path: &Path, own: &Path) -> Vec<Domain> {
     found
 }
 
-/// Create the own output domain once. An existing `domain_def.json` with another
-/// id is an error and is not overwritten; `options.json` is written only when missing.
+/// The own output domain after [`ensure_output_domain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputDomain {
+    /// The id in force: the configured one, or the one an existing
+    /// `domain_def.json` already has.
+    pub id: Uuid,
+    /// This call wrote `domain_def.json`.
+    pub created: bool,
+}
+
+/// Create the own output domain once (G2). An existing `domain_def.json` is never
+/// overwritten: with another id, that id is kept and a warning logged.
+/// `options.json` is written only when missing. Both are written atomically.
 pub fn ensure_output_domain(
     dir: &Path,
     id: Uuid,
     label: &str,
     history_ns: u64,
-) -> Result<bool, String> {
+) -> Result<OutputDomain, String> {
     if dir.parent().is_none() || dir == Path::new("/Volumes/mxl") {
         return Err(format!("{} cannot be an output domain", dir.display()));
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let def = dir.join("domain_def.json");
-    let created = match read_def(dir) {
-        Some(existing) if existing.id == id => false,
+    let domain = match read_def(dir) {
+        Some(existing) if existing.id == id => OutputDomain { id, created: false },
         Some(existing) => {
-            return Err(format!(
-                "{} already has id {}, not {id}; not overwriting it",
+            tracing::warn!(
+                "{} already has id {}, not {id}; keeping {} and not overwriting it",
                 def.display(),
+                existing.id,
                 existing.id
-            ))
+            );
+            OutputDomain {
+                id: existing.id,
+                created: false,
+            }
         }
         None if def.exists() => {
             return Err(format!(
@@ -85,28 +101,54 @@ pub fn ensure_output_domain(
                 "description": format!("{label} MXL audio mixer output domain"),
                 "tags": {}
             });
-            std::fs::write(
+            crate::state::write_atomic(
                 &def,
-                serde_json::to_string_pretty(&body).unwrap_or_default(),
-            )
-            .map_err(|e| format!("write {}: {e}", def.display()))?;
-            true
+                &serde_json::to_vec_pretty(&body).unwrap_or_default(),
+            )?;
+            OutputDomain { id, created: true }
         }
     };
     let options = dir.join("options.json");
     if !options.exists() {
         let body = serde_json::json!({"urn:x-mxl:option:history_duration/v1.0": history_ns});
-        std::fs::write(&options, body.to_string())
-            .map_err(|e| format!("write {}: {e}", options.display()))?;
+        crate::state::write_atomic(&options, body.to_string().as_bytes())?;
     }
-    Ok(created)
+    Ok(domain)
 }
 
-/// Remove the own output domain (G8 with `MXL_CLEANUP_ON_EXIT`). Refuses the scan
-/// root itself.
+/// `dir` is a direct child of `scan_path` (G2, I5): the only kind of directory
+/// the mixer creates as its domain or removes.
+pub fn is_child_of(dir: &Path, scan_path: &Path) -> bool {
+    dir.is_absolute()
+        && matches!(
+            dir.components().next_back(),
+            Some(std::path::Component::Normal(_))
+        )
+        && dir.parent() == Some(scan_path)
+}
+
+/// `MXL_DOMAIN_SCAN_PATH` must be an existing directory: the platform mounts it
+/// (hostPath); without it the domain would land in the container's own files.
+pub fn check_scan_path(scan_path: &Path) -> Result<(), String> {
+    match std::fs::metadata(scan_path) {
+        Ok(m) if m.is_dir() => Ok(()),
+        Ok(_) => Err(format!(
+            "MXL_DOMAIN_SCAN_PATH {} is not a directory",
+            scan_path.display()
+        )),
+        Err(e) => Err(format!("MXL_DOMAIN_SCAN_PATH {}: {e}", scan_path.display())),
+    }
+}
+
+/// Remove the own output domain (G8 with `MXL_CLEANUP_ON_EXIT`). Refuses
+/// anything but a direct child of the scan path.
 pub fn remove_output_domain(dir: &Path, scan_path: &Path) -> Result<(), String> {
-    if dir == scan_path || dir.parent().is_none() {
-        return Err(format!("refusing to remove {}", dir.display()));
+    if !is_child_of(dir, scan_path) {
+        return Err(format!(
+            "refusing to remove {}: not a directory directly below {}",
+            dir.display(),
+            scan_path.display()
+        ));
     }
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
@@ -124,21 +166,40 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("mixer-1");
         let id = Uuid::new_v4();
-        assert!(ensure_output_domain(&dir, id, "Mixer", 200_000_000).unwrap());
+        assert_eq!(
+            ensure_output_domain(&dir, id, "Mixer", 200_000_000).unwrap(),
+            OutputDomain { id, created: true }
+        );
+        assert!(!dir.join("domain_def.tmp").exists());
         let def: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("domain_def.json")).unwrap())
                 .unwrap();
         for key in ["id", "label", "description", "tags"] {
             assert!(def.get(key).is_some(), "{key}");
         }
-        assert!(!ensure_output_domain(&dir, id, "Mixer", 1).unwrap());
+        assert!(!ensure_output_domain(&dir, id, "Mixer", 1).unwrap().created);
         assert!(std::fs::read_to_string(dir.join("options.json"))
             .unwrap()
             .contains("200000000"));
-        assert!(ensure_output_domain(&dir, Uuid::new_v4(), "Mixer", 1).is_err());
-        assert!(std::fs::read_to_string(dir.join("domain_def.json"))
-            .unwrap()
-            .contains(&id.to_string()));
+        // Another configured id: the existing one is kept, the file untouched.
+        let before = std::fs::read_to_string(dir.join("domain_def.json")).unwrap();
+        assert_eq!(
+            ensure_output_domain(&dir, Uuid::new_v4(), "Other", 1).unwrap(),
+            OutputDomain { id, created: false }
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("domain_def.json")).unwrap(),
+            before
+        );
+        // An unreadable definition is an error, not overwritten.
+        let bad = root.path().join("mixer-bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("domain_def.json"), "{").unwrap();
+        assert!(ensure_output_domain(&bad, id, "Mixer", 1).is_err());
+        assert_eq!(
+            std::fs::read_to_string(bad.join("domain_def.json")).unwrap(),
+            "{"
+        );
     }
 
     #[test]
@@ -162,5 +223,47 @@ mod tests {
         remove_output_domain(&own, root.path()).unwrap();
         assert!(!own.exists());
         assert!(remove_output_domain(root.path(), root.path()).is_err());
+        // Only a direct child of the scan path is ever removed.
+        let nested = root.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(remove_output_domain(&nested, root.path()).is_err());
+        assert!(remove_output_domain(root.path().parent().unwrap(), root.path()).is_err());
+        assert!(remove_output_domain(Path::new("relative"), Path::new("")).is_err());
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn the_scan_path_must_be_a_directory() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(check_scan_path(root.path()).is_ok());
+        assert!(check_scan_path(&root.path().join("missing")).is_err());
+        let file = root.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(check_scan_path(&file)
+            .unwrap_err()
+            .contains("not a directory"));
+    }
+
+    #[test]
+    fn a_domain_is_a_direct_child_of_the_scan_path() {
+        let scan = Path::new("/Volumes/mxl");
+        assert!(is_child_of(Path::new("/Volumes/mxl/mix1"), scan));
+        assert!(is_child_of(
+            Path::new("/Volumes/mxl/mix1/"),
+            Path::new("/Volumes/mxl/")
+        ));
+        for bad in [
+            "/Volumes/mxl",
+            "/Volumes",
+            "/",
+            "/Volumes/mxl/a/b",
+            "/Volumes/mxl/..",
+            "/Volumes/mxl/a/..",
+            "/Volumes/other/mix1",
+            "mix1",
+            "Volumes/mxl/mix1",
+        ] {
+            assert!(!is_child_of(Path::new(bad), scan), "{bad}");
+        }
     }
 }

@@ -14,6 +14,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))
 }
 
+/// `MIXER_STATE_DIR` (G1): create it and prove it is writable, so a read-only
+/// mount fails the start instead of losing every change later.
+pub fn check_state_dir(dir: &Path) -> Result<(), String> {
+    let probe = dir.join(".write-probe");
+    std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&probe, b"ok"))
+        .and_then(|()| std::fs::remove_file(&probe))
+        .map_err(|e| format!("MIXER_STATE_DIR {} is not writable: {e}", dir.display()))
+}
+
 pub fn load_connections(path: &Path) -> Vec<mxl_nmos::SavedConnection> {
     std::fs::read_to_string(path)
         .ok()
@@ -34,6 +44,23 @@ pub fn save_connections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_state_dir_must_be_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("config");
+        check_state_dir(&dir).unwrap();
+        assert!(dir.is_dir() && !dir.join(".write-probe").exists());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root ignores the mode bits; the check only means something for others.
+        let root_user = unsafe { libc::geteuid() } == 0;
+        assert_eq!(check_state_dir(&dir).is_err(), !root_user);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(check_state_dir(&file).is_err());
+    }
 
     #[test]
     fn connections_round_trip() {

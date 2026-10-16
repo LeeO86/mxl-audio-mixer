@@ -42,6 +42,10 @@ pub struct Logic {
     buttons: BTreeMap<String, BTreeMap<String, bool>>,
     /// The last tick's value of every block, per graph.
     pub values: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Ticks evaluated (`logic_ticks_total`).
+    pub ticks: u64,
+    /// Actions returned, per graph (`logic_actions_total{graph}`).
+    pub actions: BTreeMap<String, u64>,
 }
 
 impl Logic {
@@ -75,9 +79,14 @@ impl Logic {
             .retain(|id, _| graphs.iter().any(|g| &g.id == id));
         self.applied
             .retain(|id, _| graphs.iter().any(|g| &g.id == id));
+        self.ticks += 1;
         let mut actions = Vec::new();
         for g in &graphs {
-            actions.extend(self.graph(g, readings));
+            let a = self.graph(g, readings);
+            if !a.is_empty() {
+                *self.actions.entry(g.id.clone()).or_default() += a.len() as u64;
+            }
+            actions.extend(a);
         }
         actions
     }
@@ -533,6 +542,9 @@ mod tests {
         assert!(logic
             .tick(&readings(&mix, &speech, &level, &on_air))
             .is_empty());
+        // logic_ticks_total and logic_actions_total{graph}.
+        assert_eq!(logic.ticks, 4);
+        assert_eq!(logic.actions, BTreeMap::from([("g".to_string(), 2)]));
     }
 
     #[test]

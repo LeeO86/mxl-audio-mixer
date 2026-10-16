@@ -94,14 +94,25 @@ fn process_cpus() -> &'static [usize] {
     CPUS.get_or_init(affinity_cpus)
 }
 
-/// The CPU the DSP thread is pinned to: the last one of the process's CPUs.
+/// The CPU the DSP thread is pinned to: the last of the process's CPUs whose
+/// SMT siblings are all in the process too (a whole core), else the last one.
 pub fn dsp_cpu() -> Option<usize> {
     let cpus = process_cpus();
     if cpus.len() > 1 {
-        cpus.last().copied()
+        pick_dsp_cpu(cpus, smt_siblings)
     } else {
         None
     }
+}
+
+/// Without `full-pcpus-only` an odd CPU count can end in half a core (e.g.
+/// 3,11,12 with the sibling pairs 3/11 and 4/12): 11 then, not 12.
+fn pick_dsp_cpu(cpus: &[usize], siblings: impl Fn(usize) -> Option<Vec<usize>>) -> Option<usize> {
+    cpus.iter()
+        .rev()
+        .copied()
+        .find(|c| siblings(*c).is_some_and(|s| s.iter().all(|x| cpus.contains(x))))
+        .or_else(|| cpus.last().copied())
 }
 
 /// A CPU list as in sysfs ("3,27", "0-1").
@@ -227,9 +238,11 @@ pub fn flush_denormals() -> Option<&'static str> {
     None
 }
 
-/// Set up the calling thread as the DSP thread. Returns a description.
-pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> String {
+/// Set up the calling thread as the DSP thread. Returns a description and
+/// whether it runs `SCHED_FIFO`.
+pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> (String, bool) {
     let mut notes = Vec::new();
+    let mut realtime = false;
     if let Some(f) = flush_denormals() {
         notes.push(f.to_string());
     }
@@ -257,19 +270,25 @@ pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> String
                 let rc =
                     libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param);
                 if rc == 0 {
+                    realtime = true;
                     notes.push(format!("SCHED_FIFO {}", priority.min(49)));
                 } else {
-                    notes.push(format!(
+                    let refused = format!(
                         "SCHED_FIFO {} refused ({}), SCHED_OTHER",
                         priority.min(49),
                         std::io::Error::from_raw_os_error(rc)
-                    ));
+                    );
+                    tracing::warn!(
+                        "DSP thread: {refused}; the container needs the SYS_NICE capability (effective: {})",
+                        crate::caps::effective()
+                    );
+                    notes.push(refused);
                 }
             }
             None => notes.push("SCHED_OTHER".to_string()),
         }
     }
-    notes.join(", ")
+    (notes.join(", "), realtime)
 }
 
 /// CPU time of this process in seconds.
@@ -327,6 +346,24 @@ mod tests {
         // No SMT, or no sysfs.
         assert!(plan_cpus(&[0, 1], 1, Some(&[])).1.contains("no SMT"));
         assert_eq!(plan_cpus(&[0, 1], 1, None).0, [0]);
+    }
+
+    #[test]
+    fn the_dsp_cpu_is_on_a_whole_core() {
+        // SMT pairs n and n+8, as on the small cluster's nodes.
+        let pairs = |c: usize| Some(vec![if c < 8 { c + 8 } else { c - 8 }]);
+        // Half a core last (12's sibling 4 is not ours): the whole core's 11.
+        assert_eq!(pick_dsp_cpu(&[3, 11, 12], pairs), Some(11));
+        assert_eq!(pick_dsp_cpu(&[3, 4, 11], pairs), Some(11));
+        assert_eq!(pick_dsp_cpu(&[3, 4, 11, 12], pairs), Some(12));
+        assert_eq!(pick_dsp_cpu(&[3, 11], pairs), Some(11));
+        // No whole core, or no sysfs: the last CPU, as before.
+        assert_eq!(pick_dsp_cpu(&[3, 12], pairs), Some(12));
+        assert_eq!(pick_dsp_cpu(&[3, 11, 12], |_| None), Some(12));
+        // No SMT: every CPU is a whole core.
+        assert_eq!(pick_dsp_cpu(&[0, 1, 2], |_| Some(vec![])), Some(2));
+        // The other threads then keep off 11 and 3.
+        assert_eq!(plan_cpus(&[3, 11, 12], 11, Some(&[3])).0, [12]);
     }
 
     #[test]
