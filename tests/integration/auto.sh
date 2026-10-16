@@ -139,23 +139,28 @@ api DELETE /api/v1/vad/t1 >/dev/null
 api POST /api/v1/ducks '{"id": "bed", "name": "Bed", "keys": ["vox"], "targets": ["t1"], "depth_db": -20, "attack_ms": 50, "hold_ms": 300, "release_ms": 500}' >/dev/null
 # A fixed extra delay on the tone and the speech while the duck is measured: an
 # automatic delay change crossfades the input (a dip in t1 that is not the duck;
-# seen in the lab). A late input (a gap) still makes the measurement start again, as
-# probe does.
+# seen in the lab). A late input (a gap) or a DSP deadline miss (a block of zeros
+# on the output: 0.97 dB in a 10 ms window, seen in CI on a shared runner) during
+# the dump makes the measurement start again, as probe does; at most 4 dumps.
 for i in 1 2; do api PATCH "/api/v1/inputs/$i" '{"extra_delay": 4}' >/dev/null; done
 sleep 1
-inputs_moved() { for i in 1 2; do echo "$(input $i missing_samples) $(input $i effective_delay_ms)"; done; }
-for attempt in 1 2 3; do
-    before=$(inputs_moved)
+dsp_misses() { curl -fsS "$WEB/metrics" | sed -n 's/^mxl_audio_mixer_dsp_deadline_misses_total \(.*\)/\1/p'; }
+duck_glitches() { for i in 1 2; do echo "$(input $i missing_samples) $(input $i effective_delay_ms)"; done; dsp_misses; }
+DUCK_DUMPS=4
+for attempt in $(seq 1 $DUCK_DUMPS); do
+    before=$(duck_glitches)
+    misses_before=$(dsp_misses)
     DELAY=$(json "$WEB/api/v1/inputs/2" "round(d['effective_delay_ms'] * 48)")
     "$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds 17 --dump "$WORK/duck.txt" >/dev/null
-    [[ "$(inputs_moved)" == "$before" ]] && break
-    if ((attempt < 3)); then
-        log "an input was late during the ducking dump (attempt $attempt); measuring again"
+    DUMP_MISSES=$(($(dsp_misses) - misses_before))
+    [[ "$(duck_glitches)" == "$before" ]] && break
+    if ((attempt < DUCK_DUMPS)); then
+        log "an input was late or the DSP missed $DUMP_MISSES deadline(s) during the ducking dump (attempt $attempt); measuring again"
     else
-        log "an input was late during the ducking dump (attempt $attempt); using the last dump"
+        log "an input was late or the DSP missed $DUMP_MISSES deadline(s) during the ducking dump (attempt $attempt); using the last dump"
     fi
 done
-python3 - "$WORK/duck.txt" "$ONSET" "$END" "$DELAY" <<'EOF' || fail "ducking"
+python3 - "$WORK/duck.txt" "$ONSET" "$END" "$DELAY" <<'EOF' || fail "ducking$( ((DUMP_MISSES)) && echo " (the last of $DUCK_DUMPS dumps also had $DUMP_MISSES DSP deadline miss(es))")"
 import math, sys
 rows = [l.split() for l in open(sys.argv[1])]
 onset, end, delay = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
