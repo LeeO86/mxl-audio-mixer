@@ -115,7 +115,9 @@ sleep 0.5
 python3 - "$WEB" <<'EOF' || fail "VAD"
 import json, sys, time, urllib.request
 web = sys.argv[1]
-get = lambda p: json.load(urllib.request.urlopen(web + p))
+# No proxy: urllib ignores CIDR entries in no_proxy.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+get = lambda p: json.load(opener.open(web + p))
 start = {v["signal"]: v["state"] for v in get("/api/v1/vad")}
 time.sleep(12.5)
 end = {v["signal"]: v["state"] for v in get("/api/v1/vad")}
@@ -135,10 +137,20 @@ api DELETE /api/v1/vad/t1 >/dev/null
 
 # Ducking: t1 down by 20 dB under vox's speech; t1 alone on the left of pgm.
 api POST /api/v1/ducks '{"id": "bed", "name": "Bed", "keys": ["vox"], "targets": ["t1"], "depth_db": -20, "attack_ms": 50, "hold_ms": 300, "release_ms": 500}' >/dev/null
+# A fixed extra delay on the tone and the speech while the duck is measured: an
+# automatic delay change crossfades the input (a dip in t1 that is not the duck;
+# seen in the lab). A late input (a gap) still makes the measurement start again, as
+# probe does.
+for i in 1 2; do api PATCH "/api/v1/inputs/$i" '{"extra_delay": 4}' >/dev/null; done
 sleep 1
-settled 2
-DELAY=$(json "$WEB/api/v1/inputs/2" "round(d['effective_delay_ms'] * 48)")
-"$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds 17 --dump "$WORK/duck.txt" >/dev/null
+inputs_moved() { for i in 1 2; do echo "$(input $i missing_samples) $(input $i effective_delay_ms)"; done; }
+for attempt in 1 2 3; do
+    before=$(inputs_moved)
+    DELAY=$(json "$WEB/api/v1/inputs/2" "round(d['effective_delay_ms'] * 48)")
+    "$PROBE_BIN" --domain "$OWN" --flow "$OUT_FLOW" --seconds 17 --dump "$WORK/duck.txt" >/dev/null
+    [[ "$(inputs_moved)" == "$before" ]] && break
+    log "an input was late during the ducking dump (attempt $attempt); measuring again"
+done
 python3 - "$WORK/duck.txt" "$ONSET" "$END" "$DELAY" <<'EOF' || fail "ducking"
 import math, sys
 rows = [l.split() for l in open(sys.argv[1])]
@@ -178,6 +190,7 @@ assert max(back) < 0.1, ("back to 0 dB 2 s after the speech", back)
 print(f"periods {len(lat)}: onset to −10 dB {lat} ms; at −20 ±0.5 dB {[round(d, 3) for d in depth]} of the speech; after it within {max(back):.3f} dB of 0")
 EOF
 pass "ducking: the tone under the speech at −20 dB, down within 200 ms of the onset, back after hold and release"
+for i in 1 2; do api PATCH "/api/v1/inputs/$i" '{"extra_delay": "auto"}' >/dev/null; done
 api DELETE /api/v1/ducks/bed >/dev/null
 
 # Two talkers taking turns (guest 3 s after vox), last-mic-hold on.
@@ -186,7 +199,9 @@ sleep 1
 python3 - "$WEB" <<'EOF' || fail "auto-mix of talkers"
 import json, sys, time, urllib.request
 web = sys.argv[1]
-get = lambda p: json.load(urllib.request.urlopen(web + p))
+# No proxy: urllib ignores CIDR entries in no_proxy.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+get = lambda p: json.load(opener.open(web + p))
 rows = []
 until = time.time() + 12.5
 while time.time() < until:
@@ -234,7 +249,9 @@ api PUT /api/v1/autolevels/vox >/dev/null
 python3 - "$WEB" <<'EOF' || fail "auto-level on speech"
 import json, sys, time, urllib.request
 web = sys.argv[1]
-get = lambda p: json.load(urllib.request.urlopen(web + p))
+# No proxy: urllib ignores CIDR entries in no_proxy.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+get = lambda p: json.load(opener.open(web + p))
 rows = []
 until = time.time() + 12.5
 while time.time() < until:
@@ -262,7 +279,9 @@ sleep 3.5
 python3 - "$WEB" "$IT_OUT/auto-ratio.json" <<'EOF' || fail "ratio duck (the polls: $IT_OUT/auto-ratio.json)"
 import json, sys, time, urllib.request
 web = sys.argv[1]
-get = lambda p: json.load(urllib.request.urlopen(web + p))
+# No proxy: urllib ignores CIDR entries in no_proxy.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+get = lambda p: json.load(opener.open(web + p))
 rows = []
 until = time.time() + 18.5
 while time.time() < until:

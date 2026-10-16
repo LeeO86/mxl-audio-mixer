@@ -14,13 +14,35 @@ pub struct Domain {
 }
 
 fn read_def(dir: &Path) -> Option<Domain> {
-    let text = std::fs::read_to_string(dir.join("domain_def.json")).ok()?;
-    let def: serde_json::Value = serde_json::from_str(&text).ok()?;
-    Some(Domain {
-        id: def["id"].as_str()?.trim().parse().ok()?,
-        label: def["label"].as_str().unwrap_or_default().to_string(),
-        path: dir.to_path_buf(),
-    })
+    match read_existing(dir) {
+        Existing::Valid(d) => Some(d),
+        _ => None,
+    }
+}
+
+/// `domain_def.json` read once: missing, readable, or there but not a definition.
+enum Existing {
+    Missing,
+    Valid(Domain),
+    Invalid,
+}
+
+fn read_existing(dir: &Path) -> Existing {
+    let text = match std::fs::read_to_string(dir.join("domain_def.json")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Existing::Missing,
+        Err(_) => return Existing::Invalid,
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|def| {
+            Some(Domain {
+                id: def["id"].as_str()?.trim().parse().ok()?,
+                label: def["label"].as_str().unwrap_or_default().to_string(),
+                path: dir.to_path_buf(),
+            })
+        });
+    parsed.map_or(Existing::Invalid, Existing::Valid)
 }
 
 /// Every child of `scan_path` with a `domain_def.json`, plus `own`. A domain id
@@ -65,7 +87,9 @@ pub struct OutputDomain {
 
 /// Create the own output domain once (G2). An existing `domain_def.json` is never
 /// overwritten: with another id, that id is kept and a warning logged.
-/// `options.json` is written only when missing. Both are written atomically.
+/// `options.json` is written only when missing. Both appear atomically and only
+/// once, also when several processes create the same domain at the same time
+/// (the test tone writers do).
 pub fn ensure_output_domain(
     dir: &Path,
     id: Uuid,
@@ -77,55 +101,82 @@ pub fn ensure_output_domain(
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let def = dir.join("domain_def.json");
-    let domain = match read_def(dir) {
-        Some(existing) if existing.id == id => OutputDomain {
-            id,
-            created: false,
-            foreign: false,
-        },
-        Some(existing) => {
-            tracing::warn!(
-                "{} already has id {}, not {id}; keeping {} and not overwriting it",
-                def.display(),
-                existing.id,
-                existing.id
-            );
-            OutputDomain {
-                id: existing.id,
-                created: false,
-                foreign: true,
-            }
-        }
-        None if def.exists() => {
-            return Err(format!(
-                "{} is not a valid domain definition",
-                def.display()
-            ))
-        }
-        None => {
+    // One read decides: a definition that appears between two checks (another
+    // writer creating the domain) must not look invalid.
+    let existing = match read_existing(dir) {
+        Existing::Valid(existing) => Some(existing),
+        Existing::Invalid => None,
+        Existing::Missing => {
             let body = serde_json::json!({
                 "id": id.to_string(),
                 "label": label,
                 "description": format!("{label} MXL audio mixer output domain"),
                 "tags": {}
             });
-            crate::state::write_atomic(
-                &def,
-                &serde_json::to_vec_pretty(&body).unwrap_or_default(),
-            )?;
-            OutputDomain {
-                id,
-                created: true,
-                foreign: false,
+            if write_new(&def, &serde_json::to_vec_pretty(&body).unwrap_or_default())? {
+                return finish(
+                    dir,
+                    history_ns,
+                    OutputDomain {
+                        id,
+                        created: true,
+                        foreign: false,
+                    },
+                );
             }
+            // Another process wrote it first.
+            read_def(dir)
         }
     };
+    let Some(existing) = existing else {
+        return Err(format!(
+            "{} is not a valid domain definition",
+            def.display()
+        ));
+    };
+    let foreign = existing.id != id;
+    if foreign {
+        tracing::warn!(
+            "{} already has id {}, not {id}; keeping {} and not overwriting it",
+            def.display(),
+            existing.id,
+            existing.id
+        );
+    }
+    finish(
+        dir,
+        history_ns,
+        OutputDomain {
+            id: existing.id,
+            created: false,
+            foreign,
+        },
+    )
+}
+
+fn finish(dir: &Path, history_ns: u64, domain: OutputDomain) -> Result<OutputDomain, String> {
     let options = dir.join("options.json");
     if !options.exists() {
         let body = serde_json::json!({"urn:x-mxl:option:history_duration/v1.0": history_ns});
-        crate::state::write_atomic(&options, body.to_string().as_bytes())?;
+        write_new(&options, body.to_string().as_bytes())?;
     }
     Ok(domain)
+}
+
+/// Write `path` only if it does not exist: a private temporary file, then a hard
+/// link (which never replaces a file). `false` when another writer was first.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<bool, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
+    let linked = std::fs::write(&tmp, bytes).and_then(|()| std::fs::hard_link(&tmp, path));
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(format!("write {}: {e}", path.display())),
+    }
 }
 
 /// `dir` is a direct child of `scan_path` (G2, I5): the only kind of directory
@@ -186,7 +237,13 @@ mod tests {
                 foreign: false
             }
         );
-        assert!(!dir.join("domain_def.tmp").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
         let def: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("domain_def.json")).unwrap())
                 .unwrap();
@@ -251,6 +308,35 @@ mod tests {
         assert!(remove_output_domain(root.path().parent().unwrap(), root.path()).is_err());
         assert!(remove_output_domain(Path::new("relative"), Path::new("")).is_err());
         assert!(nested.exists());
+    }
+
+    #[test]
+    fn writers_creating_one_domain_at_once_all_succeed() {
+        // The integration tests start several tone writers on one new domain;
+        // one used to read the other's half-written domain_def.json and exit.
+        for _ in 0..20 {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("tones");
+            let id = Uuid::new_v4();
+            let results: Vec<_> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..8)
+                    .map(|_| s.spawn(|| ensure_output_domain(&dir, id, "tones", 1)))
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert!(results
+                .iter()
+                .all(|r| r.as_ref().is_ok_and(|d| d.id == id && !d.foreign)));
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|r| r.as_ref().unwrap().created)
+                    .count(),
+                1
+            );
+            assert_eq!(read_def(&dir).unwrap().id, id);
+            assert!(dir.join("options.json").exists());
+        }
     }
 
     #[test]

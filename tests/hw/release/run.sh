@@ -98,6 +98,7 @@ item_load() {
     after=$(cgroup_stat)
     line=$(grep -m1 '^blocks ' "$OUT/load.log")
     dsp=$(sed -n 's/^dsp thread: //p' "$OUT/load.log" | head -1)
+    tones=$(sed -n 's/^tone writers: //p' "$OUT/load.log" | head -1)
     if [[ -z "$line" ]]; then
         row load FAIL "no result; see load.log"
         return
@@ -111,9 +112,9 @@ ratio = float(re.search(r"load ratio ([0-9.]+)", l)[1])
 misses = int(re.search(r"deadline misses (\d+)", l)[1])
 sys.exit(0 if ratio < 0.5 and misses == 0 else 1)
 EOF
-        row load PASS "$minutes min: $line; nr_throttled +$throttled; DSP thread: $dsp"
+        row load PASS "$minutes min: $line; nr_throttled +$throttled; DSP thread: $dsp; tone writers: $tones"
     else
-        row load FAIL "$minutes min: $line; nr_throttled +$throttled; DSP thread: $dsp"
+        row load FAIL "$minutes min: $line; nr_throttled +$throttled; DSP thread: $dsp; tone writers: $tones"
     fi
 }
 
@@ -166,9 +167,14 @@ item_registry() {
         receivers=$(python3 - "$query" "$node" <<'EOF'
 import json, sys, urllib.request
 q, node = sys.argv[1], sys.argv[2]
-get = lambda p: json.load(urllib.request.urlopen(f"{q}/{p}?paging.limit=1000"))
-devices = {d["id"] for d in get("devices") if d["node_id"] == node}
-print(sum(1 for r in get("receivers") if r["device_id"] in devices))
+# No proxy: urllib ignores CIDR entries in no_proxy (a 10.x registry went to the proxy).
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+get = lambda p: json.load(opener.open(f"{q}/{p}?paging.limit=1000", timeout=5))
+try:
+    devices = {d["id"] for d in get("devices") if d["node_id"] == node}
+    print(sum(1 for r in get("receivers") if r["device_id"] in devices))
+except Exception as e:
+    print(f"none (Query API: {e})")
 EOF
 )
         [[ "$receivers" == "$inputs" ]] && break

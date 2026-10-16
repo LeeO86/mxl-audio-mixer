@@ -108,8 +108,10 @@ curl -fsS -o /dev/null -X POST "$WEB/api/v1/loudness/main/stop"
 curl -fsS -o /dev/null -X POST "$WEB/api/v1/loudness/main/reset"
 [[ "$(loud integrated_lufs)" == -inf && "$(loud running)" == False ]] || fail "stop and reset"
 curl -fsS -o /dev/null -X POST "$WEB/api/v1/loudness/main/start"
-sleep 1
-python3 -c "exit(0 if abs($(loud integrated_lufs) + 23.0) < 0.2 else 1)" || fail "integration after start"
+# The first gating block (400 ms) needs a moment after the start: poll, up to 5 s.
+integrated_ok() { python3 -c "exit(0 if abs(float('$(loud integrated_lufs)') + 23.0) < 0.2 else 1)"; }
+for _ in $(seq 1 50); do integrated_ok && break; sleep 0.1; done
+integrated_ok || fail "integration after start: $(loud integrated_lufs) LUFS, not −23.0"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$WEB/api/v1/loudness/main/explode")
 [[ "$code" == 400 ]] || fail "unknown action answered $code"
 pass "loudness stop, reset and start"
