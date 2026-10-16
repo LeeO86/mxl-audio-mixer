@@ -611,8 +611,9 @@ labels, real-time) in **Appendix B**. These appendices are the contract. In part
 
 - G1 configuration (env > file > `/config` > defaults; invalid → exit 78; no secrets
   in exported files; remote-link secrets via env/Secret only);
-- G2 MXL domains (scan path `/Volumes/mxl`, own output domain created once, id
-  mismatch never overwritten, `MXL_HISTORY_DURATION_NS`);
+- G2 MXL domains (scan path `/Volumes/mxl`, which must exist; own output domain
+  directly below it, created once; an existing different id is kept with a warning,
+  never overwritten; `MXL_HISTORY_DURATION_NS`);
 - G3 NMOS identity (`NMOS_SEED` UUIDv5 for all resources, `NMOS_LABEL`, `NMOS_TAGS`,
   group hints);
 - G4 static registry, `NMOS_DNS_SD=false` by default; G5 `NMOS_HOST_ADDRESS` (pod IP);
@@ -641,9 +642,12 @@ labels, real-time) in **Appendix B**. These appendices are the contract. In part
 (block time / block period), `plan_swaps_total`, `plan_compile_seconds`,
 `input_late_samples_total{input}`, `input_lag_ms{input}`, `output_blocks_total`,
 `signals`, `nodes{type}`, `loudness_lufs{signal,window}`, `true_peak_dbtp{signal}`,
-`vad_active{signal}`, `webrtc_clients`, `remote_link_up{peer}`,
+`vad_active{signal}`, `remote_link_up{peer}`,
 `remote_link_rtt_ms{peer}`, `logic_ticks_total`, `logic_actions_total{graph}`,
-process CPU/memory.
+`dsp_realtime` (0/1: the DSP thread runs `SCHED_FIFO`), process CPU/memory.
+The browsers' WebRTC sessions are counted by MediaMTX, not the mixer:
+`preview_readers{path}` (below) is their number per stream, read from a shared
+MediaMTX's API (the built-in one runs with its API off).
 
 Also:
 - `input_arrival_lag_ms{input}` (histogram or p50/p99/p999 gauges);
@@ -723,13 +727,19 @@ Pod network; MXL root `hostPath`; uid 1000; `/config` volume for show files.
   - Scheduling is optional (`MIXER_RT_PRIORITY`, default off, needs `CAP_SYS_NICE`).
     The value MUST be **≤ 49**: the kernel's IRQ threads run at SCHED_FIFO 50, and a DSP
     thread above them starves interrupt handling (the platform runs its real-time
-    functions at 49).
+    functions at 49). Kubernetes `capabilities.add` only puts `SYS_NICE` into the
+    bounding set of a non-root process, so the image carries it as a permitted file
+    capability (`setcap cap_sys_nice+p`) and the mixer raises it into its effective set
+    before any thread starts. Without it the mixer still starts (`SCHED_OTHER`, a
+    warning, `dsp_realtime` 0).
   - **Guaranteed QoS with whole CPUs** (static CPU manager, exclusive cores) is the
     supported way to run the DSP thread on the platform. A Burstable pod with a CPU
     limit gets CFS throttling (§2).
   - Pin the DSP thread to one of the pod's CPUs, read from the affinity mask; never
     assume CPU 0 or any fixed number. The platform's static CPU manager gives pods
-    arbitrary CPU sets.
+    arbitrary CPU sets. The DSP CPU is the last one whose SMT siblings are all in the
+    pod (a whole core); request an even number of CPUs: 4 preferred; 2 is the minimum
+    (not measured), and then the non-DSP threads run on the DSP CPU's sibling.
 - **Compose demo:** registry, mxl-test-player (tones), the mixer, mxl-webrtc-monitor,
   MediaMTX; plus a two-instance demo for master/slave.
 - **Kubernetes Deployment** that `mxl-poc-platform` can vendor (L3 production function).

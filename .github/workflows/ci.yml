@@ -228,12 +228,17 @@ jobs:
           build-args: VERSION=ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Smoke test (uid 1000, libmxl, /livez, the MediaMTX child, exit 143)
+      - name: Smoke test (uid 1000, libmxl, /livez, the MediaMTX child, SCHED_FIFO with SYS_NICE, exit 143)
         run: |
           set -eu
           [ "$(docker inspect -f '{{.Config.User}}' mxl-audio-mixer:ci)" = 1000 ]
           docker inspect -f '{{json .Config.Labels}}' mxl-audio-mixer:ci
+          # Without SYS_NICE the file capability must not stop the exec (78 is the
+          # invalid setting, not "operation not permitted").
+          rc=0; docker run --rm --cap-drop ALL -e WEB_PORT=abc mxl-audio-mixer:ci || rc=$?
+          [ "$rc" = 78 ]
           docker run -d --name smoke --network host -e HOST_ID=smoke -e NMOS_HOST_ADDRESS=192.0.2.10 \
+            --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges -e MIXER_RT_PRIORITY=49 \
             -e MXL_DOMAIN_SCAN_PATH=/tmp mxl-audio-mixer:ci
           for _ in $(seq 1 50); do curl -fs http://127.0.0.1:8190/livez && break; sleep 0.2; done
           curl -fs http://127.0.0.1:8190/readyz
@@ -241,6 +246,7 @@ jobs:
           curl -fs http://127.0.0.1:8190/widgets | grep -q '"fader-bank"'
           for _ in $(seq 1 50); do curl -fs http://127.0.0.1:8190/api/v1/preview | grep -q '"running":true' && break; sleep 0.2; done
           curl -fs http://127.0.0.1:8190/api/v1/preview | grep -q '"running":true'
+          curl -fs http://127.0.0.1:8190/metrics | grep -qx 'mxl_audio_mixer_dsp_realtime 1'
           docker stop -t 15 smoke
           [ "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 143 ]
           docker logs smoke 2>&1 | tail -5

@@ -51,7 +51,7 @@ RUN cargo build --release --locked --bins \
 FROM ubuntu:24.04 AS runtime
 ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 ARG VERSION=dev
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libstdc++6 libssl3 \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libstdc++6 libssl3 libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /config && chown 1000:1000 /config
 COPY --from=mxl /opt/mxl/lib/libmxl.so* /usr/local/lib/
@@ -67,8 +67,14 @@ COPY assets/onnxruntime.LICENSE /usr/share/doc/onnxruntime/LICENSE
 COPY assets/onnxruntime.ThirdPartyNotices.txt /usr/share/doc/onnxruntime/ThirdPartyNotices.txt
 COPY assets/silero_vad.LICENSE /usr/share/doc/silero-vad/LICENSE
 COPY src/auto/comis/LICENSE /usr/share/doc/com-is-assist/LICENSE
+# CAP_SYS_NICE as a permitted file capability only (+p, not +ep): with SYS_NICE
+# granted (Kubernetes capabilities.add) the mixer raises it into its effective set
+# for SCHED_FIFO as uid 1000; without it the binary still starts (SCHED_OTHER).
 RUN ldconfig && ldd /usr/local/lib/libmxl.so.1 | (! grep -q "not found") \
-    && ldd /usr/local/bin/mxl-audio-mixer | (! grep -q "not found")
+    && ldd /usr/local/bin/mxl-audio-mixer | (! grep -q "not found") \
+    && setcap cap_sys_nice+p /usr/local/bin/mxl-audio-mixer \
+    && getcap /usr/local/bin/mxl-audio-mixer | grep -q 'cap_sys_nice=p'
+
 USER 1000
 # Web/API, NMOS, the built-in MediaMTX's WHEP (TCP) and ICE (UDP).
 EXPOSE 8190 3342 8599 8199/udp

@@ -465,6 +465,12 @@ async fn metrics(State(app): State<App>) -> Response {
         vec![format!(" {}", c.load_ratio())],
     );
     metric(
+        "dsp_realtime",
+        "gauge",
+        "1 when the DSP thread runs SCHED_FIFO (MIXER_RT_PRIORITY and an effective SYS_NICE).",
+        vec![format!(" {}", u8::from(c.realtime.load(Ordering::Relaxed)))],
+    );
+    metric(
         "output_blocks_total",
         "counter",
         "Blocks written to MXL outputs (one per output and block).",
@@ -682,6 +688,23 @@ async fn metrics(State(app): State<App>) -> Response {
         "Times the input was opened again.",
         per(&|s| s.reopens.to_string()),
     );
+    metric(
+        "logic_ticks_total",
+        "counter",
+        "Logic ticks evaluated (100 Hz).",
+        vec![format!(" {}", control.logic.ticks)],
+    );
+    metric(
+        "logic_actions_total",
+        "counter",
+        "Logic actions run (mute, fader, recall, webhook), per graph.",
+        control
+            .logic
+            .actions
+            .iter()
+            .map(|(g, n)| format!("{{graph=\"{g}\"}} {n}"))
+            .collect(),
+    );
     drop(control);
     metric(
         "process_cpu_seconds_total",
@@ -695,8 +718,27 @@ async fn metrics(State(app): State<App>) -> Response {
         "Resident memory of the process.",
         vec![format!(" {}", timing::process_resident_bytes())],
     );
-    for line in link_lines {
-        let _ = writeln!(out, "mxl_audio_mixer_{line}");
+    for (name, kind, help) in [
+        (
+            "remote_link_up",
+            "gauge",
+            "Remote link (§13): 1 while the peer is connected.",
+        ),
+        (
+            "remote_link_rtt_ms",
+            "gauge",
+            "Remote link (§13): round-trip time to the peer.",
+        ),
+    ] {
+        let lines: Vec<String> = link_lines
+            .iter()
+            .filter_map(|l| l.strip_prefix(name))
+            .filter(|rest| rest.starts_with('{') || rest.starts_with(' '))
+            .map(str::to_string)
+            .collect();
+        if !lines.is_empty() {
+            metric(name, kind, help, lines);
+        }
     }
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }

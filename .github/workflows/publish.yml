@@ -31,6 +31,13 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             ver="${GITHUB_REF#refs/tags/v}"
             [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            # The binary reports the crate version (/api/v1/status, the export).
+            crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+            web=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' web/package.json | head -1)
+            if [[ "$crate" != "$ver" || "$web" != "$ver" ]]; then
+              echo "::error::tag v${ver}, but Cargo.toml is ${crate} and web/package.json is ${web}"
+              exit 1
+            fi
             echo "list=${image}:${ver},${image}:${ver%.*},${image}:${ver%%.*}" >> "$GITHUB_OUTPUT"
             echo "version=${ver}" >> "$GITHUB_OUTPUT"
           else

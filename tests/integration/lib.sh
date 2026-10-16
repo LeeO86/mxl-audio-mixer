@@ -64,6 +64,7 @@ MIXER_PID=""
 # this machine does not collide; without MEDIAMTX_BIN the mixer only logs that
 # it cannot start it.
 start_mixer() { # [VAR=value...] ; logs to $IT_OUT/<test>-mixer.log
+    mkdir -p "$WORK/mxl"
     env HOST_ID=it NMOS_HOST_ADDRESS="$HOST_IP" MXL_DOMAIN_SCAN_PATH="$WORK/mxl" \
         MIXER_STATE_DIR="$WORK/state" MIXER_INPUT_FLOWS=4 \
         MEDIAMTX_RTSP_PORT=8964 MEDIAMTX_WHEP_PORT=8609 MEDIAMTX_ICE_UDP_PORT=8209 "$@" \

@@ -1,5 +1,5 @@
 //! Process start-up and shutdown (G1–G9). Exit codes: 0, 75 (a port cannot be
-//! bound), 78 (invalid configuration), 143 (SIGTERM).
+//! bound, libmxl cannot be loaded), 78 (invalid configuration), 143 (SIGTERM).
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -15,7 +15,7 @@ use mxl_audio_mixer::mxlio::{self, domain};
 use mxl_audio_mixer::nmos::{self, RouteRequest};
 use mxl_audio_mixer::ops::{self, App};
 use mxl_audio_mixer::outputs::Outputs;
-use mxl_audio_mixer::{state, timing};
+use mxl_audio_mixer::{caps, state, timing};
 
 const EX_CONFIG: u8 = 78;
 const EX_UNAVAILABLE: u8 = 75;
@@ -73,7 +73,44 @@ async fn preview_task(app: App, mut stop: tokio::sync::watch::Receiver<bool>) {
     }
 }
 
+/// G6: every port this start will listen on is free, checked before the output
+/// domain is created, so a busy port (exit 75) leaves nothing behind.
+fn check_ports(config: &Config) -> Result<(), String> {
+    let mut tcp = vec![
+        ("WEB_PORT", config.web_port),
+        ("NMOS_PORT", config.nmos_port),
+    ];
+    if config.tsl_enable {
+        tcp.push(("TSL_TCP_PORT", config.tsl_tcp_port));
+        std::net::UdpSocket::bind(("0.0.0.0", config.tsl_udp_port))
+            .map_err(|e| format!("cannot bind TSL_UDP_PORT {}: {e}", config.tsl_udp_port))?;
+    }
+    for (name, port) in tcp {
+        std::net::TcpListener::bind(("0.0.0.0", port))
+            .map_err(|e| format!("cannot bind {name} {port}: {e}"))?;
+    }
+    if config.preview_publish_url.is_none() {
+        mxl_audio_mixer::preview::mediamtx::check_ports(config)?;
+    }
+    Ok(())
+}
+
+/// A failed start after the output domain was created: remove it again when this
+/// start created it (never a domain that was there before).
+fn abort(created: bool, config: &Config, code: u8, message: impl std::fmt::Display) -> ExitCode {
+    if created {
+        if let Err(e) = domain::remove_output_domain(&config.output_domain_dir, &config.scan_path) {
+            tracing::error!("output domain cleanup failed: {e}");
+        }
+    }
+    fail(code, message)
+}
+
 fn main() -> ExitCode {
+    // Before any thread starts (threads inherit both): the permitted SYS_NICE of
+    // the image's file capability into the effective set, and the open-files limit.
+    let raised = caps::raise_permitted();
+    let open_files = caps::raise_open_files();
     let config = match config::from_env() {
         Ok(c) => c,
         Err(e) => {
@@ -89,6 +126,14 @@ fn main() -> ExitCode {
             config.log_level
         )))
         .init();
+    tracing::info!("effective capabilities: {}", caps::effective());
+    if let Err(e) = raised {
+        tracing::warn!("raising the permitted capabilities into the effective set failed: {e}");
+    }
+    match open_files {
+        Ok(n) => tracing::info!("open files limit {n}"),
+        Err(e) => tracing::warn!("open files limit not raised: {e}"),
+    }
     let workers = timing::worker_threads();
     timing::reserve_dsp_core();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -102,7 +147,7 @@ fn main() -> ExitCode {
     runtime.block_on(run(config))
 }
 
-async fn run(config: Config) -> ExitCode {
+async fn run(mut config: Config) -> ExitCode {
     tracing::info!(
         "mxl-audio-mixer {} starting, {} inputs, {}-sample blocks",
         ops::VERSION,
@@ -117,34 +162,54 @@ async fn run(config: Config) -> ExitCode {
         );
     }
 
-    if let Err(e) = std::fs::create_dir_all(&config.state_dir) {
-        return fail(
-            EX_CONFIG,
-            format!("MIXER_STATE_DIR {}: {e}", config.state_dir.display()),
-        );
+    if let Err(e) = domain::check_scan_path(&config.scan_path) {
+        return fail(EX_CONFIG, e);
     }
-    match domain::ensure_output_domain(
+    if let Err(e) = state::check_state_dir(&config.state_dir) {
+        return fail(EX_CONFIG, e);
+    }
+    let api = match mxlio::load() {
+        Ok(api) => api,
+        Err(e) => return fail(EX_UNAVAILABLE, e),
+    };
+    if let Err(e) = check_ports(&config) {
+        return fail(EX_UNAVAILABLE, e);
+    }
+    // A failed ensure may leave a directory it made; remove it only then.
+    let existed = config.output_domain_dir.exists();
+    let (created, foreign) = match domain::ensure_output_domain(
         &config.output_domain_dir,
         config.output_domain_id,
         &config.nmos_label,
         config.history_duration_ns,
     ) {
-        Ok(true) => tracing::info!(
-            "created output domain {} ({})",
-            config.output_domain_dir.display(),
-            config.output_domain_id
-        ),
-        Ok(false) => tracing::info!(
-            "output domain {} ({})",
-            config.output_domain_dir.display(),
-            config.output_domain_id
-        ),
-        Err(e) => return fail(EX_CONFIG, format!("MXL output domain: {e}")),
-    }
-    let api = match mxlio::load() {
-        Ok(api) => api,
-        Err(e) => return fail(EX_CONFIG, e),
+        Ok(d) => {
+            tracing::info!(
+                "{} output domain {} ({})",
+                if d.created { "created" } else { "using" },
+                config.output_domain_dir.display(),
+                d.id
+            );
+            config.set_output_domain_id(d.id);
+            (d.created, d.foreign)
+        }
+        Err(e) => {
+            return abort(
+                !existed,
+                &config,
+                EX_CONFIG,
+                format!("MXL output domain: {e}"),
+            )
+        }
     };
+    // G2: a domain with another id was there before; it is not ours to remove.
+    let cleanup_on_exit = config.cleanup_on_exit && !foreign;
+    if config.cleanup_on_exit && foreign {
+        tracing::warn!(
+            "MXL_CLEANUP_ON_EXIT: {} keeps its own id, so it is not removed on exit",
+            config.output_domain_dir.display()
+        );
+    }
 
     let mut engine = match Engine::start(EngineConfig {
         inputs: config.input_flows,
@@ -154,7 +219,7 @@ async fn run(config: Config) -> ExitCode {
         cpu: timing::dsp_cpu(),
     }) {
         Ok(e) => e,
-        Err(e) => return fail(EX_UNAVAILABLE, format!("DSP thread: {e}")),
+        Err(e) => return abort(created, &config, EX_UNAVAILABLE, format!("DSP thread: {e}")),
     };
     let inputs_path = config.state_dir.join("inputs.json");
     let connections_path = config.state_dir.join("connections.json");
@@ -169,7 +234,7 @@ async fn run(config: Config) -> ExitCode {
     let (route_tx, mut route_rx) = tokio::sync::mpsc::unbounded_channel::<RouteRequest>();
     let node = match nmos::build(&config, &configs, route_tx, connections_path.clone()) {
         Ok(node) => node,
-        Err(e) => return fail(EX_CONFIG, format!("NMOS: {e}")),
+        Err(e) => return abort(created, &config, EX_CONFIG, format!("NMOS: {e}")),
     };
     let outputs = match Outputs::new(
         api,
@@ -178,7 +243,14 @@ async fn run(config: Config) -> ExitCode {
         &config.nmos_seed,
     ) {
         Ok(o) => o,
-        Err(e) => return fail(EX_CONFIG, format!("MXL output domain: {e}")),
+        Err(e) => {
+            return abort(
+                created,
+                &config,
+                EX_CONFIG,
+                format!("MXL output domain: {e}"),
+            )
+        }
     };
     let mut control = Control::new(engine, inputs, outputs, node.clone(), &config);
     // The mix of the last run, with its published outputs, before the IS-05
@@ -251,13 +323,15 @@ async fn run(config: Config) -> ExitCode {
     let nmos_addr: SocketAddr = ([0, 0, 0, 0], config.nmos_port).into();
     let nmos_server = match node.bind(nmos_addr).await {
         Ok(s) => s,
-        Err(e) => return fail(EX_UNAVAILABLE, e),
+        Err(e) => return abort(created, &config, EX_UNAVAILABLE, e),
     };
     let web_addr: SocketAddr = ([0, 0, 0, 0], config.web_port).into();
     let web_listener = match tokio::net::TcpListener::bind(web_addr).await {
         Ok(l) => l,
         Err(e) => {
-            return fail(
+            return abort(
+                created,
+                &config,
                 EX_UNAVAILABLE,
                 format!("cannot bind WEB_PORT {web_addr}: {e}"),
             )
@@ -267,7 +341,9 @@ async fn run(config: Config) -> ExitCode {
         let sockets = match mxl_audio_mixer::tally::bind(&config).await {
             Ok(s) => s,
             Err(e) => {
-                return fail(
+                return abort(
+                    created,
+                    &config,
                     EX_UNAVAILABLE,
                     format!(
                         "cannot bind TSL_UDP_PORT {} / TSL_TCP_PORT {}: {e}",
@@ -294,11 +370,6 @@ async fn run(config: Config) -> ExitCode {
         );
     }
     let own_mediamtx = config.preview_publish_url.is_none();
-    if own_mediamtx {
-        if let Err(e) = mxl_audio_mixer::preview::mediamtx::check_ports(&config) {
-            return fail(EX_UNAVAILABLE, e);
-        }
-    }
     let config = Arc::new(config);
     let mediamtx = Arc::new(mxl_audio_mixer::preview::mediamtx::Child::default());
     let app = App {
@@ -361,7 +432,7 @@ async fn run(config: Config) -> ExitCode {
         )
         .await;
         // G8 3: remove the own output domain.
-        if config.cleanup_on_exit {
+        if cleanup_on_exit {
             match domain::remove_output_domain(&config.output_domain_dir, &config.scan_path) {
                 Ok(()) => tracing::info!(
                     "removed output domain {}",

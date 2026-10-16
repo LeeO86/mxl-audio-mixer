@@ -124,6 +124,7 @@ item_registry() {
     fi
     local work web nmos query state pid node rc
     work=$(mktemp -d /dev/shm/release-reg.XXXXXX)
+    mkdir -p "$work/mxl"
     web="http://127.0.0.1:${REG_WEB_PORT:-8190}"
     nmos="${REG_NMOS_PORT:-3342}"
     query="http://${NMOS_QUERY_ADDRESS:-$NMOS_REGISTRY_ADDRESS}:${NMOS_QUERY_PORT:-$((NMOS_REGISTRY_PORT + 1))}/x-nmos/query/v1.3"
