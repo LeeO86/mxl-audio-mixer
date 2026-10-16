@@ -21,7 +21,7 @@ Milestone 9 (§13: master/slave remote link).
 
 ### Remote link
 
-Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D140–D146).
+Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D153).
 
 - `wss://` works: the master speaks TLS (rustls, the system certificate store). It failed on every attempt before. The slave needs a TLS-terminating proxy in front of its web port. Over `ws://` the token travels in clear: keep such a link on a trusted network.
 - Takeover deny no longer refuses the master's own commands, and a closing extra connection no longer marks the link down under a live master.

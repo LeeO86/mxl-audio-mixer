@@ -147,7 +147,7 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
-      - name: tests/integration/link.sh (remote link: two mixers, a hung peer, takeover)
+      - name: tests/integration/link.sh (the remote link, a hung peer, takeover)
         run: tests/integration/link.sh
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
