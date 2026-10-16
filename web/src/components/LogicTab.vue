@@ -15,6 +15,7 @@ import "@vue-flow/minimap/dist/style.css";
 import "@vue-flow/controls/dist/style.css";
 import ConfirmButton from "./ConfirmButton.vue";
 import LogicNode from "./LogicNode.vue";
+import LogicParam from "./LogicParam.vue";
 import { api, fmtDb } from "../api.js";
 import { act, live, room, signalOf, signals, vcas } from "../store.js";
 import { PORT_TYPES, batchFor, boundary, canWire, clipboard, copyOf, forget, freshId, group, history, historyOf, pasted, portName, portsOf, record, resource, same, ungroup } from "../logicEdit.js";
@@ -864,15 +865,7 @@ onUnmounted(() => {
               <td>{{ b.id }}</td>
               <td>{{ typeLabel(b.type) }}</td>
               <td class="lparams">
-                <template v-for="p in paramsOf(b)" :key="p.name">
-                  <select v-if="optionsOf(p, b)" :value="b[p.name]" :aria-label="`${b.id} ${p.name}`" :title="p.name" @change="setParam(b, p, $event.target.value)">
-                    <option v-for="o in optionsOf(p, b)" :key="o.id" :value="o.id">{{ o.name }}</option>
-                  </select>
-                  <label v-else-if="p.kind === 'boolean'" class="check"><input type="checkbox" :checked="b[p.name]" :aria-label="`${b.id} ${p.name}`" @change="setParam(b, p, $event.target.checked)" /> {{ p.name }}</label>
-                  <input v-else-if="NUMBER_KINDS.includes(p.kind)" type="number" :min="p.min" :max="p.max" :step="p.kind === 'integer' ? 1 : 'any'" :value="b[p.name]" :aria-label="`${b.id} ${p.name}`" :title="p.name" style="width: 6rem" @change="setParam(b, p, $event.target.value)" />
-                  <input v-else-if="JSON_KINDS.includes(p.kind)" :value="JSON.stringify(b[p.name])" :aria-label="`${b.id} ${p.name}`" :title="`${p.name} (JSON)`" style="width: 12rem" @change="setParam(b, p, $event.target.value)" />
-                  <input v-else :value="b[p.name]" :aria-label="`${b.id} ${p.name}`" :placeholder="p.name" style="width: 12rem" @change="setParam(b, p, $event.target.value)" />
-                </template>
+                <LogicParam v-for="p in paramsOf(b)" :key="p.name" :block="b" :param="p" :options="optionsOf" @set="setParam(b, p, $event)" />
                 <template v-if="!openMacro">
                   <button v-if="b.type === 'button'" class="btn small" :aria-pressed="pressed(b)" @click="press(b, !pressed(b))">{{ pressed(b) ? "Pressed" : "Press" }}</button>
                   <button v-if="b.type === 'trigger'" class="btn small" :aria-label="`Fire ${b.id}`" @click="fire(b)">Fire</button>

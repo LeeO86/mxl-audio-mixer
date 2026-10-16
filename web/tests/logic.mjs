@@ -78,7 +78,10 @@ try {
   pass("palette: a click adds a block, a drag drops one where it lands");
 
   // Value, then a cable: the live value of the action shows "on".
+  // Typed, then the tab redraws a few times (polls, ports, selection) before Enter: the number stays.
   await page.getByLabel("const-1 value").fill("1");
+  await page.locator(".lpalette").hover();
+  await page.waitForTimeout(800);
   await page.getByLabel("const-1 value").press("Enter");
   await until("const is 1", async () => (await graphOf(g.id)).blocks.find((b) => b.id === "const-1").value === 1);
   await page.getByRole("button", { name: "Fit" }).click();
