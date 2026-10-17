@@ -16,7 +16,7 @@ import "@vue-flow/controls/dist/style.css";
 import ConfirmButton from "./ConfirmButton.vue";
 import LogicNode from "./LogicNode.vue";
 import LogicParam from "./LogicParam.vue";
-import { api, fmtDb } from "../api.js";
+import { api, exchange, fmtDb } from "../api.js";
 import { act, live, room, signalOf, signals, vcas } from "../store.js";
 import { PORT_TYPES, boundary, canWire, clipboard, copyOf, forget, freshId, group, history, historyOf, pasted, portName, portsOf, record, resource, same, sameEdit, ungroup } from "../logicEdit.js";
 
@@ -171,7 +171,8 @@ const failed = (e) => (live.actionError = e.message);
 // nothing (the request failed: network, 5xx).
 async function send(body, want) {
   try {
-    const done = await api.post("/api/v1/logic-batch", body);
+    const { data: done, revision } = await exchange("/api/v1/logic-batch", { method: "POST", body });
+    adopt(body, done, revision);
     live.actionError = "";
     issues.value = [];
     rejected.value = null;
@@ -185,6 +186,28 @@ async function send(body, want) {
     } else live.actionError = e.message;
     return e.status === 400 ? { refused: true } : null;
   }
+}
+
+// A write's answer is the newest state of what it wrote: shown at once, without waiting for the pushed
+// mix, which may come a meter tick later (store.js then drops pushes older than this revision).
+function adopt(body, done, revision) {
+  // Not over a push of the same or a newer revision: it already has this write, and maybe more.
+  if (!live.mix || !done || (revision !== null && revision <= live.revision)) return;
+  for (const [kind, key] of [
+    ["graph", "logic"],
+    ["macro", "logic_macros"],
+  ]) {
+    let list = [...(live.mix[key] || [])];
+    for (const r of done[`${kind}s`] || []) {
+      const i = list.findIndex((x) => x.id === r.id);
+      if (i >= 0) list[i] = resource(r);
+      else list.push(resource(r));
+    }
+    const gone = new Set(body[`delete_${kind}s`] || []);
+    list = list.filter((x) => !gone.has(x.id));
+    live.mix[key] = list;
+  }
+  if (revision !== null) live.revision = revision;
 }
 
 // Reads `reads` (graphs and macros; with `lists`, also every graph and macro as `cur.graphs` and
@@ -588,26 +611,42 @@ function deleteSelection() {
   for (const e of getSelectedEdges.value) if (!e.data?.ghost) doom("wires", e.id);
 }
 
+// Copies from the graph or macro as the server has it now (read in the queue, after this client's own
+// edits), not from the last pushed mix.
+let copying = 0;
 function copy() {
-  const v = view.value;
+  const d = doc.value;
   const ids = selectedIds.value;
-  if (!v || !ids.length) return false;
-  Object.assign(clipboard, copyOf(v, ids), { pastes: 0 });
-  live.notice = `${ids.length} block${ids.length > 1 ? "s" : ""} copied.`;
+  if (!d || !ids.length) return false;
+  copying++;
+  queued = queued
+    .then(async () => {
+      const cur = await api.get(urlOf(d)).catch(() => null);
+      if (!cur) return void (live.actionError = "The graph could not be read; nothing was copied.");
+      Object.assign(clipboard, copyOf(cur, ids), { pastes: 0 });
+      live.notice = `${ids.length} block${ids.length > 1 ? "s" : ""} copied.`;
+    })
+    .catch(failed)
+    .finally(() => copying--);
   return true;
 }
 
 // The clipboard into the open graph or macro (any one), with new ids, a bit further down and right on
 // each paste. A macro's own inputs and outputs are left out when pasting into a graph.
 function paste() {
-  if (!view.value || !clipboard.blocks.length) return false;
+  if (!view.value || (!clipboard.blocks.length && !copying)) return false;
+  // After a copy that is still reading.
+  queued = queued.then(pasteClip).catch(failed);
+  return true;
+}
+function pasteClip() {
+  if (!view.value || !clipboard.blocks.length) return;
   const inGraph = !openMacro.value;
   const own = (t) => inGraph && (t === "macro-in" || t === "macro-out");
   const drop = new Set(clipboard.blocks.filter((b) => own(b.type)).map((b) => b.id));
   const clip = { blocks: clipboard.blocks.filter((b) => !drop.has(b.id)), wires: clipboard.wires.filter((w) => !drop.has(w.from_block) && !drop.has(w.to_block)) };
-  if (!clip.blocks.length) return true;
+  if (!clip.blocks.length) return;
   guardLive(clip.blocks, "Pasted actions act at once in a live graph, and pasted blocks that remember start empty.", () => pasteNow(clip));
-  return true;
 }
 function pasteNow(clip) {
   const offset = 40 * ++clipboard.pastes;
