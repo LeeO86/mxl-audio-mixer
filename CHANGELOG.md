@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0 (in progress)
+## 1.3.0 (2026-10-17)
 
 Milestone 9 (§13: master/slave remote link).
 
@@ -33,8 +33,8 @@ The editor (the Logic tab; D175–D184):
 - The list under the canvas edits every block parameter. A new block gets no target by itself: its strip, snapshot, monitor, mic, … stays empty (outlined in amber) until chosen, unless a strip is picked in the add row; an action without a target never acts, an input without one reads off, 0 or the floor and still drives what it is wired to. A webhook asks for its URL first. A choice made with the arrow keys applies on Enter or when the field is left; Escape puts the old one back.
 - A new graph starts in dry run; the toolbar shows LIVE, DRY RUN or OFF. Undo and redo never switch a graph on, off or out of dry run.
 - In a live graph, paste, group, ungroup, undo, redo and a new macro instance ask first when they (re)make actions or blocks that remember: those actions act at once, and re-made blocks start with empty memory. "Switch to dry run first" is offered; if that switch fails, nothing is changed.
-- Fixed: a number being typed in the logic list was reset by the next live-value poll, or by a pushed mix; a field that has the focus or an unapplied edit keeps it, and is outlined in amber when the value changes elsewhere meanwhile (Enter keeps the typed value, Escape takes the stored one).
-- Fixed: after a quick undo or redo the canvas could show, and a copy take, an older graph. The UI takes its logic edits from their answers at once, drops pushed mixes older than what it shows, and copies from a fresh read.
+- Fixed: a number being typed in the logic list was reset by the next live-value poll, or by a pushed mix; a field that has the focus or an unapplied edit keeps it, and is outlined in amber when the value changes elsewhere meanwhile (Enter keeps the typed value, Escape takes the stored one) (#35).
+- Fixed: after a quick undo or redo the canvas could show, and a copy take, an older graph. The UI takes its logic edits from their answers at once, drops pushed mixes older than what it shows, and copies from a fresh read (#35).
 - `@vue-flow/minimap` and `@vue-flow/controls` (MIT) for the minimap and the zoom buttons.
 
 ### Platform readiness
@@ -79,7 +79,7 @@ Fixes from the audit of `09b5598` (IMPLEMENTATION_PLAN X5–X10, D147–D157).
 - The §16 tone writers (`tests/perf/section16.sh`) run off the DSP core at `SCHED_FIFO` `MIXER_RT_PRIORITY` − 4 (at least 1) when allowed; the script takes `MIXER_RT_PRIORITY` only as an integer 1–49 (`off`, `false` or 0 leave them `SCHED_OTHER`).
 - The m0 spike keeps its other threads off the block core; `m0-block-clock` picks the CPU by the whole-core rule. The lint job also runs the m0 spike's tests.
 - The test scripts' `urllib` calls use an opener without proxies (`no_proxy` CIDR entries were ignored).
-- Flakes fixed: `auto.sh` ducking (a fixed input delay and a bounded retry) and `processing.sh` (polling instead of a fixed wait).
+- Flakes fixed: `auto.sh` ducking (a fixed input delay, and the dump taken again after a late input or a DSP deadline miss, at most 4 times; #30, #31), `processing.sh` (polling instead of a fixed wait; #30) and `ui.mjs` (the auto-mix shares taken once they have settled for 1 s; #34).
 
 ### Documentation
 
