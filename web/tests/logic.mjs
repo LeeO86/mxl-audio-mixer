@@ -484,6 +484,74 @@ try {
   if ((await graphOf(lg.id)).blocks.some((b) => b.id === "toggle-2")) throw new Error("a cancelled redo was written");
   pass("a live graph: Do it live pastes and stays live; a redo that re-makes a block asks again, Cancel keeps it undone");
 
+  // Typing while mixes are pushed: the focused field keeps what is typed until Enter.
+  const sync = await api("/api/v1/logic", {
+    method: "POST",
+    headers: json,
+    body: JSON.stringify({ name: "Sync", dry_run: true, blocks: [{ id: "const-1", type: "const", value: 0, x: 0, y: 0 }, { id: "const-2", type: "const", value: 0, x: 0, y: 150 }] }),
+  });
+  made.push(sync.id);
+  const setConst = async (id, value) => {
+    const cur = await graphOf(sync.id);
+    const { values, ports, buttons, actions, warnings, revision, ...rest } = cur;
+    rest.blocks = rest.blocks.map((b) => (b.id === id ? { ...b, value } : b));
+    await api("/api/v1/logic-batch", { method: "POST", headers: json, body: JSON.stringify({ graphs: [{ ...rest, revision }] }) });
+  };
+  await page.getByLabel("Logic graph", { exact: true }).selectOption(sync.id);
+  await node("const-2").waitFor();
+  const typing = page.getByLabel("const-1 value", { exact: true });
+  await typing.fill("1");
+  for (const v of [2, 3, 4]) {
+    await setConst("const-2", v);
+    await page.waitForTimeout(250);
+  }
+  await until("the pushes shown", async () => (await page.getByLabel("const-2 value", { exact: true }).inputValue()) === "4");
+  if ((await typing.inputValue()) !== "1") throw new Error(`a pushed mix replaced the typed value: ${await typing.inputValue()}`);
+  await typing.press("Enter");
+  await until("const-1 is 1", async () => (await graphOf(sync.id)).blocks.find((b) => b.id === "const-1").value === 1);
+  pass("typing while mixes are pushed: the focused field keeps the typed value, Enter applies it");
+
+  // A client whose pushed mixes come 1.5 s late (and one 3 s late, overtaken by the next): its own
+  // change shows at once from the write's answer, a copy takes the server's state, and the overtaken
+  // push does not bring an old value back.
+  const slowCtx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, colorScheme: "dark" });
+  const slow = await slowCtx.newPage();
+  slow.on("pageerror", (e) => errors.push(e.message));
+  let holdNext = false;
+  await slow.routeWebSocket(/\/api\/v1\/events/, (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((m) => {
+      if (JSON.parse(String(m)).type !== "mix") return ws.send(m);
+      const wait = holdNext ? 3000 : 1500;
+      holdNext = false;
+      setTimeout(() => ws.send(m), wait);
+    });
+    ws.onMessage((m) => server.send(m));
+  });
+  await slow.goto(`${base}/#logic`);
+  await until("Sync listed on the slow client", async () => (await slow.getByLabel("Logic graph", { exact: true }).innerHTML()).includes(sync.id), 8000);
+  await slow.getByLabel("Logic graph", { exact: true }).selectOption(sync.id);
+  const slowNode = (id) => slow.locator(`.vue-flow__node[data-id="${id}"]`);
+  await slowNode("const-1").getByText("Number: 1").waitFor({ timeout: 5000 });
+  await slow.getByLabel("const-1 value", { exact: true }).fill("7");
+  await slow.getByLabel("const-1 value", { exact: true }).press("Enter");
+  await slowNode("const-1").getByText("Number: 7").waitFor({ timeout: 1000 });
+  await slowNode("const-1").click();
+  await slow.keyboard.press(`${mod}+c`);
+  await slow.keyboard.press(`${mod}+v`);
+  const syncPasted = await until("pasted on the slow client", async () => (await graphOf(sync.id)).blocks.find((b) => b.id === "const-3"));
+  if (syncPasted.value !== 7) throw new Error(`the slow client pasted a stale value: ${syncPasted.value}`);
+  await new Promise((r) => setTimeout(r, 2000));
+  holdNext = true;
+  await setConst("const-2", 5);
+  await new Promise((r) => setTimeout(r, 300));
+  await setConst("const-2", 9);
+  await new Promise((r) => setTimeout(r, 4000));
+  if ((await slow.getByLabel("const-2 value", { exact: true }).inputValue()) !== "9") throw new Error("an overtaken push brought an old value back");
+  await slowNode("const-2").getByText("Number: 9").waitFor({ timeout: 1000 });
+  await slowCtx.close();
+  pass("late pushes: an own change shows at once, a copy takes the server's state, an overtaken push is dropped");
+
   // Narrow screen: the palette goes above the canvas, no horizontal scroll.
   await page.setViewportSize({ width: 420, height: 900 });
   await page.waitForTimeout(300);

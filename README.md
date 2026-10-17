@@ -822,7 +822,9 @@ logic action (with `"log"` from a `log` block); and `{"type": "analysis", …}` 
 asked. A client may send `{"type": "subscribe", "meters": [ids] | null, "meter_hz":
 25, "analysis": false}` to receive only some signals' meters, less often, or the
 analyser. Changes go through the REST API; every change answers with
-`x-mix-revision`, the mix's revision after it.
+`x-mix-revision`, the mix's revision after it. The web UI shows a mix only when its
+revision is not older than the one it shows, and takes its own logic edits from
+their answers at once.
 
 ## Metrics
 

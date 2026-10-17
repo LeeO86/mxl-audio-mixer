@@ -288,6 +288,9 @@ export async function refreshConfig() {
 function onMessage(m) {
   if (m.type === "status") live.status = m.status;
   else if (m.type === "mix") {
+    // A mix older than the one shown (a push that was overtaken, or this client's own change already
+    // taken from its answer) is dropped.
+    if (m.revision < live.revision) return;
     live.mix = m.mix;
     live.revision = m.revision;
     for (const [key, u] of unacked) {
@@ -309,6 +312,8 @@ function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   socket = new WebSocket(`${proto}//${location.host}/api/v1/events`);
   socket.onopen = () => {
+    // A restarted mixer counts revisions from the start again: take the first push as it comes.
+    live.revision = -1;
     live.connected = true;
     live.everConnected = true;
     live.error = "";

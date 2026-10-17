@@ -33,7 +33,8 @@ The editor (the Logic tab; D175–D184):
 - The list under the canvas edits every block parameter. A new block gets no target by itself: its strip, snapshot, monitor, mic, … stays empty (outlined in amber) until chosen, unless a strip is picked in the add row; an action without a target never acts, an input without one reads off, 0 or the floor and still drives what it is wired to. A webhook asks for its URL first. A choice made with the arrow keys applies on Enter or when the field is left; Escape puts the old one back.
 - A new graph starts in dry run; the toolbar shows LIVE, DRY RUN or OFF. Undo and redo never switch a graph on, off or out of dry run.
 - In a live graph, paste, group, ungroup, undo, redo and a new macro instance ask first when they (re)make actions or blocks that remember: those actions act at once, and re-made blocks start with empty memory. "Switch to dry run first" is offered; if that switch fails, nothing is changed.
-- Fixed: a number being typed in the logic list was reset by the next live-value poll.
+- Fixed: a number being typed in the logic list was reset by the next live-value poll, or by a pushed mix; a field that has the focus or an unapplied edit keeps it.
+- Fixed: after a quick undo or redo the canvas could show, and a copy take, an older graph. The UI takes its logic edits from their answers at once, drops pushed mixes older than what it shows, and copies from a fresh read.
 - `@vue-flow/minimap` and `@vue-flow/controls` (MIT) for the minimap and the zoom buttons.
 
 ### Platform readiness
