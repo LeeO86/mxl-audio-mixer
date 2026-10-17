@@ -191,7 +191,8 @@ async function send(body, want) {
 // A write's answer is the newest state of what it wrote: shown at once, without waiting for the pushed
 // mix, which may come a meter tick later (store.js then drops pushes older than this revision).
 function adopt(body, done, revision) {
-  if (!live.mix || !done || (revision !== null && revision < live.revision)) return;
+  // Not over a push of the same or a newer revision: it already has this write, and maybe more.
+  if (!live.mix || !done || (revision !== null && revision <= live.revision)) return;
   for (const [kind, key] of [
     ["graph", "logic"],
     ["macro", "logic_macros"],

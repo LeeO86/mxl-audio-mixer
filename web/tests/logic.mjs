@@ -507,9 +507,21 @@ try {
   }
   await until("the pushes shown", async () => (await page.getByLabel("const-2 value", { exact: true }).inputValue()) === "4");
   if ((await typing.inputValue()) !== "1") throw new Error(`a pushed mix replaced the typed value: ${await typing.inputValue()}`);
+  // The same value changed elsewhere meanwhile: the field says so, and Enter still applies the typed one.
+  await setConst("const-1", 2);
+  await until("marked as changed elsewhere", async () => (await typing.getAttribute("class"))?.includes("elsewhere") && (await typing.getAttribute("title")).includes("changed elsewhere to 2"));
+  if ((await typing.inputValue()) !== "1") throw new Error("the change elsewhere replaced the typed value");
   await typing.press("Enter");
   await until("const-1 is 1", async () => (await graphOf(sync.id)).blocks.find((b) => b.id === "const-1").value === 1);
-  pass("typing while mixes are pushed: the focused field keeps the typed value, Enter applies it");
+  if ((await typing.getAttribute("class"))?.includes("elsewhere")) throw new Error("the mark stayed after Enter");
+  // Escape takes the stored value back and writes nothing.
+  const second = page.getByLabel("const-2 value", { exact: true });
+  await second.fill("8");
+  await second.press("Escape");
+  if ((await second.inputValue()) !== "4") throw new Error(`Escape left ${await second.inputValue()}`);
+  await page.waitForTimeout(400);
+  if ((await graphOf(sync.id)).blocks.find((b) => b.id === "const-2").value !== 4) throw new Error("Escape wrote a value");
+  pass("typing while mixes are pushed: the focused field keeps the typed value and marks a change elsewhere; Enter applies, Escape reverts");
 
   // A client whose pushed mixes come 1.5 s late (and one 3 s late, overtaken by the next): its own
   // change shows at once from the write's answer, a copy takes the server's state, and the overtaken
@@ -518,11 +530,13 @@ try {
   const slow = await slowCtx.newPage();
   slow.on("pageerror", (e) => errors.push(e.message));
   let holdNext = false;
+  const held = [];
   await slow.routeWebSocket(/\/api\/v1\/events/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((m) => {
       if (JSON.parse(String(m)).type !== "mix") return ws.send(m);
       const wait = holdNext ? 3000 : 1500;
+      if (holdNext) held.push(JSON.parse(String(m)).mix.logic.find((x) => x.id === sync.id)?.blocks.find((b) => b.id === "const-2")?.value);
       holdNext = false;
       setTimeout(() => ws.send(m), wait);
     });
@@ -535,7 +549,8 @@ try {
   await slowNode("const-1").getByText("Number: 1").waitFor({ timeout: 5000 });
   await slow.getByLabel("const-1 value", { exact: true }).fill("7");
   await slow.getByLabel("const-1 value", { exact: true }).press("Enter");
-  await slowNode("const-1").getByText("Number: 7").waitFor({ timeout: 1000 });
+  // Well before its own push (1.5 s late).
+  await slowNode("const-1").getByText("Number: 7").waitFor({ timeout: 1400 });
   await slowNode("const-1").click();
   await slow.keyboard.press(`${mod}+c`);
   await slow.keyboard.press(`${mod}+v`);
@@ -547,6 +562,7 @@ try {
   await new Promise((r) => setTimeout(r, 300));
   await setConst("const-2", 9);
   await new Promise((r) => setTimeout(r, 4000));
+  if (held[0] !== 5) throw new Error(`the held push was not the overtaken one (const-2 = ${held[0]})`);
   if ((await slow.getByLabel("const-2 value", { exact: true }).inputValue()) !== "9") throw new Error("an overtaken push brought an old value back");
   await slowNode("const-2").getByText("Number: 9").waitFor({ timeout: 1000 });
   await slowCtx.close();

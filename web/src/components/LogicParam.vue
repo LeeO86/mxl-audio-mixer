@@ -3,7 +3,9 @@
 //
 // The field shows its own copy of the value. A pushed mix (another client, or this one's own change
 // coming back) updates that copy only while the field is neither focused nor edited, so what is being
-// typed or picked is never replaced; when the field is left, it shows the stored value again.
+// typed or picked is never replaced; when the field is left, it shows the stored value again. If the
+// stored value changes elsewhere meanwhile, the field is outlined in amber and says so; Enter still
+// applies what was typed, Escape takes the stored value.
 //
 // A choice made with the keyboard (arrow keys step through a <select> and fire "change" at every step)
 // applies on Enter or when the field is left, and Escape puts the stored one back, so stepping past
@@ -28,9 +30,12 @@ const field = ref(null);
 const shown = ref(stored());
 const dirty = ref(false); // typed or picked, not applied yet
 const focused = () => field.value && document.activeElement === field.value;
+const elsewhere = ref(null); // the stored value, when it changed while this field was being edited
 watch(stored, (v) => {
   if (!dirty.value && !focused()) shown.value = v;
+  else if (dirty.value) elsewhere.value = v;
 });
+const note = () => (elsewhere.value === null ? null : `changed elsewhere to ${elsewhere.value === "" ? "nothing" : elsewhere.value}; Enter keeps yours, Escape takes it`);
 
 function typed(e) {
   shown.value = e.target.value;
@@ -39,6 +44,7 @@ function typed(e) {
 function apply() {
   if (!dirty.value) return;
   dirty.value = false;
+  elsewhere.value = null;
   emit("set", shown.value);
 }
 // Left without applying (or after applying): the stored value again, unless it is still on its way.
@@ -62,6 +68,7 @@ function settle() {
 function cancel() {
   keyed.value = false;
   dirty.value = false;
+  elsewhere.value = null;
   shown.value = stored();
 }
 </script>
@@ -72,7 +79,8 @@ function cancel() {
     ref="field"
     :value="shown"
     :aria-label="`${props.block.id} ${props.param.name}`"
-    :title="props.param.name"
+    :title="note() || props.param.name"
+    :class="{ elsewhere: elsewhere !== null }"
     @pointerdown="keyed = false"
     @keydown.enter="settle"
     @keydown.esc="cancel"
@@ -96,10 +104,12 @@ function cancel() {
     :step="props.param.kind === 'integer' ? 1 : 'any'"
     :value="shown"
     :aria-label="`${props.block.id} ${props.param.name}`"
-    :title="props.param.name"
+    :title="note() || props.param.name"
+    :class="{ elsewhere: elsewhere !== null }"
     style="width: 6rem"
     @input="typed"
     @change="apply"
+    @keydown.esc="cancel"
     @blur="left"
   />
   <input
@@ -107,11 +117,13 @@ function cancel() {
     ref="field"
     :value="shown"
     :aria-label="`${props.block.id} ${props.param.name}`"
-    :title="JSON_KINDS.includes(props.param.kind) ? `${props.param.name} (JSON)` : props.param.name"
+    :title="note() || (JSON_KINDS.includes(props.param.kind) ? `${props.param.name} (JSON)` : props.param.name)"
+    :class="{ elsewhere: elsewhere !== null }"
     :placeholder="props.param.name"
     style="width: 12rem"
     @input="typed"
     @change="apply"
+    @keydown.esc="cancel"
     @blur="left"
   />
 </template>
