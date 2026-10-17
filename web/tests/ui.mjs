@@ -335,10 +335,25 @@ try {
     return g.vox !== undefined && g.gtr !== undefined ? g : null;
   };
   const shown = (id) => page.locator(`[data-signal="${id}"] .autogain`).getAttribute("data-auto");
-  const before = await until("both members share", async () => {
-    const g = await shares();
-    return g && (await shown("vox")) === g.vox.toFixed(1) && (await shown("gtr")) === g.gtr.toFixed(1) ? g : null;
-  });
+  // Guitar's share rises while its level is measured after it joined (seen at −14.8 dB on its way to
+  // about −6): take the shares once they have held, the same to 0.1 dB on the API and this client, for 1 s.
+  let held = null;
+  let since = 0;
+  const before = await until(
+    "both members share, settled",
+    async () => {
+      const g = await shares();
+      if (!g || (await shown("vox")) !== g.vox.toFixed(1) || (await shown("gtr")) !== g.gtr.toFixed(1)) return (held = null);
+      const key = `${g.vox.toFixed(1)} ${g.gtr.toFixed(1)}`;
+      if (key !== held) {
+        held = key;
+        since = Date.now();
+        return null;
+      }
+      return Date.now() - since >= 1000 ? g : null;
+    },
+    8000,
+  );
   const power = 10 ** (before.vox / 10) + 10 ** (before.gtr / 10);
   if (Math.abs(power - 1) > 0.01) throw new Error(`the shares' powers add up to ${power}`);
   await page.locator('[data-signal="vox"] .vad[data-vad="quiet"]').waitFor({ timeout: 3000 });
