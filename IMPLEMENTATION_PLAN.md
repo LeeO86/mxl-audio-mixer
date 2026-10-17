@@ -3,7 +3,7 @@
 Decisions, deviations and results against `SPECIFICATION.md` (Draft v0.3). Kept
 current so that work can resume after an interruption.
 
-## Status (2026-10-16)
+## Status (2026-10-17)
 
 | Step | State |
 | --- | --- |
@@ -13,15 +13,14 @@ current so that work can resume after an interruption.
 | M1–M6 skeleton, DSP core, processing, console, control room, preview, talkback, VCA, N-1 | done, **released in 1.0.0** (`14e9487`, 2026-10-13) |
 | M7 VAD, auto-level, auto-mix, ducking; the missing-sample split; ports 8190/3342 | done, **released in 1.1.0** (`ee2d06d`, 2026-10-14) |
 | M8a logic graphs | done, **released in 1.2.0** (`8e2aae6`, 2026-10-15); maintainers' hardware run 2026-10-15/16 (`docs/release-notes/1.2.0.md`) |
-| M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | branch `feat/logic-complete`, for 1.3.0 |
-| M9 remote link (master/slave) | done on `main` (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **1.3.0 in progress**, untagged |
+| M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | done (PRs 32, 33, 35), **released in 1.3.0** (2026-10-17; the tag commit is added after the tag) |
+| M9 remote link (master/slave) | done (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **released in 1.3.0** (2026-10-17; the tag commit is added after the tag); maintainers' hardware runs 2026-10-16/17 on `cab382e` and the final candidate `bd720c3` (`docs/release-notes/1.3.0.md`) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
 
-- `main` is 1.3.0 in progress (`Cargo.toml` 1.3.0); the tag waits for the
-  maintainers' run. Release notes: `docs/release-notes/1.3.0.md` (its digest and
-  "Tested" are filled at the tag).
+- 1.3.0 is released (2026-10-17). Release notes: `docs/release-notes/1.3.0.md`;
+  its image digest is filled in after the tag build.
 - Environment: `docs/development.md`.
 
 ## Decisions

@@ -5,8 +5,9 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Status: 1.3.0 in progress** (§19: milestone 9, the remote link); 1.0.0, 1.1.0
-and 1.2.0 are released (milestones 0–8; notes in `docs/release-notes/`). Settings, probes, metrics, the NMOS node with its
+**Status: 1.3.0 released** (2026-10-17; §19: milestone 9, the remote link, and the
+complete logic editor); 1.0.0, 1.1.0 and 1.2.0 before it (milestones 0–8; notes in
+`docs/release-notes/`). Settings, probes, metrics, the NMOS node with its
 MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
 and re-created flows, arrival lag and automatic delay); the mix: input patch,
 strips (trim, polarity, fader, mute, pan/balance/width), buses, a send matrix with
