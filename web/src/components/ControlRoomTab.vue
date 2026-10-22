@@ -50,13 +50,14 @@ const oscillator = computed(() => {
   }
   return null;
 });
+// Named by waveform first (R4).
 const PRESETS = [
-  { label: "1 kHz −18 dBFS (EBU R 68)", body: { waveform: "sine", freq_hz: 1000, level_dbfs: -18 } },
-  { label: "1 kHz −20 dBFS (SMPTE RP 155)", body: { waveform: "sine", freq_hz: 1000, level_dbfs: -20 } },
-  { label: "EBU stereo ident (R 49)", body: { waveform: "ebu-ident", freq_hz: 1000, level_dbfs: -18 } },
+  { label: "Sine 1 kHz −18 dBFS (EBU R 68)", body: { waveform: "sine", freq_hz: 1000, level_dbfs: -18 } },
+  { label: "Sine 1 kHz −20 dBFS (SMPTE RP 155)", body: { waveform: "sine", freq_hz: 1000, level_dbfs: -20 } },
+  { label: "EBU stereo ident 1 kHz −18 dBFS (EBU R 49)", body: { waveform: "ebu-ident", freq_hz: 1000, level_dbfs: -18 } },
   { label: "Pink noise −18 dBFS RMS", body: { waveform: "pink", level_dbfs: -18 } },
   { label: "White noise −18 dBFS RMS", body: { waveform: "white", level_dbfs: -18 } },
-  { label: "Sweep 20 Hz–20 kHz, 10 s", body: { waveform: "sweep", freq_hz: 20, sweep_to_hz: 20000, sweep_s: 10, level_dbfs: -18 } },
+  { label: "Sweep 20 Hz–20 kHz, 10 s, −18 dBFS", body: { waveform: "sweep", freq_hz: 20, sweep_to_hz: 20000, sweep_s: 10, level_dbfs: -18 } },
 ];
 async function addOscillator() {
   const ok = await act(() => api.post("/api/v1/buses", { id: "osc", name: "Oscillator", format: "stereo" }));

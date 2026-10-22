@@ -106,6 +106,8 @@ async fn one_personal(State(app): State<App>, Path(id): Path<String>) -> Respons
 #[serde(deny_unknown_fields)]
 struct CreateBody {
     source: Option<Source>,
+    #[serde(default)]
+    follows_solo: bool,
 }
 
 async fn create_personal(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
@@ -122,7 +124,7 @@ async fn create_personal(State(app): State<App>, bytes: axum::body::Bytes) -> Re
                     return Err(bad(format!("source {s} does not exist")));
                 }
             }
-            c.add_personal(b.source)
+            c.add_personal(b.source, b.follows_solo)
                 .map_err(|e| Box::new(crate::ops::error(StatusCode::CONFLICT, e)))?
         };
         apply(&app, 0, |_| Ok(())).await?;
@@ -153,6 +155,7 @@ struct PatchBody {
     dim: Option<bool>,
     cut: Option<bool>,
     check: Option<Check>,
+    follows_solo: Option<bool>,
 }
 
 async fn patch_personal(
@@ -190,6 +193,9 @@ async fn patch_personal(
                 }
                 if let Some(v) = b.check {
                     m.check = v;
+                }
+                if let Some(v) = b.follows_solo {
+                    m.follows_solo = v;
                 }
             })
             .ok_or_else(|| not_found(format!("personal monitor {id} does not exist")))?;

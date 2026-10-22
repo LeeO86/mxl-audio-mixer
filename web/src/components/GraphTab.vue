@@ -10,7 +10,8 @@ import { VueFlow, useVueFlow } from "@vue-flow/core";
 import "@vue-flow/core/dist/style.css";
 import GraphNode from "./GraphNode.vue";
 import Pot from "./Pot.vue";
-import { TAPS, tapLabel } from "../nodes.js";
+import { tapLabel } from "../nodes.js";
+import { loadTaps, tapOptions } from "../taps.js";
 import { api, dbValue, fmtDb } from "../api.js";
 import { act, buses, isSubgroup, live, patchSend, sendOf, signalOf, store, stored, strips } from "../store.js";
 
@@ -147,6 +148,9 @@ const gain = computed(() => {
   return Number.isFinite(v) ? v : -80;
 });
 const tapValue = computed(() => (typeof current.value?.tap === "object" ? `after:${current.value.tap.after}` : current.value?.tap));
+// Only the taps the source has (G1: a bus has no input or post-pan), from the server.
+watch(() => [editing.value?.from, live.revision], () => editing.value && loadTaps(), { immediate: true });
+const tapChoices = computed(() => (current.value ? tapOptions(current.value.from, tapValue.value) : []));
 function setTap(v) {
   put({ tap: v.startsWith("after:") ? { after: v.slice(6) } : v });
 }
@@ -189,8 +193,7 @@ async function remove() {
       <div v-if="!isSubgroup(current.to)" class="row">
         <label>Tap</label>
         <select :value="tapValue" aria-label="Tap" @change="setTap($event.target.value)">
-          <option v-for="[v, l] in TAPS" :key="v" :value="v">{{ l }}</option>
-          <option v-for="n in signalOf(current.from)?.chain || []" :key="n.id" :value="`after:${n.id}`">after {{ n.id }}</option>
+          <option v-for="[v, l] in tapChoices" :key="v" :value="v">{{ l }}</option>
         </select>
       </div>
       <div class="row">

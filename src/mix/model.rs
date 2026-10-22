@@ -749,8 +749,9 @@ impl Mix {
             return Err(format!("at most {MAX_OUTPUTS} outputs"));
         }
         for o in &self.outputs {
-            if self.kind(&o.signal) != Some(Kind::Bus) {
-                return Err(format!("output signal {} is not a bus", o.signal));
+            // A bus, or a strip (its post-fader direct out).
+            if self.kind(&o.signal).is_none() {
+                return Err(format!("output signal {} does not exist", o.signal));
             }
             if !published.insert(o.signal.as_str()) {
                 return Err(format!("signal {} is published twice", o.signal));
@@ -781,6 +782,22 @@ impl Mix {
 
     pub fn chain(&self, id: &str) -> Option<&[Proc]> {
         self.chains().find(|(s, _)| *s == id).map(|(_, c)| c)
+    }
+
+    /// Every tap `id` has (those [`Mix::check_tap`] takes): the named taps in
+    /// signal order, then after each node of its chain. Empty for an unknown id.
+    pub fn taps(&self, id: &str) -> Vec<Tap> {
+        let after = self
+            .chain(id)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| Tap::After(p.id.clone()));
+        TAP_NAMES
+            .iter()
+            .map(|(_, t)| t.clone())
+            .chain(after)
+            .filter(|t| self.check_tap(id, t).is_ok())
+            .collect()
     }
 
     /// Whether `id` has `tap`.
@@ -1189,11 +1206,19 @@ pub(crate) mod tests {
         assert!(bad.validate(4, 96).unwrap_err().contains("multiple"));
         let mut bad = mix.clone();
         bad.outputs.push(Output {
+            signal: "nope".into(),
+            format: None,
+            commit_samples: None,
+        });
+        assert!(bad.validate(4, 96).unwrap_err().contains("does not exist"));
+        // A strip is published as its post-fader direct out.
+        let mut direct = mix.clone();
+        direct.outputs.push(Output {
             signal: "vox".into(),
             format: None,
             commit_samples: None,
         });
-        assert!(bad.validate(4, 96).unwrap_err().contains("not a bus"));
+        assert_eq!(direct.validate(4, 96), Ok(()));
     }
 
     #[test]
@@ -1284,6 +1309,19 @@ pub(crate) mod tests {
         );
         assert_eq!(mix.next_id("strip"), "strip-2");
         assert_eq!(mix.next_id("bus"), "bus-2");
+        // The taps a source offers: a bus has no input or post-pan.
+        let names = |id: &str| -> Vec<String> {
+            mix.taps(id)
+                .iter()
+                .map(|t| serde_json::to_value(t).unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(names("strip-1").len(), 8);
+        assert!(!names("bus-1")
+            .iter()
+            .any(|t| t.contains("input") || t.contains("post-pan")));
+        assert_eq!(names("bus-1").len(), 6);
+        assert!(names("nope").is_empty());
         mix.sends.push(send("strip-1", "bus-1"));
         mix.remove_signal("bus-1");
         assert!(mix.sends.is_empty() && mix.buses.is_empty());

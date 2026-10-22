@@ -137,6 +137,8 @@ struct MonitorBody {
     dim_db: Option<f64>,
     talkback_dim_db: Option<f64>,
     cut: Option<bool>,
+    mute_channels: Option<Vec<usize>>,
+    solo_channels: Option<Vec<usize>>,
     check: Option<Check>,
     follows_solo: Option<bool>,
     trim_db: Option<f64>,
@@ -155,6 +157,11 @@ struct MonitorBody {
 
 impl MonitorBody {
     fn apply(self, m: &mut Monitor) {
+        // A new format keeps the channel mutes and the solos it still has; a list
+        // the same change sets is taken as it is.
+        let reformat = self.format.is_some_and(|f| f != m.format);
+        let trim_mute = reformat && self.mute_channels.is_none();
+        let trim_solo = reformat && self.solo_channels.is_none();
         macro_rules! set {
             ($($f:ident),*) => { $(if let Some(v) = self.$f { m.$f = v; })* };
         }
@@ -168,6 +175,8 @@ impl MonitorBody {
             dim_db,
             talkback_dim_db,
             cut,
+            mute_channels,
+            solo_channels,
             check,
             follows_solo,
             trim_db,
@@ -178,6 +187,13 @@ impl MonitorBody {
             publish,
             downmix
         );
+        let n = m.format.channels();
+        if trim_mute {
+            m.mute_channels.retain(|&c| (1..=n).contains(&c));
+        }
+        if trim_solo {
+            m.solo_channels.retain(|&c| (1..=n).contains(&c));
+        }
     }
 }
 
@@ -321,4 +337,43 @@ async fn clear_solo(State(app): State<App>) -> Response {
         Ok(Json(json!(app.control().solo())).into_response())
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn surround() -> Monitor {
+        let mut m: Monitor =
+            serde_json::from_value(json!({"id": "main", "name": "Main", "format": "5.1"})).unwrap();
+        m.mute_channels = vec![2, 4];
+        m.solo_channels = vec![1, 6];
+        m
+    }
+
+    fn patch(m: &mut Monitor, body: Value) {
+        serde_json::from_value::<MonitorBody>(body)
+            .unwrap()
+            .apply(m);
+    }
+
+    #[test]
+    fn a_format_change_trims_each_channel_list_unless_given() {
+        // Both lists trimmed to the stereo channels.
+        let mut m = surround();
+        patch(&mut m, json!({"format": "stereo"}));
+        assert_eq!((m.mute_channels, m.solo_channels), (vec![2], vec![1]));
+        // Mutes given: taken as they are; the solos still trimmed (6 would be refused).
+        let mut m = surround();
+        patch(&mut m, json!({"format": "stereo", "mute_channels": []}));
+        assert_eq!((m.mute_channels, m.solo_channels), (vec![], vec![1]));
+        // Solos given, mutes trimmed.
+        let mut m = surround();
+        patch(&mut m, json!({"format": "stereo", "solo_channels": [2]}));
+        assert_eq!((m.mute_channels, m.solo_channels), (vec![2], vec![2]));
+        // The same format: nothing trimmed.
+        let mut m = surround();
+        patch(&mut m, json!({"format": "5.1", "level_db": -3.0}));
+        assert_eq!((m.mute_channels, m.solo_channels), (vec![2, 4], vec![1, 6]));
+    }
 }

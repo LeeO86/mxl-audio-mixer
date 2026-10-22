@@ -1,6 +1,7 @@
 <script setup>
 // "My headphones" (§10.1 personal monitoring): this browser's own monitor path, with its own source and PFL,
-// heard here by WebRTC, without touching the control room. Removed by the mixer when nobody listened for
+// heard here by WebRTC, without touching the control room; with "Follow PFL/AFL" it also plays the
+// control room's PFL/AFL while it has no solo of its own. Removed by the mixer when nobody listened for
 // ten minutes.
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import Pot from "./Pot.vue";
@@ -17,8 +18,12 @@ async function load() {
   const id = sessionStorage.getItem(KEY);
   if (!id) return;
   try {
-    mine.value = await api.get(`/api/v1/personal/${id}`);
+    const p = await api.get(`/api/v1/personal/${id}`);
+    // Removed meanwhile (Remove pressed while this was on its way): keep it gone.
+    if (sessionStorage.getItem(KEY) === id) mine.value = p;
   } catch {
+    // A late answer for a monitor already removed here: leave a new one alone.
+    if (sessionStorage.getItem(KEY) !== id) return;
     sessionStorage.removeItem(KEY);
     stopListening(id);
     mine.value = null;
@@ -83,9 +88,12 @@ const buttons = computed(() => (room.value.sources.length ? room.value.sources :
       <Pot label="Level" unit="dB" :value="mine.level_db" :min="-80" :max="12" :def="0" :fine="0.5" @change="(v) => set({ level_db: v })" />
       <div class="mbuttons">
         <button class="btn secondary on-warn" :aria-pressed="mine.dim" @click="set({ dim: !mine.dim })">Dim</button>
-        <button class="btn secondary on-bad" :aria-pressed="mine.cut" @click="set({ cut: !mine.cut })">Cut</button>
+        <button class="btn secondary on-bad" :aria-pressed="mine.cut" @click="set({ cut: !mine.cut })">Mute</button>
       </div>
-      <div class="group-caption">My PFL (the control room is not touched)</div>
+      <label class="check" title="while the control room has a PFL or AFL and I have none of my own, I hear it">
+        <input type="checkbox" :checked="mine.follows_solo" aria-label="Follow PFL/AFL" @change="set({ follows_solo: $event.target.checked })" /> Follow PFL/AFL of the control room
+      </label>
+      <div class="group-caption">My PFL (the control room is not touched; it wins over the control room's)</div>
       <div class="soloed">
         <button v-for="s in signals" :key="s.id" class="btn small" :class="mine.solo[s.id] === 'pfl' ? 'pfl' : 'secondary'" :aria-pressed="mine.solo[s.id] === 'pfl'" :aria-label="`My PFL ${s.name}`" @click="solo(s.id, 'pfl')">
           {{ s.name }}

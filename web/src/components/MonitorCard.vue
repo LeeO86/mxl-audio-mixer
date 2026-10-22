@@ -1,7 +1,8 @@
 <script setup>
 // One monitor path (§10.1): the source buttons, level (with the SPL presets of a calibrated monitor), dim,
-// cut, the L/R check, solo, its meter; in full, the room alignment and the MXL output too. `compact` is the
-// monitor widget: source, level, dim, cut, mono.
+// mute (the API's `cut`), the L/R check, solo, its meter; in full, mute and solo of single channels, the
+// room alignment, the MXL output and Remove too. `compact` is the monitor widget: source, level, dim, mute,
+// mono.
 import { computed } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import Meter from "./Meter.vue";
@@ -20,7 +21,25 @@ const props = defineProps({
 const m = computed(() => props.monitor);
 const set = (body) => patchMonitor(m.value.id, body);
 const key = computed(() => `monitor:${m.value.id}`);
-const channels = computed(() => ({ mono: 1, stereo: 2, "3.0": 3, "5.1": 6, "7.1": 8, "5.1.4": 10, "7.1.4": 12 })[m.value.format] || 2);
+// Channel labels as the server's formats (SMPTE ST 2110-30 order).
+const LABELS = {
+  mono: ["M"],
+  stereo: ["L", "R"],
+  "3.0": ["L", "R", "C"],
+  "5.1": ["L", "R", "C", "LFE", "Ls", "Rs"],
+  "7.1": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs"],
+  "5.1.4": ["L", "R", "C", "LFE", "Ls", "Rs", "Ltf", "Rtf", "Ltr", "Rtr"],
+  "7.1.4": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs", "Ltf", "Rtf", "Ltr", "Rtr"],
+};
+const labels = computed(() => LABELS[m.value.format] || ["L", "R"]);
+const channels = computed(() => labels.value.length);
+// Mute and solo of single output channels (1-based on the API).
+const mutedCh = computed(() => m.value.mute_channels || []);
+const soloCh = computed(() => m.value.solo_channels || []);
+function toggleChannel(field, list, c) {
+  set({ [field]: list.includes(c) ? list.filter((x) => x !== c) : [...list, c].sort((a, b) => a - b) });
+}
+const silent = (c) => mutedCh.value.includes(c) || (soloCh.value.length > 0 && !soloCh.value.includes(c));
 const soloActive = computed(() => Object.keys(soloed.value).length > 0);
 // A control-room talkback mic talks: the monitor is at its talkback dim.
 const talkDim = computed(() => {
@@ -68,6 +87,7 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
       <span v-if="listenBack && m.follows_solo" class="state-tag" style="background: var(--warn); color: #20180a" :title="`plays ${sourceName(listenBack)}`">listen-back</span>
       <span class="spacer"></span>
       <span v-if="!compact && published" class="pill ok" :title="`MXL flow ${published.mxl_flow_id}`">MXL out</span>
+      <ConfirmButton v-if="!compact" label="Remove" small :aria-label="`Remove monitor ${m.name}`" @confirm="removeMonitor" />
       <button class="btn small" :class="listening[m.id] ? '' : 'secondary'" :aria-pressed="!!listening[m.id]" :title="listening[m.id] || 'listen in this browser (WebRTC)'" @click="toggleListen(m.id)">
         {{ listening[m.id] === "playing" ? "Listening" : listening[m.id] ? "Connecting…" : "Listen" }}
       </button>
@@ -89,13 +109,21 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
         </div>
         <div class="mbuttons">
           <button class="btn secondary on-warn" :aria-pressed="m.dim" @click="set({ dim: !m.dim })">Dim</button>
-          <button class="btn secondary on-bad" :aria-pressed="m.cut" @click="set({ cut: !m.cut })">Cut</button>
+          <button class="btn secondary on-bad" :aria-pressed="m.cut" @click="set({ cut: !m.cut })">Mute</button>
           <button v-if="compact" class="btn secondary on-warn" :aria-pressed="m.check === 'mono'" @click="set({ check: m.check === 'mono' ? 'stereo' : 'mono' })">Mono</button>
         </div>
         <template v-if="!compact">
           <label>Check</label>
           <Segmented :model-value="m.check" :options="CHECKS" label="Check" @update:model-value="(v) => set({ check: v })" />
           <label class="check"><input type="checkbox" :checked="m.follows_solo" @change="set({ follows_solo: $event.target.checked })" /> Follows solo (PFL/AFL)</label>
+          <div v-if="channels > 1" class="chmutes" role="group" aria-label="Channels">
+            <span class="muted small">Channels</span>
+            <div v-for="(l, i) in labels" :key="i" class="chm" :class="{ silent: silent(i + 1) }">
+              <span class="chl">{{ l }}</span>
+              <button class="btn small secondary on-bad" :aria-pressed="mutedCh.includes(i + 1)" :aria-label="`Mute ${l}`" @click="toggleChannel('mute_channels', mutedCh, i + 1)">M</button>
+              <button class="btn small secondary on-warn" :aria-pressed="soloCh.includes(i + 1)" :aria-label="`Solo ${l}`" @click="toggleChannel('solo_channels', soloCh, i + 1)">S</button>
+            </div>
+          </div>
           <div v-if="hasLfe" class="bass">
             <button class="btn secondary on-warn" :aria-pressed="!!bass?.enabled" @click="setBass({ enabled: !bass?.enabled })">Bass management</button>
             <template v-if="bass?.enabled">
@@ -119,7 +147,6 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
             <button v-else class="btn small secondary" @click="set({ downmix: { ...(live.mix?.settings?.downmix || DEFAULT_DOWNMIX) } })">Own down-mix</button>
             <p class="note">{{ m.chain.length }} alignment nodes (EQ, filters for bass management): <code>PATCH /api/v1/monitors/{{ m.id }}</code> <code>chain</code>.</p>
             <label class="check"><input type="checkbox" :checked="m.publish" @change="set({ publish: $event.target.checked })" /> Publish as an MXL flow (NMOS sender "Monitor {{ m.name }}")</label>
-            <div class="actions"><ConfirmButton label="Delete monitor" small @confirm="removeMonitor" /></div>
           </details>
         </template>
       </div>

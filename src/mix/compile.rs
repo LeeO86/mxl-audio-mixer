@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use super::chain::{Category, Proc, ProcKind};
 use super::format::{pan_gains, stereo_matrix, width_matrix, Format};
 use super::model::{Db, Kind, Mix, Patch, Tap};
-use super::room::{check_matrix, monitor_gain, Monitor, SoloKind, Source};
+use super::room::{channel_gains, check_matrix, Monitor, SoloKind, Source};
 use super::talkback::{destination_gains, dims_control_room, MicInfo, Talking};
 use crate::engine::plan::{NodeId, Plan, PlanBuilder, Processor, Span, Step};
 
@@ -110,7 +110,8 @@ impl Compiler {
 }
 
 /// A browser client's own monitor path (§10.1 personal monitoring): stereo, its
-/// own source and its own solo.
+/// own source and its own solo; with `monitor.follows_solo` it also plays the
+/// control room's PFL/AFL while it has no solo of its own.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Personal {
     pub monitor: Monitor,
@@ -968,8 +969,12 @@ impl Compiler {
                 room.solo.pfl_trim_db,
                 &format!("{}/solo", w.monitor.id),
             );
-            let slot = c.compiler.streams.get(&w.monitor.id).copied();
-            jobs.push((w.monitor, bus, slot));
+            // Its own solo wins; without one, the control room's when it follows solo.
+            let bus = bus.or(solo_bus.filter(|_| w.monitor.follows_solo));
+            let mut m = w.monitor;
+            m.follows_solo = bus.is_some();
+            let slot = c.compiler.streams.get(&m.id).copied();
+            jobs.push((m, bus, slot));
         }
         let mono_sum = Db(f64::from(laws.mono_sum)).gain() as f32;
         for (j, (m, solo_bus, stream)) in jobs.iter().enumerate() {
@@ -1083,7 +1088,7 @@ impl Compiler {
             let node = c.node(
                 format!("{key}/level"),
                 format_name(m.format),
-                vec![monitor_gain(m, talk_dimmed); n],
+                channel_gains(m, talk_dimmed),
             );
             c.b.step(Step::Gain {
                 node,
@@ -1378,6 +1383,87 @@ mod tests {
         assert_eq!(c.meters.len(), 3);
         let kinds: Vec<&str> = c.plan.steps.iter().map(|s| s.kind()).collect();
         assert_eq!(kinds.iter().filter(|k| **k == "send").count(), 3);
+    }
+
+    #[test]
+    fn a_personal_monitor_follows_the_control_room_solo_when_asked() {
+        // Streams of the personal monitors, by slot.
+        #[derive(Default)]
+        struct Streams(HashMap<usize, Vec<Vec<f32>>>);
+        impl OutputSink for Streams {
+            fn write(&mut self, _: usize, _: usize, _: usize, _: &[f32]) {}
+            fn stream(&mut self, slot: usize, channel: usize, samples: &[f32]) {
+                let s = self.0.entry(slot).or_insert_with(|| vec![Vec::new(); 2]);
+                s[channel].extend_from_slice(samples);
+            }
+        }
+        let personal = |id: &str, follows_solo: bool| {
+            let mut monitor: Monitor = serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "kind": "headphones", "format": "stereo"
+            }))
+            .unwrap();
+            // Its source: the music strip, which plays nothing here.
+            monitor.source = Some(Source::Signal("music".into()));
+            monitor.follows_solo = follows_solo;
+            Personal {
+                monitor,
+                solo: Default::default(),
+                created: std::time::Instant::now(),
+            }
+        };
+        let mut compiler = Compiler {
+            personal: vec![personal("personal-1", true), personal("personal-2", false)],
+            streams: HashMap::from([("personal-1".to_string(), 0), ("personal-2".to_string(), 1)]),
+            ..Default::default()
+        };
+        compiler.solo.insert("vox".into(), SoloKind::Pfl);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.0; 48], vec![0.0; 48]],
+        ]);
+        let heard = |compiler: &mut Compiler| {
+            let mut c = compile(compiler, &mix(), 48);
+            let mut out = Streams::default();
+            c.plan.process(0, &inputs, &mut out);
+            (out.0[&0][0][0], out.0[&1][0][0])
+        };
+        // PFL of vox centred (−3 dB): the follower hears it, the other does not.
+        let h = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        let (follows, own) = heard(&mut compiler);
+        assert!((follows - h).abs() < 1e-6, "{follows}");
+        assert_eq!(own, 0.0);
+        // Its own solo wins: music (silent) instead of the control room's vox.
+        compiler.personal[0]
+            .solo
+            .insert("music".into(), SoloKind::Pfl);
+        let (follows, _) = heard(&mut compiler);
+        assert_eq!(follows, 0.0);
+    }
+
+    #[test]
+    fn a_strip_published_as_its_direct_out() {
+        // vox (mono) at −6 dB and panned hard left: its own flow is post-fader, before the pan.
+        let mut m = mix();
+        m.strips[0].fader_db = Db(-6.0);
+        m.strips[0].pan = -1.0;
+        m.outputs.push(Output {
+            signal: "vox".into(),
+            format: None,
+            commit_samples: None,
+        });
+        assert_eq!(m.validate(2, 48), Ok(()));
+        let slots = HashMap::from([("main".to_string(), 3), ("vox".to_string(), 4)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.0; 48], vec![0.0; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 1);
+        let direct = &out.0[&4];
+        assert_eq!(direct.len(), 1, "mono, the strip's format");
+        let want = 0.5 * Db(-6.0).gain() as f32;
+        assert!((direct[0][0] - want).abs() < 1e-6, "{}", direct[0][0]);
     }
 
     #[test]

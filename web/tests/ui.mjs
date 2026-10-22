@@ -29,6 +29,7 @@ async function until(what, fn, ms = 5000) {
   throw new Error(`timed out: ${what} (last: ${JSON.stringify(last)})`);
 }
 const pass = (what) => console.log(`[ui.mjs] PASS: ${what}`);
+const JSON_HEADERS = { "content-type": "application/json" };
 
 const browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
 try {
@@ -121,10 +122,69 @@ try {
   await until("a compressor", async () => (await api("/api/v1/strips/vox/chain")).length === 2);
   await page.locator(".nodecard").nth(1).locator(".btn.bypass").click();
   await until("compressor bypassed", async () => (await api("/api/v1/strips/vox/chain"))[1].bypass === true);
-  await page.locator(".nodecard").nth(1).locator("button", { hasText: "↑" }).click();
+  await page.getByRole("button", { name: /^Move compressor-\d+ earlier$/ }).click();
   await until("compressor first", async () => (await api("/api/v1/strips/vox/chain"))[0].type === "compressor");
   await page.screenshot({ path: `${out}/processing.png`, fullPage: true });
-  pass("processing: compressor added, bypassed and moved up");
+  pass("processing: compressor added, bypassed and moved earlier");
+  // A double-click on a band's handle resets it (P4); the boost is put back for the auto-mix below.
+  const eqId = (await api("/api/v1/strips/vox/chain"))[1].id;
+  const boosted = (await api("/api/v1/strips/vox/chain"))[1].bands;
+  await page.locator(".nodecard .curve .handle circle").first().dblclick();
+  await until("EQ band reset", async () => {
+    const b = (await api("/api/v1/strips/vox/chain"))[1].bands[0];
+    return b.gain_db === 0 && b.q === 1 && b.freq_hz === boosted[0].freq_hz;
+  });
+  await api(`/api/v1/strips/vox/chain/${eqId}`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ bands: boosted }) });
+  pass("processing: a double-click on an EQ handle resets that band");
+  // A click on a tile's header closes and opens it (P8).
+  const firstTile = page.locator(".nodecard").first();
+  await firstTile.locator(".ntitle").click();
+  await firstTile.locator(".nbody").waitFor({ state: "detached", timeout: 3000 });
+  await firstTile.locator(".ntitle").click();
+  await firstTile.locator(".nbody").waitFor({ timeout: 3000 });
+  pass("processing: a click on a tile's header closes and opens it");
+  // Drag a tile by its header onto the first one, turning the wheel meanwhile (P7): the EQ goes first and
+  // the page scrolled while dragging (a low window, so the page can scroll).
+  await page.setViewportSize({ width: 1600, height: 560 });
+  // The tiles' headers in the middle of the window, away from the edges that scroll by themselves.
+  await page.evaluate(() => window.scrollTo(0, document.querySelector(".nodecard").getBoundingClientRect().top + window.scrollY - 200));
+  const grab = await page.locator(".nodecard").nth(1).locator(".ntitle").boundingBox();
+  await page.mouse.move(grab.x + 5, grab.y + 5);
+  await page.mouse.down();
+  await page.mouse.move(grab.x + 40, grab.y + 30, { steps: 5 });
+  await page.locator(".dragghost").waitFor({ timeout: 3000 });
+  const scrollBefore = await page.evaluate(() => window.scrollY);
+  await page.mouse.wheel(0, 120);
+  await page.waitForTimeout(300);
+  const scrollAfter = await page.evaluate(() => window.scrollY);
+  if (scrollAfter <= scrollBefore) throw new Error(`the wheel did not scroll while dragging (${scrollBefore} → ${scrollAfter})`);
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(300);
+  const back = await page.locator(".nodecard").first().locator(".nbody").boundingBox();
+  await page.mouse.move(back.x + 30, back.y + 30, { steps: 8 });
+  await page.mouse.up();
+  await until("EQ first again (dragged)", async () => (await api("/api/v1/strips/vox/chain"))[0].type === "eq");
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  pass(`processing: a tile dragged by its header onto the first one; the wheel scrolled meanwhile (${scrollBefore} → ${scrollAfter})`);
+  // Escape cancels a drag: nothing moves.
+  const head = await page.locator(".nodecard").nth(1).locator(".ntitle").boundingBox();
+  await page.mouse.move(head.x + 5, head.y + 5);
+  await page.mouse.down();
+  await page.mouse.move(head.x - 200, head.y + 40, { steps: 6 });
+  await page.locator(".dragghost").waitFor({ timeout: 3000 });
+  await page.keyboard.press("Escape");
+  await page.locator(".dragghost").waitFor({ state: "detached", timeout: 3000 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  if ((await api("/api/v1/strips/vox/chain"))[0].type !== "eq") throw new Error("a drag cancelled by Escape moved a node");
+  pass("processing: Escape cancels a drag");
+  // Previous and next strip or bus: the arrows and the [ and ] keys (P2).
+  await page.getByRole("button", { name: "Next strip or bus" }).click();
+  await until("Guitar in the processing view", async () => (await page.getByLabel("Signal", { exact: true }).inputValue()) === "gtr");
+  await page.locator("body").press("[");
+  await until("Vox again by [", async () => (await page.getByLabel("Signal", { exact: true }).inputValue()) === "vox");
+  if (!(await page.getByRole("button", { name: "Previous strip or bus" }).isDisabled())) throw new Error("previous enabled on the first strip");
+  pass("processing: next by its arrow, previous by [, the first has no previous");
 
   // Tally and AFV: index 5 in the strip settings, AFV on, then index 5 on air over TSL (UDP).
   await page.getByLabel("Tally index").fill("5");
@@ -171,6 +231,40 @@ try {
   await page.getByRole("button", { name: "Clear solos" }).click();
   await until("no solo", async () => Object.keys(await api("/api/v1/solo")).length === 0);
   pass("control room: PFL from the strip shown as soloed, monitor dim from its card, solos cleared");
+  // Mute (once "Cut"), mute and solo of single channels (R1, R2), and Remove on every monitor (R3).
+  await page.locator(".monitor").first().getByRole("button", { name: "Mute", exact: true }).click();
+  await until("main muted", async () => (await api("/api/v1/monitors/main")).cut === true);
+  await page.locator(".monitor").first().getByRole("button", { name: "Mute", exact: true }).click();
+  await page.getByRole("button", { name: "Mute R" }).click();
+  await until("R muted", async () => JSON.stringify((await api("/api/v1/monitors/main")).mute_channels) === "[2]");
+  await page.getByRole("button", { name: "Solo L" }).click();
+  await until("L soloed", async () => JSON.stringify((await api("/api/v1/monitors/main")).solo_channels) === "[1]");
+  await page.locator(".chm.silent", { hasText: "R" }).waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/control-room-channels.png`, fullPage: true });
+  await page.getByRole("button", { name: "Mute R" }).click();
+  await page.getByRole("button", { name: "Solo L" }).click();
+  await until("channels back", async () => {
+    const m = await api("/api/v1/monitors/main");
+    return m.cut === false && !m.mute_channels?.length && !m.solo_channels?.length;
+  });
+  await api("/api/v1/monitors", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ id: "spare", name: "Spare", format: "stereo" }) });
+  const remove = page.getByRole("button", { name: "Remove monitor Spare" });
+  await remove.click();
+  await remove.click();
+  await until("spare removed", async () => !(await api("/api/v1/monitors")).some((m) => m.id === "spare"));
+  pass("control room: Mute, mute and solo of single channels, a monitor removed from its card");
+  // My headphones follow the control room's PFL/AFL when asked (R5).
+  await page.getByRole("button", { name: "Create my headphones" }).click();
+  await page.getByLabel("Follow PFL/AFL").check();
+  await until("my headphones follow solo", async () => (await api("/api/v1/personal")).some((p) => p.follows_solo === true));
+  await page.getByLabel("Follow PFL/AFL").uncheck();
+  await until("my headphones do not follow solo", async () => (await api("/api/v1/personal")).every((p) => p.follows_solo === false));
+  await page.locator(".monitor", { hasText: "My headphones" }).getByRole("button", { name: "Remove" }).click();
+  await until("my headphones removed", async () => (await api("/api/v1/personal")).length === 0);
+  await page.getByRole("button", { name: "Create my headphones" }).waitFor({ timeout: 3000 });
+  await page.waitForTimeout(2500);
+  if (!(await page.getByRole("button", { name: "Create my headphones" }).isVisible())) throw new Error("my headphones came back after Remove");
+  pass("control room: My headphones' Follow PFL/AFL on and off");
 
   // Listening in the browser (WHEP from the built-in MediaMTX), only with MediaMTX.
   if (process.env.MEDIAMTX_BIN) {
@@ -257,10 +351,36 @@ try {
 
   // Routing: a send from vox to aux through the matrix.
   await page.goto(`${base}/#routing`);
-  await page.getByRole("button", { name: "Vox to Aux" }).click();
+  // A new send takes a second click on the same cell (T2): the first marks it, a click elsewhere cancels.
+  const voxAux = page.getByRole("button", { name: "Vox to Aux" });
+  await voxAux.click();
+  await page.locator(".matrix button.armed").waitFor({ timeout: 3000 });
+  await page.locator(".matrix th.axis").first().click();
+  await page.locator(".matrix button.armed").waitFor({ state: "detached", timeout: 3000 });
+  await voxAux.click();
+  await page.waitForTimeout(400);
+  if ((await api("/api/v1/sends")).some((s) => s.from === "vox" && s.to === "aux")) throw new Error("one click made a send");
+  await voxAux.click();
   await until("send vox → aux", async () => (await api("/api/v1/sends")).some((s) => s.from === "vox" && s.to === "aux"));
   await page.screenshot({ path: `${out}/routing.png`, fullPage: true });
-  pass("routing: send created in the matrix");
+  pass("routing: a send made in the matrix by two clicks on its cell; one click and a click elsewhere make none");
+  // A bus's send offers no input or post-pan tap (G1, from GET /api/v1/taps).
+  await api("/api/v1/sends/main/aux", { method: "PUT" });
+  await page.locator('.matrix button[aria-label="Main to Aux"][aria-pressed="true"]').waitFor({ timeout: 3000 });
+  await page.getByRole("button", { name: "Main to Aux" }).click();
+  await page.locator(".sendedit").waitFor({ timeout: 3000 });
+  const taps = await page.locator(".sendedit select[aria-label='Tap'] option").evaluateAll((o) => o.map((x) => x.value));
+  if (taps.includes("input") || taps.includes("post-pan") || !taps.includes("post-fader")) throw new Error(`bus taps ${taps}`);
+  await api("/api/v1/sends/main/aux", { method: "DELETE" });
+  pass(`routing: a bus's send offers ${taps.join(", ")}`);
+  // A strip published as its direct out (T3); its flow id copied (T4).
+  await page.locator("tr", { hasText: "direct out" }).filter({ hasText: "Vox" }).getByRole("button", { name: "Publish" }).click();
+  const direct = await until("vox published", async () => (await api("/api/v1/outputs")).find((o) => o.signal === "vox"));
+  if (direct.format !== "mono") throw new Error(`vox direct out ${direct.format}`);
+  await page.getByRole("button", { name: "Copy the MXL flow id of Vox" }).click();
+  await page.locator(".banner", { hasText: direct.mxl_flow_id }).waitFor({ timeout: 3000 });
+  await api("/api/v1/outputs/vox", { method: "DELETE" });
+  pass("routing: Vox published as its direct out (mono), its flow id copied");
 
   // Snapshots.
   await page.goto(`${base}/#snapshots`);
@@ -463,6 +583,13 @@ try {
   await page.mouse.click(cableBox.x + cableBox.width / 2, cableBox.y + cableBox.height / 2);
   await page.keyboard.press("Delete");
   await until("the cable removed", async () => (await api(`/api/v1/logic/${graph.id}`)).wires.length === 0);
+  // A click on a block's row selects it in the graph (L1).
+  await page.locator('tr[data-block="const-1"] td').first().click();
+  await page.locator('.vue-flow__node[data-id="const-1"].selected').waitFor({ timeout: 3000 });
+  await page.locator('tr[data-block="set-mute-1"] td').first().click();
+  await page.locator('.vue-flow__node[data-id="set-mute-1"].selected').waitFor({ timeout: 3000 });
+  if (await page.locator('.vue-flow__node[data-id="const-1"].selected').count()) throw new Error("const-1 still selected");
+  pass("logic: a click on a block's row selects it in the graph");
   // Parameters are edited in the list: on air index, timer, meter threshold, snapshot recall.
   const blockOf = async (type) => (await api(`/api/v1/logic/${graph.id}`)).blocks.find((x) => x.type === type);
   for (const type of ["tally", "timer", "above", "recall"]) {

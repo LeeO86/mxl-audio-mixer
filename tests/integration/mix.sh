@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Milestone 2 (§4.2, §4.3, §5, §17): input patch, strips, a bus and sends; a
 # published bus is an MXL flow with the expected samples (pan law, gain, polarity,
-# width mapping) and an NMOS sender; parameter changes and rewiring; meters;
+# width mapping) and an NMOS sender; a strip published as its direct out; the
+# taps of a strip and a bus; parameter changes and rewiring; meters;
 # a restart keeps the output flow id and a downstream reader (a second mixer)
 # receives again; unpublishing removes the flow and the sender.
 # shellcheck source=tests/integration/lib.sh
@@ -111,6 +112,26 @@ api PUT /api/v1/sends/vox/main >/dev/null
 sleep 0.2
 probe 1 1:1:1 2:1:0
 pass "bus deleted with its sends, VCA membership and logic target; vox straight to main again"
+# A strip published as its own flow (its direct out): post-fader, before the pan.
+api PATCH /api/v1/strips/vox '{"fader_db": -6.0206}' >/dev/null
+api PUT /api/v1/outputs/vox >/dev/null
+DIRECT=$(json "$WEB/api/v1/outputs/vox" "d['mxl_flow_id']")
+[[ "$(json "$WEB/api/v1/outputs/vox" "d['format']")" == mono ]] || fail "vox direct out is not mono"
+label=$(json "$NMOS/x-nmos/node/v1.3/senders" "[s['label'] for s in d if s['flow_id']]")
+grep -q "'Vox'" <<<"$label" || fail "no sender Vox: $label"
+MAIN_FLOW=$OUT_FLOW
+OUT_FLOW=$DIRECT
+sleep 0.2
+probe 1 1:1:0.5
+OUT_FLOW=$MAIN_FLOW
+curl -fsS -X DELETE "$WEB/api/v1/outputs/vox"
+api PATCH /api/v1/strips/vox '{"fader_db": 0}' >/dev/null
+pass "strip vox published as its direct out: mono, post-fader (−6 dB), before the pan; NMOS sender Vox"
+
+# The taps a source offers (GET /api/v1/taps): a bus has no input or post-pan.
+[[ "$(json "$WEB/api/v1/taps" "'input' in d['vox'] and 'post-pan' in d['vox'] and 'input' not in d['main'] and 'post-pan' not in d['main'] and 'post-fader' in d['main']")" == True ]] ||
+    fail "taps: $(curl -fsS "$WEB/api/v1/taps")"
+pass "taps: a strip has input and post-pan, a bus has neither"
 
 api PUT /api/v1/outputs/main '{"format": "mono"}' >/dev/null
 wait_until 5 "mono output flow" python3 -c "import json; exit(0 if json.load(open('$OWN/$OUT_FLOW.mxl-flow/flow_def.json'))['channel_count'] == 1 else 1)"

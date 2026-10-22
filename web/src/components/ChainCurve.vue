@@ -7,7 +7,7 @@ import { fmtHz } from "../api.js";
 
 const props = defineProps({ chain: { type: Array, default: () => [] } });
 const W = 800;
-const H = 180;
+const H = 130;
 const PAD = 26;
 const R = 24;
 const F = freqs(240);

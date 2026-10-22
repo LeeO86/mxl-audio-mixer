@@ -1,8 +1,8 @@
 <script setup>
 // The EQ editor's response (§12.2): the summed curve, each band's own (dashed), and a handle per band.
 // Drag a handle for frequency and gain (a notch, a high- or low-pass band: frequency only), the wheel or
-// the Q buttons for Q.
-// `extra` adds other nodes of the chain to the drawn sum (the whole chain's EQ).
+// the Q buttons for Q; a double-click resets that band (frequency and type stay; the rest as the band's
+// reset buttons).
 import { computed, ref } from "vue";
 import { bandDb, filterDb, freqs } from "../dsp.js";
 import { fmtHz } from "../api.js";
@@ -14,8 +14,8 @@ const props = defineProps({
 });
 const emit = defineEmits(["bands", "select"]);
 
-const W = 800;
-const H = 240;
+const W = 480;
+const H = 180;
 const PAD = 26;
 const F = freqs(240);
 const x = (f) => PAD + (Math.log10(f / 20) / 3) * (W - 2 * PAD);
@@ -74,6 +74,17 @@ function move(ev) {
 function up() {
   dragging = -1;
 }
+// A band's values after a reset (the defaults of its pots in the node editor).
+const RESET = { gain_db: 0, q: 1 };
+const RESET_DYNAMIC = { ...RESET, threshold_db: -30, ratio: 3, attack_ms: 5, release_ms: 100 };
+function reset(i) {
+  // A filter and a high- or low-pass band have no gain or Q to reset (as the wheel).
+  if (props.node.type === "filter" || isPass(bands.value[i])) return;
+  dragging = -1;
+  const next = bands.value.map((b) => ({ ...b }));
+  Object.assign(next[i], props.node.type === "dynamic-eq" ? RESET_DYNAMIC : RESET);
+  emit("bands", { bands: next });
+}
 function wheel(i, ev) {
   if (props.node.type === "filter" || isPass(bands.value[i])) return;
   ev.preventDefault();
@@ -93,8 +104,8 @@ function wheel(i, ev) {
     </g>
     <path v-for="(p, i) in each" :key="i" :d="p" class="band" />
     <path :d="total" class="resp" />
-    <g v-for="h in handles" :key="h.i" class="handle" :class="{ active: h.i === active }" @pointerdown="down(h.i, $event)" @wheel="wheel(h.i, $event)">
-      <circle :cx="h.cx" :cy="h.cy" r="10" :aria-label="`band ${h.i + 1}`" />
+    <g v-for="h in handles" :key="h.i" class="handle" :class="{ active: h.i === active }" @pointerdown="down(h.i, $event)" @dblclick="reset(h.i)" @wheel="wheel(h.i, $event)">
+      <circle :cx="h.cx" :cy="h.cy" r="10" :aria-label="`band ${h.i + 1}`"><title>drag: frequency and gain; wheel: Q; double-click: reset</title></circle>
       <text :x="h.cx" :y="h.cy + 4" text-anchor="middle" font-size="11" style="pointer-events: none">{{ h.i + 1 }}</text>
     </g>
   </svg>
