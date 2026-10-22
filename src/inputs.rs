@@ -95,11 +95,12 @@ pub struct Route {
 /// down only after the need stayed lower by [`DELAY_LOWER_SAMPLES`] for the
 /// whole hold time, to the highest need seen in that time, and at most once per
 /// hold time. The need of a late block stays a floor for one hold time. When an
-/// outlier of about that size comes again within [`LATE_MEMORY_HOLDS`] hold
-/// times of the last late block (late again, or now covered), it recurs: the
-/// floor then lasts that long (5 min by default), renewed by every such block, so
-/// a rare outlier, e.g. once a minute, is lost once instead of once per hold
-/// time. A one-off late block costs its latency for about two hold times.
+/// outlier of about that size (within 1 ms) comes again within
+/// [`LATE_MEMORY_HOLDS`] hold times of the last one (late again, or now
+/// covered), it recurs: its floor then lasts that long (5 min by default),
+/// renewed by every recurrence, so a rare outlier, e.g. once a minute, is lost
+/// once instead of once per hold time. A one-off late block, or a single spike
+/// above a recurring outlier, costs its latency for about two hold times.
 /// Lags above the read offset plus the maximum delay are no outliers but a
 /// writer catching up (a stall, D230) and count for nothing here.
 #[derive(Default)]
@@ -107,15 +108,24 @@ struct DelayHold {
     last_change: Option<Instant>,
     /// Since when the need has been lower, and the highest need since then.
     lower: Option<(Instant, u32)>,
-    /// The floor set by late blocks: its need, when it was last renewed, and
-    /// whether the outlier recurs (the floor lasts the memory time then).
-    floor: Option<(Instant, u32, bool)>,
-    /// The last late block (or its outlier covered again) within the memory
-    /// time: when, and its need.
+    /// The floor of a late block that does not recur: when, and its need (one
+    /// hold time).
+    short: Option<(Instant, u32)>,
+    /// The floor of a recurring outlier: when it last came, and its need (the
+    /// memory time, renewed by each recurrence of about that size).
+    long: Option<(Instant, u32)>,
+    /// The last outlier that was late or recurred, within the memory time: when,
+    /// and its need.
     last_late: Option<(Instant, u32)>,
 }
 
 impl DelayHold {
+    /// The higher of the two late-block floors (0 without one).
+    fn floor(&self) -> u32 {
+        let n = |f: Option<(Instant, u32)>| f.map_or(0, |(_, n)| n);
+        n(self.short).max(n(self.long))
+    }
+
     /// A stall interrupts a period of lower need: it starts again afterwards.
     fn interrupt(&mut self) {
         self.lower = None;
@@ -142,36 +152,40 @@ impl DelayHold {
                 .min(delay_max)
         };
         let memory = hold * LATE_MEMORY_HOLDS;
-        if self.floor.is_some_and(|(t, _, recurs)| {
-            now.duration_since(t) >= if recurs { memory } else { hold }
-        }) {
-            self.floor = None;
-        }
-        if self
-            .last_late
-            .is_some_and(|(t, _)| now.duration_since(t) >= memory)
-        {
-            self.last_late = None;
-        }
+        let expire = |f: &mut Option<(Instant, u32)>, after: Duration| {
+            if f.is_some_and(|(t, _)| now.duration_since(t) >= after) {
+                *f = None;
+            }
+        };
+        expire(&mut self.short, hold);
+        expire(&mut self.long, memory);
+        expire(&mut self.last_late, memory);
         if let Some(lag) = max_lag.filter(|&l| l <= read_offset + delay_max) {
             let need = need_of(lag);
             let late = lag > read_offset + current;
             // An outlier needs at least 1 ms more than the 99.9th percentile (not
             // known in the first second: a late block then is no outlier).
             let outlier = p999.is_some_and(|p| need > need_of(p) + DELAY_LOWER_SAMPLES);
-            let recurs = outlier && self.last_late.is_some();
-            if late || recurs {
-                let (floor, long) = self.floor.map_or((0, false), |(_, n, r)| (n, r));
-                // A higher outlier is a new one: it recurs only once it comes again.
-                let long = recurs || (long && need <= floor + DELAY_LOWER_SAMPLES);
-                self.floor = Some((now, need.max(floor), long));
+            // It recurs when it needs about as much (within 1 ms) as the
+            // recurring floor or the last outlier: another size, a smaller tail
+            // or a single higher spike, renews nothing and does not ratchet.
+            let near = |f: Option<(Instant, u32)>| {
+                f.map(|(_, n)| n)
+                    .filter(|&n| need.abs_diff(n) <= DELAY_LOWER_SAMPLES)
+            };
+            let matched = near(self.long).max(near(self.last_late));
+            let recurs = outlier && matched.is_some();
+            if recurs {
+                self.long = Some((now, need.max(matched.unwrap_or(0))));
+            } else if late {
+                let before = self.short.map_or(0, |(_, n)| n);
+                self.short = Some((now, need.max(before)));
             }
             if outlier && (late || recurs) {
-                let before = self.last_late.map_or(0, |(_, n)| n);
-                self.last_late = Some((now, need.max(before)));
+                self.last_late = Some((now, need));
             }
             if late {
-                let floor = self.floor.map_or(need, |(_, n, _)| n);
+                let floor = need.max(self.floor());
                 if floor > current {
                     self.lower = None;
                     self.last_change = Some(now);
@@ -180,7 +194,7 @@ impl DelayHold {
             }
         }
         let p999 = p999?;
-        let need = need_of(p999).max(self.floor.map_or(0, |(_, n, _)| n));
+        let need = need_of(p999).max(self.floor());
         if p999 + DELAY_RAISE_HEADROOM_SAMPLES > read_offset + current && need > current {
             self.lower = None;
             self.last_change = Some(now);
@@ -926,6 +940,68 @@ mod tests {
         assert!(changes <= 2, "{changes} changes");
     }
 
+    /// Runs the hold over `ticks` ticks (10 Hz) with p99.9 3 ms, offset 2 ms;
+    /// `lag(k)` is the highest lag of tick k. Returns the delay per tick.
+    fn run(ticks: u64, lag: impl Fn(u64) -> u32) -> Vec<u32> {
+        let t0 = Instant::now();
+        let (mut h, mut current, mut out) = (DelayHold::default(), 96, Vec::new());
+        for k in 0..ticks {
+            let now = t0 + Duration::from_millis(100 * k);
+            if let Some(d) = h.next(
+                Some(144),
+                Some(lag(k)),
+                current,
+                96,
+                7200,
+                Duration::from_secs(30),
+                now,
+            ) {
+                current = d;
+            }
+            out.push(current);
+        }
+        out
+    }
+
+    #[test]
+    fn one_spike_then_small_outliers_does_not_ratchet() {
+        // Review probe A: one 6 ms spike at 30 s, then outliers 1.25 ms above the
+        // p99.9 every 20 s for 20 min. The spike's floor goes after ~2 hold times;
+        // the small outliers keep only their own need.
+        let d = run(12_000, |k| match k {
+            300 => 144 + 288,
+            k if k > 300 && k % 200 == 0 => 144 + 60,
+            _ => 144,
+        });
+        assert_eq!(d[301], 384, "up at once for the spike");
+        let back = d.iter().skip(301).position(|&x| x < 384).unwrap() + 301;
+        assert!(
+            back <= 301 + 650,
+            "down after ~2 hold times, at tick {back}"
+        );
+        assert!(d[11_999] <= 156, "{}", d[11_999]);
+    }
+
+    #[test]
+    fn a_single_high_spike_over_a_recurring_outlier_does_not_ratchet() {
+        // Review probe B: 6 ms every 30 s (a recurring floor of 8 ms) and one
+        // 100 ms spike at 300 s: up to it at once, back to the recurring floor
+        // after its own short floor and a hold.
+        let d = run(12_000, |k| match k {
+            3000 => 144 + 4800,
+            k if k > 0 && k % 300 == 0 => 144 + 288,
+            _ => 144,
+        });
+        assert_eq!(d[2999], 384);
+        assert_eq!(d[3000], 4800 + 144 + 48 - 96);
+        let back = d.iter().skip(3000).position(|&x| x < 4896).unwrap() + 3000;
+        assert!(
+            back <= 3000 + 650,
+            "down after ~2 hold times, at tick {back}"
+        );
+        assert_eq!(d[11_999], 384, "the recurring 6 ms stays covered");
+    }
+
     #[test]
     fn a_writer_catching_up_raises_nothing() {
         // After a stall the first lags are seconds (beyond offset + maximum):
@@ -937,7 +1013,7 @@ mod tests {
         for lag in [96_000, 48_000, 7297] {
             assert_eq!(h.next(Some(144), Some(lag), 96, 96, 7200, hold, t0), None);
         }
-        assert!(h.floor.is_none() && h.last_late.is_none());
+        assert!(h.floor() == 0 && h.last_late.is_none());
     }
 
     #[test]
@@ -980,7 +1056,7 @@ mod tests {
             h.next(Some(144), Some(144), 384, 96, 7200, hold, at(29)),
             None
         );
-        assert!(h.floor.is_some());
+        assert!(h.floor() > 0);
     }
 
     #[test]

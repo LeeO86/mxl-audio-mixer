@@ -2265,23 +2265,26 @@ inputs (bursts, 960-sample batches, a mirror with outliers, per packet), 12 stri
 
 | Run | 1.3.0 | 1.4.0 | 1.4.1 |
 | --- | --- | --- | --- |
-| per packet, +6 ms every 30 s: missing samples | – | 2496 (4 changes) | 0 (2 changes) |
-| per packet, +5 ms every 40 s | – | 1248 (3 changes) | 192: the first outlier, 2 blocks (2 changes) |
-| bursts of 5 packets, +10 ms every 45 s | – | 2688 (14 changes) | 384: the first outlier, 4 blocks (2 changes) |
+| per packet, +6 ms every 30 s: missing samples | – | 2496 (4 changes) | 192: the first outlier, 2 blocks (2 changes) |
+| per packet, +5 ms every 40 s | – | 1248 (3 changes) | 192: the first outlier (3 changes, one a start-up one-off falling after 1 min) |
+| bursts of 5 packets, +10 ms every 45 s | – | 2688 (14 changes) | 384: the first outlier, 4 blocks (2 changes; earlier run) |
 | deadline misses in 3 min after a restart | 31 (16 in the first 5 s) | 180 (all in the first second) | 0 |
 | deadline misses with five writers stopped, 3 s | 752 | 752 | 2 |
 | automatic delays 5 s after those writers resumed | – | 150 ms (the maximum) on all five | 0–2 ms (as before the stop) |
+| two inputs on one flow, writer restarted at once 10 times | – | both stalled, 2 "(deleted)" mappings (1.4.1 before D240) | both running, 0 missing, none |
 
-(1.4.1 numbers after the review fixes; all losses of the 1.4.1 column are in each
-input's first outlier, none recurred in the 5 min.)
+(1.4.1 numbers after the review fixes; all outlier losses of the 1.4.1 column are in
+each input's first outlier, none recurred in the 5 min. The steady per-packet input
+lost 96 samples to one late wake-up of the lab's own writer, which ran SCHED_OTHER on
+the mixer's CPUs: a one-off, its 2 ms went again after 1 min.)
 
 #### Decisions
 
 | ID | Decision | Reason |
 | --- | --- | --- |
 | D235 | A block whose lag is above the read offset plus the input's delay (late, or saved only by the read's short wait) raises the automatic delay at once to its lag plus 1 ms, within `MIXER_INPUT_DELAY_MAX_MS`, also before the first second of lags and regardless of the hold. The control tick takes the highest lag of the tick from the lags the DSP thread already reports; nothing new on the DSP thread. | A rare outlier is invisible to the 99.9th percentile; each one lost a block. A stall is no lag (D230), so a stopped writer raises nothing. |
-| D236 | The need of a late block is a floor of the automatic delay for one hold time. An outlier (a block needing at least 1 ms more than the 99.9th percentile; not before the first second) that comes again, late or covered, within ten hold times of the last one recurs: the floor then lasts ten hold times (5 min by default), renewed by each recurrence; a higher outlier starts a new floor. The delay goes down only after the floor has expired and then the need stayed lower for a hold time. Lags above the read offset plus `MIXER_INPUT_DELAY_MAX_MS` count for nothing (a writer catching up, D230). | A one-off hiccup should cost its latency for about two hold times (1 min), not 5.5 min; a recurring outlier (the gateways: every 30–50 s) costs one block, or two when it recurs only after the delay fell (every 1–5 min), instead of one per occurrence. |
-| D239 | After a new reader or a stall the arrival lag counts only once the writer has caught up: a lag within the window that fell by at most one block since the head's last move. | A resumed writer is seconds behind and then commits faster than real time; counted, its catch-up raised the delay to the maximum (also in 1.4.0, through the 99.9th percentile). |
+| D236 | The need of a late block is a floor of the automatic delay for one hold time (the short floor). An outlier (a block needing at least 1 ms more than the 99.9th percentile; not before the first second) that comes again, late or covered, within ten hold times, needing within 1 ms of the last outlier or of the recurring floor, recurs: it sets the recurring floor, which lasts ten hold times (5 min by default), renewed by each recurrence of that size. Another size renews nothing: a smaller tail does not keep a higher floor up, a single higher spike gets its own short floor and does not enter the recurring one (no ratchet). The delay goes down only after the floor has expired and then the need stayed lower for a hold time. Lags above the read offset plus `MIXER_INPUT_DELAY_MAX_MS` count for nothing (a writer catching up, D230). | A one-off hiccup should cost its latency for about two hold times (1 min), not 5.5 min; a recurring outlier (the gateways: every 30–50 s) costs one block, or two when it recurs only after the delay fell (every 1–5 min), instead of one per occurrence. |
+| D239 | After a new reader or a stall the arrival lag counts only once the writer has caught up: a lag that fell by at most one block since the head's last move. A writer always later than the window is reported (the lag metrics show it, to read off `MIXER_INPUT_DELAY_MAX_MS`); the automatic delay ignores lags beyond the read offset plus the maximum. | A resumed writer is seconds behind and then commits faster than real time; counted, its catch-up raised the delay to the maximum (also in 1.4.0, through the 99.9th percentile). A slow catch-up (at most about twice real time, a block per block more) still counts and raises the delay for about two hold times, as in 1.4.0. |
 | D240 | Every input open creates its own MXL instance (no instance shared per domain); the reader holds it, and both are released when the control side drops the reader the DSP thread returns (at stop after the DSP thread ended, G8). | libmxl 218ddaa caches one reader per flow id per instance and only adds a reference: a re-open after a quick re-create (or a second input on the flow) got the old reader, mapped on the deleted files (lab: both inputs stalled, 2 "(deleted)" mappings after ten quick writer restarts; with D240 both run, none). The srt-gateway and the multiviewer use one instance per reader too. |
 | D237 | One read wait per block for all inputs: a quarter block from the wake-up; a read after it does not wait. | A wait per input multiplied by the late inputs exceeded the block (deadline misses at every start and with stalled inputs). |
 | D238 | `inputs.sh` adds a per-packet writer with a 6 ms outlier every 8 s (nothing lost after the first) and five stopped writers (fewer than 50 deadline misses in 3 s; 1.4.0: about 750). | Both fail on 1.4.0. |

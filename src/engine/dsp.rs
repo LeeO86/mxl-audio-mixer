@@ -182,7 +182,9 @@ impl OutputSink for Outputs<'_> {
 /// reader, and after a stall, nothing counts until the writer has caught up: a
 /// new flow's head is 0, a re-opened one may be stale, and a writer that resumes
 /// is seconds behind and then commits faster than real time. Caught up is a lag
-/// within the window that fell by at most one block since the head's last move.
+/// that fell by at most one block since the head's last move (also one beyond
+/// the window: a writer that is always that late is shown, the automatic delay
+/// ignores it).
 struct ArrivalTracker {
     last_head: Option<u64>,
     /// Lag of the first block without a commit, and how many there are.
@@ -228,8 +230,7 @@ impl ArrivalTracker {
             if let Some(before) = self.catching_up {
                 self.waiting = 0;
                 self.stalled = false;
-                let window = self.window.saturating_mul(self.block);
-                if lag <= window && before.saturating_sub(lag) <= self.block {
+                if before.saturating_sub(lag) <= self.block {
                     self.catching_up = None;
                     push(lag);
                 } else {
@@ -938,5 +939,19 @@ mod tests {
         }
         assert!(out.iter().all(|&l| l == 20), "{:?}", out.iter().max());
         assert!(out.len() > 150, "{} lags", out.len());
+    }
+
+    #[test]
+    fn a_writer_always_later_than_the_window_is_still_shown() {
+        // 300 ms late, on time otherwise: beyond the window (offset + maximum),
+        // but its lag is reported (for the metrics; the delay ignores it).
+        let mut t = ArrivalTracker::new(76, 96);
+        let mut out = Vec::new();
+        for n in 0..100u64 {
+            let end = 1_000_000 + n * 96;
+            t.observe(end - 14_400, end, |l| out.push(l));
+        }
+        assert!(out.len() >= 97, "{} lags", out.len());
+        assert!(out.iter().all(|&l| l == 14_400));
     }
 }
