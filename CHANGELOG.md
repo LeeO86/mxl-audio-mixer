@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1 (unreleased)
+
+From the 1.4.0 deployment on test-all (IMPLEMENTATION_PLAN D235–D238, X34).
+
+- Fixed: the ST 2110 gateway inputs lost a whole block every 30–50 s at `MIXER_READ_OFFSET=2` (1112–1718 samples in 10 min each). Their writers are on time except for a rare packet several ms late, far below the 99.9th percentile, so the automatic delay never covered it and the hold kept it low. A late block (its arrival lag above the read offset plus the delay, the head moving) now raises that input's delay at once to its lag plus 1 ms (within `MIXER_INPUT_DELAY_MAX_MS`), also before the first second of lags and regardless of the hold. Its need stays a floor for ten hold times (5 min by default), renewed whenever an outlier of about that size comes back, so a recurring outlier costs one block once instead of one per occurrence. The DSP thread only reports lags; the control tick decides.
+- Fixed: deadline misses after a start (test-all: 497, and 313 with the device IRQs moved off the DSP core, in the first 3 min). A read waits up to a quarter block for samples that are almost there, and every late input waited its own quarter block: four or more late inputs took longer than the block, so every block missed its deadline. That happened at the start, before the inputs' delays were set (1.4.0 sets the first after a full second of lags; 180 misses in the lab's first second), and while several inputs were stalled (a stopped writer, a source not started yet; also in 1.3.0: 752 misses in 3 s with five). The wait is now one quarter block per block, shared by all inputs; after it the inputs read without waiting. Lab: 0 misses after a restart with 7 inputs (1.4.0: 180, 1.3.0: 31), 1 with five stopped writers (752).
+- `tests/integration/inputs.sh`: a per-packet writer with one packet 6 ms late every 8 s loses nothing after its first outlier; five stopped writers cause no deadline misses.
+
 ## 1.4.0 (2026-10-22)
 
 Operator feedback (IDs as in IMPLEMENTATION_PLAN "1.4.0") and two input fixes from the test-all deployment (PRs #37–#41). Release notes: `docs/release-notes/1.4.0.md`.

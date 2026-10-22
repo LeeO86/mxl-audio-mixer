@@ -378,9 +378,12 @@ longer than the read offset plus `MIXER_INPUT_DELAY_MAX_MS` is a stall, not a la
 block is late exactly when its lag is above the read offset plus the extra delay, so
 the arrival lag and `late_samples` agree. The extra delay is the 99.9th percentile plus
 1 ms, minus the read offset, within `MIXER_INPUT_DELAY_MAX_MS`. It goes up at once
-when the 99.9th percentile comes within 0.5 ms of the delay; it goes down only after
-the need stayed at least 1 ms lower for `MIXER_INPUT_DELAY_HOLD_S` (30 s), to the
-highest need of that time, and at most once per hold time. A change is applied with a
+when the 99.9th percentile comes within 0.5 ms of the delay, and at once when a block
+was late (its lag above the read offset plus the delay: a rare outlier the percentile
+does not show), to that lag plus 1 ms. It goes down only after the need stayed at
+least 1 ms lower for `MIXER_INPUT_DELAY_HOLD_S` (30 s), to the highest need of that
+time, and at most once per hold time; the need of a late block counts for ten hold
+times (5 min), renewed whenever the same outlier comes back. A change is applied with a
 fade, or waits for `POST /api/v1/inputs/<n>/delay/confirm` with
 `MIXER_INPUT_DELAY_CONFIRM=true`. A writer that commits N samples at once needs about
 N samples of read offset plus extra delay: with the 2 ms default, a browser source that

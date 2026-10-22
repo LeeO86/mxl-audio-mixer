@@ -7,7 +7,9 @@
 #   writers that commit in batches (a video frame of audio, bursts of packets) at the
 #   default 2 ms read offset -> the arrival lag shows the batch, the automatic delay
 #   covers it, 0 missing samples (F1);
-#   lag outliers that come and go -> the automatic delay holds instead of flapping (F2).
+#   lag outliers that come and go -> the automatic delay holds instead of flapping (F2);
+#   a steady writer with a rare long outlier -> the first late block raises the
+#   delay, later outliers are covered (1.4.1).
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
 
@@ -16,7 +18,8 @@ LATE=44444444-4444-4444-8444-444444444444
 FRAMES=66666666-6666-4666-8666-666666666666
 BURSTS=77777777-7777-4777-8777-777777777777
 OUTLIERS=88888888-8888-4888-8888-888888888888
-start_mixer NMOS_SEED=it-inputs MIXER_INPUT_FLOWS=5
+RARE=99999999-9999-4999-8999-999999999999
+start_mixer NMOS_SEED=it-inputs MIXER_INPUT_FLOWS=6
 
 # The domain must be visible for the activation; the flow does not exist yet.
 mkdir -p "$WORK/mxl/tones"
@@ -73,6 +76,7 @@ pass "writer restart: the input re-opened by itself, 0 missing samples afterward
 
 # Arrival lag: a writer 30 ms late. The automatic delay must settle above the lag.
 start_tone "$WORK/mxl/tones" "$LATE" --domain-id "$DOMAIN" --delay-ms 30
+WRITERS=("$TONE_PID")
 wait_until 10 "late flow" test -d "$WORK/mxl/tones/$LATE.mxl-flow"
 route 3 "$DOMAIN" "$LATE"
 wait_until 10 "input 3 running" is_state 3 running
@@ -89,19 +93,27 @@ pass "arrival lag: the automatic delay settled, 0 missing samples afterwards"
 # only in blocks right after a commit (about 0.5 ms), set no delay and lost most
 # blocks as late.
 start_tone "$WORK/mxl/tones" "$FRAMES" --domain-id "$DOMAIN" --block 960
+WRITERS+=("$TONE_PID")
 start_tone "$WORK/mxl/tones" "$BURSTS" --domain-id "$DOMAIN" --block 48 --delay-ms 0.4 --batch 5
+WRITERS+=("$TONE_PID")
 # F2: a mirror 6 ms late with 2.5 ms more for 0.2 s every 12 s; the outliers leave the
 # 10 s lag window between two of them. v1.3.0 followed them up and down (with a fade).
 start_tone "$WORK/mxl/tones" "$OUTLIERS" --domain-id "$DOMAIN" --block 96 --delay-ms 6 --late-ms 2.5 --every-s 12 --for-s 0.2
-for f in "$FRAMES" "$BURSTS" "$OUTLIERS"; do
+WRITERS+=("$TONE_PID")
+# 1.4.1: the gateways of test-all, per packet and on time but once in a while one
+# packet 6 ms late (here every 8 s). Far below the p99.9; 1.4.0 lost a block at each.
+start_tone "$WORK/mxl/tones" "$RARE" --domain-id "$DOMAIN" --block 48 --delay-ms 0.4 --late-ms 6 --every-s 8 --for-s 0.001
+WRITERS+=("$TONE_PID")
+for f in "$FRAMES" "$BURSTS" "$OUTLIERS" "$RARE"; do
     wait_until 10 "flow $f" test -d "$WORK/mxl/tones/$f.mxl-flow"
 done
 MIXER_LOG_AT=$(wc -l <"$IT_OUT/inputs-mixer.log")
 route 2 "$DOMAIN" "$FRAMES"
 route 4 "$DOMAIN" "$BURSTS"
 route 5 "$DOMAIN" "$OUTLIERS"
+route 6 "$DOMAIN" "$RARE"
 OUTLIERS_ROUTED=$SECONDS
-for i in 2 4 5; do wait_until 10 "input $i running" is_state "$i" running; done
+for i in 2 4 5 6; do wait_until 10 "input $i running" is_state "$i" running; done
 delay_above() { # <input> <ms>
     python3 -c "import json,urllib.request as u; d=json.load(u.build_opener(u.ProxyHandler({})).open('$WEB/api/v1/inputs/$1')); exit(0 if d['extra_delay_ms'] > $2 else 1)"
 }
@@ -117,6 +129,11 @@ done
 python3 -c "import sys; sys.exit(0 if float('$(json "$WEB/api/v1/inputs/2" "d['arrival_lag_ms']['p999']")') >= 18 else 1)" ||
     fail "input 2: the arrival lag does not show the 20 ms batches"
 pass "batched writers at a 2 ms read offset: the arrival lag shows the batch, the delay covers it, 0 missing samples"
+# At least 9 s after routing input 6 its first outlier has come and raised the delay.
+rest=$((OUTLIERS_ROUTED + 9 - SECONDS))
+((rest <= 0)) || sleep "$rest"
+RARE_MISSING=$(input 6 missing_samples)
+RARE_AT=$SECONDS
 
 # F2: over 28 s from routing (two outliers), input 5 gets its automatic delay and may
 # go up when an outlier needs more (a slow shared runner adds rises), but it must not
@@ -132,6 +149,28 @@ log "input 5: $ups rises and $downs falls of the automatic delay in 28 s, effect
 ((ups >= 1)) || fail "input 5 got no automatic delay"
 ((downs == 0)) || fail "input 5: the automatic delay went down $downs times in 28 s (flapping)"
 pass "lag outliers: the automatic delay holds instead of flapping"
+
+# 1.4.1: since the first outlier (and its rise) input 6 lost nothing over two more.
+((SECONDS - RARE_AT >= 16)) || sleep $((16 - (SECONDS - RARE_AT)))
+missing=$(($(input 6 missing_samples) - RARE_MISSING))
+log "input 6: $missing samples lost after its first outlier, delay $(input 6 extra_delay_ms) ms"
+((missing == 0)) || fail "input 6: the rare 6 ms outliers lost $missing samples after the first one"
+delay_above 6 5.9 || fail "input 6: the automatic delay does not cover the 6 ms outlier"
+pass "a rare long outlier: the first late block raises the delay, the later ones are covered"
+
+# Five writers stopped at once: their reads wait for samples that do not come.
+# The wait is a quarter block shared by all inputs of a block; 1.4.0 gave each
+# input its own, so five late inputs took longer than the block, every block a
+# deadline miss (also at the start, before the delays were set).
+misses() { json "$WEB/api/v1/status" "d['dsp']['deadline_misses']"; }
+before=$(misses)
+kill -STOP "${WRITERS[@]}"
+sleep 3
+after=$(misses)
+kill -CONT "${WRITERS[@]}"
+log "five stopped writers: $((after - before)) deadline misses in 3 s"
+((after - before < 50)) || fail "five stopped writers: $((after - before)) deadline misses in 3 s"
+pass "late inputs share one short wait: no deadline misses with five stopped writers"
 
 # master_enable false: the input stops reading.
 route 1 "$DOMAIN" "$FLOW" false

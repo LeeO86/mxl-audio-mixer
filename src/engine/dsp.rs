@@ -289,8 +289,9 @@ pub(super) fn run(
     let block = config.block as usize;
     let b = u64::from(config.block);
     let period_ns = time_of(b);
-    // Bounded wait for samples that are almost there: a quarter block.
-    let read_wait = Duration::from_nanos(period_ns / 4);
+    // Bounded wait for samples that are almost there: a quarter block per block,
+    // shared by all inputs (see `read_timeout`).
+    let read_wait_ns = period_ns / 4;
     let lag_window_blocks = config.lag_window.div_ceil(config.block.max(1));
     let mut inputs: Vec<Input> = (0..config.inputs)
         .map(|_| Input::new(block, lag_window_blocks, config.block))
@@ -477,8 +478,12 @@ pub(super) fn run(
                 });
             }
             let channels = input.channels;
-            let mut result = reader.get_samples(head, block, read_wait);
-            if matches!(result, Err(MxlError::OutOfRangeTooEarly)) {
+            let timeout = read_timeout(tai_ns(), woke + read_wait_ns);
+            let mut result = match timeout {
+                Some(t) => reader.get_samples(head, block, t),
+                None => reader.get_samples_non_blocking(head, block),
+            };
+            if timeout.is_some() && matches!(result, Err(MxlError::OutOfRangeTooEarly)) {
                 // MXL wakes a waiting reader only once per sync batch of the writer
                 // (maxSyncBatchSizeHint) and, when its wait times out, returns the
                 // result from before the wait: a commit during the wait is only
@@ -694,6 +699,16 @@ fn commit(o: &mut OutputWriter, head: u64, counters: &super::OutputCounters) {
 
 /// Fade in after a gap or a (re)start, fade out over a gap (holding the last
 /// sample) and around a delay change, so nothing clicks.
+/// How long a read may wait for samples that are almost there: until `wait_end`,
+/// a quarter block after the wake-up, for all inputs of the block together.
+/// Each input waiting a quarter block of its own let a few late inputs (at the
+/// start, before their delays are set, or stalled ones) take more than the whole
+/// block: every block was then a deadline miss (1.4.0, 180 in its first second
+/// with 7 late inputs). `None`: the window is over, read without waiting.
+fn read_timeout(now: u64, wait_end: u64) -> Option<Duration> {
+    (now < wait_end).then(|| Duration::from_nanos(wait_end - now))
+}
+
 /// A failed read after the input has started.
 ///
 /// `missing` counts every failure. Late is the source not having written the
@@ -867,5 +882,17 @@ mod tests {
             t.observe(96 * (100 + n / 5 * 5), end, |l| out.push(l));
         }
         assert_eq!(out, vec![0, 96, 192, 288, 384, 0]);
+    }
+
+    #[test]
+    fn the_read_wait_is_shared_by_all_inputs() {
+        use super::read_timeout;
+        use std::time::Duration;
+        // Woken at 1000 ns with a 500 ns window: the first input may wait the
+        // whole window, a later one only what is left, after it none.
+        assert_eq!(read_timeout(1000, 1500), Some(Duration::from_nanos(500)));
+        assert_eq!(read_timeout(1400, 1500), Some(Duration::from_nanos(100)));
+        assert_eq!(read_timeout(1500, 1500), None);
+        assert_eq!(read_timeout(9000, 1500), None);
     }
 }

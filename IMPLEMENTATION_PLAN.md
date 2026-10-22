@@ -2235,3 +2235,54 @@ settling):
 | ID | Feedback | What was done | Reason |
 | --- | --- | --- | --- |
 | X33 | F2 "never more than one change per hold period" | Only decreases wait for the hold time; an increase is applied at once, also within a hold period. | An increase stops samples from being lost; holding it back would trade a fade for audible gaps. Increases cannot flap: the delay only goes down after a hold. |
+
+## 1.4.1: late blocks and the read wait (test-all, 1.4.0)
+
+1.4.0 on test-all at `MIXER_READ_OFFSET=2` (10 min): the ST 2110 gateway inputs lost a
+whole block every 30–50 s (1718, 1112 and 1516 samples; 0 at offset 20 on 1.3.0), with
+automatic delays of 7.17–14 ms and no or few changes; at offset 20 a replay input over an
+RDMA mirror lost 388 and 97 samples to rare outliers above 20 ms (9 changes). And
+deadline misses after a start: 497 in the first 3 min (313 once the device IRQs were
+moved off the DSP core), then none.
+
+**Late blocks.** The real gateways are on time except for a rare packet several ms late:
+about one block in 20 000, far below the 99.9th percentile. The percentile rule never
+covered it, and the hold kept the delay down. A late block is exactly a block whose lag
+is above the read offset plus the delay (D230), so the control tick sees it in the lags
+it already gets.
+
+**The read wait.** Every read that finds its samples not there yet waits up to a quarter
+block (0.5 ms at 96 samples) for them, and each input waited its own. Four or more late
+inputs took longer than the block: every block was a deadline miss. Inputs are late
+together at the start, before their delays are set (1.4.0 sets the first after a full
+second of lags, D233; 1.3.0 after 100 ms), and while several are stalled or
+not started yet. The lab has no device IRQs on the DSP CPU; it shows the same misses
+with this mechanism alone.
+
+Lab (CPUs 43–47; the gateway pattern 5 min at offset 2 after 5 s; the startup with 7
+inputs (bursts, 960-sample batches, a mirror with outliers, per packet), 12 strips,
+8 buses, restarted with its saved show at SCHED_FIFO 49, 3 min):
+
+| Run | 1.3.0 | 1.4.0 | 1.4.1 |
+| --- | --- | --- | --- |
+| per packet, +6 ms every 30 s: missing samples | – | 2496 (4 changes) | 96, the first outlier (2 changes) |
+| per packet, +5 ms every 40 s | – | 1248 (3 changes) | 0 (1 change) |
+| bursts of 5 packets, +10 ms every 45 s | – | 2688 (14 changes) | 0 (1 change) |
+| deadline misses in 3 min after a restart | 31 (16 in the first 5 s) | 180 (all in the first second) | 0 |
+| deadline misses with five writers stopped, 3 s | 752 | 752 | 1 |
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D235 | A block whose lag is above the read offset plus the input's delay (late, or saved only by the read's short wait) raises the automatic delay at once to its lag plus 1 ms, within `MIXER_INPUT_DELAY_MAX_MS`, also before the first second of lags and regardless of the hold. The control tick takes the highest lag of the tick from the lags the DSP thread already reports; nothing new on the DSP thread. | A rare outlier is invisible to the 99.9th percentile; each one lost a block. A stall is no lag (D230), so a stopped writer raises nothing. |
+| D236 | The need of a late block is a floor of the automatic delay for ten hold times (5 min by default), renewed by every later block that needs at least that floor less 1 ms (the same outlier coming back, now covered). The delay goes down only after the floor has expired and then the need stayed lower for a hold time. | With a floor of one hold time, outliers every 30–50 s found the delay just lowered: one block lost per minute and a fade each way. |
+| D237 | One read wait per block for all inputs: a quarter block from the wake-up; a read after it does not wait. | A wait per input multiplied by the late inputs exceeded the block (deadline misses at every start and with stalled inputs). |
+| D238 | `inputs.sh` adds a per-packet writer with a 6 ms outlier every 8 s (nothing lost after the first) and five stopped writers (fewer than 50 deadline misses in 3 s; 1.4.0: about 750). | Both fail on 1.4.0. |
+
+#### Deviations
+
+| ID | Request | What was done | Reason |
+| --- | --- | --- | --- |
+| X34 | "never below the highest lag that caused a miss within the hold time" | The floor lasts ten hold times and is renewed by recurring outliers. | Gateway outliers come every 30–50 s, longer than the 30 s hold: a floor of one hold time let the delay fall between two of them, and each outlier was lost again. |
+
