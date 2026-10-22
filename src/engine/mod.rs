@@ -243,6 +243,9 @@ pub struct EngineConfig {
     pub inputs: usize,
     pub block: u32,
     pub read_offset: u32,
+    /// How long (samples) the arrival lag of blocks without a commit is held for
+    /// the next commit; a head that stands still longer is a stall (§4.2).
+    pub lag_window: u32,
     pub rt_priority: Option<i32>,
     pub cpu: Option<usize>,
 }
@@ -252,7 +255,8 @@ pub struct Engine {
     pub counters: Arc<EngineCounters>,
     pub commands: rtrb::Producer<Command>,
     pub returned: rtrb::Consumer<Returned>,
-    /// Per input: arrival lag samples (in 48 kHz samples), one per read block.
+    /// Per input: arrival lag samples (in 48 kHz samples), one per read block
+    /// (see `dsp::ArrivalTracker`).
     pub lags: Vec<rtrb::Consumer<u32>>,
     /// The analysed signal: per block, channel 1 then channel 2 (a copy of
     /// channel 1 for mono).

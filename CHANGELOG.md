@@ -42,6 +42,15 @@ From the operators' feedback (IMPLEMENTATION_PLAN "1.4.0: DSP and formats", D200
 - Logic: a click on a block's row selects it in the graph (L1).
 - Graph and routing: a send's tap list offers only the taps its source has, from the new `GET /api/v1/taps` (G1).
 
+### Input reading (F1, F2)
+
+From the test-all deployment (D-263; IMPLEMENTATION_PLAN D230–D234, X33).
+
+- Fixed: inputs whose writer commits audio in batches lost samples at the default `MIXER_READ_OFFSET` of 2 ms (ST 2110 gateway audio delivered in bursts of packets, browser-source audio committed per video frame), all counted as late, while the arrival lag showed about 0.5 ms and no automatic delay was set. The arrival lag was measured only in blocks right after a commit, when the flow is freshest; it now counts every read block, as the distance from the block's end to the head index, so a 960-sample batch shows about 20 ms, the automatic delay covers it and the input reads clean. A block is late exactly when its arrival lag exceeds the read offset plus the extra delay. A head that stands still longer than the read offset plus `MIXER_INPUT_DELAY_MAX_MS` is a stall and adds no lag.
+- A read that MXL answers "too early" after its wait is tried once more without waiting: MXL wakes a waiting reader only once per sync batch of the writer and returns the result from before the wait.
+- The automatic input delay holds: up at once when the 99.9th percentile of the lag comes within 0.5 ms of the delay; down only after the need stayed at least 1 ms lower for `MIXER_INPUT_DELAY_HOLD_S` (new, default 30 s), to the highest need of that time, and at most once per hold time. It changed every 0.1–1 s (with a fade) on fabrics-mirrored inputs.
+- `mxl-mixer-tone` has `--batch N` (N blocks handed over at once) and `--late-ms X --every-s P --for-s D` (lag outliers); `tests/integration/inputs.sh` covers batched writers and outliers.
+
 ## 1.3.0 (2026-10-17)
 
 Milestone 9 (§13: master/slave remote link).

@@ -2184,3 +2184,51 @@ part B), routing (T1–T4), logic (L1) and graph (G1).
 | D226 | G1: `GET /api/v1/taps` lists the taps of every strip and bus, made by the same check as the validation (`Mix::taps` over `check_tap`): named taps in signal order, then after each node. The send editors of the routing and graph views offer only those, fetched again on every mix revision while an editor is open; the current tap is always listed. | Taken from the server, the list cannot drift from the validation (a bus has no input or post-pan). Rules that depend on the destination are not in this per-source list. |
 | D227 | L1: a click on a block's row in the logic list (not on its fields or buttons) selects it in the graph (Ctrl or Cmd adds or removes it) and centres it when it is outside the view; the selected rows have a blue bar. | The reverse (graph → list) already worked. |
 | D228 | R5: a personal monitor has `follows_solo` (create and PATCH; default false, unlike a show monitor). While the control room has a PFL or AFL and the personal monitor has no solo of its own, it plays the control room's solo bus as a show monitor that follows solo does (the programme at `programme_db`); its own solo, while it has one, wins. The switch rewires its solo send (a plan swap with the usual fades), as its own solo did. Listen-back (talkback) does not change its source. | "My headphones" for an operator who wants to hear what the control room pre-listens without making their own solo. Off by default, so an existing personal monitor does not change. |
+
+### 1.4.0: input reading (F1, F2; D-263)
+
+From the test-all deployment of 1.3.0: at `MIXER_READ_OFFSET=2` six of seven inputs
+lost samples (gateway RX audio +290 016 in 30 s, browser-source audio +191 616), all
+counted as late, with 0 overruns and 0 re-opens, while the arrival lag read p50/p99/p99.9
+0.42 ms and the automatic delay stayed 0. With 20 ms everything was clean. On the
+fabrics mirrors of host-03 the automatic delay changed every 0.1–1 s (7.083 ↔ 9.583 ms),
+each time with a fade.
+
+**Root cause (F1).** The DSP thread pushed an arrival lag (TAI now − head index) only in
+blocks in which the head index had moved since the block before ("a head that does not
+move is a stall"). A writer that commits in batches, a 960-sample video frame of audio
+(browser source) or a burst of 1 ms packets (the gateway's receiver hands several over
+at once), is freshest right after a commit and up to a whole batch behind just before
+the next one. Only the fresh blocks were measured, so the lag showed the minimum (about
+0.5 ms) while the read of every block in between needed the head a batch further on:
+MXL answered `OUT_OF_RANGE_TOO_EARLY`, counted as late. The automatic delay, fed by the
+biased lag, stayed 0. A correctly timed per-packet writer (FlowXer) moves the head every
+block and was clean. A larger offset is inherent for a batched writer: samples it has
+not committed cannot be read, so it needs about one batch of read offset plus extra
+delay; the fix is to measure what the read needs and let the automatic delay cover it.
+
+Lab (CPUs 43–47, `mxl-mixer-tone` writers, `MIXER_READ_OFFSET=2`, 40 s after 15 s of
+settling):
+
+| Writer | 1.3.0: missing, lag p99.9, delay | 1.4.0: missing, lag p99.9, delay |
+| --- | --- | --- |
+| 48-sample commits, 0.4 ms late (gateway per packet) | 0, 1.08 ms, 0 | 0, 1.08 ms, 0 |
+| bursts of five 48-sample commits (gateway receiver) | 251 136, 2.08 ms, 1.17 ms | 0, 5.08 ms, 4.08 ms |
+| 960-sample commits (browser source, 50 Hz) | 1 539 552, 0.58 ms, 0 | 0, 20.08 ms, 19.08 ms |
+| 96-sample commits 6 ms late, +2.5 ms for 0.2 s every 12 s (mirror) | 1 440, 10.58 ms, 46 delay changes in all | 0, 10.08 ms, 5 changes in all (first settings and one rise) |
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D230 | The arrival lag is measured in every read block as (end of the block) − (head index), not TAI now − head index and not only when the head moved. Blocks without a commit are held (a `Vec` with capacity for the window, allocated before the loop) and pushed when the head moves; when it does not move within `MIXER_READ_OFFSET + MIXER_INPUT_DELAY_MAX_MS`, they are dropped as a stall. | The read of a block needs `head ≥ end − (offset + delay)`, so a block is late exactly when this lag exceeds `offset + delay`: the lag and `late_samples` agree. A stall (stalled → re-open, §4.2) must not raise the delay to its maximum. |
+| D231 | After `OUT_OF_RANGE_TOO_EARLY` from the blocking read, one non-blocking read of the same range. | MXL 218ddaa wakes a waiting reader only per sync batch of the writer (`maxSyncBatchSizeHint`) and on time-out returns the status from before its wait: a commit during the wait that does not complete a sync batch was reported as late. |
+| D232 | The automatic delay goes up at once to p99.9 + 1 ms − offset when p99.9 comes within 0.5 ms of offset + delay. | Missing samples are worse than latency; the 0.5 ms headroom keeps a slowly growing lag from fading at every 83 µs bucket. |
+| D233 | It goes down only when p99.9 + 1 ms − offset stayed at least 1 ms below the delay for the whole hold time (`MIXER_INPUT_DELAY_HOLD_S`, default 30 s, 0 to 3600), then to the highest need seen in that time, and not sooner than one hold time after the last change. A route change or setting `auto` again starts over. | The lag window is 10 s: an outlier leaving it made the delay drop and the next one raise it again, each with a fade. 30 s is three lag windows. |
+| D234 | `mxl-mixer-tone` writes like the platform's writers: `--block 48` (gateway per packet), `--block 960` (browser source per frame), `--batch N` (a burst of N blocks at once), `--late-ms/--every-s/--for-s` (lag outliers). | Reproduces F1 and F2 in `inputs.sh` without the platform. |
+
+#### Deviations
+
+| ID | Feedback | What was done | Reason |
+| --- | --- | --- | --- |
+| X33 | F2 "never more than one change per hold period" | Only decreases wait for the hold time; an increase is applied at once, also within a hold period. | An increase stops samples from being lost; holding it back would trade a fade for audible gaps. Increases cannot flap: the delay only goes down after a hold. |

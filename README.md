@@ -342,6 +342,7 @@ token.
 | `MIXER_RT_PRIORITY` | off | SCHED_FIFO priority of the DSP thread, 1–49 (needs CAP_SYS_NICE). |
 | `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move for this long is stalled and re-opened. |
 | `MIXER_INPUT_DELAY_MAX_MS` | 150 | Upper limit of an input's automatic extra delay. |
+| `MIXER_INPUT_DELAY_HOLD_S` | 30 | An automatic delay goes down only after the measured need stayed at least 1 ms lower for this long, and at most once per this time; it goes up at once. |
 | `MIXER_INPUT_DELAY_CONFIRM` | false | true: an automatic delay change waits for operator confirmation instead of applying with a fade. |
 | `WIDGET_FRAME_ANCESTORS` | 'self' | CSP frame-ancestors of the /widget pages; /widgets answers these origins with CORS. |
 | `TSL_ENABLE` | false | Listen for TSL UMD 5.0 tally (audio-follows-video). |
@@ -368,10 +369,21 @@ token.
 
 Per input (show file, `PATCH /api/v1/inputs/<n>`): `label` (NMOS receiver label and
 group hint, default `Input <n>`) and `extra_delay` (`"auto"`, the default, or ms).
-`auto` measures the arrival lag (TAI now minus the flow's head index, sliding window)
-over the last 10 s and sets the extra delay to its 99.9th percentile plus 1 ms,
-minus the read offset, within `MIXER_INPUT_DELAY_MAX_MS`; a change is applied with a fade, or waits
-for `POST /api/v1/inputs/<n>/delay/confirm` with `MIXER_INPUT_DELAY_CONFIRM=true`.
+`auto` measures the arrival lag over the last 10 s: for every read block, how far the
+flow's head index is behind the end of that block. Blocks in which the writer committed
+nothing count too: a writer that commits in batches (a video frame of audio, a burst of
+packets) is furthest behind just before its next commit. A head that stands still for
+longer than the read offset plus `MIXER_INPUT_DELAY_MAX_MS` is a stall, not a lag. A
+block is late exactly when its lag is above the read offset plus the extra delay, so
+the arrival lag and `late_samples` agree. The extra delay is the 99.9th percentile plus
+1 ms, minus the read offset, within `MIXER_INPUT_DELAY_MAX_MS`. It goes up at once
+when the 99.9th percentile comes within 0.5 ms of the delay; it goes down only after
+the need stayed at least 1 ms lower for `MIXER_INPUT_DELAY_HOLD_S` (30 s), to the
+highest need of that time, and at most once per hold time. A change is applied with a
+fade, or waits for `POST /api/v1/inputs/<n>/delay/confirm` with
+`MIXER_INPUT_DELAY_CONFIRM=true`. A writer that commits N samples at once needs about
+N samples of read offset plus extra delay: with the 2 ms default, a browser source that
+commits a 50 Hz frame of audio (960 samples) gets about 19 ms of automatic delay.
 
 ## The mix
 

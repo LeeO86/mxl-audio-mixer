@@ -17,8 +17,14 @@ use crate::mxlio::{self, Api, MxlInstance};
 
 /// Length of the sliding window of arrival lags.
 pub const LAG_WINDOW: Duration = Duration::from_secs(10);
-/// Margin added to the 99.9th percentile, and the hysteresis of a change (1 ms).
+/// Margin added to the 99.9th percentile (1 ms).
 pub const DELAY_MARGIN_SAMPLES: u32 = 48;
+/// The automatic delay goes up once less than this is left above the 99.9th
+/// percentile (0.5 ms), so a slowly growing lag does not fade at every step.
+const DELAY_RAISE_HEADROOM_SAMPLES: u32 = DELAY_MARGIN_SAMPLES / 2;
+/// The automatic delay goes down only when the need is at least this much lower
+/// (1 ms), for `MIXER_INPUT_DELAY_HOLD_S`.
+const DELAY_LOWER_SAMPLES: u32 = 48;
 /// Lag samples needed before the first automatic setting: one second of blocks.
 const MIN_LAG_SECONDS: u64 = 1;
 const LAG_BUCKET_SAMPLES: u32 = 4; // 83 µs resolution
@@ -79,6 +85,56 @@ impl InputConfig {
 pub struct Route {
     pub domain: PathBuf,
     pub flow: Uuid,
+}
+
+/// Hysteresis and hold of the automatic delay (F2): up at once when the lag
+/// comes close to the delay; down only after the need stayed lower by
+/// [`DELAY_LOWER_SAMPLES`] for the whole hold time, to the highest need seen in
+/// that time, and at most once per hold time.
+#[derive(Default)]
+struct DelayHold {
+    last_change: Option<Instant>,
+    /// Since when the need has been lower, and the highest need since then.
+    lower: Option<(Instant, u32)>,
+}
+
+impl DelayHold {
+    /// The new delay for an input with delay `current` and arrival lag `p999`
+    /// (99.9th percentile), or `None` to keep it.
+    fn next(
+        &mut self,
+        p999: u32,
+        current: u32,
+        read_offset: u32,
+        delay_max: u32,
+        hold: Duration,
+        now: Instant,
+    ) -> Option<u32> {
+        let need = (p999 + DELAY_MARGIN_SAMPLES)
+            .saturating_sub(read_offset)
+            .min(delay_max);
+        if p999 + DELAY_RAISE_HEADROOM_SAMPLES > read_offset + current && need > current {
+            self.lower = None;
+            self.last_change = Some(now);
+            return Some(need);
+        }
+        if need + DELAY_LOWER_SAMPLES > current {
+            self.lower = None;
+            return None;
+        }
+        let (since, highest) = match self.lower {
+            Some((since, highest)) => (since, highest.max(need)),
+            None => (now, need),
+        };
+        self.lower = Some((since, highest));
+        let held = |t: Instant| now.duration_since(t) >= hold;
+        if held(since) && self.last_change.is_none_or(held) {
+            self.lower = None;
+            self.last_change = Some(now);
+            return Some(highest);
+        }
+        None
+    }
 }
 
 /// A sliding window of arrival lags as per-second histograms.
@@ -168,6 +224,7 @@ struct Slot {
     delay: u32,
     /// An automatic change waiting for confirmation.
     proposed: Option<u32>,
+    hold: DelayHold,
 }
 
 /// An input's status for the API, the UI and the metrics.
@@ -217,6 +274,7 @@ pub struct Inputs {
     read_offset: u32,
     delay_max: u32,
     confirm: bool,
+    hold: Duration,
     stall: Duration,
     show_path: PathBuf,
 }
@@ -244,6 +302,7 @@ impl Inputs {
                 last_lag: 0,
                 delay: 0,
                 proposed: None,
+                hold: DelayHold::default(),
             })
             .collect();
         let mut inputs = Self {
@@ -254,6 +313,7 @@ impl Inputs {
             read_offset: config.read_offset_samples,
             delay_max: config.input_delay_max_samples,
             confirm: config.input_delay_confirm,
+            hold: config.input_delay_hold,
             stall: config.input_stall,
             show_path: config.state_dir.join("inputs.json"),
         };
@@ -304,6 +364,7 @@ impl Inputs {
         slot.route = route;
         slot.inode = None;
         slot.lag.clear();
+        slot.hold = DelayHold::default();
         slot.state = if slot.route.is_some() {
             State::Waiting
         } else {
@@ -386,7 +447,7 @@ impl Inputs {
                 }
                 State::Running | State::Stalled => self.watch(engine, i, now),
             }
-            self.auto_delay(engine, i);
+            self.auto_delay(engine, i, now);
         }
     }
 
@@ -427,8 +488,10 @@ impl Inputs {
         }
     }
 
-    fn auto_delay(&mut self, engine: &mut Engine, i: usize) {
-        let slot = &self.slots[i];
+    fn auto_delay(&mut self, engine: &mut Engine, i: usize, now: Instant) {
+        let (read_offset, delay_max, hold, confirm) =
+            (self.read_offset, self.delay_max, self.hold, self.confirm);
+        let slot = &mut self.slots[i];
         if slot.config.extra_delay != ExtraDelay::default() || slot.state != State::Running {
             return;
         }
@@ -438,14 +501,14 @@ impl Inputs {
         let Some(p999) = slot.lag.quantile(0.999) else {
             return;
         };
-        let target = (p999 + DELAY_MARGIN_SAMPLES)
-            .saturating_sub(self.read_offset)
-            .min(self.delay_max);
         let current = slot.proposed.unwrap_or(slot.delay);
-        if target.abs_diff(current) <= DELAY_MARGIN_SAMPLES {
+        let Some(target) = slot
+            .hold
+            .next(p999, current, read_offset, delay_max, hold, now)
+        else {
             return;
-        }
-        if self.confirm {
+        };
+        if confirm {
             if slot.proposed != Some(target) {
                 tracing::info!(
                     input = i + 1,
@@ -454,7 +517,7 @@ impl Inputs {
                     "input delay change proposed"
                 );
             }
-            self.slots[i].proposed = Some(target);
+            slot.proposed = Some(target);
         } else {
             tracing::info!(
                 input = i + 1,
@@ -503,7 +566,10 @@ impl Inputs {
             slot.proposed = None;
             match delay {
                 ExtraDelay::Ms(value) => self.set_delay(engine, index, samples(value)),
-                ExtraDelay::Auto(_) => self.slots[index].lag.clear(),
+                ExtraDelay::Auto(_) => {
+                    self.slots[index].lag.clear();
+                    self.slots[index].hold = DelayHold::default();
+                }
             }
         }
         let config = self.slots[index].config.clone();
@@ -625,6 +691,70 @@ mod tests {
         assert_eq!(w.quantile(1.0), Some(1004));
         w.clear();
         assert_eq!(w.quantile(0.5), None);
+    }
+
+    /// The delays an input takes when its p99.9 (samples) follows `p999` at 10 Hz.
+    fn delays(p999: impl Fn(u64) -> u32, ticks: u64, hold_s: u64) -> Vec<(u64, u32)> {
+        let t0 = Instant::now();
+        let mut hold = DelayHold::default();
+        let mut current = 0;
+        let mut changes = Vec::new();
+        for k in 0..ticks {
+            let now = t0 + Duration::from_millis(100 * k);
+            if let Some(d) = hold.next(p999(k), current, 96, 7200, Duration::from_secs(hold_s), now)
+            {
+                current = d;
+                changes.push((k, d));
+            }
+        }
+        changes
+    }
+
+    #[test]
+    fn auto_delay_does_not_flap() {
+        // host-03 fabrics mirrors (D-263): p99.9 8.08 <-> 10.08 ms every 0.5 s.
+        // v1.3.0 changed the delay 7.083 <-> 9.083 ms at every flip (with a fade).
+        let changes = delays(|k| if (k / 5) % 2 == 0 { 388 } else { 484 }, 1200, 30);
+        assert_eq!(changes.len(), 2, "{changes:?}");
+        assert_eq!(changes[0], (0, 388 + 48 - 96));
+        assert_eq!(changes[1].1, 484 + 48 - 96, "up at once to the higher need");
+        assert!(changes[1].0 <= 5);
+    }
+
+    #[test]
+    fn auto_delay_goes_down_after_the_hold_by_a_margin() {
+        // 10 ms for 20 s, then 4 ms: down once, 30 s after the need went down.
+        let changes = delays(|k| if k < 200 { 480 } else { 192 }, 1200, 30);
+        assert_eq!(changes, vec![(0, 432), (500, 144)]);
+        // A need only slightly lower (0.5 ms) keeps the delay.
+        let changes = delays(|k| if k < 200 { 480 } else { 456 }, 1200, 30);
+        assert_eq!(changes, vec![(0, 432)]);
+        // Lower in steps: the delay follows the highest need of the hold time,
+        // and changes at most once per hold time.
+        let changes = delays(|k| 480u32.saturating_sub(k as u32 / 5), 1200, 30);
+        assert_eq!(changes.len(), 4, "{changes:?}");
+        for w in changes.windows(2) {
+            assert!(w[1].0 - w[0].0 >= 300, "{changes:?}");
+        }
+    }
+
+    #[test]
+    fn auto_delay_rises_at_once_but_not_for_a_small_creep() {
+        let changes = delays(
+            |k| {
+                if k < 50 {
+                    96
+                } else if k < 100 {
+                    110
+                } else {
+                    300
+                }
+            },
+            200,
+            30,
+        );
+        // 96 + 48 - 96 = 48; 110 stays within the 0.5 ms headroom; 300 rises at once.
+        assert_eq!(changes, vec![(0, 48), (100, 252)]);
     }
 
     #[test]
