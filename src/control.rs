@@ -1348,7 +1348,6 @@ impl Control {
     pub fn stop(&mut self) {
         self.flush_mix();
         self.engine.stop();
-        self.inputs.release();
     }
 }
 

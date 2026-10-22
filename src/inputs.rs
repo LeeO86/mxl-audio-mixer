@@ -2,7 +2,7 @@
 //! re-opening re-created flows, stall detection, arrival lag and the automatic
 //! extra delay. Runs on a 100 ms tick, never in the DSP thread.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -340,7 +340,6 @@ pub struct Inputs {
     api: Api,
     counters: Arc<EngineCounters>,
     slots: Vec<Slot>,
-    instances: HashMap<PathBuf, MxlInstance>,
     read_offset: u32,
     delay_max: u32,
     confirm: bool,
@@ -379,7 +378,6 @@ impl Inputs {
             api,
             counters,
             slots,
-            instances: HashMap::new(),
             read_offset: config.read_offset_samples,
             delay_max: config.input_delay_max_samples,
             confirm: config.input_delay_confirm,
@@ -450,26 +448,23 @@ impl Inputs {
         let Some(route) = self.slots[index].route.clone() else {
             return false;
         };
-        let instance = match self.instances.get(&route.domain) {
-            Some(instance) => instance.clone(),
-            None => {
-                match MxlInstance::new(self.api.clone(), &route.domain.display().to_string(), "") {
-                    Ok(instance) => {
-                        self.instances
-                            .insert(route.domain.clone(), instance.clone());
-                        instance
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            input = index + 1,
-                            "MXL instance for {}: {err}",
-                            route.domain.display()
-                        );
-                        return false;
-                    }
+        // An instance of its own for every open: libmxl caches one reader per
+        // flow id per instance, so a shared instance could hand a re-open (a
+        // flow deleted and re-created) the old reader, mapped on the deleted
+        // files, while the DSP thread still holds it. The reader keeps its
+        // instance; both go when the control side drops the returned reader.
+        let instance =
+            match MxlInstance::new(self.api.clone(), &route.domain.display().to_string(), "") {
+                Ok(instance) => instance,
+                Err(err) => {
+                    tracing::warn!(
+                        input = index + 1,
+                        "MXL instance for {}: {err}",
+                        route.domain.display()
+                    );
+                    return false;
                 }
-            }
-        };
+            };
         match mxlio::open_reader(&instance, route.flow) {
             Ok((reader, channels)) => {
                 let inode = mxlio::flow_inode(&route.domain, route.flow);
@@ -721,11 +716,6 @@ impl Inputs {
                 }
             })
             .collect()
-    }
-
-    /// Release the MXL instances once the DSP thread has stopped (G8).
-    pub fn release(&mut self) {
-        self.instances.clear();
     }
 
     /// Whether input `index` (from 0) runs and has at least `channels` channels.

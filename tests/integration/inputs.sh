@@ -63,16 +63,39 @@ if ! grep -q input_stalled "$IT_OUT/inputs-mixer.log" || ! grep -q input_resumed
 fi
 pass "stalled writer: stalled -> resumed"
 
+# Input 2 reads the same flow: both re-open by themselves, each with a reader of
+# its own (an MXL instance per open: a shared one could hand back the old reader,
+# mapped on the deleted files).
+route 2 "$DOMAIN" "$FLOW"
+wait_until 5 "input 2 running" is_state 2 running
 reopens=$(input 1 reopens)
 kill -TERM "$TONE_PID"
 wait "$TONE_PID" || true
 wait_until 5 "input 1 waiting after the flow is gone" is_state 1 waiting
 start_tone "$WORK/mxl/tones" "$FLOW" --domain-id "$DOMAIN"
 wait_until 5 "input 1 running again" is_state 1 running
+wait_until 5 "input 2 running again" is_state 2 running
 (($(input 1 reopens) > reopens)) || fail "reopens did not increase"
+# The writer restarted at once, three times: the flow is deleted and re-created
+# within about one control tick, so the inputs re-open while the DSP thread still
+# holds the old readers. 1.4.0 got the cached old reader back: stalled, on the
+# deleted files.
+for _ in 1 2 3; do
+    kill -TERM "$TONE_PID"
+    wait "$TONE_PID" || true
+    start_tone "$WORK/mxl/tones" "$FLOW" --domain-id "$DOMAIN"
+    sleep 1.5
+done
+wait_until 5 "input 1 running after the quick restarts" is_state 1 running
+wait_until 5 "input 2 running after the quick restarts" is_state 2 running
+sleep 1
+quiet 2 3 || fail "input 2 (the same flow) lost samples after the re-open"
+if grep -q "$FLOW.*(deleted)" "/proc/$MIXER_PID/maps"; then
+    fail "the mixer still maps the deleted flow: $(grep -c "$FLOW.*(deleted)" "/proc/$MIXER_PID/maps") mappings"
+fi
 sleep 1
 quiet 1 3 || fail "missing samples after the re-open"
-pass "writer restart: the input re-opened by itself, 0 missing samples afterwards"
+pass "writer restart: two inputs on the flow re-opened by themselves, 0 missing samples afterwards, nothing of the deleted flow mapped"
 
 # Arrival lag: a writer 30 ms late. The automatic delay must settle above the lag.
 start_tone "$WORK/mxl/tones" "$LATE" --domain-id "$DOMAIN" --delay-ms 30
