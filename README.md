@@ -33,7 +33,8 @@ sends, pan and width, mute, fader, meter; the buses and VCAs beside them, behind
 divider that sets how wide each side is (drag it or use the arrow keys; double-click
 or Home: automatic), each side scrolling on its own. A click on a strip's name
 renames it, the gear opens its processing, and its ⋮ menu has "Send to…" (a new
-send at 0 dB to a bus), on a bus "Add source…" and "Subgroup…", and "Delete…" (with
+send at 0 dB to a bus), on a bus "Add source…" and "Subgroup…", "Format…" (the
+format change of the Processing view, confirmed by a second press), and "Delete…" (with
 a confirmation listing what goes with it). "+ Strip" and "+ Bus" add several at
 once with numbered names; the first new one is selected. A stereo or wider strip's
 input patch is linked by default: choose the first channel and the others follow

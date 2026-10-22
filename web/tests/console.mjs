@@ -131,6 +131,19 @@ try {
   await strip("it-grp").locator(".fmt .sub").waitFor();
   pass("subgroup: the send at −10 dB now post-pan at 0 dB, shown locked on the strip");
 
+  // C10 from the console: the strip menu opens the format selector; one press only arms the change.
+  await menuItem("it-grp", "Format…");
+  const fmt = page.getByRole("dialog", { name: "Format: Grp" });
+  await fmt.getByLabel("Grp format").selectOption("5.1");
+  await fmt.getByRole("button", { name: "Change to 5.1" }).click();
+  await page.waitForTimeout(500);
+  if ((await api("/api/v1/buses/it-grp")).format !== "stereo") throw new Error("one press changed the format");
+  await fmt.getByRole("button", { name: "Press again" }).waitFor();
+  await page.keyboard.press("Escape");
+  await fmt.waitFor({ state: "detached" });
+  if ((await api("/api/v1/buses/it-grp")).format !== "stereo") throw new Error("closing changed the format");
+  pass("Format… from the strip menu: the selector opens; one press arms, closing changes nothing");
+
   // C2: the divider gives the buses more room; double-click goes back to automatic.
   const width = async () => (await page.locator(".console .masters").boundingBox()).width;
   const w0 = await width();
