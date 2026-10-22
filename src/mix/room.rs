@@ -83,6 +83,14 @@ pub struct Monitor {
     pub dim_db: f64,
     #[serde(default)]
     pub cut: bool,
+    /// Muted output channels (1-based, in the monitor's format), e.g. only the
+    /// LFE.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mute_channels: Vec<usize>,
+    /// Soloed output channels (1-based): while any is set, only these play
+    /// (a muted one stays muted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub solo_channels: Vec<usize>,
     /// The dim while a control-room talkback mic talks.
     #[serde(default = "dim_depth")]
     pub talkback_dim_db: f64,
@@ -258,6 +266,21 @@ pub fn validate(mix: &Mix, inputs: usize) -> Result<(), String> {
         range("talkback_dim_db", m.talkback_dim_db, -60.0, 0.0).map_err(at)?;
         range("trim_db", m.trim_db, -24.0, 24.0).map_err(at)?;
         range("delay_ms", m.delay_ms, 0.0, MAX_DELAY_MS).map_err(at)?;
+        let n = m.format.channels();
+        for (what, list) in [
+            ("mute_channels", &m.mute_channels),
+            ("solo_channels", &m.solo_channels),
+        ] {
+            let mut seen = std::collections::BTreeSet::new();
+            for &c in list {
+                if c == 0 || c > n {
+                    return Err(at(format!("{what}: channel {c} does not exist (1 to {n})")));
+                }
+                if !seen.insert(c) {
+                    return Err(at(format!("{what}: channel {c} is given twice")));
+                }
+            }
+        }
         if let Some(c) = m.calibration_spl {
             range("calibration_spl", c, 40.0, 130.0).map_err(at)?;
         }
@@ -314,6 +337,23 @@ pub fn monitor_gain(m: &Monitor, talkback: bool) -> f32 {
     let dim = if m.dim { m.dim_db } else { 0.0 };
     let talk = if talkback { m.talkback_dim_db } else { 0.0 };
     Db(m.level_db + dim + talk + m.trim_db).gain() as f32
+}
+
+/// The gain of each output channel: [`monitor_gain`], 0 on a muted channel and,
+/// while any channel is soloed, on every channel that is not.
+pub fn channel_gains(m: &Monitor, talkback: bool) -> Vec<f32> {
+    let g = monitor_gain(m, talkback);
+    (1..=m.format.channels())
+        .map(|c| {
+            let off = m.mute_channels.contains(&c)
+                || (!m.solo_channels.is_empty() && !m.solo_channels.contains(&c));
+            if off {
+                0.0
+            } else {
+                g
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -382,5 +422,31 @@ mod tests {
         assert!((monitor_gain(&m, true) - 0.028_183_83).abs() < 1e-6);
         m.cut = true;
         assert_eq!(monitor_gain(&m, false), 0.0);
+    }
+
+    #[test]
+    fn channel_mute_and_solo() {
+        let mut m: Monitor = serde_json::from_value(
+            serde_json::json!({"id": "main", "name": "Main", "format": "5.1"}),
+        )
+        .unwrap();
+        assert_eq!(channel_gains(&m, false), vec![1.0; 6]);
+        // LFE (4) muted.
+        m.mute_channels = vec![4];
+        assert_eq!(channel_gains(&m, false), vec![1.0, 1.0, 1.0, 0.0, 1.0, 1.0]);
+        // Only C (3) and LFE soloed: LFE stays muted.
+        m.solo_channels = vec![3, 4];
+        assert_eq!(channel_gains(&m, false), vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        // Not serialized while empty (shows stay readable by older versions).
+        let v = serde_json::to_value(monitor("x")).unwrap();
+        assert!(v.get("mute_channels").is_none() && v.get("solo_channels").is_none());
+        // Validation: channels of the format, once each.
+        let mut mix = Mix::default();
+        mix.control_room.monitors.push(m.clone());
+        assert_eq!(validate(&mix, 2), Ok(()));
+        mix.control_room.monitors[0].mute_channels = vec![7];
+        assert!(validate(&mix, 2).unwrap_err().contains("channel 7"));
+        mix.control_room.monitors[0].mute_channels = vec![1, 1];
+        assert!(validate(&mix, 2).unwrap_err().contains("twice"));
     }
 }

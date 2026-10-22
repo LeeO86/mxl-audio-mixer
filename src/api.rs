@@ -83,6 +83,23 @@ pub fn routes() -> Router<App> {
             get(analysis).put(put_analysis).delete(delete_analysis),
         )
         .route("/api/v1/tally", get(tally))
+        .route("/api/v1/taps", get(taps))
+}
+
+/// The taps each strip and bus offers (for sends, keys and the analyser):
+/// `{"<signal>": ["input", …, {"after": "<node>"}]}`, from the same check as the
+/// validation.
+async fn taps(State(app): State<App>) -> Json<Value> {
+    let control = app.control();
+    let mix = &control.mix;
+    let ids = mix
+        .strips
+        .iter()
+        .map(|s| &s.id)
+        .chain(mix.buses.iter().map(|b| &b.id));
+    let map: serde_json::Map<String, Value> =
+        ids.map(|id| (id.clone(), json!(mix.taps(id)))).collect();
+    Json(Value::Object(map))
 }
 
 /// The TSL receiver's settings, the lamps of every tally index seen, and the

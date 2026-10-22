@@ -20,7 +20,7 @@ import { api, exchange, fmtDb } from "../api.js";
 import { act, live, room, signalOf, signals, vcas } from "../store.js";
 import { PORT_TYPES, boundary, canWire, clipboard, copyOf, forget, freshId, group, history, historyOf, pasted, portName, portsOf, record, resource, same, sameEdit, ungroup } from "../logicEdit.js";
 
-const { applyNodeChanges, applyEdgeChanges, fitView, screenToFlowCoordinate, getSelectedNodes, getSelectedEdges } = useVueFlow("logic");
+const { applyNodeChanges, applyEdgeChanges, fitView, screenToFlowCoordinate, getSelectedNodes, getSelectedEdges, addSelectedNodes, removeSelectedNodes, findNode, setCenter, getViewport, dimensions } = useVueFlow("logic");
 
 const MAX_BLOCKS = 64;
 const graphs = computed(() => live.mix?.logic || []);
@@ -606,6 +606,29 @@ function removeDoomed() {
 
 const selectedIds = computed(() => getSelectedNodes.value.map((n) => n.id));
 const selectedInstance = computed(() => (selectedIds.value.length === 1 && blockOf(selectedIds.value[0])?.type === "macro" ? blockOf(selectedIds.value[0]) : null));
+// A click on a block's row in the list (not on its fields or buttons) selects it in the graph (a blue
+// frame; Ctrl or Cmd adds or removes it) and brings it into view when it is outside (L1).
+function pickRow(ev, id) {
+  if (ev.target.closest("button, input, select, textarea, a, label")) return;
+  const node = findNode(id);
+  if (!node) return;
+  if (ev.ctrlKey || ev.metaKey) {
+    if (node.selected) removeSelectedNodes([node]);
+    else addSelectedNodes([node]);
+    return;
+  }
+  removeSelectedNodes(getSelectedNodes.value.filter((n) => n.id !== id));
+  addSelectedNodes([node]);
+  const { x, y, zoom } = getViewport();
+  const w = node.dimensions?.width || 0;
+  const h = node.dimensions?.height || 0;
+  const left = node.computedPosition?.x ?? node.position.x;
+  const top = node.computedPosition?.y ?? node.position.y;
+  const sx = left * zoom + x;
+  const sy = top * zoom + y;
+  const outside = sx < 0 || sy < 0 || sx + w * zoom > dimensions.value.width || sy + h * zoom > dimensions.value.height;
+  if (outside) setCenter(left + w / 2, top + h / 2, { zoom, duration: 200 });
+}
 function deleteSelection() {
   for (const id of selectedIds.value) doom("blocks", id);
   for (const e of getSelectedEdges.value) if (!e.data?.ghost) doom("wires", e.id);
@@ -1139,7 +1162,7 @@ onUnmounted(() => {
             <tr><th>Block</th><th>Type</th><th></th><th>Value</th><th></th></tr>
           </thead>
           <tbody>
-            <tr v-for="b in view.blocks" :key="b.id" :data-block="b.id" :class="{ chosen: selectedIds.includes(b.id), waiting: waiting.has(b.id) }">
+            <tr v-for="b in view.blocks" :key="b.id" :data-block="b.id" :class="{ chosen: selectedIds.includes(b.id), waiting: waiting.has(b.id) }" title="click: select it in the graph" @click="pickRow($event, b.id)">
               <td>{{ b.id }}</td>
               <td>{{ typeLabel(b.type) }}</td>
               <td class="lparams">

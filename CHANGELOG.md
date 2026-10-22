@@ -33,6 +33,15 @@ From the operators' feedback (IMPLEMENTATION_PLAN "1.4.0: DSP and formats", D200
 - D5: new node `surround-pan` for mono and stereo strips: 5.1 or 7.1, position, spread, divergence, LFE send; it replaces the strip's stereo panner, so post-pan sends feed surround buses. A position pad in the editor.
 - A ramping gain matrix (panners, the width node) costs about a third of before.
 
+### Views (operator feedback; IMPLEMENTATION_PLAN D215–D228)
+
+- Control room: Cut is called Mute (the API field stays `cut`) (R1). Mute and solo of single monitor channels, e.g. only C or the LFE: `mute_channels`, `solo_channels` on a monitor, M and S per channel on its card (R2). Every monitor card has Remove in its header (R3). Oscillator presets are named waveform first, e.g. "Sine 1 kHz −18 dBFS (EBU R 68)" (R4).
+- Processing: the nodes are compact tiles of one size in a grid (side by side and below), with smaller curves and one band's controls at a time (P1, P5). ◀ ▶ and the `[` `]` keys step to the previous or next strip or bus (P2). A double-click on an EQ or dynamic EQ handle resets that band (P4). The palette stays in view (P6). Dragging uses pointer events, so the wheel scrolls meanwhile, and the page scrolls by itself near the window's edges (P7). A click anywhere on a tile's header opens or closes it (P8).
+- Routing: the matrix names its axes (sources in rows, destination buses in columns) (T1). A new send needs a second click on the same cell within 3 s; the first marks it yellow, a click elsewhere cancels (T2). A strip can be published as its own MXL flow and NMOS sender: its direct out, post-fader before the pan (it was refused: "output signal … is not a bus") (T3). A copy button next to a published flow id (T4).
+- My headphones (personal monitors) can follow the control room's PFL/AFL: `follows_solo` on `/api/v1/personal`, "Follow PFL/AFL" on the card; their own solo wins (R5).
+- Logic: a click on a block's row selects it in the graph (L1).
+- Graph and routing: a send's tap list offers only the taps its source has, from the new `GET /api/v1/taps` (G1).
+
 ## 1.3.0 (2026-10-17)
 
 Milestone 9 (§13: master/slave remote link).

@@ -32,7 +32,7 @@ const GRID = [-60, -40, -20, 0];
 </script>
 
 <template>
-  <svg class="curve" :viewBox="`0 0 ${S} ${S}`" style="max-width: 260px; height: auto; aspect-ratio: 1" role="img" :aria-label="`${node.type} transfer curve`">
+  <svg class="curve" :viewBox="`0 0 ${S} ${S}`" style="max-width: 180px; height: auto; aspect-ratio: 1" role="img" :aria-label="`${node.type} transfer curve`">
     <g class="grid">
       <line v-for="d in GRID" :key="`x${d}`" :x1="p(d)" :x2="p(d)" y1="0" :y2="S" />
       <line v-for="d in GRID" :key="`y${d}`" x1="0" :x2="S" :y1="S - p(d)" :y2="S - p(d)" />

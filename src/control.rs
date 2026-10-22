@@ -848,10 +848,12 @@ impl Control {
         &self.compiler.personal
     }
 
-    /// Add a personal monitor on `source`; applied with the next change of the mix.
+    /// Add a personal monitor on `source`, following the control room's solo or
+    /// not; applied with the next change of the mix.
     pub fn add_personal(
         &mut self,
         source: Option<crate::mix::room::Source>,
+        follows_solo: bool,
     ) -> Result<String, String> {
         if self.compiler.personal.len() >= self.max_personal {
             return Err(format!(
@@ -868,6 +870,8 @@ impl Control {
         }))
         .map_err(|e| e.to_string())?;
         monitor.source = source;
+        // The control room's PFL/AFL only when asked for (`follows_solo`).
+        monitor.follows_solo = follows_solo;
         self.compiler.personal.push(crate::mix::compile::Personal {
             monitor,
             solo: BTreeMap::new(),

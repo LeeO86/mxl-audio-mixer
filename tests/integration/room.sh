@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The control room (§10.1) through MXL: a published monitor (MXL flow, NMOS
-# sender) on the programme bus, sample-exact: level, dim, cut, swap, left only;
+# sender) on the programme bus, sample-exact: level, dim, cut, swap, left only,
+# mute and solo of single channels; personal monitors following the PFL or not;
 # PFL (replacing the programme), AFL, interlock, solo-in-place with a solo-safe
 # strip; an input as the source; an oscillator bus (§10.2) on the monitor.
 # shellcheck source=tests/integration/lib.sh
@@ -46,12 +47,39 @@ probe 1 1:1:1 2:1:1
 mon '{"check": "stereo"}'
 pass "level −20 dB, dim (−21 dB), cut, swap, left only: sample-exact"
 
+mon '{"mute_channels": [2]}'
+probe 1 1:1:1 2:2:0
+mon '{"mute_channels": [], "solo_channels": [2]}'
+probe 1 1:1:0 2:2:1
+mon '{"mute_channels": [2]}'
+probe 1 1:1:0 2:2:0
+mon '{"mute_channels": [], "solo_channels": []}'
+probe 1 1:1:1 2:2:1
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/monitors/main" -d '{"mute_channels": [3]}')
+[[ "$code" == 400 ]] || fail "mute of channel 3 on a stereo monitor answered $code"
+pass "channel mute and solo: R muted, R soloed, R soloed and muted, back; a channel the format lacks refused"
+
 solo() { api PUT "/api/v1/solo/$1" "{\"kind\": \"$2\"}" >/dev/null; sleep 0.3; }
 api PATCH /api/v1/control-room '{"solo": {"programme_db": "-inf"}}' >/dev/null
 api PATCH /api/v1/strips/vox '{"fader_db": "-inf"}' >/dev/null
 solo vox pfl
 probe 1 1:1:0.70710677 2:1:0.70710677
 pass "PFL of vox (fader at −∞): pre-fader, centred at −3 dB on the monitor, the programme replaced"
+
+# Personal monitors without a source: one follows the control room's PFL, one does not
+# (their meters: tone 1 at −20 dBFS, centred at −3 dB).
+P1=$(api POST /api/v1/personal '{"follows_solo": true}' | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+P2=$(api POST /api/v1/personal '{}' | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+sleep 0.5
+peaks() { json "$WEB/api/v1/meters" "[d['monitor:$1']['peak_dbfs'][c] for c in (0, 1)]"; }
+[[ "$(json "$WEB/api/v1/meters" "all(abs(float(p) + 23.0103) < 0.01 for p in d['monitor:$P1']['peak_dbfs'])")" == True ]] || fail "$P1 (follows solo): $(peaks "$P1")"
+[[ "$(json "$WEB/api/v1/meters" "all(p is None or float(p) < -100 for p in d['monitor:$P2']['peak_dbfs'])")" == True ]] || fail "$P2 (own solo only): $(peaks "$P2")"
+api PATCH "/api/v1/personal/$P1" '{"follows_solo": false}' >/dev/null
+sleep 0.5
+[[ "$(json "$WEB/api/v1/meters" "all(p is None or float(p) < -100 for p in d['monitor:$P1']['peak_dbfs'])")" == True ]] || fail "$P1 after follows_solo off: $(peaks "$P1")"
+curl -fsS -X DELETE "$WEB/api/v1/personal/$P1"
+curl -fsS -X DELETE "$WEB/api/v1/personal/$P2"
+pass "personal monitors: the one that follows solo hears the PFL of vox at −23.01 dBFS, the other and the first after follows_solo off hear nothing"
 api PATCH /api/v1/strips/vox '{"fader_db": 0}' >/dev/null
 solo vox afl
 probe 1 1:1:1 2:1:0

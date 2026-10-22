@@ -11,7 +11,7 @@ complete logic editor); 1.0.0, 1.1.0 and 1.2.0 before it (milestones 0–8; note
 MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
 and re-created flows, arrival lag and automatic delay); the mix: input patch,
 strips (trim, polarity, fader, mute, pan/balance/width), buses, a send matrix with
-width mapping, and buses published as MXL flows with NMOS senders; processing
+width mapping, and buses and strips (their direct out) published as MXL flows with NMOS senders; processing
 chains (EQ, filters, dynamic EQ, compressor, limiter, expander, gate, de-esser,
 ducker, multiband, delay) with delay compensation and block-delay feedback;
 peak, peak hold, true peak, RMS, PPM, correlation, gain-reduction and loudness
@@ -41,17 +41,24 @@ input patch is linked by default: choose the first channel and the others follow
 in order on the same input (untick "Link" to choose each). Wider strips have one
 polarity button that opens a toggle per channel and shows how many are inverted.
 "Auto-mix" opens the gain-sharing auto-mixes, every strip a tile), **Processing**
-(the chain of a strip or bus: drag node types in from the palette, drag nodes to
-reorder, bypass, delete; EQ curve with band handles (high- and low-pass bands
-with their slope), filter, dynamics transfer curves with the live level, de-esser
-listen, keys, the surround panner's position pad; the signal's format, changed
-after a confirming second press, with the nodes it would bypass named first and a
-flag on every node that cannot run on the format; a bus's own down-mix),
-**Routing** (the send matrix,
-a send's tap, gain, mute, phase and block delay; publishing outputs), **Graph**
+(the chain of a strip or bus as tiles of one size in a grid, in chain order: drag
+node types in from the palette, which stays in view, drag a tile by its header to
+reorder (the wheel scrolls meanwhile, Escape cancels), a click on the header opens
+or closes it, bypass, delete; ◀ ▶ or the `[` and `]` keys step to the previous or
+next strip or bus; EQ curve with band handles (a double-click resets a band;
+high- and low-pass bands with their slope), one band's controls at a time, filter,
+dynamics transfer curves with the live level, de-esser listen, keys, the surround
+panner's position pad; the signal's format, changed after a confirming second
+press, with the nodes it would bypass named first and a flag on every node that
+cannot run on the format; a bus's own down-mix), **Routing** (the send matrix,
+sources in rows, destination buses in columns: a click on an empty cell marks it
+yellow, a second click on it within 3 s sends at 0 dB; a send's tap (only those
+its source has), gain, mute, phase and block delay; publishing outputs, a strip as
+its direct out, and copying a flow id), **Graph**
 (the routing as a graph, read-write: inputs, strips, buses, monitors and outputs
 with their patches, sends, mix-minus, monitor sources and outputs; draw from a
-strip or bus to a bus to send, click a send to edit it, Delete removes it; nodes
+strip or bus to a bus to send, click a send to edit it (its tap list offers only
+the taps its source has), Delete removes it; nodes
 in columns by routing depth, moved ones kept in the browser), **Logic** (logic
 graphs, §11: drag blocks in from the palette or click them; draw cables between
 ports, coloured by type (boolean, number, level, event, text), where an input that
@@ -62,7 +69,8 @@ Ctrl+Shift+Z) of every edit; group blocks into a macro with the ports you choose
 open it (double-click, a breadcrumb back) and ungroup it; a refused edit shows the
 server's reasons as red markers on the blocks, ports and the dashed cable; every
 block shows its live value; soft keys, triggers, dry run and the list of the last
-actions; the list under the canvas edits every parameter. A new graph starts in
+actions; the list under the canvas edits every parameter, and a click on a block's
+row selects it in the graph. A new graph starts in
 dry run, and the toolbar shows LIVE, DRY RUN or OFF; undo never changes that. A
 new block gets no target by itself (amber until one is chosen: an action without
 one never acts, an input without one reads off, 0 or the floor). In a live graph,
@@ -96,7 +104,7 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 | `strip` | `strip` (a strip or bus id) | name, tally, gain reduction per dynamics node, PFL, mute, fader, meter | 120×480 |
 | `fader-bank` | `layout` (a layout's name) and `page` (its name or 1-based number), or `strips` (strip, bus or VCA ids, comma-separated, 1–32) | the strips, buses and VCAs of that page, side by side | 480×480 |
 | `loudness` | `signal` (a strip or bus id) | momentary, short-term, integrated LUFS, LRA, max true peak, the tolerance; start, stop, reset | 320×200 |
-| `monitor` | `monitor` (a monitor id) | source buttons, level, dim, cut, mono, the meter | 360×200 |
+| `monitor` | `monitor` (a monitor id) | source buttons, level, dim, mute, mono, the meter | 360×200 |
 | `talkback` | `destinations` (ids, comma-separated; default all), `mic` (a talkback mic id; default the browser's microphone) | talk buttons (a short press latches, hold to talk), "All", the mic's meter; with the browser's microphone its on/off | 260×110 |
 | `vca` | `vca` (a VCA id) | the VCA's fader, mute, PFL; spill shows its members beside it | 120×480 |
 
@@ -128,7 +136,11 @@ The control room (§10.1) is part of the show (`control_room`); who is soloed is
 
 - **Monitors** (speakers or headphones, any format): a source (a strip at its
   post-pan, a bus post-fader, or `{"input": n}`: an input's channels 1 and 2),
-  `level_db` (−80 … +12), `dim` with `dim_db` (default −21), `cut`, a `check` of L
+  `level_db` (−80 … +12), `dim` with `dim_db` (default −21), `cut` (the UI's
+  Mute), `mute_channels` and `solo_channels` (output channels from 1: muted ones
+  are silent; while any is soloed, only the soloed ones play; they act before bass
+  management, so a muted LFE still gets the mains' low end; a format change keeps
+  the channels the new format has), a `check` of L
   and R (`stereo`, `mono` and `difference` with the stereo-to-mono sum, `swap`,
   `left` or `right` on both sides), `follows_solo`, room alignment (`trim_db`,
   `delay_ms`, a `chain` of processing nodes for EQ), a
@@ -152,7 +164,8 @@ The control room (§10.1) is part of the show (`control_room`); who is soloed is
 - **Oscillator** (§10.2): a bus with an `oscillator` node; it goes anywhere a bus
   goes (sends, monitors, outputs).
 
-The UI's Control room tab has all of it; PFL and AFL are on the strips.
+The UI's Control room tab has all of it (every monitor with Remove, and M and S per
+channel); PFL and AFL are on the strips.
 
 ## Talkback
 
@@ -206,7 +219,11 @@ other formats downmixed) and publishes it over RTSP to MediaMTX as
   `MEDIAMTX_API_URL`, readers on MediaMTX count too. 10 s after the last, it stops.
 - **Personal monitors:** each browser can make its own (`MIXER_MAX_WEB_MONITORS`,
   default 8): "My headphones" in the Control room tab, with its own source, level,
-  dim, cut, check and solo, not part of the show. Unheard for 10 minutes, it is
+  dim, cut (Mute), check and solo, not part of the show. With `follows_solo` (off
+  by default; "Follow PFL/AFL" on the card) it also plays the control room's
+  PFL/AFL like a monitor that follows solo (the programme at `programme_db`
+  meanwhile); its own solo, while it has one, wins over the control room's.
+  Listen-back stays with the control-room monitors. Unheard for 10 minutes, it is
   removed.
 - **Latency:** from the media time of a sample to the browser's audio output,
   79–99 ms (median per run; single pulses 75–104 ms) measured in headless Chrome
@@ -399,12 +416,13 @@ an id gets `strip-<n>` or `bus-<n>`.
   latency among them (look-ahead limiters), so parallel paths stay phase-coherent.
   Keys and block-delay sends are not compensated. Each output reports its
   `processing_latency_ms` and `latency_ms` (read offset + one block + processing).
-- **Output:** a bus published as an `audio/float32` MXL flow in the own domain and
-  an NMOS Source, Flow and Sender (label = bus name, group hint `<name>:Audio`).
-  `format` (default: the bus's) maps it to another layout; `commit_samples`
+- **Output:** a bus (post-fader) or a strip (its direct out: post-fader, before
+  the pan) published as an `audio/float32` MXL flow in the own domain and an NMOS
+  Source, Flow and Sender (label = its name, group hint `<name>:Audio`).
+  `format` (default: the signal's) maps it to another layout; `commit_samples`
   (default `MIXER_OUTPUT_COMMIT_SAMPLES`) is a multiple of the block size. The MXL
-  flow id is UUIDv5 of `NMOS_SEED` and the bus id, so it survives restarts. At most
-  128 outputs.
+  flow id is UUIDv5 of `NMOS_SEED` and the signal id, so it survives restarts. At
+  most 128 outputs.
 - **Formats** (§4.1), channel order as SMPTE ST 2110-30: mono `M`; stereo `L R`;
   `3.0` `L R C`; `5.1` `L R C LFE Ls Rs`; `7.1` `L R C LFE Lss Rss Lrs Rrs`;
   `5.1.4` = 5.1 + `Ltf Rtf Ltr Rtr`; `7.1.4` = 7.1 + the same heights.
@@ -820,8 +838,9 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format` (as strips), `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `subgroup`, `downmix` (`null`: the mix's), `ramp_ms`; GET adds `chain_warnings`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
 | `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
-| `GET /api/v1/outputs`, `GET /api/v1/outputs/<bus>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
-| `PUT`, `DELETE /api/v1/outputs/<bus>` | publish (`{"format": …, "commit_samples": …}`, both optional) or unpublish |
+| `GET /api/v1/outputs`, `GET /api/v1/outputs/<signal>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
+| `PUT`, `DELETE /api/v1/outputs/<signal>` | publish a bus or a strip (its direct out) (`{"format": …, "commit_samples": …}`, both optional) or unpublish |
+| `GET /api/v1/taps` | the taps each strip and bus offers (for sends, keys, the analyser): `{"<signal>": ["input", …, {"after": "<node>"}]}` |
 | `GET`, `POST /api/v1/{strips,buses}/<id>/chain` | the chain; add a node (its JSON, `id` optional, `position` optional) |
 | `GET`, `PATCH`, `DELETE /api/v1/{strips,buses}/<id>/chain/<node>` | a node; change it with a JSON merge patch (RFC 7396) plus `ramp_ms` |
 | `POST /api/v1/{strips,buses}/<id>/chain/<node>/move` | `{"position": n}` |
@@ -858,8 +877,8 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
 | `GET /api/v1/preview` | the preview: `mode` (`own`, `shared`), the built-in MediaMTX (`child`: running, pid, restarts, last exit), `whep_url` or `whep_port`, every stream (path, state, frames, connects, error, readers, last listen) |
 | `POST /api/v1/preview/<id>/listen` | someone listens to monitor `<id>` (repeat it at least every 10 s); answers `{"path", "whep_url", "whep_port"}` |
-| `GET`, `POST /api/v1/personal` | personal monitors; create one (`{"source"?}`; 409 above `MIXER_MAX_WEB_MONITORS`) |
-| `GET`, `PATCH`, `DELETE /api/v1/personal/<id>` | one: `source`, `level_db`, `dim`, `cut`, `check` |
+| `GET`, `POST /api/v1/personal` | personal monitors; create one (`{"source"?, "follows_solo"?}`; 409 above `MIXER_MAX_WEB_MONITORS`) |
+| `GET`, `PATCH`, `DELETE /api/v1/personal/<id>` | one: `source`, `level_db`, `dim`, `cut`, `check`, `follows_solo` |
 | `PUT`, `DELETE /api/v1/personal/<id>/solo/<signal>` | its own solo (`{"kind"}`) |
 | `GET`, `PATCH /api/v1/talkback` | mics, destinations, `browser_priority`, the browser mics (state, packets, lost, delay, underruns), who talks, listen-back; PATCH `{"browser_priority"}` |
 | `GET`, `POST /api/v1/talkback/mics`, `GET`, `PATCH`, `DELETE …/mics/<id>` | talkback mics (`input` and `channel` required to create) |
@@ -923,21 +942,28 @@ re-created writers, a writer 30 ms late), `tests/integration/mix.sh` (the mix
 end to end: sample-exact output checks with `mxl-mixer-probe`, plan swaps that
 leave other paths untouched, meters, the NMOS sender, a restart with a downstream
 reader, unpublish, loop rejection, a subgroup's locked sends, a deleted bus's
-references), `tests/integration/processing.sh` (EQ
+references, a strip's direct out, the taps of a strip and a bus),
+`tests/integration/processing.sh` (EQ
 sample-exact, ramped parameters without a plan swap, bypass, high-pass, compressor
 gain reduction, limiter ceiling and latency, loudness and its controls),
 `tests/integration/show.sh` (snapshots with filters, recall-safe and crossfade,
 layouts, show history, PPM, correlation, the analyser, the events WebSocket),
 `tests/integration/ui.sh` (the UI in headless Chrome with two clients: every action
 checked on the API and on the other client; tally and AFV; a toggle pressed twice
-around a late mix; listening to a monitor with `MEDIAMTX_BIN`; talkback latched,
-held and listen-back; a send drawn and deleted in the graph; the logic editor,
+around a late mix; the processing tiles (a band reset by a double-click, a tile
+opened and closed by its header and dragged while the wheel scrolls, the next and
+previous strip); a monitor's Mute, channel mute and solo, Remove; a send by two
+clicks in the matrix, a bus's taps, a strip's direct out and its copied flow id;
+listening to a monitor with `MEDIAMTX_BIN`; talkback latched,
+held and listen-back; a send drawn and deleted in the graph; a logic block
+selected from its row; the logic editor,
 `web/tests/logic.mjs`: palette, cables, undo and redo, copy and paste, typed ports,
 validation markers, macros, dry run; the console's strip handling,
 `web/tests/console.mjs`: several strips at once, rename, the linked patch, polarity
 of a 5.1 strip, "Send to…" and "Add source…", a subgroup, delete, the divider),
 `tests/integration/room.sh` (a published monitor sample-exact with level, dim,
-cut and checks; PFL, AFL, interlock, solo-in-place; an input source; the
+cut, checks and the mute and solo of single channels; PFL on personal monitors
+that follow solo or not; PFL, AFL, interlock, solo-in-place; an input source; the
 oscillator with pink noise and a sweep), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and
 closed sample-exact, its fade), `tests/integration/widgets.sh` (the widget contract
 and a framing check in headless Chrome from an allowed and a refused origin),
