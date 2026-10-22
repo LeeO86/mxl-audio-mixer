@@ -3,6 +3,9 @@
 // index and audio-follows-video (open while the index is on air, at its depth otherwise, with fade times).
 import { computed, ref, watch } from "vue";
 import Pot from "./Pot.vue";
+import DownmixEdit from "./DownmixEdit.vue";
+import ConfirmButton from "./ConfirmButton.vue";
+import { DEFAULT_DOWNMIX } from "../nodes.js";
 import { dbValue } from "../api.js";
 import { buses, isBus, live, patchSignal, signalOf, signals, tallyOf } from "../store.js";
 
@@ -30,6 +33,9 @@ const minusSources = computed(() => {
   const of = s.value.minus?.of;
   return of ? (live.mix?.sends || []).filter((x) => x.to === of).map((x) => x.from) : [];
 });
+// A bus's own down-mix of everything arriving from a wider format (D2); off: the mix's.
+const globalDownmix = computed(() => live.mix?.settings?.downmix || DEFAULT_DOWNMIX);
+const setOwnDownmix = (on) => set({ downmix: on ? { ...globalDownmix.value } : null });
 function saveName() {
   if (name.value.trim() && name.value !== s.value.name) set({ name: name.value.trim() });
 }
@@ -77,6 +83,18 @@ const depth = computed(() => {
         <template v-if="s.minus">
           <p class="note">Takes every send into {{ signalOf(s.minus.of)?.name || s.minus.of }}, as it is, except:</p>
           <label v-for="id in minusSources" :key="id" class="check"><input type="checkbox" :checked="s.minus.without.includes(id)" :aria-label="`without ${signalOf(id)?.name || id}`" @change="toggleWithout(id, $event.target.checked)" /> {{ signalOf(id)?.name || id }}</label>
+        </template>
+      </div>
+      <div v-if="bus" class="downmixedit">
+        <label>Down-mix of what arrives here</label>
+        <template v-if="s.downmix">
+          <DownmixEdit :value="s.downmix" label="Bus down-mix" @change="(d) => set({ downmix: d })" />
+          <ConfirmButton small label="Use the mix's down-mix" aria-label="Use the mix's down-mix" @confirm="setOwnDownmix(false)" />
+          <p class="note">Going back to the mix's fades the affected sends out and in: a brief dip.</p>
+        </template>
+        <template v-else>
+          <p class="note">The mix's down-mix (Settings).</p>
+          <button class="btn small secondary" aria-label="Own down-mix" @click="setOwnDownmix(true)">Own down-mix</button>
         </template>
       </div>
       <template v-if="!bus">

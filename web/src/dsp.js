@@ -72,10 +72,16 @@ export function filterDb(node, f) {
   return -10 * Math.log10(1 + Math.pow(r, 2 * n));
 }
 
+/** One EQ band in dB at `f`: a biquad, or a high- or low-pass band's Butterworth response (D4). */
+export function bandDb(band, f) {
+  if (band.type === "high-pass" || band.type === "low-pass") return filterDb({ mode: band.type, freq_hz: band.freq_hz, slope_db_per_oct: band.slope_db_per_oct || 12 }, f);
+  return biquadDb(bandCoefficients(band), f);
+}
+
 /** The magnitude of a node in dB at `f` (EQ-like nodes; others are flat). */
 export function nodeDb(node, f) {
   if (node.bypass) return 0;
-  if (node.type === "eq") return node.bands.reduce((s, b) => s + biquadDb(bandCoefficients(b), f), 0);
+  if (node.type === "eq") return node.bands.reduce((s, b) => s + bandDb(b, f), 0);
   if (node.type === "dynamic-eq") return node.bands.reduce((s, b) => s + biquadDb(bandCoefficients({ ...b, type: "bell" }), f), 0);
   if (node.type === "filter") return filterDb(node, f);
   return 0;

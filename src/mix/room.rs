@@ -110,6 +110,10 @@ pub struct Monitor {
     /// Published as an MXL flow with an NMOS sender (to physical speakers).
     #[serde(default)]
     pub publish: bool,
+    /// The down-mix of its source into its format (D2); `None`: the mix's. The
+    /// solo bus is folded to stereo with the mix's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downmix: Option<super::format::Downmix>,
 }
 
 /// Bass management: the lows of every main channel to the LFE (sub) channel.
@@ -258,6 +262,9 @@ pub fn validate(mix: &Mix, inputs: usize) -> Result<(), String> {
             range("calibration_spl", c, 40.0, 130.0).map_err(at)?;
         }
         chain::validate(&m.chain).map_err(at)?;
+        if let Some(d) = &m.downmix {
+            d.validate().map_err(at)?;
+        }
         if let Some(b) = &m.bass_management {
             if b.enabled && m.lfe().is_none() {
                 return Err(at(format!(

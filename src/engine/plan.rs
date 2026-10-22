@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 pub use super::proc::{NodeMeter, Processor, MAX_CH};
 
-/// Values per node: the widest format's channels, or a 2 × 2 panner.
-pub const MAX_NODE_VALUES: usize = 12;
+/// Values per node: the widest format's channels (12), a 2 × 2 panner, or a
+/// surround panner's matrix (stereo into 7.1: 16).
+pub const MAX_NODE_VALUES: usize = 16;
 
 /// Stable id of a node across plans (assigned by the compiler per node key).
 pub type NodeId = u32;
@@ -541,11 +542,17 @@ impl Plan {
                             if !ramping && g == 0.0 {
                                 continue;
                             }
-                            let node = n.clone();
+                            // The ramp's part of the block, then the target: two
+                            // plain loops the compiler vectorises.
+                            let (cur, step, left) = (n.cur[v], n.step[v], n.left as usize);
                             let (x, y) = self.pair(from, out);
                             if ramping {
-                                for k in 0..block {
-                                    y[k] += x[k] * node.at(v, k);
+                                let r = left.min(block);
+                                for k in 0..r {
+                                    y[k] += x[k] * (cur + step * (k + 1) as f32);
+                                }
+                                for k in r..block {
+                                    y[k] += x[k] * g;
                                 }
                             } else {
                                 for k in 0..block {

@@ -490,6 +490,7 @@ mod tests {
             mute_safe: false,
             minus: None,
             subgroup: false,
+            downmix: None,
         });
         for from in ["a", "b"] {
             m.sends.push(Send {

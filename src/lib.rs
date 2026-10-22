@@ -31,6 +31,8 @@ pub mod show_api;
 pub mod state;
 pub mod talkback_api;
 pub mod tally;
+#[cfg(test)]
+pub(crate) mod test_alloc;
 pub mod timing;
 pub mod wav;
 pub mod widgets;

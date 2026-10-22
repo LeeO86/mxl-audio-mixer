@@ -147,6 +147,9 @@ struct MonitorBody {
     #[serde(default, deserialize_with = "present")]
     bass_management: Option<Option<BassManagement>>,
     publish: Option<bool>,
+    /// The monitor's own down-mix (`null`: the mix's).
+    #[serde(default, deserialize_with = "present")]
+    downmix: Option<Option<crate::mix::format::Downmix>>,
     ramp_ms: Option<f64>,
 }
 
@@ -172,7 +175,8 @@ impl MonitorBody {
             chain,
             calibration_spl,
             bass_management,
-            publish
+            publish,
+            downmix
         );
     }
 }

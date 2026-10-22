@@ -2091,3 +2091,73 @@ by `web/tests/console.mjs` (in `tests/integration/ui.sh`), `ui.mjs` (auto-mix ti
 | D192 | The divider stores the buses' side in pixels in the browser (`console.buswidth`; 0: as wide as they need); the strips take the rest. Each side scrolls on its own. | One screen size differs from the next; the layout of a shared show should not carry it. |
 | D193 | Auto-mixes have their own dialog. Every strip is a tile of a fixed size whether it is a member or not (member: speech, gain, weight, bypass; another auto-mix's member: dimmed), so a member added or removed moves nothing. | Adding a member grew the table above the checkboxes, and the next checkbox moved away from the pointer. |
 
+### 1.4.0: DSP and formats (C10/P3, D1–D5)
+
+From the operators' feedback (Confluence "Feedback MXL Audio-Mixer", decided
+2026-10-22): change a strip's or bus's format in operation, an adjustable down-mix,
+an M/S / width node, high- and low-pass bands in the EQ, a surround panner.
+
+#### What exists
+
+- `src/mix/format.rs`: `Downmix` (`centre_db`, `surround_db`, `lfe_db`,
+  `normalise`) in `Laws`; `width_matrix` folds with it. `mix.settings.downmix`,
+  `Bus.downmix`, `Monitor.downmix`; `PATCH /api/v1/mix/settings`, buses and
+  monitors take it.
+- `src/mix/reformat.rs`: `change_format` (C10), used by `PATCH` of a strip's or
+  bus's `format`; the answer's `warnings`; `chain_warnings` on strips and buses.
+- `src/mix/chain.rs`: node types `width` and `surround-pan`, band types
+  `high-pass` and `low-pass` with `slope_db_per_oct`, `ProcKind::supports`.
+- `src/mix/spatial.rs`: the width matrix and the surround panner's matrix.
+- `src/mix/compile.rs`: the width node as a gain matrix in the chain, the surround
+  panner as the strip's panner, nodes that cannot run pass through, per-target
+  down-mix, signatures from the width matrices.
+- `src/engine/proc.rs`: EQ bands of one or more sections; `dsp_costs` measures the
+  new nodes. `src/engine/plan.rs`: `MAX_NODE_VALUES` 16, the ramping matrix in two
+  plain loops.
+- UI: `FormatSelect.vue` (in the Processing view's signal panel), `DownmixEdit.vue`
+  (Settings, a bus's settings, a monitor's details), `SurroundPad.vue`, the EQ's
+  pass bands (`dsp.js` `bandDb`, `EqCurve.vue`, `NodeEditor.vue`), the new node
+  types in `nodes.js`, a flag on nodes that cannot run on the format.
+- Tests: unit tests in `format.rs`, `spatial.rs`, `reformat.rs`, `proc.rs`,
+  `compile.rs` (with a test-only allocator that counts the DSP thread's
+  allocations: `src/test_alloc.rs`); `tests/integration/processing.sh` (through
+  MXL, sample-exact), `web/tests/spatial.mjs` in `tests/integration/ui.sh`.
+
+#### Decisions
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D200 | The down-mix has a mix-wide default (`settings.downmix`) and an override on a bus (everything its sends bring) and on a monitor (its source; the solo bus is folded to stereo with the mix's). The solo bus and published layouts use the mix's. The default is the fixed down-mix of 1.3: centre and surrounds at −3 dB, taken as 1/√2 exactly (BS.775's 0.7071), LFE dropped, no normalisation; a 1.3 show sounds the same. Levels −40 … 0 dB (LFE … +10 dB) or `-inf`. The heights and the merges between surround layouts stay at −3 dB. | D1/D2 as decided: a global default plus a per-target-bus override, no per-send settings. A monitor is the other place where a wider format meets a narrower one by an operator's choice. |
+| D201 | `normalise` scales the whole matrix (the front channels too) of a down-mix from 3.0 or wider into fewer channels by its largest row sum (of absolute gains) when that is above 1; up-mixes, the same format and stereo → mono (which has its own sum law) are left alone. | No output channel can then exceed unity for fully correlated full-scale inputs. |
+| D202 | A send's, monitor's, solo's and output's node signature carries a hash of its width matrix instead of the laws: a down-mix change rewires (fades out and in, 10 ms) exactly the nodes whose coefficients change; the matrices are not smoothed, so they never jump. A down-mix change is therefore a fade, not a ramp. In the UI a down-mix is a draft until Apply, and Apply and going back to the mix's down-mix want a second press (the affected sends dip briefly); the mix's down-mix is left out of the JSON while it is the default, so an unchanged mix loads in 1.3. A `downmix` in a PATCH replaces the whole object. The sends a mix-minus bus mirrors use that bus's down-mix. | A changed law used to rewire every node that names it; a slider sending every step would fade the sends again and again. |
+| D203 | A format change (C10) keeps the chain, the sends, the outputs and the settings. Nodes that run on any width (all but two) are rebuilt for the new channel count; M/S / width (stereo only) and the surround panner (mono or stereo strips only) are bypassed and named in the answer's `warnings`. A node bypassed so stays bypassed when the format comes back: switching it on is the operator's. The strip's patch is trimmed, or extended: a run of consecutive channels of one input from channel 1 goes on with the next channels, anything else leaves the new channels unpatched; the polarity follows. A published bus without an output layout gets its old format as the layout, so the MXL flow and its receivers keep their channels. The plan swap fades the signal out and in. | "Keep and adapt" as decided. Downstream receivers break when a flow's channel count changes; the operator changes the output's layout on purpose. |
+| D204 | A node that cannot run on its signal's format passes the signal through, also when someone switches it on again; validation does not refuse it (a recalled snapshot, an import or a remote push stay valid). `GET` of a strip or bus lists such nodes in `chain_warnings`; the UI flags them. | A refusal would make a snapshot recall or a show import fail on a node the operator did not touch. |
+| D205 | The M/S / width node is a 2 × 2 gain matrix in the plan (`Step::Matrix`), not a processor: its parameters and its bypass (the identity) ramp per sample like a panner, and it holds no state. Mid and side are (L + R) / 2 and (L − R) / 2, so 100 % L/R in and out is the identity and 0 % the strip width's mono. | Allocation-free and click-free for free; the same arithmetic as the stereo strip's width. |
+| D206 | EQ high- and low-pass bands (D4) are the filter node's Butterworth sections (`slope_db_per_oct` 12/24/36/48, required on them and refused on the other types); their `q` and `gain_db` are kept and validated but unused. An EQ runs its bands' sections in one cascade. | One module for all filters, sample-identical to the filter node (tested). |
+| D207 | The surround panner (D5) is the panner of a mono or stereo strip, not an in-place node: wherever it sits in the chain, it replaces the stereo panner after the fader, so the post-pan tap (and every send, solo and monitor from there) has the layout's channels, as on a broadcast console's surround channel. Position: azimuth on the BS.775 / BS.2051 speaker ring, constant-power between neighbours; spread blends each source's powers with an equal share on every speaker; divergence moves that share of the centre's power into L and R; both keep the power at 1. A stereo strip's L and R sit 30° either side of the position. LFE: each input at `lfe_db` (a stereo input's channels at half), full band (bass management on the monitor filters it). A stereo strip aimed behind has L and R mirrored. Its matrix is a node (16 values for stereo into 7.1, `MAX_NODE_VALUES` 16): moving it ramps without a plan swap; bypassing it rewires back to the stereo panner. At most one per chain. | "Also usable on a strip feeding a surround bus": a chain node keeps its channel count, so a mono source can only reach 5.1 where the panner is. |
+| D208 | A ramping gain matrix runs as two plain loops (the ramp's part of the block, then the target), which the compiler vectorises. | It computed every sample's gain through a branch: stereo into 7.1 cost 4.5 µs per 96-sample block while moving, now 1.6 µs. |
+| D209 | The format selector (`FormatSelect.vue`) asks for a confirming second press and names the nodes it will bypass before the change; the answer's warnings show as a notice. It sits in the Processing view's signal panel (P3); the console can place the same component (C10's console entry belongs to the console's strip menu). | §12.0: actions that change the audio of a live signal are confirmed. |
+| D210 | Tests only: a global allocator that counts the calling thread's allocations; `spatial_nodes_never_allocate_on_the_dsp_thread` runs a plan with every new node, down-mix sends and ramps and expects none. | The real-time rule (§2) as a test, not a review note. |
+
+#### Deviations
+
+| # | Spec | Deviation | Reason |
+| --- | --- | --- | --- |
+| X25 | §5 "up/down-mix presets for 5.1/7.1" | No presets: one adjustable down-mix (with a BS.775 button in the UI) per mix, bus and monitor. | D1/D2 as decided. |
+
+#### Results (dev host, release build, `dsp_costs`)
+
+Per 96-sample block; matrices on the plan without their patch steps.
+
+| Node | ns | while ramping |
+| --- | --- | --- |
+| EQ, 4 bells | 973 | |
+| EQ, high-pass 24 + 4 bells + low-pass 12 | 1735 | |
+| filter, high-pass 24 | 706 | |
+| width (2 × 2) | 127 | 426 |
+| surround panner mono → 5.1 | 251 | 699 |
+| surround panner stereo → 7.1 | 462 | 1650 |
+| send 5.1 → stereo (down-mix) | 139 | 861 |
+
+The down-mix costs nothing extra: a send's matrix has the same size whatever its
+coefficients.

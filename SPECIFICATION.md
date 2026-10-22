@@ -182,7 +182,9 @@ rates other than 48 kHz, recording.
   loudness integration).
 - **Block size** configurable: 48, 96, 144, 240 samples (1, 2, 3, 5 ms; default 96).
 - Channel formats for strips and buses: mono, stereo, 3.0, 5.1, 7.1, 5.1.4, 7.1.4 (linked
-  processing across a strip's channels).
+  processing across a strip's channels). The format of a strip or bus can be changed
+  in operation: its chain, sends and settings stay; nodes that cannot run on the new
+  format are bypassed and flagged; the change fades.
 
 ### 4.2 MXL inputs (NMOS receivers)
 
@@ -280,7 +282,9 @@ rates other than 48 kHz, recording.
   phase; pre/post tap selectable per send (tap points: input, pre-EQ, post-EQ,
   pre-dynamics, post-dynamics, pre-fader, post-fader, post-pan, or after any node).
 - **Width mapping:** mono→stereo (pan law selectable: −3 dB default, −4.5, −6, 0),
-  stereo→mono (sum −3 dB or −6 dB), up/down-mix presets for 5.1/7.1.
+  stereo→mono (sum −3 dB or −6 dB), up/down-mix for 5.1/7.1. The down-mix is
+  adjustable (ITU-R BS.775 style: centre, surround and LFE levels, normalisation):
+  a mix-wide default and an override per target bus or monitor.
 - **High-level operations** that generate the graph:
   - **Group:** selected strips → new subgroup bus with routing.
   - **N-1:** selected strips → N-1 bus per selected participant (each receives the sum
@@ -299,8 +303,8 @@ across multichannel signals, parameter smoothing.
 
 | Category | Nodes |
 | --- | --- |
-| Basic | gain/trim, fader, pan/balance/width, phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
-| EQ | parametric EQ (up to 8 bands: bell, shelf, notch), high-pass/low-pass (12–48 dB/oct), **dynamic EQ** (per-band threshold/ratio/attack/release) |
+| Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (mono/stereo into 5.1/7.1: position, spread, divergence, LFE), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
+| EQ | parametric EQ (up to 8 bands: bell, shelf, notch, high-pass, low-pass), high-pass/low-pass (12–48 dB/oct), **dynamic EQ** (per-band threshold/ratio/attack/release) |
 | Dynamics | compressor (feed-forward, soft knee, sidechain with filter), limiter (look-ahead, true-peak option), expander, gate (with hysteresis, hold), **de-esser** (split-band and wide-band modes, frequency 2–12 kHz, threshold, range, listen/sidechain monitor), ducker (keyed by any signal or by VAD), multiband dynamics (3–5 bands, linear-phase crossover option) |
 | Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs |
 | Utility | oscillator/tone (sine, pink/white noise, sweep, EBU stereo ident), block delay (feedback), meter tap |

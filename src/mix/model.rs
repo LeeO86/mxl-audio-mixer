@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::chain::{Category, Proc};
-use super::format::{Format, Laws, MonoSum, PanLaw};
+use super::format::{Downmix, Format, Laws, MonoSum, PanLaw};
 
 /// Largest send gain (§5: −∞ … +10 dB).
 pub const MAX_GAIN_DB: f64 = 10.0;
@@ -199,6 +199,10 @@ pub struct Bus {
     /// post-pan) at 0 dB, whatever the send says; its fader is the group level.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subgroup: bool,
+    /// The down-mix of everything arriving here from a wider format (D2);
+    /// `None`: the mix's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downmix: Option<Downmix>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +214,18 @@ pub struct Minus {
 }
 
 impl Strip {
+    /// The layout of its surround panner (D5), when one is on and can run.
+    pub fn surround_layout(&self) -> Option<Format> {
+        self.chain.iter().find_map(|p| match &p.kind {
+            super::chain::ProcKind::SurroundPan { layout, .. }
+                if !p.bypass && p.kind.supports(self.format, true).is_ok() =>
+            {
+                Some(*layout)
+            }
+            _ => None,
+        })
+    }
+
     /// A strip with the defaults of §5: unpatched, 0 dB, unmuted, centred.
     pub fn new(id: &str, format: Format) -> Self {
         let n = format.channels();
@@ -254,6 +270,7 @@ impl Bus {
             mute_safe: false,
             minus: None,
             subgroup: false,
+            downmix: None,
         }
     }
 }
@@ -370,6 +387,12 @@ pub struct MixSettings {
     /// Integrated loudness within ± this of the target is in tolerance.
     #[serde(default = "default_tolerance")]
     pub loudness_tolerance_lu: f64,
+    /// The down-mix wherever a wider format meets a narrower one (D1): sends,
+    /// monitors, solo, published layouts. A bus or monitor can override it.
+    /// Left out of the JSON while it is the default, so an unchanged mix still
+    /// loads in 1.3 (a rollback).
+    #[serde(default, skip_serializing_if = "Downmix::is_default")]
+    pub downmix: Downmix,
 }
 
 fn default_target() -> f64 {
@@ -387,6 +410,7 @@ impl Default for MixSettings {
             mono_sum_db: MonoSum::default(),
             loudness_target_lufs: default_target(),
             loudness_tolerance_lu: default_tolerance(),
+            downmix: Downmix::default(),
         }
     }
 }
@@ -396,6 +420,7 @@ impl MixSettings {
         Laws {
             pan: self.pan_law_db,
             mono_sum: self.mono_sum_db,
+            downmix: self.downmix,
         }
     }
 }
@@ -486,13 +511,45 @@ impl Mix {
             .or_else(|| self.bus(id).map(|b| (b.name.as_str(), b.format)))
     }
 
-    /// The width of `id` at `tap`: a mono strip is stereo after its panner.
+    /// The width of `id` at `tap`: a mono strip is stereo after its panner, a
+    /// strip with a surround panner (D5) its layout.
     pub fn tap_format(&self, id: &str, tap: &Tap) -> Option<Format> {
         let (_, format) = self.signal(id)?;
+        if let (Some(s), Tap::PostPan) = (self.strip(id), tap) {
+            if let Some(layout) = s.surround_layout() {
+                return Some(layout);
+            }
+        }
         Some(match (self.kind(id)?, tap, format) {
             (Kind::Strip, Tap::PostPan, Format::Mono) => Format::Stereo,
             _ => format,
         })
+    }
+
+    /// The laws for what arrives at bus `to` (its down-mix override, D2).
+    pub fn laws_into(&self, to: &str) -> Laws {
+        self.settings
+            .laws()
+            .with_downmix(self.bus(to).and_then(|b| b.downmix))
+    }
+
+    /// The nodes of `id`'s chain that cannot run on its format (C10): they pass
+    /// the signal through. `(node id, why)`.
+    pub fn chain_warnings(&self, id: &str) -> Vec<(String, String)> {
+        let Some((_, format)) = self.signal(id) else {
+            return Vec::new();
+        };
+        let strip = self.kind(id) == Some(Kind::Strip);
+        self.chain(id)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| {
+                p.kind
+                    .supports(format, strip)
+                    .err()
+                    .map(|e| (p.id.clone(), e))
+            })
+            .collect()
     }
 
     /// A signal's default tap for a new send: a strip's post-pan, a bus's post-fader.
@@ -623,9 +680,13 @@ impl Mix {
                 return Err(format!("strip {}: width must be 0 to 2", s.id));
             }
         }
+        self.settings.downmix.validate()?;
         for b in &self.buses {
             check_name(&b.name)?;
             check_fader(&format!("bus {}: fader_db", b.id), b.fader_db)?;
+            if let Some(d) = &b.downmix {
+                d.validate().map_err(|e| format!("bus {}: {e}", b.id))?;
+            }
             if let Some(m) = &b.minus {
                 if self.kind(&m.of) != Some(Kind::Bus) || m.of == b.id {
                     return Err(format!(
@@ -1044,6 +1105,7 @@ pub(crate) mod tests {
             mute_safe: false,
             minus: None,
             subgroup: false,
+            downmix: None,
         }
     }
 
@@ -1057,6 +1119,23 @@ pub(crate) mod tests {
             phase: false,
             block_delay: false,
         }
+    }
+
+    #[test]
+    fn default_down_mix_is_left_out_for_a_rollback() {
+        // An unchanged mix has no `downmix` in its settings: 1.3 (deny_unknown_fields) loads it.
+        let mix = Mix::default();
+        let v = serde_json::to_value(&mix).unwrap();
+        assert!(v["settings"].get("downmix").is_none(), "{v}");
+        let back: Mix = serde_json::from_value(v).unwrap();
+        assert_eq!(back, mix);
+        // A changed one is written and read back.
+        let mut changed = Mix::default();
+        changed.settings.downmix.centre_db = Db(-6.0);
+        let v = serde_json::to_value(&changed).unwrap();
+        assert_eq!(v["settings"]["downmix"]["centre_db"], -6.0);
+        let back: Mix = serde_json::from_value(v).unwrap();
+        assert_eq!(back, changed);
     }
 
     #[test]

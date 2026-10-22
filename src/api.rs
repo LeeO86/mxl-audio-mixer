@@ -214,6 +214,25 @@ pub async fn apply_held(
     }
 }
 
+/// `warnings`: what an operator should know about a change (a format change's
+/// bypassed nodes, C10).
+fn with_notes(mut value: Value, notes: Vec<String>) -> Value {
+    if !notes.is_empty() {
+        value["warnings"] = json!(notes);
+    }
+    value
+}
+
+/// A signal's chain warnings: the nodes that cannot run on its format (C10).
+fn chain_warnings(mix: &Mix, id: &str) -> Value {
+    Value::Array(
+        mix.chain_warnings(id)
+            .into_iter()
+            .map(|(node, message)| json!({"node": node, "message": message}))
+            .collect(),
+    )
+}
+
 pub(crate) fn with_errors(mut value: Value, errors: Vec<String>) -> Value {
     if !errors.is_empty() {
         value["output_errors"] = json!(errors);
@@ -226,7 +245,7 @@ async fn mix(State(app): State<App>) -> Json<Value> {
 }
 
 async fn settings(State(app): State<App>) -> Json<Value> {
-    Json(json!(app.control().mix.settings))
+    Json(settings_json(&app.control().mix.settings))
 }
 
 #[derive(Deserialize)]
@@ -236,6 +255,7 @@ struct SettingsBody {
     mono_sum_db: Option<crate::mix::format::MonoSum>,
     loudness_target_lufs: Option<f64>,
     loudness_tolerance_lu: Option<f64>,
+    downmix: Option<crate::mix::format::Downmix>,
 }
 
 async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
@@ -260,13 +280,23 @@ async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Res
                 }
                 m.settings.loudness_tolerance_lu = t;
             }
+            if let Some(d) = b.downmix {
+                m.settings.downmix = d;
+            }
             Ok(())
         })
         .await?;
         let s: MixSettings = app.control().mix.settings;
-        Ok::<_, Box<Response>>(Json(with_errors(json!(s), errors)).into_response())
+        Ok::<_, Box<Response>>(Json(with_errors(settings_json(&s), errors)).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
+}
+
+/// The settings with `downmix` always shown (the show file leaves out the default).
+fn settings_json(s: &MixSettings) -> Value {
+    let mut v = json!(s);
+    v["downmix"] = json!(s.downmix);
+    v
 }
 
 fn strip_json(app: &App, s: &Strip) -> Value {
@@ -274,12 +304,15 @@ fn strip_json(app: &App, s: &Strip) -> Value {
     let mut v = json!(s);
     v["patch_state"] = json!(control.patch_state(s));
     v["published"] = json!(control.mix.output(&s.id).is_some());
+    v["chain_warnings"] = chain_warnings(&control.mix, &s.id);
     v
 }
 
 fn bus_json(app: &App, b: &Bus) -> Value {
+    let control = app.control();
     let mut v = json!(b);
-    v["published"] = json!(app.control().mix.output(&b.id).is_some());
+    v["published"] = json!(control.mix.output(&b.id).is_some());
+    v["chain_warnings"] = chain_warnings(&control.mix, &b.id);
     v
 }
 
@@ -452,19 +485,23 @@ async fn patch_strip(
             return Err(bad("a signal id cannot be changed"));
         }
         let ramp = ramp(b.ramp_ms.take())?;
+        let format = b.format.take();
+        let mut notes = Vec::new();
         let errors = apply(&app, ramp, |m| {
-            let s = m
-                .strips
-                .iter_mut()
-                .find(|s| s.id == id)
-                .ok_or_else(|| not_found(format!("strip {id} does not exist")))?;
+            if m.strip(&id).is_none() {
+                return Err(not_found(format!("strip {id} does not exist")));
+            }
+            if let Some(f) = format {
+                notes = crate::mix::reformat::change_format(m, &id, f).map_err(bad)?;
+            }
+            let s = m.strips.iter_mut().find(|s| s.id == id).expect("exists");
             b.apply(s);
             Ok(())
         })
         .await?;
         let s = app.control().mix.strip(&id).cloned();
         let v = s.map(|s| strip_json(&app, &s)).unwrap_or_default();
-        Ok(Json(with_errors(v, errors)).into_response())
+        Ok(Json(with_notes(with_errors(v, errors), notes)).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
 }
@@ -519,6 +556,9 @@ struct BusBody {
     minus: Option<Option<crate::mix::model::Minus>>,
     /// Every send into it post-fader (post-pan) at 0 dB (C12).
     subgroup: Option<bool>,
+    /// The bus's own down-mix (`null`: the mix's, D2).
+    #[serde(default, deserialize_with = "present")]
+    downmix: Option<Option<crate::mix::format::Downmix>>,
     ramp_ms: Option<f64>,
 }
 
@@ -529,6 +569,9 @@ impl BusBody {
         }
         if let Some(v) = self.subgroup {
             b.subgroup = v;
+        }
+        if let Some(v) = self.downmix {
+            b.downmix = v;
         }
         if let Some(v) = self.colour {
             b.colour = colour(v);
@@ -589,6 +632,7 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             mute_safe: false,
             minus: None,
             subgroup: false,
+            downmix: None,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {
@@ -617,19 +661,23 @@ async fn patch_bus(
             return Err(bad("a signal id cannot be changed"));
         }
         let ramp = ramp(b.ramp_ms.take())?;
+        let format = b.format.take();
+        let mut notes = Vec::new();
         let errors = apply(&app, ramp, |m| {
-            let bus = m
-                .buses
-                .iter_mut()
-                .find(|x| x.id == id)
-                .ok_or_else(|| not_found(format!("bus {id} does not exist")))?;
+            if m.bus(&id).is_none() {
+                return Err(not_found(format!("bus {id} does not exist")));
+            }
+            if let Some(f) = format {
+                notes = crate::mix::reformat::change_format(m, &id, f).map_err(bad)?;
+            }
+            let bus = m.buses.iter_mut().find(|x| x.id == id).expect("exists");
             b.apply(bus);
             Ok(())
         })
         .await?;
         let b = app.control().mix.bus(&id).cloned();
         let v = b.map(|b| bus_json(&app, &b)).unwrap_or_default();
-        Ok(Json(with_errors(v, errors)).into_response())
+        Ok(Json(with_notes(with_errors(v, errors), notes)).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
 }
