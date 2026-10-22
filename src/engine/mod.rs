@@ -275,6 +275,13 @@ pub struct Engine {
 /// One second of two channels.
 pub const ANALYSIS_RING: usize = 2 * 48_000;
 
+/// Room of an input's arrival-lag ring: the held blocks of a whole window
+/// (pushed at once on the next commit) plus two control ticks (100 ms) of blocks.
+fn lag_ring(block: u32, lag_window: u32) -> usize {
+    let block = block.max(1);
+    (lag_window.div_ceil(block) + 2 * 4800u32.div_ceil(block)).max(1024) as usize
+}
+
 impl Engine {
     /// Start the DSP thread.
     pub fn start(config: EngineConfig) -> std::io::Result<Self> {
@@ -284,7 +291,7 @@ impl Engine {
         let mut lag_tx = Vec::new();
         let mut lags = Vec::new();
         for _ in 0..config.inputs {
-            let (tx, rx) = rtrb::RingBuffer::new(1024);
+            let (tx, rx) = rtrb::RingBuffer::new(lag_ring(config.block, config.lag_window));
             lag_tx.push(tx);
             lags.push(rx);
         }
@@ -389,5 +396,19 @@ impl Engine {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lag_ring;
+
+    #[test]
+    fn the_lag_ring_holds_a_window_and_two_ticks() {
+        // 48-sample blocks, 2 + 3600 ms: 3602 held blocks + 2 × 100 ticks.
+        assert_eq!(lag_ring(48, 96 + 172_800), 3602 + 200);
+        // The defaults (96, 2 + 150 ms) fit the old 1024.
+        assert_eq!(lag_ring(96, 96 + 7200), 1024);
+        assert!(lag_ring(96, 96 + 7200) >= 76 + 100);
     }
 }

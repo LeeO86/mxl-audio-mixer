@@ -38,7 +38,7 @@ struct Input {
 }
 
 impl Input {
-    fn new(block: usize, lag_window_blocks: usize) -> Self {
+    fn new(block: usize, lag_window_blocks: u32, block_samples: u32) -> Self {
         Self {
             reader: None,
             channels: 0,
@@ -49,7 +49,7 @@ impl Input {
             started: false,
             buffer: vec![0.0; MAX_CHANNELS * block],
             last: [0.0; MAX_CHANNELS],
-            arrival: ArrivalTracker::new(lag_window_blocks),
+            arrival: ArrivalTracker::new(lag_window_blocks, block_samples),
         }
     }
 
@@ -176,50 +176,64 @@ impl OutputSink for Outputs<'_> {
 /// Every block counts, also the ones in which the head did not move: a writer
 /// that commits in batches (a frame of audio, a burst of packets) is furthest
 /// behind just before its next commit. The lags of blocks without a commit are
-/// held until the head moves; when it does not move within the window, the
-/// writer stalled and they are dropped (a stall is not an arrival lag).
+/// held until the head moves (they grow by one block each, so the first and a
+/// count describe them); when it does not move within the window, the writer
+/// stalled and they are dropped (a stall is not an arrival lag). After a new
+/// reader nothing counts until the head has moved once: a new flow's head is 0
+/// and a re-opened one may be stale.
 struct ArrivalTracker {
-    last_head: u64,
-    waiting: Vec<u32>,
-    window: usize,
+    last_head: Option<u64>,
+    /// Lag of the first block without a commit, and how many there are.
+    first_waiting: u32,
+    waiting: u32,
+    window: u32,
+    block: u32,
     stalled: bool,
 }
 
 impl ArrivalTracker {
-    fn new(window_blocks: usize) -> Self {
+    fn new(window_blocks: u32, block: u32) -> Self {
         Self {
-            last_head: 0,
-            waiting: Vec::with_capacity(window_blocks),
+            last_head: None,
+            first_waiting: 0,
+            waiting: 0,
             window: window_blocks,
-            stalled: false,
+            block,
+            stalled: true,
         }
     }
 
     fn reset(&mut self) {
-        self.last_head = 0;
-        self.waiting.clear();
-        self.stalled = false;
+        self.last_head = None;
+        self.waiting = 0;
+        self.stalled = true;
     }
 
     /// The block ending at index `end` reads a flow whose head index is `head`.
-    /// No allocation: `waiting` never grows beyond its capacity.
     fn observe(&mut self, head: u64, end: u64, mut push: impl FnMut(u32)) {
         let lag = end.saturating_sub(head).min(u64::from(u32::MAX)) as u32;
-        if head != self.last_head {
-            self.last_head = head;
+        let Some(last) = self.last_head else {
+            self.last_head = Some(head);
+            return;
+        };
+        if head != last {
+            self.last_head = Some(head);
             if !self.stalled {
-                for &l in &self.waiting {
-                    push(l);
+                for k in 0..self.waiting {
+                    push(self.first_waiting.saturating_add(k * self.block));
                 }
             }
-            self.waiting.clear();
+            self.waiting = 0;
             self.stalled = false;
             push(lag);
         } else if !self.stalled {
-            if self.waiting.len() < self.window {
-                self.waiting.push(lag);
+            if self.waiting == 0 {
+                self.first_waiting = lag;
+            }
+            if self.waiting < self.window {
+                self.waiting += 1;
             } else {
-                self.waiting.clear();
+                self.waiting = 0;
                 self.stalled = true;
             }
         }
@@ -277,9 +291,9 @@ pub(super) fn run(
     let period_ns = time_of(b);
     // Bounded wait for samples that are almost there: a quarter block.
     let read_wait = Duration::from_nanos(period_ns / 4);
-    let lag_window_blocks = config.lag_window.div_ceil(config.block.max(1)) as usize;
+    let lag_window_blocks = config.lag_window.div_ceil(config.block.max(1));
     let mut inputs: Vec<Input> = (0..config.inputs)
-        .map(|_| Input::new(block, lag_window_blocks))
+        .map(|_| Input::new(block, lag_window_blocks, config.block))
         .collect();
     let mut outputs: Vec<Option<Box<OutputWriter>>> = (0..MAX_OUTPUTS).map(|_| None).collect();
     let mut loudness: Vec<Option<Box<SegmentMeter>>> = (0..MAX_LOUDNESS).map(|_| None).collect();
@@ -767,9 +781,9 @@ mod tests {
     /// Lags of 2 ms blocks reading a writer whose commit of `batch` samples lands
     /// `late` samples after the batch's last sample, over `blocks` blocks.
     fn lags(batch: u64, late: u64, blocks: u64, stall_from: Option<u64>) -> Vec<u32> {
-        let mut t = ArrivalTracker::new(76);
+        let mut t = ArrivalTracker::new(76, 96);
         let mut out = Vec::new();
-        for n in 1..=blocks {
+        for n in 0..=blocks {
             let end = 1_000_000 + n * 96;
             // The newest commit visible at `end`, frozen during a stall.
             let at = stall_from.map_or(end, |s| end.min(1_000_000 + s * 96));
@@ -786,8 +800,9 @@ mod tests {
         // 2 ms read offset is late in 9 of 10 blocks. v1.3.0 counted only the
         // blocks after a commit (lag 0) and proposed no delay.
         let l = lags(960, 0, 1000, None);
-        // Only the blocks after the last commit are still held.
-        assert!(l.len() >= 990, "{} lags", l.len());
+        // Nothing counts before the first commit; the blocks after the last
+        // one are still held.
+        assert!(l.len() >= 980, "{} lags", l.len());
         let max = *l.iter().max().unwrap();
         assert!((864..=960).contains(&max), "max {max}");
         let late = l.iter().filter(|&&x| x > 96).count();
@@ -812,5 +827,45 @@ mod tests {
         let l = lags(48, 20, 1000, Some(100));
         assert!(l.iter().all(|&x| x < 96), "{:?}", l.iter().max());
         assert!(l.len() <= 101, "{} lags", l.len());
+    }
+
+    #[test]
+    fn arrival_lag_starts_at_the_first_head_move() {
+        // A new flow (head 0) and a re-opened one on a stale head: neither the
+        // head before the first commit nor the blocks spent waiting for it count.
+        for stale in [0u64, 1_000_000 - 96 * 500] {
+            let mut t = ArrivalTracker::new(76, 96);
+            let mut out = Vec::new();
+            for n in 0..200u64 {
+                let end = 1_000_000 + n * 96;
+                let head = if n < 30 { stale } else { end - 20 };
+                t.observe(head, end, |l| out.push(l));
+            }
+            assert_eq!(out.len(), 170, "stale head {stale}");
+            assert!(
+                out.iter().all(|&x| x == 20),
+                "stale head {stale}: {:?}",
+                out.iter().max()
+            );
+            // After a reset (a new reader) the same holds again.
+            t.reset();
+            let mut after = Vec::new();
+            t.observe(stale, 2_000_000, |l| after.push(l));
+            t.observe(2_000_000 - 20, 2_000_096, |l| after.push(l));
+            assert_eq!(after, vec![96 + 20]);
+        }
+    }
+
+    #[test]
+    fn held_lags_grow_by_one_block() {
+        // One commit every 5 blocks: the held blocks come out in order. The
+        // first period (before the first head move) does not count.
+        let mut t = ArrivalTracker::new(76, 96);
+        let mut out = Vec::new();
+        for n in 0..=10u64 {
+            let end = 96 * (100 + n);
+            t.observe(96 * (100 + n / 5 * 5), end, |l| out.push(l));
+        }
+        assert_eq!(out, vec![0, 96, 192, 288, 384, 0]);
     }
 }

@@ -99,6 +99,11 @@ struct DelayHold {
 }
 
 impl DelayHold {
+    /// A stall interrupts a period of lower need: it starts again afterwards.
+    fn interrupt(&mut self) {
+        self.lower = None;
+    }
+
     /// The new delay for an input with delay `current` and arrival lag `p999`
     /// (99.9th percentile), or `None` to keep it.
     fn next(
@@ -183,7 +188,9 @@ impl LagWindow {
 
     fn span(&self) -> Duration {
         match (self.seconds.front(), self.seconds.back()) {
-            (Some((a, _, _)), Some((b, _, _))) => b.duration_since(*a) + Duration::from_secs(1),
+            // From the first to the last per-second bucket: one second of samples
+            // at least before the first automatic setting.
+            (Some((a, _, _)), Some((b, _, _))) => b.duration_since(*a),
             _ => Duration::ZERO,
         }
     }
@@ -492,6 +499,9 @@ impl Inputs {
         let (read_offset, delay_max, hold, confirm) =
             (self.read_offset, self.delay_max, self.hold, self.confirm);
         let slot = &mut self.slots[i];
+        if slot.state == State::Stalled {
+            slot.hold.interrupt();
+        }
         if slot.config.extra_delay != ExtraDelay::default() || slot.state != State::Running {
             return;
         }
@@ -755,6 +765,37 @@ mod tests {
         );
         // 96 + 48 - 96 = 48; 110 stays within the 0.5 ms headroom; 300 rises at once.
         assert_eq!(changes, vec![(0, 48), (100, 252)]);
+    }
+
+    #[test]
+    fn a_stall_restarts_the_hold() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::default();
+        assert_eq!(h.next(480, 0, 96, 7200, hold, at(0)), Some(432));
+        assert_eq!(h.next(192, 432, 96, 7200, hold, at(1)), None);
+        h.interrupt(); // stalled at 20 s
+        assert_eq!(h.next(192, 432, 96, 7200, hold, at(25)), None);
+        assert_eq!(
+            h.next(192, 432, 96, 7200, hold, at(40)),
+            None,
+            "lower since 25 s only"
+        );
+        assert_eq!(h.next(192, 432, 96, 7200, hold, at(55)), Some(144));
+    }
+
+    #[test]
+    fn lag_window_span_needs_a_second_of_samples() {
+        let mut w = LagWindow::new(4800);
+        let t = Instant::now();
+        assert_eq!(w.span(), Duration::ZERO);
+        w.push(48, t);
+        assert!(w.span() < Duration::from_secs(MIN_LAG_SECONDS), "one tick");
+        w.push(48, t + Duration::from_millis(900));
+        assert!(w.span() < Duration::from_secs(MIN_LAG_SECONDS));
+        w.push(48, t + Duration::from_millis(1000));
+        assert!(w.span() >= Duration::from_secs(MIN_LAG_SECONDS));
     }
 
     #[test]
