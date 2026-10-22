@@ -367,9 +367,13 @@ an id gets `strip-<n>` or `bus-<n>`.
   `compensate` (delay compensation, default `true`). A **subgroup** bus
   (`subgroup: true`) takes every send into it from its source's output (a strip's
   post-pan, a bus's post-fader) at 0 dB, whatever the send's `tap` and `gain_db`
-  say: its fader is the group level. Making a bus a subgroup sets its sends so
-  (ramped); a send's `mute` and `phase` still apply, and a PUT of another level or
-  tap into it is refused (400). The `group` operation makes subgroups. A **mix-minus** bus (N-1, §5)
+  say: its fader is the group level. Every change stores its sends so (also a
+  recall, an import or the remote link; making a bus a subgroup is ramped), so the
+  API shows what is heard; clearing the flag leaves them at 0 dB. A send's `mute`
+  and `phase` still apply, and a PUT of another level or tap into it is refused
+  (400). The `group` operation makes subgroups. A mix-minus `of` a subgroup takes
+  those sends as the subgroup does (0 dB from the source's output). A show with a
+  subgroup cannot be loaded by 1.3.0. A **mix-minus** bus (N-1, §5)
   has `minus: {"of": "<bus>", "without": [ids]}`: besides its own sends it takes
   every send into `of`, as it is (tap, level, mute, phase), except those from
   `without`; its own send from a source wins. It follows `of` without a plan swap.
@@ -422,9 +426,13 @@ an id gets `strip-<n>` or `bus-<n>`.
   most 32. Neither VCAs nor mute groups change the plan: only fader values move.
   Deleting a strip, bus or VCA takes it out of VCAs, mute groups and layout pages.
   Deleting a strip or bus also removes its sends, its output, its mix-minus and
-  talkback references and its auto setup; a monitor or talkback return that
-  listened to it listens to nothing; logic blocks that name it stay, wired, with
-  an empty target (they never act, as a new block without one).
+  talkback destinations and references and its auto setup; a monitor, a
+  control-room source or a talkback return that listened to it listens to
+  nothing; another signal's key on it is cleared (a compressor keys itself, a
+  ducker's empty key hears nothing); logic blocks that name it (also a `set-talk`
+  to one of its talkback destinations) stay, wired, with an empty target: they
+  no longer act on it but still pass their value on; a `set-monitor` that chose
+  it chooses no source.
 - **Snapshots** (§12.5): parameter states of every strip, bus, send and VCA (trim,
   polarity, fader, mute, pan, width, every chain node's parameters and bypass,
   send gain, mute and phase; VCA fader and mute), and the auto setup as a whole

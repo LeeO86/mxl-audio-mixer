@@ -88,6 +88,9 @@ try {
     return true;
   });
   await page.getByLabel("Host link channels").uncheck();
+  await page.waitForTimeout(300);
+  const kept = (await api(`/api/v1/strips/${g1}`)).patch.map((x) => `${x.input}:${x.channel}`).join();
+  if (kept !== "1:1,1:2") throw new Error(`unticking Link changed the patch: ${kept}`);
   await page.getByLabel("Host channel 2 input").selectOption("1:1");
   await until("unlinked: R on 1·1", async () => (await api(`/api/v1/strips/${g1}`)).patch[1]?.channel === 1);
   pass("linked input patch: the first channel chosen, R follows; unlinked per channel");

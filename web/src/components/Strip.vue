@@ -18,6 +18,7 @@ import { DYNAMICS } from "../nodes.js";
 import {
   act,
   addSend,
+  buses,
   autoGain,
   automixOf,
   groupMuted,
@@ -35,6 +36,7 @@ import {
   soloed,
   store,
   stored,
+  strips,
   tallyOf,
   toggleSolo,
   vcaMuted,
@@ -81,7 +83,7 @@ const editing = ref(false);
 const draft = ref("");
 const nameInput = ref(null);
 function startRename() {
-  if (props.compact) return;
+  if (props.compact) return emit("open", s.value.id);
   select(s.value.id);
   draft.value = s.value.name;
   editing.value = true;
@@ -143,10 +145,24 @@ const refs = computed(() => {
     out.push("the auto setup");
   return out;
 });
+// Logic blocks that name it (also a set-monitor choosing it, a set-talk to a talkback destination on it),
+// and other signals' keys on it: they stay, emptied (D187).
 const logicRefs = computed(() => {
   const id = s.value.id;
   const m = live.mix || {};
-  return [...(m.logic || []), ...(m.logic_macros || [])].flatMap((g) => g.blocks || []).filter((b) => b.signal === id).length;
+  const dests = new Set((m.control_room?.talkback?.destinations || []).filter((d) => d.bus === id).map((d) => d.id));
+  return [...(m.logic || []), ...(m.logic_macros || [])]
+    .flatMap((g) => g.blocks || [])
+    .filter((b) => b.signal === id || b.source?.signal === id || (b.type === "set-talk" && dests.has(b.destination))).length;
+});
+const keyRefs = computed(() => {
+  const id = s.value.id;
+  return [...strips.value, ...buses.value].filter((x) => x.id !== id && x.chain.some((n) => n.key?.signal === id)).map((x) => x.name);
+});
+const talkRefs = computed(() => {
+  const t = live.mix?.control_room?.talkback;
+  const id = s.value.id;
+  return (t?.destinations || []).filter((d) => d.bus === id).map((d) => d.name);
 });
 async function remove() {
   const id = s.value.id;
@@ -450,7 +466,11 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
     </Modal>
     <Modal v-if="dialog === 'delete'" :title="`Delete ${kind} ${s.name}?`" @close="dialog = ''">
       <p>{{ s.name }} ({{ s.id }}) is removed from the mix at once<template v-if="refs.length">, with {{ refs.join("; ") }}</template>.</p>
-      <p v-if="logicRefs" class="warnbox">{{ logicRefs }} logic block{{ logicRefs === 1 ? "" : "s" }} name{{ logicRefs === 1 ? "s" : "" }} it: they stay with no target and stop acting.</p>
+      <p v-if="talkRefs.length">Talkback destination{{ talkRefs.length === 1 ? "" : "s" }} {{ talkRefs.join(", ") }} go{{ talkRefs.length === 1 ? "es" : "" }} with it.</p>
+      <p v-if="keyRefs.length" class="warnbox">The key of {{ keyRefs.join(", ") }} is cleared: a compressor keys itself again, a ducker hears nothing.</p>
+      <p v-if="logicRefs" class="warnbox">
+        {{ logicRefs }} logic block{{ logicRefs === 1 ? "" : "s" }} name{{ logicRefs === 1 ? "s" : "" }} it: they stay, wired, with no target and no longer act on it (they still pass their value to the blocks after them; a monitor choice gets no source).
+      </p>
       <p class="note">This cannot be undone; snapshots keep their values but not the {{ kind }}.</p>
       <div class="actions">
         <button class="btn secondary" @click="dialog = ''">Cancel</button>

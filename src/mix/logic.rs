@@ -733,9 +733,11 @@ impl Mix {
         None
     }
 
-    /// Blocks that name signal `id` keep their place and wires with an empty
-    /// target: valid, listed in the warnings, never acting (C9, D182).
-    pub fn remove_from_logic(&mut self, id: &str) {
+    /// Blocks that name signal `id`, or one of the talkback `destinations` that
+    /// went with it, keep their place and wires with an empty target: valid,
+    /// listed in the warnings, never acting on it (C9, D182). A `set-monitor`
+    /// that chose it chooses no source.
+    pub fn remove_from_logic(&mut self, id: &str, destinations: &[String]) {
         let blocks = self
             .logic
             .iter_mut()
@@ -744,6 +746,19 @@ impl Mix {
         for b in blocks {
             if let Some(target) = b.kind.signal_mut().filter(|t| *t == id) {
                 target.clear();
+            }
+            match &mut b.kind {
+                BlockKind::SetTalk { destination, .. } if destinations.contains(destination) => {
+                    destination.clear();
+                }
+                BlockKind::SetMonitor { source, .. }
+                    if source
+                        .as_ref()
+                        .is_some_and(|s| *s == Source::Signal(id.to_string())) =>
+                {
+                    *source = None;
+                }
+                _ => {}
             }
         }
     }
@@ -1748,6 +1763,59 @@ pub(crate) mod tests {
             ),
             vec![]
         );
+    }
+
+    /// C9: a deleted bus empties the `set-talk` blocks of its talkback
+    /// destination and the `set-monitor` blocks that chose it as the source.
+    #[test]
+    fn deleting_a_bus_empties_talk_and_monitor_targets() {
+        use serde_json::json;
+        let mut m = Mix::default();
+        m.buses
+            .push(crate::mix::model::tests::bus("ifb", Format::Mono));
+        m.buses
+            .push(crate::mix::model::tests::bus("main", Format::Stereo));
+        let t = &mut m.control_room.talkback;
+        t.mics.push(
+            serde_json::from_value(json!({"id": "tb", "name": "TB", "input": 1, "channel": 1}))
+                .unwrap(),
+        );
+        t.destinations
+            .push(serde_json::from_value(json!({"id": "d1", "name": "D1", "bus": "ifb"})).unwrap());
+        m.control_room.monitors.push(
+            serde_json::from_value(json!({"id": "mon", "name": "Mon", "format": "stereo"}))
+                .unwrap(),
+        );
+        let talk = |d: &str| BlockKind::SetTalk {
+            mic: "tb".into(),
+            destination: d.into(),
+        };
+        let listen = |s: &str| BlockKind::SetMonitor {
+            monitor: "mon".into(),
+            source: Some(Source::Signal(s.into())),
+        };
+        m.logic.push(graph(
+            vec![
+                block("t", talk("d1")),
+                block("l", listen("ifb")),
+                block("k", listen("main")),
+            ],
+            vec![],
+        ));
+        assert_eq!(validate(&m), Ok(()));
+        m.remove_signal("ifb");
+        assert_eq!(validate(&m), Ok(()));
+        let kinds: Vec<&BlockKind> = m.logic[0].blocks.iter().map(|b| &b.kind).collect();
+        assert_eq!(kinds[0], &talk(""));
+        assert!(kinds[0].target_unset());
+        assert_eq!(
+            kinds[1],
+            &BlockKind::SetMonitor {
+                monitor: "mon".into(),
+                source: None
+            }
+        );
+        assert_eq!(kinds[2], &listen("main"), "another source stays");
     }
 
     fn issues_of(blocks: Vec<Block>, wires: Vec<Wire>) -> Vec<Issue> {

@@ -66,17 +66,35 @@ api POST /api/v1/buses '{"id": "sub", "name": "Sub", "format": "stereo"}' >/dev/
 api PUT /api/v1/sends/vox/sub '{"tap": "pre-fader", "gain_db": -12}' >/dev/null
 api PUT /api/v1/sends/sub/main >/dev/null
 api PATCH /api/v1/strips/vox '{"fader_db": -6.0206}' >/dev/null
+api POST /api/v1/snapshots '{"id": "before-sub"}' >/dev/null
 api PATCH /api/v1/buses/sub '{"subgroup": true}' >/dev/null
 sleep 0.2
 probe 1 1:1:0.5 2:1:0
-[[ "$(json "$WEB/api/v1/sends/vox/sub" "(d['tap'], d['gain_db'])")" == "('post-pan', 0.0)" ]] || fail "the send into the subgroup was not locked"
+locked() { [[ "$(json "$WEB/api/v1/sends/vox/sub" "(d['tap'], d['gain_db'])")" == "('post-pan', 0.0)" ]]; }
+locked || fail "the send into the subgroup was not locked"
+# A recall of the send at −12 dB stores and plays the locked send.
+api POST /api/v1/snapshots/before-sub/recall '{}' >/dev/null
+sleep 0.2
+locked || fail "a recall stored another level into the subgroup"
+probe 1 1:1:0.5 2:1:0
+curl -fsS -X DELETE "$WEB/api/v1/snapshots/before-sub"
+# Clearing the flag keeps the send at 0 dB post-pan.
+api PATCH /api/v1/buses/sub '{"subgroup": false}' >/dev/null
+locked || fail "clearing the flag changed the send"
+api PATCH /api/v1/buses/sub '{"subgroup": true}' >/dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/sends/vox/sub" -d '{"gain_db": -6}')
 [[ "$code" == 400 ]] || fail "a send level into a subgroup answered $code"
 api PUT /api/v1/sends/vox/sub '{"mute": true}' >/dev/null
 sleep 0.2
 probe 1 1:1:0 2:1:0
 api PUT /api/v1/sends/vox/sub '{"mute": false}' >/dev/null
-pass "subgroup: its send post-pan at 0 dB (L = tone 1 × −6 dB fader), level locked (400), mute kept"
+# The group operation makes a subgroup: a send level into it is refused too.
+group=$(api POST /api/v1/operations/group '{"strips": ["music"]}' | python3 -c "import json,sys; print(json.load(sys.stdin)['buses'][0])")
+[[ "$(json "$WEB/api/v1/buses/$group" "d.get('subgroup')")" == True ]] || fail "the group operation made no subgroup"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/sends/music/$group" -d '{"gain_db": -6}')
+[[ "$code" == 400 ]] || fail "a send level into a group answered $code"
+curl -fsS -X DELETE "$WEB/api/v1/buses/$group"
+pass "subgroup: its send post-pan at 0 dB (L = tone 1 × −6 dB fader), stored so after a recall and after clearing the flag, level locked (400, also in a group), mute kept"
 
 # Deleting a bus (C9) takes its sends, VCA membership and layout place with it;
 # a logic block that names it stays with no target.

@@ -1102,10 +1102,13 @@ impl Control {
     /// Check `next` and start applying it. Parameter-only changes ramp over `ramp`
     /// samples and are done; anything else fades the affected nodes out and needs
     /// [`Control::swap`] after [`fade_wait`].
-    pub fn stage(&mut self, next: Mix, ramp: u32) -> Result<Staged, String> {
+    pub fn stage(&mut self, mut next: Mix, ramp: u32) -> Result<Staged, String> {
         if self.link.refuses() {
             return Err("the master is disconnected and local takeover is denied".into());
         }
+        // Whatever wrote the sends (API, recall, import, the link), a subgroup's
+        // keep what is heard (C12, D186).
+        next.lock_subgroup_sends();
         next.validate_except_logic(self.input_count, self.block)?;
         self.check_logic(&next)?;
         self.compiler.afv = self.afv_targets(&next);

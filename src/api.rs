@@ -624,7 +624,6 @@ async fn patch_bus(
                 .find(|x| x.id == id)
                 .ok_or_else(|| not_found(format!("bus {id} does not exist")))?;
             b.apply(bus);
-            lock_sends(m, &id);
             Ok(())
         })
         .await?;
@@ -633,16 +632,6 @@ async fn patch_bus(
         Ok(Json(with_errors(v, errors)).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
-}
-
-/// The sends into subgroup `id` keep what the plan takes: the source's output
-/// tap at 0 dB (C12), so they show what is heard.
-fn lock_sends(m: &mut Mix, id: &str) {
-    if !m.is_subgroup(id) {
-        return;
-    }
-    let locked: Vec<Send> = m.sends.iter().map(|s| m.locked(s.clone())).collect();
-    m.sends = locked;
 }
 
 async fn sends(State(app): State<App>) -> Json<Value> {
@@ -695,7 +684,8 @@ async fn put_send(
                     || b.gain_db.is_some_and(|g| g != Db(0.0)))
             {
                 return Err(bad(format!(
-                    "{to} is a subgroup: its sends are post-fader at 0 dB"
+                    "{to} is a subgroup: its sends are at 0 dB from {}",
+                    serde_json::to_value(&tap).unwrap_or_default()
                 )));
             }
             if m.send(&from, &to).is_none() {
