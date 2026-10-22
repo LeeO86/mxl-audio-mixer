@@ -291,6 +291,10 @@ impl Engine {
         let mut lag_tx = Vec::new();
         let mut lags = Vec::new();
         for _ in 0..config.inputs {
+            // A full ring drops lags silently (the DSP thread does not wait). The
+            // late-block rule (inputs.rs) reacts to single lags, so the ring holds
+            // a whole window of held lags plus two control ticks: it fills only
+            // if the control tick stalls for more than about 200 ms.
             let (tx, rx) = rtrb::RingBuffer::new(lag_ring(config.block, config.lag_window));
             lag_tx.push(tx);
             lags.push(rx);

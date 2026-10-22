@@ -207,7 +207,9 @@ rates other than 48 kHz, recording.
     percentile over a sliding window. A block is late exactly when its lag exceeds the
     read offset plus the extra delay. It sets the delay to that value plus a margin,
     within a configurable maximum, and changes it only with a fade (or only on operator
-    confirmation, configurable): up at once, down only after a hold time of lower need
+    confirmation, configurable): up at once (also when a single block was late: its
+    need then stays a floor for a hold time, for ten when the outlier recurs), down
+    only after a hold time of lower need
     (`MIXER_INPUT_DELAY_HOLD_S`), so it does not follow every outlier.
   - Manual stays possible. The lag is exported per input (§15), so the right value can
     be read off.

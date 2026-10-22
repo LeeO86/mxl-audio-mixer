@@ -2235,3 +2235,63 @@ settling):
 | ID | Feedback | What was done | Reason |
 | --- | --- | --- | --- |
 | X33 | F2 "never more than one change per hold period" | Only decreases wait for the hold time; an increase is applied at once, also within a hold period. | An increase stops samples from being lost; holding it back would trade a fade for audible gaps. Increases cannot flap: the delay only goes down after a hold. |
+
+## 1.4.1: late blocks and the read wait (test-all, 1.4.0)
+
+1.4.0 on test-all at `MIXER_READ_OFFSET=2` (10 min): the ST 2110 gateway inputs lost a
+whole block every 30–50 s (1718, 1112 and 1516 samples; 0 at offset 20 on 1.3.0), with
+automatic delays of 7.17–14 ms and no or few changes; at offset 20 a replay input over an
+RDMA mirror lost 388 and 97 samples to rare outliers above 20 ms (9 changes). And
+deadline misses after a start: 497 in the first 3 min (313 once the device IRQs were
+moved off the DSP core), then none.
+
+**Late blocks.** The real gateways are on time except for a rare packet several ms late:
+about one block in 20 000, far below the 99.9th percentile. The percentile rule never
+covered it, and the hold kept the delay down. A late block is exactly a block whose lag
+is above the read offset plus the delay (D230), so the control tick sees it in the lags
+it already gets.
+
+**The read wait.** Every read that finds its samples not there yet waits up to a quarter
+block (0.5 ms at 96 samples) for them, and each input waited its own. Four or more late
+inputs took longer than the block: every block was a deadline miss. Inputs are late
+together at the start, before their delays are set (1.4.0 sets the first after a full
+second of lags, D233; 1.3.0 after 100 ms), and while several are stalled or
+not started yet. The lab has no device IRQs on the DSP CPU; it shows the same misses
+with this mechanism alone.
+
+Lab (CPUs 43–47; the gateway pattern 5 min at offset 2 after 5 s; the startup with 7
+inputs (bursts, 960-sample batches, a mirror with outliers, per packet), 12 strips,
+8 buses, restarted with its saved show at SCHED_FIFO 49, 3 min):
+
+| Run | 1.3.0 | 1.4.0 | 1.4.1 |
+| --- | --- | --- | --- |
+| per packet, +6 ms every 30 s: missing samples | – | 2496 (4 changes) | 192: the first outlier, 2 blocks (2 changes) |
+| per packet, +5 ms every 40 s | – | 1248 (3 changes) | 192: the first outlier (3 changes, one a start-up one-off falling after 1 min) |
+| bursts of 5 packets, +10 ms every 45 s | – | 2688 (14 changes) | 384: the first outlier, 4 blocks (2 changes; earlier run) |
+| deadline misses in 3 min after a restart | 31 (16 in the first 5 s) | 180 (all in the first second) | 0 |
+| deadline misses with five writers stopped, 3 s | 752 | 752 | 2 |
+| automatic delays 5 s after those writers resumed | – | 150 ms (the maximum) on all five | 0–2 ms (as before the stop) |
+| two inputs on one flow, writer restarted at once 10 times | – | both stalled, 2 "(deleted)" mappings (1.4.1 before D240) | both running, 0 missing, none |
+
+(1.4.1 numbers after the review fixes; all outlier losses of the 1.4.1 column are in
+each input's first outlier, none recurred in the 5 min. The steady per-packet input
+lost 96 samples to one late wake-up of the lab's own writer, which ran SCHED_OTHER on
+the mixer's CPUs: a one-off, its 2 ms went again after 1 min.)
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D235 | A block whose lag is above the read offset plus the input's delay (late, or saved only by the read's short wait) raises the automatic delay at once to its lag plus 1 ms, within `MIXER_INPUT_DELAY_MAX_MS`, also before the first second of lags and regardless of the hold. The control tick takes the highest lag of the tick from the lags the DSP thread already reports; nothing new on the DSP thread. | A rare outlier is invisible to the 99.9th percentile; each one lost a block. A stall is no lag (D230), so a stopped writer raises nothing. |
+| D236 | The need of a late block is a floor of the automatic delay for one hold time (the short floor). An outlier (a block needing at least 1 ms more than the 99.9th percentile; not before the first second) that comes again, late or covered, within ten hold times, needing within 1 ms and a block of the last outlier or of the recurring floor (the same outlier reads up to a block apart at block ends), recurs: it sets the recurring floor, which lasts ten hold times (5 min by default), renewed by each recurrence of that size. Another size renews nothing: a smaller tail does not keep a higher floor up, a single higher spike gets its own short floor and does not enter the recurring one (no ratchet). The delay goes down only after the floor has expired and then the need stayed lower for a hold time. Lags above the read offset plus `MIXER_INPUT_DELAY_MAX_MS` count for nothing (a writer catching up, D230). | A one-off hiccup should cost its latency for about two hold times (1 min), not 5.5 min; a recurring outlier (the gateways: every 30–50 s) costs one block, or two when it recurs only after the delay fell (every 1–5 min), instead of one per occurrence. |
+| D239 | After a new reader or a stall the arrival lag counts only once the writer has caught up: back within a block of the lag reported before the stall, or a head that kept real time (advanced at most 1/8 more than the time) over 0.5 s (a new reader, a writer now later than before, one always later than the window). Lags beyond the read offset plus `MIXER_INPUT_DELAY_MAX_MS` move no delay at all: neither the late-block rule nor the 99.9th percentile counts them (they stay in the displayed percentiles and `lag_ms`; a writer always that late reads the edge of the measured range there, `lag_ms` is exact). | A resumed writer is seconds behind and then commits faster than real time, under load also in bits; counted, its catch-up raised the delay to the maximum for about 40 s (also in 1.4.0, through the 99.9th percentile; review: 1 of 3 runs of `inputs.sh` on a loaded host). The lag at the head's moves of a batched writer goes up and down by up to a block, so "the lag stopped falling" cannot be the test, the head's pace is. A catch-up slower than 1.125 times real time still counts and raises the delay for about two hold times, as in 1.4.0. |
+| D240 | One MXL instance per flow generation (flow id and the inode of its data file), shared by the inputs reading it, instead of one per domain; the reader holds it, and both are released when the control side drops the reader the DSP thread returns (at stop after the DSP thread ended, G8). | libmxl 218ddaa caches one reader per flow id per instance and only adds a reference: a re-open after a quick re-create (or a second input on the flow) got the old reader, mapped on the deleted files (lab: both inputs stalled, 2 "(deleted)" mappings after ten quick writer restarts; with D240 both run, none). The srt-gateway and the multiviewer use one instance per reader. Not one per open: each instance is an inotify instance and a watcher thread, `fs.inotify.max_user_instances` is 128 per uid and shared with every MXL process as uid 1000, and `MIXER_INPUT_FLOWS` goes to 256. A flow re-created on the same inode (tmpfs may reuse one) would still share; the stall re-open covers that case. |
+| D237 | One read wait per block for all inputs: a quarter block from the wake-up; a read after it does not wait. | A wait per input multiplied by the late inputs exceeded the block (deadline misses at every start and with stalled inputs). |
+| D238 | `inputs.sh` adds a per-packet writer with a 6 ms outlier every 8 s (nothing lost after the first) and five stopped writers (fewer than 50 deadline misses in 3 s; 1.4.0: about 750). | Both fail on 1.4.0. |
+
+#### Deviations
+
+| ID | Request | What was done | Reason |
+| --- | --- | --- | --- |
+| X34 | "never below the highest lag that caused a miss within the hold time" | A one-off late block: a floor of one hold time. A recurring outlier: ten hold times, renewed by each recurrence. | Gateway outliers come every 30–50 s, longer than the 30 s hold: a floor of one hold time let the delay fall between two of them, and each outlier was lost again. The cost: a recurring outlier keeps up to its latency (e.g. 6 ms) for 5.5 min after its last occurrence. |
+
