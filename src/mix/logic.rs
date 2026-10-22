@@ -666,6 +666,28 @@ impl BlockKind {
             _ => None,
         }
     }
+
+    /// [`BlockKind::signal`], to change it.
+    pub fn signal_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Mute { signal }
+            | Self::Pfl { signal }
+            | Self::Fader { signal }
+            | Self::Vad { signal }
+            | Self::Level { signal }
+            | Self::Above { signal, .. }
+            | Self::Loudness { signal, .. }
+            | Self::NmosSender { signal }
+            | Self::SetMute { signal }
+            | Self::SetFader { signal, .. }
+            | Self::SetParam { signal, .. }
+            | Self::SetPfl { signal }
+            | Self::SetPublish { signal }
+            | Self::LoudnessControl { signal, .. } => Some(signal),
+            Self::SetVca { vca, .. } => Some(vca),
+            _ => None,
+        }
+    }
 }
 
 impl Mix {
@@ -688,7 +710,7 @@ impl Mix {
     /// Signals a logic graph reads with voice detection.
     pub fn logic_vad_signals(&self) -> impl Iterator<Item = &str> {
         self.logic_blocks().filter_map(|b| match &b.kind {
-            BlockKind::Vad { signal } => Some(signal.as_str()),
+            BlockKind::Vad { signal } if !signal.is_empty() => Some(signal.as_str()),
             _ => None,
         })
     }
@@ -711,22 +733,33 @@ impl Mix {
         None
     }
 
-    /// Remove the blocks (and their wires) that name signal `id`.
-    pub fn remove_from_logic(&mut self, id: &str) {
-        let strip = |blocks: &mut Vec<Block>, wires: &mut Vec<Wire>| {
-            let gone: Vec<String> = blocks
-                .iter()
-                .filter(|b| b.kind.signal() == Some(id))
-                .map(|b| b.id.clone())
-                .collect();
-            blocks.retain(|b| b.kind.signal() != Some(id));
-            wires.retain(|w| !gone.contains(&w.from_block) && !gone.contains(&w.to_block));
-        };
-        for g in &mut self.logic {
-            strip(&mut g.blocks, &mut g.wires);
-        }
-        for m in &mut self.logic_macros {
-            strip(&mut m.blocks, &mut m.wires);
+    /// Blocks that name signal `id`, or one of the talkback `destinations` that
+    /// went with it, keep their place and wires with an empty target: valid,
+    /// listed in the warnings, never acting on it (C9, D182). A `set-monitor`
+    /// that chose it chooses no source.
+    pub fn remove_from_logic(&mut self, id: &str, destinations: &[String]) {
+        let blocks = self
+            .logic
+            .iter_mut()
+            .flat_map(|g| &mut g.blocks)
+            .chain(self.logic_macros.iter_mut().flat_map(|m| &mut m.blocks));
+        for b in blocks {
+            if let Some(target) = b.kind.signal_mut().filter(|t| *t == id) {
+                target.clear();
+            }
+            match &mut b.kind {
+                BlockKind::SetTalk { destination, .. } if destinations.contains(destination) => {
+                    destination.clear();
+                }
+                BlockKind::SetMonitor { source, .. }
+                    if source
+                        .as_ref()
+                        .is_some_and(|s| *s == Source::Signal(id.to_string())) =>
+                {
+                    *source = None;
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -1732,6 +1765,59 @@ pub(crate) mod tests {
         );
     }
 
+    /// C9: a deleted bus empties the `set-talk` blocks of its talkback
+    /// destination and the `set-monitor` blocks that chose it as the source.
+    #[test]
+    fn deleting_a_bus_empties_talk_and_monitor_targets() {
+        use serde_json::json;
+        let mut m = Mix::default();
+        m.buses
+            .push(crate::mix::model::tests::bus("ifb", Format::Mono));
+        m.buses
+            .push(crate::mix::model::tests::bus("main", Format::Stereo));
+        let t = &mut m.control_room.talkback;
+        t.mics.push(
+            serde_json::from_value(json!({"id": "tb", "name": "TB", "input": 1, "channel": 1}))
+                .unwrap(),
+        );
+        t.destinations
+            .push(serde_json::from_value(json!({"id": "d1", "name": "D1", "bus": "ifb"})).unwrap());
+        m.control_room.monitors.push(
+            serde_json::from_value(json!({"id": "mon", "name": "Mon", "format": "stereo"}))
+                .unwrap(),
+        );
+        let talk = |d: &str| BlockKind::SetTalk {
+            mic: "tb".into(),
+            destination: d.into(),
+        };
+        let listen = |s: &str| BlockKind::SetMonitor {
+            monitor: "mon".into(),
+            source: Some(Source::Signal(s.into())),
+        };
+        m.logic.push(graph(
+            vec![
+                block("t", talk("d1")),
+                block("l", listen("ifb")),
+                block("k", listen("main")),
+            ],
+            vec![],
+        ));
+        assert_eq!(validate(&m), Ok(()));
+        m.remove_signal("ifb");
+        assert_eq!(validate(&m), Ok(()));
+        let kinds: Vec<&BlockKind> = m.logic[0].blocks.iter().map(|b| &b.kind).collect();
+        assert_eq!(kinds[0], &talk(""));
+        assert!(kinds[0].target_unset());
+        assert_eq!(
+            kinds[1],
+            &BlockKind::SetMonitor {
+                monitor: "mon".into(),
+                source: None
+            }
+        );
+        assert_eq!(kinds[2], &listen("main"), "another source stays");
+    }
+
     fn issues_of(blocks: Vec<Block>, wires: Vec<Wire>) -> Vec<Issue> {
         issues(&mix_with(blocks, wires))
     }
@@ -1760,7 +1846,15 @@ pub(crate) mod tests {
         assert_eq!(validate(&m), Ok(()));
         assert_eq!(m.logic_vad_signals().collect::<Vec<_>>(), ["vox"]);
         m.remove_signal("vox");
-        assert!(m.logic[0].blocks.is_empty());
+        // The blocks stay, wired, with no target (C9): valid, with warnings.
+        assert_eq!(m.logic[0].blocks.len(), 2);
+        assert_eq!(m.logic[0].wires.len(), 1);
+        assert!(m.logic[0]
+            .blocks
+            .iter()
+            .all(|b| b.kind.signal() == Some("")));
+        assert_eq!(validate(&m), Ok(()));
+        assert_eq!(m.logic_vad_signals().count(), 0);
         let bad = |kind: BlockKind| !issues_of(vec![block("x", kind)], vec![]).is_empty();
         assert!(bad(BlockKind::Mute {
             signal: "nope".into()

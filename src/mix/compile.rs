@@ -1226,6 +1226,7 @@ mod tests {
             solo_safe: false,
             mute_safe: false,
             minus: None,
+            subgroup: false,
         }
     }
 
@@ -1662,6 +1663,50 @@ mod tests {
         let sub = 2.0 * l * 0.707_945_8 * 0.5;
         assert!((out.0[&1][0][0] - sub * h).abs() < 1e-5);
         assert_eq!(out.0[&1].len(), 2);
+    }
+
+    /// C12: a send into a subgroup is post-pan at 0 dB, whatever it says; the
+    /// strip's fader and pan act on it, and the bus fader is the group level.
+    #[test]
+    fn subgroup_sends_are_post_pan_at_0_db() {
+        let mut m = Mix::default();
+        m.strips.push(Strip {
+            fader_db: Db(-6.0206),
+            ..strip("vox", Format::Mono, 1)
+        });
+        m.buses.push(Bus {
+            subgroup: true,
+            fader_db: Db(-6.0206),
+            ..bus("sub", Format::Stereo)
+        });
+        m.sends.push(Send {
+            gain_db: Db(-20.0),
+            ..send("vox", "sub", Tap::PreFader)
+        });
+        m.outputs.push(Output {
+            signal: "sub".into(),
+            format: None,
+            commit_samples: None,
+        });
+        assert_eq!(m.validate(1, 48), Ok(()));
+        let locked = m.all_sends();
+        assert_eq!(locked[0].tap, Tap::PostPan);
+        assert_eq!(locked[0].gain_db, Db(0.0));
+        let slots = HashMap::from([("sub".to_string(), 0)]);
+        let inputs = Inputs(vec![vec![vec![0.5; 48]]]);
+        let level = |m: &Mix| {
+            let mut compiler = Compiler::default();
+            let mut c = compiler.compile(m, 48, 0, &slots, &HashMap::new());
+            run(&mut c, &inputs, 1).0[&0][0][0]
+        };
+        // 0.5, strip fader −6 dB, centred (−3 dB), bus fader −6 dB.
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let want = 0.5 * 0.5 * h * 0.5;
+        let got = level(&m);
+        assert!((got - want).abs() < 1e-5, "{got} != {want}");
+        // Without the flag the send's own tap and level apply again.
+        m.buses[0].subgroup = false;
+        assert!((level(&m) - want).abs() > 0.01);
     }
 
     fn limiter() -> Proc {

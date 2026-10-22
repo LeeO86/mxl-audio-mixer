@@ -102,7 +102,7 @@ try {
   await page.screenshot({ path: `${out}/console.png` });
 
   // Processing: open vox, add an EQ from the palette, drag its band handle up.
-  await page.locator('[data-signal="vox"] .sname').click();
+  await page.locator('[data-signal="vox"] .sicon.gear').click();
   await page.locator(".palette .pchip", { hasText: /^EQ/ }).click();
   await until("an EQ on vox", async () => (await api("/api/v1/strips/vox/chain")).length === 1);
   const handle = page.locator(".nodecard .curve .handle circle").first();
@@ -323,7 +323,7 @@ try {
   // Auto: an auto-mix of Vox and Guitar, a weight, a duck of Main under Vox. (Vox has an EQ boost near
   // its 1 kHz tone from the processing steps: it gets the larger share.)
   await page.getByRole("button", { name: "Operations" }).click();
-  await page.getByRole("button", { name: "Auto", exact: true }).click();
+  await page.getByRole("button", { name: "Auto-mix", exact: true }).click();
   await page.getByLabel("New auto-mix name").fill("Panel");
   await page.getByRole("button", { name: "+ Auto-mix" }).click();
   await page.getByLabel("Vox in Panel").check();
@@ -372,6 +372,19 @@ try {
     return g && g.gtr < before.gtr - 3 && (await shown("gtr")) === g.gtr.toFixed(1) ? g : null;
   });
   pass(`auto-mix of Vox and Guitar from the panel: ${before.vox} and ${before.gtr} dB on both clients (powers add up to 1); Guitar's weight −6 dB: ${after.vox} and ${after.gtr} dB; the VAD dot quiet on a tone`);
+  // The members are tiles: one more member moves no tile (C7).
+  const tile = page.locator('[data-automix-edit] [data-tile="gtr"]');
+  const placed = await tile.boundingBox();
+  await page.getByLabel("Guitar in Panel").uncheck();
+  await until("Guitar out", async () => (await api("/api/v1/automixes"))[0].members.length === 1);
+  await page.getByLabel("Guitar in Panel").check();
+  await until("Guitar back", async () => (await api("/api/v1/automixes"))[0].members.length === 2);
+  const again = await tile.boundingBox();
+  if (placed.x !== again.x || placed.y !== again.y) throw new Error(`the Guitar tile moved: ${JSON.stringify(placed)} → ${JSON.stringify(again)}`);
+  await page.screenshot({ path: `${out}/automix.png` });
+  await page.keyboard.press("Escape");
+  pass("auto-mix members are tiles: out and in again, nothing moves");
+  await page.getByRole("button", { name: "Auto", exact: true }).click();
   await page.getByLabel("New duck name").fill("Bed");
   await page.getByRole("button", { name: "+ Duck" }).click();
   await page.getByLabel("Vox keys Bed").check();

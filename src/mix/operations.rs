@@ -1,7 +1,7 @@
 //! High-level operations (§5) that generate ordinary routing underneath (§1: "the
 //! operator sees a console; the engine sees a graph"):
-//! - **group:** strips → a new subgroup bus; their post-fader sends move to it,
-//!   and it sends where they sent;
+//! - **group:** strips → a new subgroup bus (flagged `subgroup`); their
+//!   post-fader sends move to it, and it sends where they sent;
 //! - **N-1:** per participant (a bus each with the sum of all others) or one of
 //!   the selection; from a bus (a mix-minus that follows it) or from the
 //!   selection's strips (sends of their own);
@@ -115,6 +115,8 @@ pub fn group(
     if let Some(n) = name {
         bus.name = n;
     }
+    // Its sends are post-pan at 0 dB: a subgroup (C12).
+    bus.subgroup = true;
     let mut targets: Vec<String> = Vec::new();
     mix.sends.retain(|s| {
         let moved = strips.contains(&s.from) && after_fader(&s.tap);
@@ -475,6 +477,7 @@ mod tests {
         assert!(m.send("host", "main").is_none(), "moved");
         assert!(m.send("host", "aux").is_some(), "the pre-fader aux stays");
         assert!(m.send("host", "group-1").is_some());
+        assert!(m.is_subgroup("group-1"));
         assert!(m.send("group-1", "main").is_some());
         assert!(m.send("phone", "main").is_some());
         // A mix-minus of main without phone: grouping phone is refused.

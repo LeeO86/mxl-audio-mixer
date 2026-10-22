@@ -29,7 +29,17 @@ logic graphs; master/slave remote production.
 `http://<host>:8190/`: one page built into the binary (no CDN, no other files). Tabs
 (the URL hash addresses them): **Console** (strips in banks or in a layout's pages:
 patch, trim, polarity, the chain overview with its response and gain reduction,
-sends, pan and width, mute, fader, meter; the buses beside them), **Processing**
+sends, pan and width, mute, fader, meter; the buses and VCAs beside them, behind a
+divider that sets how wide each side is (drag it or use the arrow keys; double-click
+or Home: automatic), each side scrolling on its own. A click on a strip's name
+renames it, the gear opens its processing, and its ⋮ menu has "Send to…" (a new
+send at 0 dB to a bus), on a bus "Add source…" and "Subgroup…", and "Delete…" (with
+a confirmation listing what goes with it). "+ Strip" and "+ Bus" add several at
+once with numbered names; the first new one is selected. A stereo or wider strip's
+input patch is linked by default: choose the first channel and the others follow
+in order on the same input (untick "Link" to choose each). Wider strips have one
+polarity button that opens a toggle per channel and shows how many are inverted.
+"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile), **Processing**
 (the chain of a strip or bus: drag node types in from the palette, drag nodes to
 reorder, bypass, delete; EQ curve with band handles, filter, dynamics transfer
 curves with the live level, de-esser listen, keys), **Routing** (the send matrix,
@@ -354,7 +364,16 @@ an id gets `strip-<n>` or `bus-<n>`.
   position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
   (measure it). A mono strip is stereo after its panner.
 - **Bus:** sum of its sends → `chain` → fader (`"-inf"` … +15) and mute; `loudness`;
-  `compensate` (delay compensation, default `true`). A **mix-minus** bus (N-1, §5)
+  `compensate` (delay compensation, default `true`). A **subgroup** bus
+  (`subgroup: true`) takes every send into it from its source's output (a strip's
+  post-pan, a bus's post-fader) at 0 dB, whatever the send's `tap` and `gain_db`
+  say: its fader is the group level. Every change stores its sends so (also a
+  recall, an import or the remote link; making a bus a subgroup is ramped), so the
+  API shows what is heard; clearing the flag leaves them at 0 dB. A send's `mute`
+  and `phase` still apply, and a PUT of another level or tap into it is refused
+  (400). The `group` operation makes subgroups. A mix-minus `of` a subgroup takes
+  those sends as the subgroup does (0 dB from the source's output). A show with a
+  subgroup cannot be loaded by 1.3.0. A **mix-minus** bus (N-1, §5)
   has `minus: {"of": "<bus>", "without": [ids]}`: besides its own sends it takes
   every send into `of`, as it is (tap, level, mute, phase), except those from
   `without`; its own send from a source wins. It follows `of` without a plan swap.
@@ -406,6 +425,14 @@ an id gets `strip-<n>` or `bus-<n>`.
   `mute`. A `mute_safe` strip or bus is never muted by a mute group or a VCA. At
   most 32. Neither VCAs nor mute groups change the plan: only fader values move.
   Deleting a strip, bus or VCA takes it out of VCAs, mute groups and layout pages.
+  Deleting a strip or bus also removes its sends, its output, its mix-minus and
+  talkback destinations and references and its auto setup; a monitor, a
+  control-room source or a talkback return that listened to it listens to
+  nothing; another signal's key on it is cleared (a compressor keys itself, a
+  ducker's empty key hears nothing); logic blocks that name it (also a `set-talk`
+  to one of its talkback destinations) stay, wired, with an empty target: they
+  no longer act on it but still pass their value on; a `set-monitor` that chose
+  it chooses no source.
 - **Snapshots** (§12.5): parameter states of every strip, bus, send and VCA (trim,
   polarity, fader, mute, pan, width, every chain node's parameters and bypass,
   send gain, mute and phase; VCA fader and mute), and the auto setup as a whole
@@ -433,7 +460,7 @@ addressed by signal id and field (§12.4), e.g. `strips/vox/fader_db`,
 
 High-level operations make ordinary buses and sends (editable afterwards), each
 `POST /api/v1/operations/<op>` answering `{"buses", "strips", "removed"}`:
-- `group` `{"strips", "id"?, "name"?, "format"? (stereo)}`: a subgroup bus; the
+- `group` `{"strips", "id"?, "name"?, "format"? (stereo)}`: a subgroup bus (`subgroup: true`); the
   strips' post-fader and post-pan sends move to it and it sends where they sent
   (pre-fader sends stay). Refused while a mix-minus of one of those buses leaves
   out one of the strips (through the group it would be back in).
@@ -751,9 +778,9 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET /api/v1/mix` | the whole mix |
 | `GET`, `PATCH /api/v1/mix/settings` | `{"pan_law_db": …, "mono_sum_db": …}` |
 | `GET`, `POST /api/v1/strips` | list (with `patch_state`), create (`format` required) |
-| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field (`tally_index` and `afv` take `null` to clear), `ramp_ms`; delete removes its sends |
+| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field (`tally_index` and `afv` take `null` to clear), `ramp_ms`; delete removes its sends and references (above, "Mute groups") |
 | `GET`, `POST /api/v1/buses` | list, create (`format` required) |
-| `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format`, `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `ramp_ms`; delete removes its sends and output |
+| `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format`, `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `subgroup`, `ramp_ms`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
 | `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
 | `GET /api/v1/outputs`, `GET /api/v1/outputs/<bus>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
@@ -858,7 +885,8 @@ exit 143, deregistered, own domain removed; connections survive a restart),
 re-created writers, a writer 30 ms late), `tests/integration/mix.sh` (the mix
 end to end: sample-exact output checks with `mxl-mixer-probe`, plan swaps that
 leave other paths untouched, meters, the NMOS sender, a restart with a downstream
-reader, unpublish, loop rejection), `tests/integration/processing.sh` (EQ
+reader, unpublish, loop rejection, a subgroup's locked sends, a deleted bus's
+references), `tests/integration/processing.sh` (EQ
 sample-exact, ramped parameters without a plan swap, bypass, high-pass, compressor
 gain reduction, limiter ceiling and latency, loudness and its controls),
 `tests/integration/show.sh` (snapshots with filters, recall-safe and crossfade,
@@ -868,7 +896,9 @@ checked on the API and on the other client; tally and AFV; a toggle pressed twic
 around a late mix; listening to a monitor with `MEDIAMTX_BIN`; talkback latched,
 held and listen-back; a send drawn and deleted in the graph; the logic editor,
 `web/tests/logic.mjs`: palette, cables, undo and redo, copy and paste, typed ports,
-validation markers, macros, dry run),
+validation markers, macros, dry run; the console's strip handling,
+`web/tests/console.mjs`: several strips at once, rename, the linked patch, polarity
+of a 5.1 strip, "Send to…" and "Add source…", a subgroup, delete, the divider),
 `tests/integration/room.sh` (a published monitor sample-exact with level, dim,
 cut and checks; PFL, AFL, interlock, solo-in-place; an input source; the
 oscillator with pink noise and a sweep), `tests/integration/tally.sh` (TSL over UDP and TCP, screen filter, AFV open and

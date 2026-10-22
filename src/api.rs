@@ -517,6 +517,8 @@ struct BusBody {
     /// A mix-minus (`null`: a plain bus again).
     #[serde(default, deserialize_with = "present")]
     minus: Option<Option<crate::mix::model::Minus>>,
+    /// Every send into it post-fader (post-pan) at 0 dB (C12).
+    subgroup: Option<bool>,
     ramp_ms: Option<f64>,
 }
 
@@ -524,6 +526,9 @@ impl BusBody {
     fn apply(self, b: &mut Bus) {
         if let Some(v) = self.minus {
             b.minus = v;
+        }
+        if let Some(v) = self.subgroup {
+            b.subgroup = v;
         }
         if let Some(v) = self.colour {
             b.colour = colour(v);
@@ -583,6 +588,7 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             solo_safe: false,
             mute_safe: false,
             minus: None,
+            subgroup: false,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {
@@ -673,6 +679,15 @@ async fn put_send(
                 return Err(not_found(format!("bus {to} does not exist")));
             }
             let tap = m.default_tap(&from);
+            if m.is_subgroup(&to)
+                && (b.tap.as_ref().is_some_and(|t| *t != tap)
+                    || b.gain_db.is_some_and(|g| g != Db(0.0)))
+            {
+                return Err(bad(format!(
+                    "{to} is a subgroup: its sends are at 0 dB from {}",
+                    serde_json::to_value(&tap).unwrap_or_default()
+                )));
+            }
             if m.send(&from, &to).is_none() {
                 m.sends.push(Send {
                     from: from.clone(),

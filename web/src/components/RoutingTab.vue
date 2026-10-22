@@ -7,7 +7,7 @@ import Pot from "./Pot.vue";
 import Pill from "./Pill.vue";
 import { TAPS, tapLabel } from "../nodes.js";
 import { api, dbValue, fmtDb } from "../api.js";
-import { act, buses, live, patchSend, sendOf, sends, signalOf, signals } from "../store.js";
+import { act, buses, isSubgroup, live, patchSend, sendOf, sends, signalOf, signals } from "../store.js";
 
 const editing = ref(null); // { from, to }
 const current = computed(() => (editing.value ? sendOf(editing.value.from, editing.value.to) : null));
@@ -82,13 +82,16 @@ const unpublish = (id) => act(() => api.del(`/api/v1/outputs/${id}`));
       <button class="btn small secondary" @click="editing = null">Close</button>
     </h3>
     <div class="params">
-      <Pot label="Gain" unit="dB" :value="gain" :min="-80" :max="10" :def="0" :fine="0.5" @change="(v) => put({ gain_db: v <= -80 ? '-inf' : v })" />
+      <p v-if="isSubgroup(current.to)" class="note" data-subgroup-lock>Into a subgroup: post-fader at 0 dB, locked (C12).</p>
+      <Pot v-else label="Gain" unit="dB" :value="gain" :min="-80" :max="10" :def="0" :fine="0.5" @change="(v) => put({ gain_db: v <= -80 ? '-inf' : v })" />
       <div>
-        <label>Tap</label>
-        <select :value="tapValue" aria-label="Tap" @change="setTap($event.target.value)">
-          <option v-for="[v, l] in TAPS" :key="v" :value="v">{{ l }}</option>
-          <option v-for="[v, l] in afterOptions" :key="v" :value="v">{{ l }}</option>
-        </select>
+        <template v-if="!isSubgroup(current.to)">
+          <label>Tap</label>
+          <select :value="tapValue" aria-label="Tap" @change="setTap($event.target.value)">
+            <option v-for="[v, l] in TAPS" :key="v" :value="v">{{ l }}</option>
+            <option v-for="[v, l] in afterOptions" :key="v" :value="v">{{ l }}</option>
+          </select>
+        </template>
         <label class="check"><input type="checkbox" :checked="current.mute" @change="put({ mute: $event.target.checked })" /> Mute</label>
         <label class="check"><input type="checkbox" :checked="current.phase" @change="put({ phase: $event.target.checked })" /> Phase invert</label>
         <label class="check" title="this send reads the source's previous block: one block of delay, allowed in loops">

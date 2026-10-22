@@ -12,7 +12,7 @@ import GraphNode from "./GraphNode.vue";
 import Pot from "./Pot.vue";
 import { TAPS, tapLabel } from "../nodes.js";
 import { api, dbValue, fmtDb } from "../api.js";
-import { act, buses, live, patchSend, sendOf, signalOf, store, stored, strips } from "../store.js";
+import { act, buses, isSubgroup, live, patchSend, sendOf, signalOf, store, stored, strips } from "../store.js";
 
 const { applyNodeChanges, applyEdgeChanges, fitView } = useVueFlow();
 const positions = ref(JSON.parse(stored("graph.positions", "{}")));
@@ -184,8 +184,9 @@ async function remove() {
     </VueFlow>
     <div v-if="current" class="panel graphsend" data-send-edit>
       <h3>{{ signalOf(current.from)?.name || current.from }} → {{ signalOf(current.to)?.name || current.to }}</h3>
-      <Pot label="Gain" unit="dB" :value="gain" :min="-80" :max="10" :def="0" :fine="0.5" @change="(v) => put({ gain_db: v <= -80 ? '-inf' : v })" />
-      <div class="row">
+      <p v-if="isSubgroup(current.to)" class="note" data-subgroup-lock>Into a subgroup: post-fader at 0 dB, locked (C12).</p>
+      <Pot v-else label="Gain" unit="dB" :value="gain" :min="-80" :max="10" :def="0" :fine="0.5" @change="(v) => put({ gain_db: v <= -80 ? '-inf' : v })" />
+      <div v-if="!isSubgroup(current.to)" class="row">
         <label>Tap</label>
         <select :value="tapValue" aria-label="Tap" @change="setTap($event.target.value)">
           <option v-for="[v, l] in TAPS" :key="v" :value="v">{{ l }}</option>

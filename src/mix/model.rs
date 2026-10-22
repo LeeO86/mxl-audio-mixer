@@ -195,6 +195,10 @@ pub struct Bus {
     /// except those from `without`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minus: Option<Minus>,
+    /// A subgroup (C12): every send into it is taken post-fader (a strip's
+    /// post-pan) at 0 dB, whatever the send says; its fader is the group level.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subgroup: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +253,7 @@ impl Bus {
             solo_safe: false,
             mute_safe: false,
             minus: None,
+            subgroup: false,
         }
     }
 }
@@ -657,7 +662,8 @@ impl Mix {
         for (id, chain) in self.chains() {
             super::chain::validate(chain).map_err(|e| format!("{id}: {e}"))?;
             for p in chain {
-                let Some(key) = p.kind.key() else {
+                // An empty key (a ducker whose key was deleted) hears nothing.
+                let Some(key) = p.kind.key().filter(|k| !k.signal.is_empty()) else {
                     continue;
                 };
                 if key.signal == id {
@@ -770,12 +776,38 @@ impl Mix {
     /// Every send the plan has: the sends, and those mix-minus buses mirror (a
     /// bus's own send from a source wins over the mirrored one).
     pub fn all_sends(&self) -> Vec<Send> {
-        let mut all = self.sends.clone();
-        all.extend(self.mirrored().map(|(bus, s)| Send {
-            to: bus.to_string(),
-            ..s.clone()
+        let mut all: Vec<Send> = self.sends.iter().map(|s| self.locked(s.clone())).collect();
+        all.extend(self.mirrored().map(|(bus, s)| {
+            self.locked(Send {
+                to: bus.to_string(),
+                ..self.locked(s.clone())
+            })
         }));
         all
+    }
+
+    /// Whether `id` is a subgroup bus (C12).
+    pub fn is_subgroup(&self, id: &str) -> bool {
+        self.bus(id).is_some_and(|b| b.subgroup)
+    }
+
+    /// Store every send into a subgroup as the plan takes it (C12, D186).
+    pub fn lock_subgroup_sends(&mut self) {
+        if !self.buses.iter().any(|b| b.subgroup) {
+            return;
+        }
+        let locked: Vec<Send> = self.sends.iter().map(|s| self.locked(s.clone())).collect();
+        self.sends = locked;
+    }
+
+    /// A send as the plan takes it: into a subgroup, from the source's output
+    /// tap (a strip's post-pan, a bus's post-fader) at 0 dB (C12).
+    pub fn locked(&self, mut send: Send) -> Send {
+        if self.is_subgroup(&send.to) {
+            send.tap = self.default_tap(&send.from);
+            send.gain_db = Db(0.0);
+        }
+        send
     }
 
     pub fn signal_order(&self) -> Result<Vec<&str>, String> {
@@ -792,7 +824,11 @@ impl Mix {
             }
         }
         for (id, chain) in self.chains() {
-            for key in chain.iter().filter_map(|p| p.kind.key()) {
+            for key in chain
+                .iter()
+                .filter_map(|p| p.kind.key())
+                .filter(|k| !k.signal.is_empty())
+            {
                 feeds.entry(id).or_default().push(key.signal.as_str());
             }
         }
@@ -841,8 +877,19 @@ impl Mix {
         Ok(order)
     }
 
-    /// Remove a signal with its sends and its output.
+    /// Remove a signal with its sends and its output, and every reference to
+    /// it: mix-minus, talkback destinations and returns, monitor sources, VCAs,
+    /// mute groups, the auto setup and layouts; logic blocks that name it stay
+    /// with an empty target (they never act, C9).
     pub fn remove_signal(&mut self, id: &str) {
+        let destinations: Vec<String> = self
+            .control_room
+            .talkback
+            .destinations
+            .iter()
+            .filter(|d| d.bus == id)
+            .map(|d| d.id.clone())
+            .collect();
         self.strips.retain(|s| s.id != id);
         self.buses.retain(|b| b.id != id);
         self.sends.retain(|s| s.from != id && s.to != id);
@@ -865,8 +912,43 @@ impl Mix {
         for g in &mut self.mute_groups {
             g.members.retain(|m| m != id);
         }
+        // What listened to it listens to nothing (C9).
+        let gone = |s: &Option<super::room::Source>| matches!(s, Some(super::room::Source::Signal(x)) if x == id);
+        for m in &mut self.control_room.monitors {
+            if gone(&m.source) {
+                m.source = None;
+            }
+        }
+        self.control_room
+            .sources
+            .retain(|s| !matches!(s, super::room::Source::Signal(x) if x == id));
+        for d in &mut self.control_room.talkback.destinations {
+            if gone(&d.return_feed) {
+                d.return_feed = None;
+            }
+        }
+        // A key on it is cleared: a compressor keys itself again, a ducker hears
+        // nothing (an empty key).
+        let chains = self
+            .strips
+            .iter_mut()
+            .map(|s| &mut s.chain)
+            .chain(self.buses.iter_mut().map(|b| &mut b.chain));
+        for p in chains.flatten() {
+            match &mut p.kind {
+                super::chain::ProcKind::Compressor { key, .. }
+                    if key.as_ref().is_some_and(|k| k.signal == id) =>
+                {
+                    *key = None;
+                }
+                super::chain::ProcKind::Ducker { key, .. } if key.signal == id => {
+                    key.signal.clear();
+                }
+                _ => {}
+            }
+        }
         self.remove_from_auto(id);
-        self.remove_from_logic(id);
+        self.remove_from_logic(id, &destinations);
         self.remove_from_layouts(id);
     }
 
@@ -961,6 +1043,7 @@ pub(crate) mod tests {
             solo_safe: false,
             mute_safe: false,
             minus: None,
+            subgroup: false,
         }
     }
 
@@ -1125,5 +1208,116 @@ pub(crate) mod tests {
         mix.sends.push(send("strip-1", "bus-1"));
         mix.remove_signal("bus-1");
         assert!(mix.sends.is_empty() && mix.buses.is_empty());
+    }
+
+    /// C9: deleting a signal takes it out of everything that names it.
+    #[test]
+    fn deleting_a_signal_removes_its_references() {
+        use serde_json::json;
+        let mut mix = Mix::default();
+        mix.strips.push(strip("vox", Format::Mono));
+        mix.strips.push(strip("gtr", Format::Mono));
+        mix.buses.push(bus("main", Format::Stereo));
+        mix.sends.push(send("vox", "main"));
+        mix.sends.push(send("gtr", "main"));
+        mix.vcas.push(
+            serde_json::from_value(json!({"id": "v", "name": "V", "members": ["vox", "gtr"]}))
+                .unwrap(),
+        );
+        mix.mute_groups.push(
+            serde_json::from_value(json!({"id": "g", "name": "G", "members": ["vox"]})).unwrap(),
+        );
+        mix.layouts.push(
+            serde_json::from_value(
+                json!({"name": "L", "pages": [{"name": "P", "signals": ["vox", "main"]}]}),
+            )
+            .unwrap(),
+        );
+        mix.control_room.monitors.push(
+            serde_json::from_value(
+                json!({"id": "pfl", "name": "PFL", "format": "stereo", "source": {"signal": "vox"}}),
+            )
+            .unwrap(),
+        );
+        mix.control_room.sources = vec![
+            serde_json::from_value(json!({"signal": "vox"})).unwrap(),
+            serde_json::from_value(json!({"signal": "main"})).unwrap(),
+        ];
+        let t = &mut mix.control_room.talkback;
+        t.mics.push(
+            serde_json::from_value(json!({"id": "tb", "name": "TB", "input": 1, "channel": 1}))
+                .unwrap(),
+        );
+        t.destinations.push(
+            serde_json::from_value(
+                json!({"id": "ifb", "name": "IFB", "bus": "main", "return": {"signal": "vox"}}),
+            )
+            .unwrap(),
+        );
+        // Keys on vox: gtr's compressor and ducker.
+        let node = |v| serde_json::from_value::<crate::mix::chain::Proc>(v).unwrap();
+        mix.strips[1].chain.push(node(json!({
+            "id": "comp", "type": "compressor", "threshold_db": -20.0, "ratio": 4.0,
+            "knee_db": 0.0, "attack_ms": 5.0, "release_ms": 100.0, "makeup_db": 0.0,
+            "detector": "peak", "key": {"signal": "vox", "tap": "post-fader"}})));
+        mix.strips[1].chain.push(node(json!({
+            "id": "duck", "type": "ducker", "key": {"signal": "vox", "tap": "post-fader"},
+            "threshold_db": -40.0, "depth_db": 10.0, "attack_ms": 5.0, "hold_ms": 100.0,
+            "release_ms": 200.0})));
+        assert_eq!(mix.validate(1, 48), Ok(()));
+        mix.remove_signal("vox");
+        assert_eq!(mix.validate(1, 48), Ok(()));
+        assert_eq!(mix.sends.len(), 1);
+        assert_eq!(mix.vcas[0].members, ["gtr"]);
+        assert!(mix.mute_groups[0].members.is_empty());
+        assert_eq!(mix.layouts[0].pages[0].signals, ["main"]);
+        assert_eq!(mix.control_room.monitors[0].source, None);
+        assert_eq!(mix.control_room.sources.len(), 1, "main stays");
+        assert_eq!(mix.control_room.talkback.destinations[0].return_feed, None);
+        assert_eq!(
+            mix.strips[0].chain[0].kind.key(),
+            None,
+            "the compressor keys itself"
+        );
+        assert_eq!(
+            mix.strips[0].chain[1].kind.key().unwrap().signal,
+            "",
+            "the ducker hears nothing"
+        );
+        // Deleting main takes its talkback destination.
+        mix.remove_signal("main");
+        assert!(mix.control_room.talkback.destinations.is_empty());
+        assert_eq!(mix.validate(1, 48), Ok(()));
+    }
+
+    /// C12: sends into a subgroup are taken post-pan at 0 dB.
+    #[test]
+    fn subgroup_sends_are_locked() {
+        let mut mix = Mix::default();
+        mix.strips.push(strip("vox", Format::Mono));
+        mix.buses.push(bus("sub", Format::Stereo));
+        mix.buses.push(bus("main", Format::Stereo));
+        mix.sends.push(Send {
+            tap: Tap::PreFader,
+            gain_db: Db(-12.0),
+            ..send("vox", "sub")
+        });
+        mix.sends.push(Send {
+            gain_db: Db(-3.0),
+            ..send("sub", "main")
+        });
+        assert_eq!(mix.all_sends(), mix.sends);
+        mix.buses[0].subgroup = true;
+        let all = mix.all_sends();
+        assert_eq!((&all[0].tap, all[0].gain_db), (&Tap::PostPan, Db(0.0)));
+        assert_eq!(all[1], mix.sends[1], "sends out of a subgroup are free");
+        // Stored as heard, and kept so when the flag is cleared.
+        mix.lock_subgroup_sends();
+        assert_eq!(mix.sends, all);
+        mix.buses[0].subgroup = false;
+        mix.lock_subgroup_sends();
+        assert_eq!(mix.all_sends(), all);
+        let json = serde_json::to_value(&mix.buses[1]).unwrap();
+        assert!(json.get("subgroup").is_none(), "not written while off");
     }
 }

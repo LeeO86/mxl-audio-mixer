@@ -1,9 +1,11 @@
 <script setup>
 // The console (§12.1): strips in banks or in a layout's pages, the buses and the VCAs beside them, the
-// mute groups in the toolbar. A strip's name or chain opens its processing; a VCA's spill shows only its
-// members.
-import { computed, ref, watch } from "vue";
+// mute groups in the toolbar. A strip's gear or chain opens its processing; a VCA's spill shows only its
+// members. A divider between the strips and the buses sets how wide each side is (C2); each scrolls on
+// its own.
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import AutomationPanel from "./AutomationPanel.vue";
+import AutomixPanel from "./AutomixPanel.vue";
 import GroupsPanel from "./GroupsPanel.vue";
 import OperationsPanel from "./OperationsPanel.vue";
 import RemoteDesk from "./RemoteDesk.vue";
@@ -12,7 +14,8 @@ import Strip from "./Strip.vue";
 import VcaStrip from "./VcaStrip.vue";
 import { SCALES } from "../dsp.js";
 import { api } from "../api.js";
-import { act, buses, live, muteGroups, patchMuteGroup, spill, store, stored, strips, vcaOf, vcaSignals, vcas } from "../store.js";
+import { numbered } from "../console.js";
+import { act, buses, live, muteGroups, patchMuteGroup, select, spill, store, stored, strips, vcaOf, vcaSignals, vcas } from "../store.js";
 
 const emit = defineEmits(["open"]);
 
@@ -52,24 +55,90 @@ const shown = computed(() => {
 const isBusId = (id) => buses.value.some((b) => b.id === id);
 const shownBuses = computed(() => buses.value.filter((b) => !shown.value.includes(b)));
 
-// New strip or bus.
+// New strips or buses: several at once get numbered names and ids (C6); the first new one is selected
+// and shown (C4).
 const adding = ref("");
-const form = ref({ id: "", name: "", format: "mono" });
+const form = ref({ id: "", name: "", format: "mono", count: 1 });
 function startAdd(kind) {
   adding.value = kind;
-  form.value = { id: "", name: "", format: kind === "bus" ? "stereo" : "mono" };
+  form.value = { id: "", name: "", format: kind === "bus" ? "stereo" : "mono", count: 1 };
 }
+const MAX_ADD = 64;
 async function add() {
-  const body = { format: form.value.format };
-  if (form.value.id.trim()) body.id = form.value.id.trim();
-  if (form.value.name.trim()) body.name = form.value.name.trim();
-  const ok = await act(() => api.post(`/api/v1/${adding.value === "bus" ? "buses" : "strips"}`, body), `${adding.value === "bus" ? "Bus" : "Strip"} added.`);
-  if (ok) adding.value = "";
+  const kind = adding.value;
+  const count = Math.max(1, Math.min(MAX_ADD, Math.round(Number(form.value.count) || 1)));
+  const id = form.value.id.trim();
+  const name = form.value.name.trim();
+  const names = numbered(name, count);
+  const made = [];
+  for (let i = 0; i < count; i++) {
+    const body = { format: form.value.format };
+    if (id) body.id = count > 1 ? `${id}-${i + 1}` : id;
+    if (name) body.name = names[i];
+    const r = await act(() => api.post(`/api/v1/${kind === "bus" ? "buses" : "strips"}`, body));
+    if (!r) break;
+    made.push(r.id);
+  }
+  if (!made.length) return;
+  const what = kind === "bus" ? "Bus" : "Strip";
+  live.notice = made.length === 1 ? `${what} added.` : `${made.length} ${what === "Bus" ? "buses" : "strips"} added${made.length < count ? ` (of ${count})` : ""}.`;
+  if (made.length === count) adding.value = "";
+  select(made[0]);
+  reveal(made[0]);
 }
+/** Shows a signal: the bank with a new strip (in "All strips"), then scrolls it into view. */
+async function reveal(id) {
+  if (kind(id) === "strip" && !layout.value && !spilled.value) {
+    const at = strips.value.findIndex((s) => s.id === id);
+    if (at >= 0) page.value = Math.floor(at / bankSize.value);
+  }
+  // The mix with the new signal comes on the WebSocket: wait for it to be drawn.
+  for (let i = 0; i < 20; i++) {
+    await nextTick();
+    const el = document.querySelector(`[data-signal="${CSS.escape(id)}"]`);
+    if (el) return el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+const kind = (id) => (strips.value.some((s) => s.id === id) ? "strip" : "bus");
+
+// The divider (C2): the width of the buses' side in px, remembered in this browser; 0 is "as wide as they
+// need, up to half".
+const busWidth = ref(Number(stored("console.buswidth", 0)) || 0);
+watch(busWidth, (v) => store("console.buswidth", Math.round(v)));
+const consoleEl = ref(null);
+const mastersEl = ref(null);
+let drag = null;
+function dragStart(e) {
+  drag = { x: e.clientX, w: mastersEl.value?.getBoundingClientRect().width || 0 };
+  window.addEventListener("pointermove", dragMove);
+  window.addEventListener("pointerup", dragEnd);
+  e.preventDefault();
+}
+const limit = (w) => Math.max(120, Math.min((consoleEl.value?.getBoundingClientRect().width || 1600) - 160, w));
+function dragMove(e) {
+  if (drag) busWidth.value = limit(drag.w - (e.clientX - drag.x));
+}
+function dragEnd() {
+  drag = null;
+  window.removeEventListener("pointermove", dragMove);
+  window.removeEventListener("pointerup", dragEnd);
+}
+function dragKey(e) {
+  const step = e.shiftKey ? 120 : 24;
+  const w = busWidth.value || mastersEl.value?.getBoundingClientRect().width || 300;
+  if (e.key === "ArrowLeft") busWidth.value = limit(w + step);
+  else if (e.key === "ArrowRight") busWidth.value = limit(w - step);
+  else if (e.key === "Home" || e.key === "Escape") busWidth.value = 0;
+  else return;
+  e.preventDefault();
+}
+onUnmounted(dragEnd);
 const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
 const editingGroups = ref(false);
 const operating = ref(false);
 const automating = ref(false);
+const automixing = ref(false);
 </script>
 
 <template>
@@ -97,7 +166,8 @@ const automating = ref(false);
       <button class="btn secondary" @click="startAdd('bus')">+ Bus</button>
       <button class="btn secondary" :aria-pressed="editingGroups" @click="editingGroups = !editingGroups">VCAs &amp; groups</button>
       <button class="btn secondary" :aria-pressed="operating" title="group, N-1, link, mix-minus" @click="operating = !operating">Operations</button>
-      <button class="btn secondary" :aria-pressed="automating" title="auto-mix, ducking, voice detection" @click="automating = !automating">Auto</button>
+      <button class="btn secondary" :aria-pressed="automixing" title="gain-sharing auto-mixes" @click="automixing = !automixing">Auto-mix</button>
+      <button class="btn secondary" :aria-pressed="automating" title="auto-level, ducking, voice detection" @click="automating = !automating">Auto</button>
     </div>
   </div>
   <div v-if="muteGroups.length" class="toolbar mutegroups">
@@ -117,6 +187,7 @@ const automating = ref(false);
   <GroupsPanel v-if="editingGroups" @close="editingGroups = false" />
   <OperationsPanel v-if="operating" @close="operating = false" />
   <AutomationPanel v-if="automating" @close="automating = false" />
+  <AutomixPanel v-if="automixing" @close="automixing = false" />
   <div v-if="spilled" class="banner info spillbanner">
     Spill: VCA <strong>{{ spilled.name }}</strong>, {{ shown.length }} members
     <button class="btn small secondary" @click="spill.vca = null">Show all</button>
@@ -131,7 +202,13 @@ const automating = ref(false);
         <label>Format</label>
         <select v-model="form.format"><option v-for="f in FORMATS" :key="f" :value="f">{{ f }}</option></select>
       </div>
+      <div class="countfield">
+        <label>How many</label><input v-model.number="form.count" type="number" min="1" :max="MAX_ADD" step="1" :aria-label="`Number of new ${adding === 'bus' ? 'buses' : 'strips'}`" />
+      </div>
     </div>
+    <p v-if="form.count > 1" class="note">
+      {{ form.name.trim() ? `Named ${numbered(form.name.trim(), 2).join(", ")} …` : "Named after their ids" }}<template v-if="form.id.trim()">; ids {{ form.id.trim() }}-1, {{ form.id.trim() }}-2 …</template>
+    </p>
     <div class="actions">
       <button class="btn secondary" @click="adding = ''">Cancel</button>
       <button class="btn" @click="add">Add</button>
@@ -140,7 +217,7 @@ const automating = ref(false);
 
   <div v-if="!live.mix" class="empty">Loading the mix…</div>
   <div v-else-if="!strips.length && !buses.length" class="empty">No strips or buses yet. Add one above, or import a show in Settings.</div>
-  <div v-else class="console">
+  <div v-else ref="consoleEl" class="console">
     <div class="strips">
       <template v-for="s in shown" :key="s.id">
         <VcaStrip v-if="isVcaId(s.id)" :vca="s" />
@@ -148,12 +225,27 @@ const automating = ref(false);
       </template>
       <div v-if="!shown.length" class="empty">This page is empty.</div>
     </div>
-    <div v-if="shownBuses.length && !spilled" class="busesec">
-      <Strip v-for="b in shownBuses" :key="b.id" :signal="b" bus :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
-    </div>
-    <div v-if="vcas.length" class="vcasec">
-      <VcaStrip v-for="v in vcas" :key="v.id" :vca="v" />
-    </div>
+    <template v-if="(shownBuses.length && !spilled) || vcas.length">
+      <div
+        class="cdivider"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Divider between strips and buses"
+        tabindex="0"
+        title="drag to share the width; arrow keys too, Home: back to automatic"
+        @pointerdown="dragStart"
+        @dblclick="busWidth = 0"
+        @keydown="dragKey"
+      ></div>
+      <div ref="mastersEl" class="masters" :style="busWidth ? { flex: `0 0 ${busWidth}px`, width: `${busWidth}px` } : null">
+        <div v-if="shownBuses.length && !spilled" class="busesec">
+          <Strip v-for="b in shownBuses" :key="b.id" :signal="b" bus :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+        </div>
+        <div v-if="vcas.length" class="vcasec">
+          <VcaStrip v-for="v in vcas" :key="v.id" :vca="v" />
+        </div>
+      </div>
+    </template>
   </div>
   <RemoteDesk :scale="scale" :alignment="alignment" />
 </template>

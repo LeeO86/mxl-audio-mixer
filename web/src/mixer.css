@@ -377,3 +377,57 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .vue-flow__handle { width: 10px; height: 10px; background: var(--accent); border: 2px solid var(--panel); }
 .graphsend { position: absolute; right: .6rem; top: .6rem; width: 280px; height: fit-content; z-index: 5; }
 .graphsend .row { display: flex; gap: .4rem; align-items: center; margin-top: .4rem; }
+
+/* ---- console 1.4.0: name, menu, linked patch, phase, subgroup sends, divider, dialogs (C1-C12) ---- */
+.shead { position: relative; display: flex; align-items: flex-start; gap: 2px; }
+.shead .sname { flex: 1; min-width: 0; overflow: hidden; }
+.shead .sname .fmt { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shead .sname .nm { max-width: 64px; }
+.strip.compact .shead .sname .nm { max-width: 92px; }
+.nmedit { flex: 1; min-width: 0; padding: .15rem .25rem; font-size: .8rem; font-weight: 700; }
+.sicons { display: flex; flex: 0 0 auto; }
+.sicon { background: none; border: 0; color: var(--muted); cursor: pointer; padding: .1rem .15rem; font-size: .8rem; line-height: 1.1; border-radius: 4px; font-family: inherit; }
+.sicon:hover { color: var(--text); background: var(--chip); }
+.sicon svg { display: block; width: 13px; height: 13px; fill: currentColor; }
+.mclose svg { display: block; width: 12px; height: 12px; stroke: currentColor; stroke-width: 2.5; fill: none; }
+.smenu { position: absolute; z-index: 20; top: 1.5rem; right: 0; display: flex; flex-direction: column; min-width: 9rem; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 14px rgba(0, 0, 0, .35); padding: .2rem; }
+.smenu button { background: none; border: 0; color: var(--text); text-align: left; padding: .35rem .55rem; font-size: .8rem; cursor: pointer; border-radius: 4px; font-family: inherit; }
+.smenu button:hover, .smenu button:focus-visible { background: var(--chip); }
+.smenu button.danger { color: var(--bad); }
+.sname .sub { color: var(--accent); font-weight: 700; }
+.patch .linkck { flex: 0 0 100%; margin: 0; font-size: .68rem; gap: .25rem; }
+.patch.linked select { flex: 1 1 100%; }
+.patch .pchip { flex: 1 1 40%; font-size: .62rem; color: var(--muted); background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; padding: .05rem .2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.patch .pchip.missing { border-color: var(--bad); color: var(--bad); }
+.polarity .btn.partial { background: var(--chip); color: var(--warn); box-shadow: inset 0 -3px 0 var(--warn); }
+.poltoggles { display: grid; grid-template-columns: repeat(auto-fill, minmax(4.2rem, 1fr)); gap: .3rem; }
+.sgsend { display: flex; justify-content: space-between; gap: .2rem; width: 100%; background: var(--panel2); border: 1px dashed var(--accent); border-radius: 4px; color: var(--muted); font-size: .66rem; padding: .1rem .25rem; margin: .1rem 0; cursor: pointer; font-family: inherit; }
+.sgsend span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sgsend .num { color: var(--text); display: inline-flex; align-items: center; gap: 2px; }
+.sgsend svg { width: 9px; height: 9px; fill: currentColor; }
+.sgsend.off .num { color: var(--muted); text-decoration: line-through; }
+.console .masters { display: flex; gap: .8rem; overflow-x: auto; flex: 0 1 auto; min-width: 0; padding-bottom: .4rem; }
+.console .masters .busesec { border-left: 0; padding-left: 0; overflow: visible; padding-bottom: 0; }
+.console .masters .vcasec { flex: 0 0 auto; }
+.cdivider { flex: 0 0 8px; margin: 0 -.4rem; cursor: col-resize; border-radius: 4px; background: linear-gradient(to right, transparent 3px, var(--border) 3px 5px, transparent 5px); touch-action: none; }
+.cdivider:hover, .cdivider:focus-visible { background: linear-gradient(to right, transparent 2px, var(--accent) 2px 6px, transparent 6px); }
+.countfield { flex: 0 0 7rem; min-width: 0; }
+.modal-back { position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, .45); display: flex; align-items: flex-start; justify-content: center; padding: 8vh 1rem 1rem; overflow: auto; }
+.modal { width: min(28rem, 100%); box-shadow: 0 10px 30px rgba(0, 0, 0, .4); }
+.modal.wide { width: min(64rem, 100%); }
+.modal p { font-size: .85rem; margin: .3rem 0 .5rem; }
+.pickgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr)); gap: .35rem; }
+.pickgrid .btn { overflow: hidden; text-overflow: ellipsis; }
+.amedit + .amedit { margin-top: .8rem; padding-top: .6rem; border-top: 1px solid var(--border); }
+.amtiles { display: grid; grid-template-columns: repeat(auto-fill, 9.5rem); gap: .35rem; margin: .5rem 0; }
+.amtile { height: 6.6rem; overflow: hidden; display: flex; flex-direction: column; gap: .2rem; border: 1px solid var(--border); border-radius: 6px; padding: .3rem .4rem; background: var(--panel2); opacity: .7; }
+.amtile.member { opacity: 1; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel2)); }
+.amtile.other { opacity: .45; }
+.amtile .amname { margin: 0; font-weight: 600; }
+.amtile .amname span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.amtile .amlive { display: flex; gap: .4rem; align-items: center; font-size: .75rem; }
+.amtile .amfields { display: flex; flex-direction: column; gap: .1rem; }
+.amtile .amfields label { margin: 0; display: flex; align-items: center; gap: .3rem; font-size: .72rem; }
+.amtile .amfields input:not([type="checkbox"]) { width: 4rem; padding: .1rem .3rem; }
+.amtile .amhint { margin-top: auto; }
+.minipot.surroundpan .num { color: var(--muted); font-style: italic; }

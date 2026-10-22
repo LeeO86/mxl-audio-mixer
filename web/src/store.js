@@ -152,6 +152,30 @@ export function patchNode(id, node, body) {
   changeLocally(() => signalOf(id)?.chain?.find((n) => n.id === node), `${signalPath(id)}/chain/${encodeURIComponent(node)}`, body);
 }
 
+// ---- routing from the console (C11) and subgroups (C12) ---------------------------------
+/** Whether signal `a` reaches signal `b` through sends (a send b → a would close a loop). */
+export function reaches(a, b) {
+  const seen = new Set();
+  const todo = [a];
+  while (todo.length) {
+    const x = todo.pop();
+    if (x === b) return true;
+    if (seen.has(x)) continue;
+    seen.add(x);
+    for (const s of sends.value) if (s.from === x && !s.block_delay) todo.push(s.to);
+  }
+  return false;
+}
+/** The buses `from` can get a new send to: not itself, not one it has, none that feeds it. */
+export const sendTargets = (from) => buses.value.filter((b) => b.id !== from && !sendOf(from, b.id) && !reaches(b.id, from));
+/** The strips and buses that can get a new send to bus `to`. */
+export const sendSources = (to) => signals.value.filter((s) => s.id !== to && !sendOf(s.id, to) && !reaches(to, s.id));
+/** A new send at the server's defaults: 0 dB from the source's output (a strip post-pan, a bus post-fader). */
+export const addSend = (from, to) =>
+  act(() => api.put(`/api/v1/sends/${encodeURIComponent(from)}/${encodeURIComponent(to)}`, {}), `Send ${signalOf(from)?.name || from} → ${signalOf(to)?.name || to} added at 0 dB.`);
+/** A subgroup bus takes its sends post-fader at 0 dB; their level is locked. */
+export const isSubgroup = (id) => !!buses.value.find((b) => b.id === id)?.subgroup;
+
 /** Send everything pending now (before an action that depends on it). */
 export function flush() {
   for (const key of [...pending.keys()]) flushKey(key);
