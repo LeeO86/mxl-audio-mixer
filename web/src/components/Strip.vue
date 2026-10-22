@@ -10,6 +10,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import Meter from "./Meter.vue";
 import MiniCurve from "./MiniCurve.vue";
 import MiniPot from "./MiniPot.vue";
+import FormatSelect from "./FormatSelect.vue";
 import Modal from "./Modal.vue";
 import VFader from "./VFader.vue";
 import { api, dbValue, fmtPan, fmtSigned } from "../api.js";
@@ -104,7 +105,7 @@ const closeMenu = (e) => {
 };
 watch(menu, (on) => (on ? window.addEventListener("mousedown", closeMenu) : window.removeEventListener("mousedown", closeMenu)));
 onUnmounted(() => window.removeEventListener("mousedown", closeMenu));
-const dialog = ref(""); // "send-to", "add-source", "subgroup", "delete", "polarity"
+const dialog = ref(""); // "send-to", "add-source", "subgroup", "format", "delete", "polarity"
 function choose(what) {
   menu.value = false;
   if (what === "processing") open();
@@ -284,7 +285,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
         </button>
         <div v-if="menu" class="smenu" role="menu">
           <button role="menuitem" @click="choose('processing')">Processing…</button>
-          <!-- TODO(1.4.0, after PR #38): a "Format…" item opening agent B's FormatSelect.vue (C10). -->
+          <button role="menuitem" @click="choose('format')">Format…</button>
           <button role="menuitem" @click="choose('send-to')">Send to…</button>
           <button v-if="bus" role="menuitem" @click="choose('add-source')">Add source…</button>
           <button v-if="bus" role="menuitem" @click="choose('subgroup')">{{ s.subgroup ? "Plain bus…" : "Subgroup…" }}</button>
@@ -463,6 +464,10 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
         <button class="btn secondary" @click="dialog = ''">Cancel</button>
         <button class="btn" @click="setSubgroup(!s.subgroup)">{{ s.subgroup ? "Make it a plain bus" : "Make it a subgroup" }}</button>
       </div>
+    </Modal>
+    <Modal v-if="dialog === 'format'" :title="`Format: ${s.name}`" @close="dialog = ''">
+      <FormatSelect :signal="s" />
+      <div class="actions"><button class="btn secondary" @click="dialog = ''">Close</button></div>
     </Modal>
     <Modal v-if="dialog === 'delete'" :title="`Delete ${kind} ${s.name}?`" @close="dialog = ''">
       <p>{{ s.name }} ({{ s.id }}) is removed from the mix at once<template v-if="refs.length">, with {{ refs.join("; ") }}</template>.</p>
