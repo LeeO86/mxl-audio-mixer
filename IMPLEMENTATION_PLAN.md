@@ -15,6 +15,7 @@ current so that work can resume after an interruption.
 | M8a logic graphs | done, **released in 1.2.0** (`8e2aae6`, 2026-10-15); maintainers' hardware run 2026-10-15/16 (`docs/release-notes/1.2.0.md`) |
 | M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | done (PRs 32, 33, 35), **released in 1.3.0** (2026-10-17; the tag commit is added after the tag) |
 | M9 remote link (master/slave) | done (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **released in 1.3.0** (2026-10-17; the tag commit is added after the tag); maintainers' hardware runs 2026-10-16/17 on `cab382e` and the final candidate `bd720c3` (`docs/release-notes/1.3.0.md`) |
+| 1.4.0 operator feedback (console C1–C12, DSP, views, input fixes) | in progress (section "1.4.0" below) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
@@ -2063,3 +2064,30 @@ The Logic tab's canvas against the API above (§11.3, §11.2's debug view). `web
 | D183 | A graph made in the UI starts in dry run. The toolbar shows LIVE (red), DRY RUN (amber) or OFF; an open macro shows the number of live graphs that use it. | An empty graph that the operator fills should not act half-built; going live is a deliberate switch. |
 | D184 | Group, ungroup, paste, undo and redo, and adding a macro instance, in a live graph (on and not in dry run; for a macro, any live graph using it) ask first when the blocks they make or re-make include actions, blocks that remember or macro instances: those actions act at once, and re-made blocks start empty (D172). The choices: do it live, switch to dry run first (all those graphs; when that write fails nothing is changed), or cancel. A dialog closes when another graph or macro is opened. | The operator decides whether a show changes under them. |
 | D185 | The client keeps the newest logic state: a write's answer (the whole graphs and macros, with `x-mix-revision`) replaces them in the shown mix at once, unless a push of that revision or a newer one is already shown; a pushed mix older than the shown revision is dropped (the revision starts again on a reconnect, for a restarted mixer); copy reads the graph or macro first, in the edit queue. A list field shows its own copy of the value, which a push updates only while the field has no focus and no unapplied edit; a value changed elsewhere meanwhile outlines the field in amber (Enter keeps the typed value, Escape takes the stored one). | The canvas was acknowledged only by pushes, which come up to a meter tick later: a copy right after an undo took the old graph, and a push redrew a focused field over the number being typed (`logic.mjs`, 2 and 3 of 40 lab runs). |
+
+## 1.4.0: operator feedback
+
+From the operators' feedback page (2026-10-22); the IDs (C console, D DSP, R control
+room, P processing, T routing, L logic, G graph, F input fixes) are used in the
+commits and the changelog.
+
+### 1.4.0: the console (C1–C7, C9, C11, C12)
+
+`web/src/components/Strip.vue`, `ConsoleTab.vue`, `AutomixPanel.vue`, `Modal.vue`,
+`web/src/console.js`; the model in `src/mix/model.rs` (`subgroup`, `locked`,
+`remove_signal`), `src/mix/logic.rs` (`remove_from_logic`), `src/api.rs`. Checked
+by `web/tests/console.mjs` (in `tests/integration/ui.sh`), `ui.mjs` (auto-mix tiles),
+`tests/integration/mix.sh` and unit tests (`subgroup_sends_are_locked`,
+`subgroup_sends_are_post_pan_at_0_db`, `deleting_a_signal_removes_its_references`).
+
+| # | Decision | Reason |
+| --- | --- | --- |
+| D186 | A subgroup is a bus flag, `subgroup` (written only while on, so a show without subgroups stays readable by 1.3.0). The plan takes every send into a subgroup from its source's output tap (a strip's post-pan, a bus's post-fader) at 0 dB (`Mix::locked` in `all_sends`, also for a mix-minus that mirrors it), whatever the send says, so a recall, an import, the remote link or logic cannot give it another level. Setting the flag also writes those values into the sends (one change, ramped; a tap change fades); a PUT of another level or tap into a subgroup is 400; `mute`, `phase` and `block_delay` stay free. Clearing the flag keeps the sends at 0 dB post-fader (no audio change). The `group` operation, which already made 0 dB post-pan sends, sets the flag. | Decided with the maintainer: "every send post-fader, post-pan, fixed at 0 dB; the bus fader is the group level". Locking at the plan keeps it true whatever writes the sends. |
+| D187 | Deleting a strip or bus keeps the logic blocks that name it, with their wires and an empty target (D182: valid, a warning, never acting), instead of removing them; a monitor's source, a control-room source and a talkback return that named it are cleared (they refused the delete before). The console asks first and lists what goes with it (sends, output, VCAs, mute groups, layouts, the auto setup, logic blocks). | An operator's graph should not lose blocks and cables by a strip being deleted; an inert block is visible (amber) and can get another target. |
+| D188 | "Send to…" and "Add source…" make a send at the server's defaults (0 dB from the source's output), like Reaper. They list only buses (sources) without a send between them that would not close a loop through the sends (the server stays the authority, e.g. for keys). | The routing view's matrix already allows any send; the console offers the usual one. |
+| D189 | The linked patch is a view of the patch, not part of the mix: a strip is shown linked while its patch is empty or in order on one input, or when the operator ticks "Link" (remembered per strip in the browser). Ticking or unticking never changes the patch; choosing the first channel then patches the others in order (beyond the input's channels they show `missing`). A talkback mic, being mono, goes to the first channel only. | A checkbox must not move audio; the per-channel patch stays the model. |
+| D190 | "+ Strip" and "+ Bus" with a count (at most 64) post one at a time: names "Name 1", "Name 2" …, ids `id-1`, `id-2` … when an id is given; it stops at the first refusal and says how many were made. The first new one is selected (also with a count of 1) and its bank shown. A click on the name renames in place; the gear and the chain overview open the processing. | No batch endpoint is needed for a handful of strips; a refusal (an id taken) leaves the ones before. |
+| D191 | Wider strips (2 or more channels) have one polarity button: inverted on all channels it is lit, on some it shows "n/m" with an amber edge (`aria-pressed="mixed"`), and it opens a dialog with a toggle per channel label (L, R, C, LFE …), All and None. | The per-channel buttons of a 7.1.4 strip filled the strip. |
+| D192 | The divider stores the buses' side in pixels in the browser (`console.buswidth`; 0: as wide as they need); the strips take the rest. Each side scrolls on its own. | One screen size differs from the next; the layout of a shared show should not carry it. |
+| D193 | Auto-mixes have their own dialog. Every strip is a tile of a fixed size whether it is a member or not (member: speech, gain, weight, bypass; another auto-mix's member: dimmed), so a member added or removed moves nothing. | Adding a member grew the table above the checkboxes, and the next checkbox moved away from the pointer. |
+

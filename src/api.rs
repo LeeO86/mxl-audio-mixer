@@ -517,6 +517,8 @@ struct BusBody {
     /// A mix-minus (`null`: a plain bus again).
     #[serde(default, deserialize_with = "present")]
     minus: Option<Option<crate::mix::model::Minus>>,
+    /// Every send into it post-fader (post-pan) at 0 dB (C12).
+    subgroup: Option<bool>,
     ramp_ms: Option<f64>,
 }
 
@@ -524,6 +526,9 @@ impl BusBody {
     fn apply(self, b: &mut Bus) {
         if let Some(v) = self.minus {
             b.minus = v;
+        }
+        if let Some(v) = self.subgroup {
+            b.subgroup = v;
         }
         if let Some(v) = self.colour {
             b.colour = colour(v);
@@ -583,6 +588,7 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             solo_safe: false,
             mute_safe: false,
             minus: None,
+            subgroup: false,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {
@@ -618,6 +624,7 @@ async fn patch_bus(
                 .find(|x| x.id == id)
                 .ok_or_else(|| not_found(format!("bus {id} does not exist")))?;
             b.apply(bus);
+            lock_sends(m, &id);
             Ok(())
         })
         .await?;
@@ -626,6 +633,16 @@ async fn patch_bus(
         Ok(Json(with_errors(v, errors)).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
+}
+
+/// The sends into subgroup `id` keep what the plan takes: the source's output
+/// tap at 0 dB (C12), so they show what is heard.
+fn lock_sends(m: &mut Mix, id: &str) {
+    if !m.is_subgroup(id) {
+        return;
+    }
+    let locked: Vec<Send> = m.sends.iter().map(|s| m.locked(s.clone())).collect();
+    m.sends = locked;
 }
 
 async fn sends(State(app): State<App>) -> Json<Value> {
@@ -673,6 +690,14 @@ async fn put_send(
                 return Err(not_found(format!("bus {to} does not exist")));
             }
             let tap = m.default_tap(&from);
+            if m.is_subgroup(&to)
+                && (b.tap.as_ref().is_some_and(|t| *t != tap)
+                    || b.gain_db.is_some_and(|g| g != Db(0.0)))
+            {
+                return Err(bad(format!(
+                    "{to} is a subgroup: its sends are post-fader at 0 dB"
+                )));
+            }
             if m.send(&from, &to).is_none() {
                 m.sends.push(Send {
                     from: from.clone(),

@@ -59,6 +59,41 @@ sleep 0.2
 probe 1 1:1:1 2:1:0
 pass "pan hard left, send deleted: L = tone 1, R = silence"
 
+# A subgroup (C12): vox reaches main through sub; its send there says pre-fader
+# −12 dB, but a subgroup takes it after the fader and pan at 0 dB.
+curl -fsS -X DELETE "$WEB/api/v1/sends/vox/main"
+api POST /api/v1/buses '{"id": "sub", "name": "Sub", "format": "stereo"}' >/dev/null
+api PUT /api/v1/sends/vox/sub '{"tap": "pre-fader", "gain_db": -12}' >/dev/null
+api PUT /api/v1/sends/sub/main >/dev/null
+api PATCH /api/v1/strips/vox '{"fader_db": -6.0206}' >/dev/null
+api PATCH /api/v1/buses/sub '{"subgroup": true}' >/dev/null
+sleep 0.2
+probe 1 1:1:0.5 2:1:0
+[[ "$(json "$WEB/api/v1/sends/vox/sub" "(d['tap'], d['gain_db'])")" == "('post-pan', 0.0)" ]] || fail "the send into the subgroup was not locked"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/sends/vox/sub" -d '{"gain_db": -6}')
+[[ "$code" == 400 ]] || fail "a send level into a subgroup answered $code"
+api PUT /api/v1/sends/vox/sub '{"mute": true}' >/dev/null
+sleep 0.2
+probe 1 1:1:0 2:1:0
+api PUT /api/v1/sends/vox/sub '{"mute": false}' >/dev/null
+pass "subgroup: its send post-pan at 0 dB (L = tone 1 × −6 dB fader), level locked (400), mute kept"
+
+# Deleting a bus (C9) takes its sends, VCA membership and layout place with it;
+# a logic block that names it stays with no target.
+api POST /api/v1/vcas '{"id": "grp", "name": "Grp", "members": ["sub", "vox"]}' >/dev/null
+api PUT /api/v1/logic/del '{"name": "Del", "enabled": false, "blocks": [{"id": "m", "type": "set-mute", "signal": "sub"}], "wires": []}' >/dev/null
+curl -fsS -X DELETE "$WEB/api/v1/buses/sub"
+[[ "$(json "$WEB/api/v1/sends" "len([s for s in d if 'sub' in (s['from'], s['to'])])")" == 0 ]] || fail "sends of the deleted bus"
+[[ "$(json "$WEB/api/v1/vcas/grp" "d['members']")" == "['vox']" ]] || fail "the deleted bus is still in the VCA"
+[[ "$(json "$WEB/api/v1/logic/del" "d['blocks'][0]['signal']")" == "" ]] || fail "the logic block still names the deleted bus"
+curl -fsS -X DELETE "$WEB/api/v1/logic/del"
+curl -fsS -X DELETE "$WEB/api/v1/vcas/grp"
+api PATCH /api/v1/strips/vox '{"fader_db": 0}' >/dev/null
+api PUT /api/v1/sends/vox/main >/dev/null
+sleep 0.2
+probe 1 1:1:1 2:1:0
+pass "bus deleted with its sends, VCA membership and logic target; vox straight to main again"
+
 api PUT /api/v1/outputs/main '{"format": "mono"}' >/dev/null
 wait_until 5 "mono output flow" python3 -c "import json; exit(0 if json.load(open('$OWN/$OUT_FLOW.mxl-flow/flow_def.json'))['channel_count'] == 1 else 1)"
 sleep 0.2

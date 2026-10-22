@@ -489,6 +489,7 @@ mod tests {
             solo_safe: false,
             mute_safe: false,
             minus: None,
+            subgroup: false,
         });
         for from in ["a", "b"] {
             m.sends.push(Send {

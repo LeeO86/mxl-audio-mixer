@@ -1,8 +1,8 @@
 <script setup>
-// The control engine (§8): auto-levels (target, speech offset, range, ballistics, freeze), gain-sharing
-// auto-mixes over strips (weight, bypass, last-mic-hold, VAD weighting), ducks (keys, targets; fixed:
+// The control engine (§8): auto-levels (target, speech offset, range, ballistics, freeze), ducks (keys, targets; fixed:
 // depth, attack, hold, release; ratio: Com-IS-Assist's control; the channel groups' shares) and the
-// voice activity detection of every analysed signal, each with its live state.
+// voice activity detection of every analysed signal, each with its live state. The gain-sharing auto-mixes
+// have a dialog of their own (AutomixPanel.vue, C7).
 import { computed, ref } from "vue";
 import AutoLive from "./AutoLive.vue";
 import ConfirmButton from "./ConfirmButton.vue";
@@ -11,12 +11,9 @@ import { api, dbValue } from "../api.js";
 import {
   act,
   autolevels,
-  automixOf,
-  automixes,
   buses,
   ducks,
   live,
-  patchAutomix as patchAm,
   patchDuck as patchDk,
   putAutolevel,
   signalOf,
@@ -26,27 +23,6 @@ import {
 
 const emit = defineEmits(["close"]);
 const nameOf = (id) => signalOf(id)?.name || id;
-
-// Auto-mixes.
-const amForm = ref({ id: "", name: "" });
-async function addAutomix() {
-  const body = {};
-  if (amForm.value.id.trim()) body.id = amForm.value.id.trim();
-  if (amForm.value.name.trim()) body.name = amForm.value.name.trim();
-  if (await act(() => api.post("/api/v1/automixes", body), "Auto-mix added.")) amForm.value = { id: "", name: "" };
-}
-const patchAutomix = (a, body) => patchAm(a.id, body);
-function setMember(a, id, on) {
-  const members = on ? [...a.members, { signal: id, weight_db: 0, bypass: false }] : a.members.filter((m) => m.signal !== id);
-  patchAutomix(a, { members });
-}
-function setMemberField(a, id, field, value) {
-  patchAutomix(a, { members: a.members.map((m) => (m.signal === id ? { ...m, [field]: value } : m)) });
-}
-const inOther = (a, id) => {
-  const other = automixOf(id);
-  return other && other.id !== a.id;
-};
 
 // Ducks.
 const duckForm = ref({ id: "", name: "" });
@@ -93,45 +69,10 @@ async function addVad() {
 
 <template>
   <div class="panel groups automation">
-    <h3>Auto-level, auto-mix, ducking and voice detection <span class="spacer"></span><button class="btn small secondary" @click="emit('close')">Close</button></h3>
+    <h3>Auto-level, ducking and voice detection <span class="spacer"></span><button class="btn small secondary" @click="emit('close')">Close</button></h3>
     <div class="grid two">
       <div>
-        <div class="caption">Auto-mixes (gain sharing)</div>
-        <div v-for="a in automixes" :key="a.id" class="groupedit" :data-automix-edit="a.id">
-          <div class="row">
-            <input :value="a.name" aria-label="Auto-mix name" @change="patchAutomix(a, { name: $event.target.value })" />
-            <label class="check"><input type="checkbox" :checked="a.enabled" @change="patchAutomix(a, { enabled: $event.target.checked })" /> on</label>
-            <label class="check" title="while nobody speaks, the gains stay"><input type="checkbox" :checked="a.last_mic_hold" @change="patchAutomix(a, { last_mic_hold: $event.target.checked })" /> last-mic hold</label>
-            <label class="check" title="a member without speech counts 10 dB less"><input type="checkbox" :checked="a.vad_weighting" @change="patchAutomix(a, { vad_weighting: $event.target.checked })" /> VAD weighting</label>
-            <label class="check" title="a snapshot's recall leaves it"><input type="checkbox" :checked="a.recall_safe" @change="patchAutomix(a, { recall_safe: $event.target.checked })" /> recall-safe</label>
-            <ConfirmButton label="Remove" small @confirm="act(() => api.del(`/api/v1/automixes/${a.id}`))" />
-          </div>
-          <table v-if="a.members.length" class="amtable">
-            <thead>
-              <tr><th>Member</th><th>Weight dB</th><th>Bypass</th><th>Gain</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="m in a.members" :key="m.signal" :data-member="m.signal">
-                <td><AutoLive kind="dot" :id="m.signal" /> {{ nameOf(m.signal) }}</td>
-                <td><NumberField :min="-30" :max="10" :step="1" :value="m.weight_db" :aria-label="`${nameOf(m.signal)} weight`" @change="(v) => setMemberField(a, m.signal, 'weight_db', v)" /></td>
-                <td><input type="checkbox" :checked="m.bypass" :aria-label="`${nameOf(m.signal)} bypass`" @change="setMemberField(a, m.signal, 'bypass', $event.target.checked)" /></td>
-                <td><AutoLive kind="gain" :id="m.signal" /></td>
-              </tr>
-            </tbody>
-          </table>
-          <div class="members">
-            <label v-for="x in strips" :key="x.id" class="check" :class="{ muted: inOther(a, x.id) }"
-              ><input type="checkbox" :checked="a.members.some((m) => m.signal === x.id)" :disabled="inOther(a, x.id)" :aria-label="`${x.name} in ${a.name}`" @change="setMember(a, x.id, $event.target.checked)" /> {{ x.name }}</label
-            >
-          </div>
-        </div>
-        <div class="row">
-          <input v-model="amForm.id" placeholder="id (automatic)" aria-label="New auto-mix id" />
-          <input v-model="amForm.name" placeholder="name" aria-label="New auto-mix name" />
-          <button class="btn small" @click="addAutomix">+ Auto-mix</button>
-        </div>
-
-        <div class="caption" style="margin-top: 0.8rem">Auto-level (speech-aware loudness)</div>
+        <div class="caption">Auto-level (speech-aware loudness)</div>
         <table v-if="autolevels.length" class="amtable leveltable">
           <thead>
             <tr>

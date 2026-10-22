@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.0 (in progress)
+
+Operator feedback (IDs as in IMPLEMENTATION_PLAN "1.4.0").
+
+### Console
+
+IMPLEMENTATION_PLAN D186–D193.
+
+- A click on a strip's name renames it in place (Enter saves, Escape cancels); a gear next to it opens its processing (C1).
+- A divider between the strips and the buses and VCAs sets how wide each side is (drag, arrow keys; double-click or Home: automatic, remembered in the browser); each side scrolls on its own (C2).
+- Stereo and wider strips have a "Link" box in their input patch: choose the first channel and the others follow in order on the same input; untick it to choose each channel (C3).
+- A new strip or bus is selected at once and shown (C4); "+ Strip" and "+ Bus" add several at once, with numbered names (and ids, when one is given) (C6).
+- Wider strips have one polarity button: it opens a toggle per channel and shows how many are inverted (C5).
+- Auto-mixes have their own dialog ("Auto-mix" in the toolbar); every strip is a tile of the same size, so a new member moves nothing (C7). The "Auto" panel keeps auto-levels, ducks and voice detection.
+- The strip menu (⋮): "Send to…" (a bus, a new send at 0 dB from the strip's output), on a bus "Add source…", and "Delete…" with a confirmation that lists its sends, output, VCAs, mute groups, layouts and logic blocks (C9, C11).
+- Deleting a strip or bus keeps the logic blocks that name it, wired, with an empty target (never acting); it removed them before. A monitor, control-room source or talkback return that listened to it is cleared instead of refusing the delete (C9).
+- Subgroup buses (`subgroup: true`, "Subgroup…" in a bus's menu, with a confirmation): every send into one is taken from its source's output (a strip's post-pan, a bus's post-fader) at 0 dB; its level is locked (a PUT of another level or tap is 400) and the strip shows it with a lock; the bus fader is the group level. The `group` operation makes subgroups (C12).
+- A logic `vad` block without a target no longer asks for voice detection of `""`.
+
 ## 1.3.0 (2026-10-17)
 
 Milestone 9 (§13: master/slave remote link).
