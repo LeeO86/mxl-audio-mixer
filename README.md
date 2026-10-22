@@ -133,8 +133,9 @@ The control room (§10.1) is part of the show (`control_room`); who is soloed is
   `delay_ms`, a `chain` of processing nodes for EQ), a
   `calibration_spl` (dB SPL at 0 dB) for the SPL presets `reference_spl` (79, 82,
   85), and `publish`: an MXL flow with an NMOS sender "Monitor <name>" for physical
-  speakers, and its own `downmix` of its source and the solo bus (`null`: the
-  mix's). Every control ramps; at most 16 monitors.
+  speakers, and its own `downmix` of its source (`null`: the mix's; the solo bus
+  is folded to stereo with the mix's down-mix). Every control ramps; at most 16
+  monitors.
 - **Bass management** (formats with an LFE channel), switched on and off per
   monitor: `bass_management` `{"enabled", "crossover_hz" (40–250), "lfe_gain_db"
   (−20 … +20)}`. The other channels are high-passed and their sum low-passed into
@@ -412,14 +413,20 @@ an id gets `strip-<n>` or `bus-<n>`.
   Ltr → Lrs (or Ls) at −3 dB; LFE → L + R at `lfe_db` (`"-inf"`: dropped);
   stereo → mono with the stereo-to-mono sum; mono → C (3.0 and the surround
   formats) or L + R with the pan law (stereo); channels the source lacks stay
-  silent. `normalise` scales a down-mix from 3.0 or wider into fewer channels so
-  that no output channel sums to more than unity.
+  silent. `normalise` scales the whole matrix of a down-mix from 3.0 or wider into
+  fewer channels (the front channels too) by its largest row sum, so that no
+  output channel sums to more than unity.
 - **Down-mix** (`downmix`: `{"centre_db", "surround_db", "lfe_db", "normalise"}`;
   levels −40 … 0 dB, LFE −40 … +10 dB, or `"-inf"`): the mix's in its settings
   (default −3, −3, `"-inf"`, `false`: the fixed down-mix of 1.3), and a bus's or a
-  monitor's own, for everything arriving there (`null`: the mix's). The solo bus
-  and published layouts use the mix's. A change rewires only the sends whose
-  coefficients change, with a fade.
+  monitor's own, for everything arriving there (`null`: the mix's), the sends a
+  mix-minus (N-1) bus mirrors included: they use the N-1 bus's down-mix. The solo
+  bus and published layouts use the mix's. A `downmix` in a PATCH replaces the
+  whole object (fields left out take their defaults). The mix's down-mix is left out of the
+  mix (and `mix.json`) while it is the default, so an unchanged mix loads in 1.3;
+  `GET /api/v1/mix/settings` always shows it. A change is not ramped: the
+  sends whose coefficients change fade out and in (10 ms, a brief dip), the others
+  are not touched. The UI asks for a second press.
 - **Format change** (`PATCH` a strip's or bus's `format`): the chain stays; nodes
   that run on any width adapt, nodes that cannot (M/S / width off stereo, a
   surround panner off a mono or stereo strip) are bypassed, flagged in
@@ -667,7 +674,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
 | `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
 | `width` | M/S / width, stereo only: `width_pct` 0–200 (0 mono, 100 unchanged, 200 double side), `input` and `output` `lr` \| `ms` (M = (L + R) / 2, S = (L − R) / 2; L = M + S, R = M − S); a gain matrix that ramps per sample, bypass ramps to the identity |
-| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off); constant power. It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
+| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off; the LFE send is full band, no low-pass); constant power. A stereo strip aimed behind has L and R mirrored (L at the right rear). It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
 ±24 dB, a chain at most 32 nodes. A node that cannot run on its signal's format

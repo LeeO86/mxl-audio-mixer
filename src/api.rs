@@ -245,7 +245,7 @@ async fn mix(State(app): State<App>) -> Json<Value> {
 }
 
 async fn settings(State(app): State<App>) -> Json<Value> {
-    Json(json!(app.control().mix.settings))
+    Json(settings_json(&app.control().mix.settings))
 }
 
 #[derive(Deserialize)]
@@ -287,9 +287,16 @@ async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Res
         })
         .await?;
         let s: MixSettings = app.control().mix.settings;
-        Ok::<_, Box<Response>>(Json(with_errors(json!(s), errors)).into_response())
+        Ok::<_, Box<Response>>(Json(with_errors(settings_json(&s), errors)).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
+}
+
+/// The settings with `downmix` always shown (the show file leaves out the default).
+fn settings_json(s: &MixSettings) -> Value {
+    let mut v = json!(s);
+    v["downmix"] = json!(s.downmix);
+    v
 }
 
 fn strip_json(app: &App, s: &Strip) -> Value {

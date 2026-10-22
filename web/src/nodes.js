@@ -198,6 +198,9 @@ export const BAND_TYPES = [
 export const PASS_BANDS = new Set(["high-pass", "low-pass"]);
 export const SLOPES = [12, 24, 36, 48];
 
+/** The mix's down-mix when the mix leaves it out (the default, ITU-R BS.775; D200). */
+export const DEFAULT_DOWNMIX = { centre_db: -3, surround_db: -3, lfe_db: "-inf", normalise: false };
+
 /** The channel formats (§4.1), for the format selector. */
 export const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
 const CHANNELS = { mono: 1, stereo: 2, "3.0": 3, "5.1": 6, "7.1": 8, "5.1.4": 10, "7.1.4": 12 };

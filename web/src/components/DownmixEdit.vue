@@ -2,10 +2,13 @@
 // A down-mix (D1/D2): how a wider format folds into a narrower one, ITU-R BS.775 style. The centre and
 // the surrounds into the front pair at their levels, the LFE into the front pair (off by default), and
 // normalisation (no output channel above unity). Levels at the bottom of their range are −∞ (off).
-// Edits are a draft until Apply: a new down-mix rewires the affected sends with a short fade.
+// Edits are a draft until Apply (a second press confirms it): a new down-mix fades the affected sends
+// out and in (10 ms), which is a brief dip on air.
 import { computed, ref, watch } from "vue";
 import Pot from "./Pot.vue";
+import ConfirmButton from "./ConfirmButton.vue";
 import { dbValue } from "../api.js";
+import { DEFAULT_DOWNMIX } from "../nodes.js";
 
 const props = defineProps({
   value: { type: Object, required: true }, // { centre_db, surround_db, lfe_db, normalise }
@@ -13,7 +16,7 @@ const props = defineProps({
 });
 const emit = defineEmits(["change"]);
 const OFF = -41;
-const DEFAULT = { centre_db: -3, surround_db: -3, lfe_db: "-inf", normalise: false };
+const DEFAULT = DEFAULT_DOWNMIX;
 const draft = ref({ ...props.value });
 watch(
   () => JSON.stringify(props.value),
@@ -35,9 +38,10 @@ const dirty = computed(() => !same(draft.value, props.value));
     <Pot :label="`${label}: LFE`" unit="dB (−41: off)" :value="shown(draft.lfe_db)" :min="OFF" :max="10" :def="OFF" :fine="0.5" @change="(v) => set('lfe_db', v)" />
     <label class="check"><input type="checkbox" :checked="draft.normalise" :aria-label="`${label}: normalise`" @change="set('normalise', $event.target.checked)" /> Normalise (no channel above unity)</label>
     <div class="row tight">
-      <button class="btn small" :disabled="!dirty" :aria-label="`${label}: apply`" @click="emit('change', { ...draft })">Apply</button>
+      <ConfirmButton small label="Apply" :disabled="!dirty" :aria-label="`${label}: apply`" @confirm="emit('change', { ...draft })" />
       <button class="btn small secondary" :disabled="!dirty" @click="draft = { ...value }">Undo</button>
       <button class="btn small secondary" :disabled="same(draft, DEFAULT)" title="ITU-R BS.775: −3 dB, −3 dB, LFE off" @click="draft = { ...DEFAULT }">BS.775</button>
     </div>
+    <p v-if="dirty" class="note">Applying fades the affected sends out and in: a brief dip.</p>
   </div>
 </template>

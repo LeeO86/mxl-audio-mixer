@@ -4,6 +4,8 @@
 import { computed, ref, watch } from "vue";
 import Pot from "./Pot.vue";
 import DownmixEdit from "./DownmixEdit.vue";
+import ConfirmButton from "./ConfirmButton.vue";
+import { DEFAULT_DOWNMIX } from "../nodes.js";
 import { dbValue } from "../api.js";
 import { buses, isBus, live, patchSignal, signalOf, signals, tallyOf } from "../store.js";
 
@@ -32,7 +34,7 @@ const minusSources = computed(() => {
   return of ? (live.mix?.sends || []).filter((x) => x.to === of).map((x) => x.from) : [];
 });
 // A bus's own down-mix of everything arriving from a wider format (D2); off: the mix's.
-const globalDownmix = computed(() => live.mix?.settings?.downmix || { centre_db: -3, surround_db: -3, lfe_db: "-inf", normalise: false });
+const globalDownmix = computed(() => live.mix?.settings?.downmix || DEFAULT_DOWNMIX);
 const setOwnDownmix = (on) => set({ downmix: on ? { ...globalDownmix.value } : null });
 function saveName() {
   if (name.value.trim() && name.value !== s.value.name) set({ name: name.value.trim() });
@@ -84,9 +86,16 @@ const depth = computed(() => {
         </template>
       </div>
       <div v-if="bus" class="downmixedit">
-        <label class="check"><input type="checkbox" :checked="!!s.downmix" aria-label="Own down-mix" @change="setOwnDownmix($event.target.checked)" /> Own down-mix of what arrives here</label>
-        <DownmixEdit v-if="s.downmix" :value="s.downmix" label="Bus down-mix" @change="(d) => set({ downmix: d })" />
-        <p v-else class="note">The mix's down-mix (Settings).</p>
+        <label>Down-mix of what arrives here</label>
+        <template v-if="s.downmix">
+          <DownmixEdit :value="s.downmix" label="Bus down-mix" @change="(d) => set({ downmix: d })" />
+          <ConfirmButton small label="Use the mix's down-mix" aria-label="Use the mix's down-mix" @confirm="setOwnDownmix(false)" />
+          <p class="note">Going back to the mix's fades the affected sends out and in: a brief dip.</p>
+        </template>
+        <template v-else>
+          <p class="note">The mix's down-mix (Settings).</p>
+          <button class="btn small secondary" aria-label="Own down-mix" @click="setOwnDownmix(true)">Own down-mix</button>
+        </template>
       </div>
       <template v-if="!bus">
         <div>

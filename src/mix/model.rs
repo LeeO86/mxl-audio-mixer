@@ -389,7 +389,9 @@ pub struct MixSettings {
     pub loudness_tolerance_lu: f64,
     /// The down-mix wherever a wider format meets a narrower one (D1): sends,
     /// monitors, solo, published layouts. A bus or monitor can override it.
-    #[serde(default)]
+    /// Left out of the JSON while it is the default, so an unchanged mix still
+    /// loads in 1.3 (a rollback).
+    #[serde(default, skip_serializing_if = "Downmix::is_default")]
     pub downmix: Downmix,
 }
 
@@ -1117,6 +1119,23 @@ pub(crate) mod tests {
             phase: false,
             block_delay: false,
         }
+    }
+
+    #[test]
+    fn default_down_mix_is_left_out_for_a_rollback() {
+        // An unchanged mix has no `downmix` in its settings: 1.3 (deny_unknown_fields) loads it.
+        let mix = Mix::default();
+        let v = serde_json::to_value(&mix).unwrap();
+        assert!(v["settings"].get("downmix").is_none(), "{v}");
+        let back: Mix = serde_json::from_value(v).unwrap();
+        assert_eq!(back, mix);
+        // A changed one is written and read back.
+        let mut changed = Mix::default();
+        changed.settings.downmix.centre_db = Db(-6.0);
+        let v = serde_json::to_value(&changed).unwrap();
+        assert_eq!(v["settings"]["downmix"]["centre_db"], -6.0);
+        let back: Mix = serde_json::from_value(v).unwrap();
+        assert_eq!(back, changed);
     }
 
     #[test]

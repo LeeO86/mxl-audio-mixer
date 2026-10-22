@@ -184,6 +184,10 @@ pub const DOWNMIX_MIN_DB: f64 = -40.0;
 pub const DOWNMIX_LFE_MAX_DB: f64 = 10.0;
 
 impl Downmix {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let check = |what: &str, db: Db, hi: f64| {
             if db == Db::MINUS_INF || (DOWNMIX_MIN_DB..=hi).contains(&db.0) {

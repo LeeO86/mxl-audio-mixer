@@ -110,8 +110,8 @@ pub struct Monitor {
     /// Published as an MXL flow with an NMOS sender (to physical speakers).
     #[serde(default)]
     pub publish: bool,
-    /// The down-mix of its source and the solo bus into its format (D2);
-    /// `None`: the mix's.
+    /// The down-mix of its source into its format (D2); `None`: the mix's. The
+    /// solo bus is folded to stereo with the mix's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downmix: Option<super::format::Downmix>,
 }

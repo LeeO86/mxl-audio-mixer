@@ -125,6 +125,9 @@ try {
   if ((await api("/api/v1/mix/settings")).downmix.centre_db !== -3) throw new Error("applied before Apply");
   await page.getByLabel("Down-mix: normalise").check();
   await page.getByLabel("Down-mix: apply").click();
+  await page.waitForTimeout(300);
+  if ((await api("/api/v1/mix/settings")).downmix.centre_db !== -3) throw new Error("applied without the second press");
+  await page.getByLabel("Down-mix: apply").click();
   await until("global down-mix", async () => {
     const d = (await api("/api/v1/mix/settings")).downmix;
     return d.centre_db === -6 && d.normalise === true;
@@ -133,14 +136,16 @@ try {
   pass("global down-mix: centre −6 dB, normalised, after Apply");
   await page.goto(`${base}/#processing`);
   await page.getByLabel("Signal", { exact: true }).selectOption("main");
-  await page.getByLabel("Own down-mix").check();
+  await page.getByLabel("Own down-mix").click();
   await until("main has its own down-mix", async () => (await api("/api/v1/buses/main")).downmix?.centre_db === -6);
   await page.getByLabel("Bus down-mix: LFE value").fill("0");
   await page.getByLabel("Bus down-mix: LFE value").press("Tab");
   await page.getByLabel("Bus down-mix: apply").click();
+  await page.getByLabel("Bus down-mix: apply").click();
   await until("main LFE at 0 dB", async () => (await api("/api/v1/buses/main")).downmix?.lfe_db === 0);
   await page.screenshot({ path: `${out}/spatial-bus-downmix.png`, fullPage: true });
-  await page.getByLabel("Own down-mix").uncheck();
+  await page.getByLabel("Use the mix's down-mix").click();
+  await page.getByLabel("Use the mix's down-mix").click();
   await until("main follows the mix again", async () => (await api("/api/v1/buses/main")).downmix === undefined);
   pass("bus down-mix: own (LFE 0 dB), then the mix's again");
 
