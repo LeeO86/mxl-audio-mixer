@@ -2,7 +2,7 @@
 //! re-opening re-created flows, stall detection, arrival lag and the automatic
 //! extra delay. Runs on a 100 ms tick, never in the DSP thread.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -95,7 +95,7 @@ pub struct Route {
 /// down only after the need stayed lower by [`DELAY_LOWER_SAMPLES`] for the
 /// whole hold time, to the highest need seen in that time, and at most once per
 /// hold time. The need of a late block stays a floor for one hold time. When an
-/// outlier of about that size (within 1 ms) comes again within
+/// outlier of about that size (within 1 ms and a block) comes again within
 /// [`LATE_MEMORY_HOLDS`] hold times of the last one (late again, or now
 /// covered), it recurs: its floor then lasts that long (5 min by default),
 /// renewed by every recurrence, so a rare outlier, e.g. once a minute, is lost
@@ -117,9 +117,19 @@ struct DelayHold {
     /// The last outlier that was late or recurred, within the memory time: when,
     /// and its need.
     last_late: Option<(Instant, u32)>,
+    /// The DSP block (samples): lags are measured at block ends, so the same
+    /// outlier reads up to a block apart.
+    block: u32,
 }
 
 impl DelayHold {
+    fn new(block: u32) -> Self {
+        Self {
+            block,
+            ..Self::default()
+        }
+    }
+
     /// The higher of the two late-block floors (0 without one).
     fn floor(&self) -> u32 {
         let n = |f: Option<(Instant, u32)>| f.map_or(0, |(_, n)| n);
@@ -166,12 +176,12 @@ impl DelayHold {
             // An outlier needs at least 1 ms more than the 99.9th percentile (not
             // known in the first second: a late block then is no outlier).
             let outlier = p999.is_some_and(|p| need > need_of(p) + DELAY_LOWER_SAMPLES);
-            // It recurs when it needs about as much (within 1 ms) as the
+            // It recurs when it needs about as much (within 1 ms and a block) as the
             // recurring floor or the last outlier: another size, a smaller tail
             // or a single higher spike, renews nothing and does not ratchet.
             let near = |f: Option<(Instant, u32)>| {
                 f.map(|(_, n)| n)
-                    .filter(|&n| need.abs_diff(n) <= DELAY_LOWER_SAMPLES)
+                    .filter(|&n| need.abs_diff(n) <= DELAY_LOWER_SAMPLES + self.block)
             };
             let matched = near(self.long).max(near(self.last_late));
             let recurs = outlier && matched.is_some();
@@ -259,10 +269,6 @@ impl LagWindow {
         self.seconds.clear();
     }
 
-    fn count(&self) -> u64 {
-        self.seconds.iter().map(|(_, _, c)| *c).sum()
-    }
-
     fn span(&self) -> Duration {
         match (self.seconds.front(), self.seconds.back()) {
             // From the first to the last per-second bucket: one second of samples
@@ -273,21 +279,31 @@ impl LagWindow {
     }
 
     /// The upper edge (samples) of the bucket holding quantile `q`.
+    /// For display: every lag; lags beyond the window's range share its top
+    /// bucket, so a writer always later than that reads the edge (`lag_ms`, the
+    /// last lag, is exact).
     fn quantile(&self, q: f64) -> Option<u32> {
-        let total = self.count();
+        self.quantile_upto(q, u32::MAX)
+    }
+
+    /// Quantile `q` of the lags up to `limit` samples only. The automatic delay
+    /// uses it with the read offset plus the maximum delay: a lag beyond that is
+    /// a writer catching up (or one no delay can cover) and must not move it.
+    fn quantile_upto(&self, q: f64, limit: u32) -> Option<u32> {
+        let bucket_of = |b: usize| (b as u32 + 1) * LAG_BUCKET_SAMPLES;
+        let count =
+            |b: usize| -> u64 { self.seconds.iter().map(|(_, h, _)| u64::from(h[b])).sum() };
+        let within = (0..self.buckets).take_while(|&b| b as u32 * LAG_BUCKET_SAMPLES <= limit);
+        let total: u64 = within.clone().map(count).sum();
         if total == 0 {
             return None;
         }
         let target = ((total as f64) * q).ceil().max(1.0) as u64;
         let mut seen = 0;
-        for b in 0..self.buckets {
-            seen += self
-                .seconds
-                .iter()
-                .map(|(_, h, _)| u64::from(h[b]))
-                .sum::<u64>();
+        for b in within {
+            seen += count(b);
             if seen >= target {
-                return Some((b as u32 + 1) * LAG_BUCKET_SAMPLES);
+                return Some(bucket_of(b));
             }
         }
         None
@@ -360,6 +376,10 @@ pub struct Inputs {
     hold: Duration,
     stall: Duration,
     show_path: PathBuf,
+    /// The DSP block in samples.
+    block: u32,
+    /// MXL instances by flow id and the inode of its data file (D240).
+    instances: HashMap<(Uuid, u64), MxlInstance>,
 }
 
 impl Inputs {
@@ -385,7 +405,7 @@ impl Inputs {
                 last_lag: 0,
                 delay: 0,
                 proposed: None,
-                hold: DelayHold::default(),
+                hold: DelayHold::new(config.block_samples),
             })
             .collect();
         let mut inputs = Self {
@@ -398,6 +418,8 @@ impl Inputs {
             hold: config.input_delay_hold,
             stall: config.input_stall,
             show_path: config.state_dir.join("inputs.json"),
+            instances: HashMap::new(),
+            block: config.block_samples,
         };
         for i in 0..inputs.slots.len() {
             if let ExtraDelay::Ms(value) = inputs.slots[i].config.extra_delay {
@@ -446,7 +468,7 @@ impl Inputs {
         slot.route = route;
         slot.inode = None;
         slot.lag.clear();
-        slot.hold = DelayHold::default();
+        slot.hold = DelayHold::new(self.block);
         slot.state = if slot.route.is_some() {
             State::Waiting
         } else {
@@ -462,26 +484,45 @@ impl Inputs {
         let Some(route) = self.slots[index].route.clone() else {
             return false;
         };
-        // An instance of its own for every open: libmxl caches one reader per
-        // flow id per instance, so a shared instance could hand a re-open (a
-        // flow deleted and re-created) the old reader, mapped on the deleted
-        // files, while the DSP thread still holds it. The reader keeps its
-        // instance; both go when the control side drops the returned reader.
-        let instance =
-            match MxlInstance::new(self.api.clone(), &route.domain.display().to_string(), "") {
-                Ok(instance) => instance,
-                Err(err) => {
-                    tracing::warn!(
-                        input = index + 1,
-                        "MXL instance for {}: {err}",
-                        route.domain.display()
-                    );
-                    return false;
+        // No flow (yet): nothing to open, no instance made and dropped per tick.
+        let Some(inode) = mxlio::flow_inode(&route.domain, route.flow) else {
+            return false;
+        };
+        // One instance per flow generation (flow id and data-file inode): libmxl
+        // caches one reader per flow id per instance, so an instance shared
+        // across a re-created flow could hand a re-open the old reader, mapped
+        // on the deleted files, while the DSP thread still holds it. Inputs on
+        // the same generation share it (each instance is an inotify instance
+        // and a watcher thread; `fs.inotify.max_user_instances` is per uid).
+        // A reader keeps its instance alive; both go when the control side
+        // drops the reader the DSP thread returns.
+        let key = (route.flow, inode);
+        let instance = match self.instances.get(&key) {
+            Some(instance) => instance.clone(),
+            None => {
+                match MxlInstance::new(self.api.clone(), &route.domain.display().to_string(), "") {
+                    Ok(instance) => {
+                        self.instances.insert(key, instance.clone());
+                        instance
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            input = index + 1,
+                            "cannot create an MXL instance for {} ({err}); each flow generation \
+                         read needs one (an inotify instance: check fs.inotify.max_user_instances)",
+                            route.domain.display()
+                        );
+                        return false;
+                    }
                 }
-            };
-        match mxlio::open_reader(&instance, route.flow) {
+            }
+        };
+        let opened = mxlio::open_reader(&instance, route.flow);
+        drop(instance);
+        self.prune_instances(Some(key));
+        match opened {
             Ok((reader, channels)) => {
-                let inode = mxlio::flow_inode(&route.domain, route.flow);
+                let inode = Some(inode);
                 engine.send(Command::SetInput {
                     index,
                     reader: Box::new(reader),
@@ -511,6 +552,22 @@ impl Inputs {
         }
     }
 
+    /// Keep only the instances of the flow generations the inputs read (and
+    /// `extra`, about to be read); readers still in the DSP thread keep theirs.
+    fn prune_instances(&mut self, extra: Option<(Uuid, u64)>) {
+        if self.instances.is_empty() {
+            return;
+        }
+        let used: Vec<(Uuid, u64)> = self
+            .slots
+            .iter()
+            .filter(|s| s.state != State::Waiting && s.state != State::Unrouted)
+            .filter_map(|s| Some((s.route.as_ref()?.flow, s.inode?)))
+            .chain(extra)
+            .collect();
+        self.instances.retain(|k, _| used.contains(k));
+    }
+
     /// The 100 ms tick.
     pub fn tick(&mut self, engine: &mut Engine) {
         let now = Instant::now();
@@ -532,6 +589,7 @@ impl Inputs {
             }
             self.auto_delay(engine, i, now, max_lag);
         }
+        self.prune_instances(None);
     }
 
     fn watch(&mut self, engine: &mut Engine, i: usize, now: Instant) {
@@ -583,7 +641,7 @@ impl Inputs {
         }
         // The percentile after a second of lags; a late block counts at once.
         let p999 = (slot.lag.span() >= Duration::from_secs(MIN_LAG_SECONDS))
-            .then(|| slot.lag.quantile(0.999))
+            .then(|| slot.lag.quantile_upto(0.999, read_offset + delay_max))
             .flatten();
         let current = slot.proposed.unwrap_or(slot.delay);
         let Some(target) =
@@ -652,7 +710,7 @@ impl Inputs {
                 ExtraDelay::Ms(value) => self.set_delay(engine, index, samples(value)),
                 ExtraDelay::Auto(_) => {
                     self.slots[index].lag.clear();
-                    self.slots[index].hold = DelayHold::default();
+                    self.slots[index].hold = DelayHold::new(self.block);
                 }
             }
         }
@@ -1000,6 +1058,69 @@ mod tests {
             "down after ~2 hold times, at tick {back}"
         );
         assert_eq!(d[11_999], 384, "the recurring 6 ms stays covered");
+    }
+
+    #[test]
+    fn lags_beyond_the_limit_move_no_delay() {
+        // 10 s steady at 3 ms, then 40 lags of a writer seconds behind (more
+        // than 4 in 10 s: the whole p99.9 for display) within the window: the
+        // percentile the delay uses ignores them, the displayed one shows them.
+        let mut w = LagWindow::new(96 + 7200 + 4800);
+        let t0 = Instant::now();
+        for k in 0..5000u32 {
+            w.push(144, t0 + Duration::from_millis(u64::from(k) * 2));
+        }
+        for k in 0..40u32 {
+            w.push(
+                144_000 - k * 48,
+                t0 + Duration::from_millis(9_000 + u64::from(k)),
+            );
+        }
+        assert_eq!(w.quantile_upto(0.999, 96 + 7200), Some(148));
+        assert!(w.quantile(0.999).unwrap() > 7296);
+        // Through the hold: no change.
+        let mut h = DelayHold::default();
+        let p999 = w.quantile_upto(0.999, 96 + 7200);
+        assert_eq!(
+            h.next(
+                p999,
+                Some(100_000),
+                100,
+                96,
+                7200,
+                Duration::from_secs(30),
+                t0
+            ),
+            None
+        );
+        // A lag at the limit still counts.
+        w.push(7296, t0 + Duration::from_millis(9_500));
+        w.push(7296, t0 + Duration::from_millis(9_501));
+        assert_eq!(w.quantile_upto(1.0, 96 + 7200), Some(7300));
+    }
+
+    #[test]
+    fn an_outlier_read_a_block_apart_still_recurs() {
+        // The same 6 ms outlier reads 6 or 7.5 ms at 2 ms block ends: it recurs
+        // (within 1 ms and a block), so the delay does not fall between them.
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::new(96);
+        let (mut current, mut misses) = (96, 0);
+        for k in 0..6000u64 {
+            let now = t0 + Duration::from_millis(100 * k);
+            let lag = match k % 400 {
+                100 if (k / 400) % 2 == 0 => 144 + 288,
+                100 => 144 + 360,
+                _ => 144,
+            };
+            misses += u32::from(lag > 96 + current);
+            if let Some(d) = h.next(Some(144), Some(lag), current, 96, 7200, hold, now) {
+                current = d;
+            }
+        }
+        assert!(misses <= 2, "{misses} late blocks");
+        assert!(current >= 384, "{current}");
     }
 
     #[test]
