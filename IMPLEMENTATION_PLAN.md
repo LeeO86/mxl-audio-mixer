@@ -3,7 +3,7 @@
 Decisions, deviations and results against `SPECIFICATION.md` (Draft v0.3). Kept
 current so that work can resume after an interruption.
 
-## Status (2026-10-17)
+## Status (2026-10-22)
 
 | Step | State |
 | --- | --- |
@@ -15,13 +15,14 @@ current so that work can resume after an interruption.
 | M8a logic graphs | done, **released in 1.2.0** (`8e2aae6`, 2026-10-15); maintainers' hardware run 2026-10-15/16 (`docs/release-notes/1.2.0.md`) |
 | M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | done (PRs 32, 33, 35), **released in 1.3.0** (2026-10-17; the tag commit is added after the tag) |
 | M9 remote link (master/slave) | done (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **released in 1.3.0** (2026-10-17; the tag commit is added after the tag); maintainers' hardware runs 2026-10-16/17 on `cab382e` and the final candidate `bd720c3` (`docs/release-notes/1.3.0.md`) |
-| 1.4.0 operator feedback (console C1–C12, DSP, views, input fixes) | in progress (section "1.4.0" below) |
+| 1.4.0 operator feedback (console C1–C12, DSP, views, input fixes F1/F2) | done (PRs 37–41), **released in 1.4.0** (2026-10-22; the tag commit is added after the tag); maintainers' hardware run 2026-10-22 on `8d27a5d` (`docs/release-notes/1.4.0.md`) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
 
-- 1.3.0 is released (2026-10-17). Release notes: `docs/release-notes/1.3.0.md`;
-  its image digest is filled in after the tag build.
+- 1.4.0 is released (2026-10-22). Release notes: `docs/release-notes/1.4.0.md`;
+  its image digest is filled in after the tag build. 1.3.0 (2026-10-17):
+  `docs/release-notes/1.3.0.md`.
 - Environment: `docs/development.md`.
 
 ## Decisions
@@ -2070,6 +2071,8 @@ The Logic tab's canvas against the API above (§11.3, §11.2's debug view). `web
 From the operators' feedback page (2026-10-22); the IDs (C console, D DSP, R control
 room, P processing, T routing, L logic, G graph, F input fixes) are used in the
 commits and the changelog.
+
+All items below are **released in 1.4.0** (2026-10-22; PRs 37–41; C8 needed no change).
 
 ### 1.4.0: the console (C1–C7, C9, C11, C12)
 

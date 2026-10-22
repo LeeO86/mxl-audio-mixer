@@ -1,12 +1,12 @@
 # Changelog
 
-## 1.4.0 (in progress)
+## 1.4.0 (2026-10-22)
 
-Operator feedback (IDs as in IMPLEMENTATION_PLAN "1.4.0").
+Operator feedback (IDs as in IMPLEMENTATION_PLAN "1.4.0") and two input fixes from the test-all deployment (PRs #37–#41). Release notes: `docs/release-notes/1.4.0.md`.
 
 ### Console
 
-IMPLEMENTATION_PLAN D186–D193.
+IMPLEMENTATION_PLAN D186–D193 (#40, #41).
 
 - A click on a strip's name renames it in place (Enter saves, Escape cancels); a gear next to it opens its processing (C1).
 - A divider between the strips and the buses and VCAs sets how wide each side is (drag, arrow keys; double-click or Home: automatic, remembered in the browser); each side scrolls on its own (C2).
@@ -24,7 +24,7 @@ IMPLEMENTATION_PLAN D186–D193.
 
 ### DSP and formats
 
-From the operators' feedback (IMPLEMENTATION_PLAN "1.4.0: DSP and formats", D200–D210, X25).
+From the operators' feedback (IMPLEMENTATION_PLAN "1.4.0: DSP and formats", D200–D210, X25; #38).
 
 - C10, P3: the format of a strip or bus can be changed in operation (`PATCH` `format`; the Processing view's format selector, confirmed by a second press). The chain stays: nodes adapt to the new channel count, and those that cannot run on it (M/S / width off stereo, a surround panner off a mono or stereo strip) are bypassed, listed in the answer's `warnings` and flagged (`chain_warnings`). Sends stay and use the width mapping; a strip's patch is trimmed or extended; a published bus keeps its flow's layout. The change fades.
 - D1/D2: adjustable down-mix (ITU-R BS.775 style: centre, surround and LFE levels, normalisation) in the mix settings (`downmix`; Settings), with an override on a bus (everything arriving there) and on a monitor. The default is 1.3's fixed down-mix. A change fades (not ramps) only the sends whose coefficients change; the UI applies it, and returns a bus or monitor to the mix's, after a second press. The mix's down-mix is left out of `mix.json` while it is the default (rollback to 1.3).
@@ -33,7 +33,7 @@ From the operators' feedback (IMPLEMENTATION_PLAN "1.4.0: DSP and formats", D200
 - D5: new node `surround-pan` for mono and stereo strips: 5.1 or 7.1, position, spread, divergence, LFE send; it replaces the strip's stereo panner, so post-pan sends feed surround buses. A position pad in the editor.
 - A ramping gain matrix (panners, the width node) costs about a third of before.
 
-### Views (operator feedback; IMPLEMENTATION_PLAN D215–D228)
+### Views (operator feedback; IMPLEMENTATION_PLAN D215–D228; #39)
 
 - Control room: Cut is called Mute (the API field stays `cut`) (R1). Mute and solo of single monitor channels, e.g. only C or the LFE: `mute_channels`, `solo_channels` on a monitor, M and S per channel on its card (R2). Every monitor card has Remove in its header (R3). Oscillator presets are named waveform first, e.g. "Sine 1 kHz −18 dBFS (EBU R 68)" (R4).
 - Processing: the nodes are compact tiles of one size in a grid (side by side and below), with smaller curves and one band's controls at a time (P1, P5). ◀ ▶ and the `[` `]` keys step to the previous or next strip or bus (P2). A double-click on an EQ or dynamic EQ handle resets that band (P4). The palette stays in view (P6). Dragging uses pointer events, so the wheel scrolls meanwhile, and the page scrolls by itself near the window's edges (P7). A click anywhere on a tile's header opens or closes it (P8).
@@ -44,7 +44,7 @@ From the operators' feedback (IMPLEMENTATION_PLAN "1.4.0: DSP and formats", D200
 
 ### Input reading (F1, F2)
 
-From the test-all deployment (D-263; IMPLEMENTATION_PLAN D230–D234, X33).
+From the test-all deployment (D-263; IMPLEMENTATION_PLAN D230–D234, X33; #37).
 
 - Fixed: inputs whose writer commits audio in batches lost samples at the default `MIXER_READ_OFFSET` of 2 ms (ST 2110 gateway audio delivered in bursts of packets, browser-source audio committed per video frame), all counted as late, while the arrival lag showed about 0.5 ms and no automatic delay was set. The arrival lag was measured only in blocks right after a commit, when the flow is freshest; it now counts every read block, as the distance from the block's end to the head index, so a 960-sample batch shows about 20 ms, the automatic delay covers it and the input reads clean. A block is late exactly when its arrival lag exceeds the read offset plus the extra delay. A head that stands still longer than the read offset plus `MIXER_INPUT_DELAY_MAX_MS` is a stall and adds no lag. After a new reader the lag counts from the first head move, so a new flow (head 0) or a re-opened stale one does not drive the delay to its maximum. The first automatic setting waits for one second of lag samples (it came after 100 ms).
 - A read that MXL answers "too early" after its wait is tried once more without waiting: MXL wakes a waiting reader only once per sync batch of the writer and returns the result from before the wait.
