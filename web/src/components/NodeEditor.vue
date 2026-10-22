@@ -7,7 +7,8 @@ import DynCurve from "./DynCurve.vue";
 import EqCurve from "./EqCurve.vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
-import { BAND_TYPES, NODE_TYPES, TAPS } from "../nodes.js";
+import SurroundPad from "./SurroundPad.vue";
+import { BAND_TYPES, NODE_TYPES, PASS_BANDS, SLOPES, TAPS } from "../nodes.js";
 import { live, patchNode, signals } from "../store.js";
 
 const props = defineProps({
@@ -27,6 +28,11 @@ const DYN = new Set(["compressor", "limiter", "expander", "gate"]);
 function setBand(i, key, value) {
   const bands = props.node.bands.map((b) => ({ ...b }));
   bands[i][key] = value;
+  // High- and low-pass bands carry a slope (D4); the others must not.
+  if (key === "type") {
+    if (PASS_BANDS.has(value)) bands[i].slope_db_per_oct ??= 12;
+    else delete bands[i].slope_db_per_oct;
+  }
   set({ bands });
 }
 function addBand() {
@@ -70,6 +76,7 @@ function toggleOptional(field, on) {
 <template>
   <div class="editor">
     <EqCurve v-if="EQ.has(node.type)" :node="node" :active="active" @select="active = $event" @bands="set" />
+    <SurroundPad v-if="node.type === 'surround-pan'" :node="node" @change="set" />
     <div v-if="DYN.has(node.type)" class="row tight" style="align-items: flex-start">
       <DynCurve :node="node" :meter="meter" />
       <div class="grbar" style="flex-direction: column; align-items: flex-start">
@@ -78,7 +85,7 @@ function toggleOptional(field, on) {
         <span class="num">{{ (meter?.gain_reduction_db || 0).toFixed(1) }} dB</span>
       </div>
     </div>
-    <div v-else-if="meter && node.type !== 'eq' && node.type !== 'filter' && node.type !== 'delay'" class="grbar">
+    <div v-else-if="meter && !['eq', 'filter', 'delay', 'width', 'surround-pan'].includes(node.type)" class="grbar">
       <span class="muted small">Gain reduction</span>
       <span class="gr"><span :style="{ width: `${Math.min(100, (meter.gain_reduction_db / 20) * 100)}%` }"></span></span>
       <span class="num">{{ meter.gain_reduction_db.toFixed(1) }} dB</span>
@@ -129,8 +136,14 @@ function toggleOptional(field, on) {
           <button class="btn small secondary" :style="node.type === 'eq' ? '' : 'margin-left: auto'" :disabled="node.bands.length <= 1" :aria-label="`Remove band ${i + 1}`" @click="removeBand(i)">✕</button>
         </h4>
         <Pot label="Frequency" unit="Hz" :value="b.freq_hz" :min="10" :max="20000" :def="1000" :fine="0.02" :digits="0" log @change="(v) => setBand(i, 'freq_hz', v)" />
-        <Pot v-if="b.type !== 'notch'" label="Gain" unit="dB" :value="b.gain_db" :min="-24" :max="24" :def="0" :fine="0.5" @change="(v) => setBand(i, 'gain_db', v)" />
-        <Pot label="Q" :value="b.q" :min="0.1" :max="40" :def="1" :fine="0.05" :digits="2" log @change="(v) => setBand(i, 'q', v)" />
+        <template v-if="PASS_BANDS.has(b.type)">
+          <label>Slope dB/oct</label>
+          <Segmented :model-value="b.slope_db_per_oct" :options="SLOPES.map((v) => ({ value: v, label: String(v) }))" :label="`band ${i + 1} slope`" @update:model-value="(v) => setBand(i, 'slope_db_per_oct', v)" />
+        </template>
+        <template v-else>
+          <Pot v-if="b.type !== 'notch'" label="Gain" unit="dB" :value="b.gain_db" :min="-24" :max="24" :def="0" :fine="0.5" @change="(v) => setBand(i, 'gain_db', v)" />
+          <Pot label="Q" :value="b.q" :min="0.1" :max="40" :def="1" :fine="0.05" :digits="2" log @change="(v) => setBand(i, 'q', v)" />
+        </template>
         <template v-if="node.type === 'dynamic-eq'">
           <Pot label="Threshold" unit="dB" :value="b.threshold_db" :min="-100" :max="0" :def="-30" :fine="0.5" @change="(v) => setBand(i, 'threshold_db', v)" />
           <Pot label="Ratio" unit=": 1" :value="b.ratio" :min="1" :max="100" :def="3" :fine="0.05" log @change="(v) => setBand(i, 'ratio', v)" />

@@ -130,6 +130,30 @@ export const NODE_TYPES = {
     }),
     fields: [],
   },
+  width: {
+    label: "M/S / Width",
+    group: "Spatial",
+    help: "Stereo only: decodes an M/S input, widens or narrows (0 % mono, 100 % unchanged, 200 % double side), encodes an M/S output.",
+    make: () => ({ type: "width", width_pct: 100, input: "lr", output: "lr" }),
+    fields: [
+      { key: "width_pct", label: "Width", min: 0, max: 200, def: 100, fine: 0.5, digits: 0, unit: "%" },
+      { key: "input", label: "Input", options: [["lr", "L/R"], ["ms", "M/S"]] },
+      { key: "output", label: "Output", options: [["lr", "L/R"], ["ms", "M/S"]] },
+    ],
+  },
+  "surround-pan": {
+    label: "Surround panner",
+    group: "Spatial",
+    help: "A mono or stereo strip into 5.1 or 7.1: replaces the stereo panner (after the fader), so its post-pan sends feed surround buses.",
+    make: () => ({ type: "surround-pan", layout: "5.1", azimuth_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 }),
+    fields: [
+      { key: "layout", label: "Layout", options: [["5.1", "5.1"], ["7.1", "7.1"]] },
+      { key: "azimuth_deg", label: "Position", min: -180, max: 180, def: 0, fine: 0.5, digits: 0, unit: "°" },
+      { key: "spread_pct", label: "Spread", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "%" },
+      { key: "divergence_pct", label: "Divergence", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "% (C into L/R)" },
+      { key: "lfe_db", label: "LFE", min: -100, max: 10, def: -100, fine: 0.5, unit: "dB (−100: off)" },
+    ],
+  },
   oscillator: {
     label: "Oscillator",
     group: "Other",
@@ -166,7 +190,27 @@ export const BAND_TYPES = [
   ["low-shelf", "Low shelf"],
   ["high-shelf", "High shelf"],
   ["notch", "Notch"],
+  ["high-pass", "High-pass"],
+  ["low-pass", "Low-pass"],
 ];
+
+/** EQ band types with a slope instead of gain and Q (high- and low-pass, D4). */
+export const PASS_BANDS = new Set(["high-pass", "low-pass"]);
+export const SLOPES = [12, 24, 36, 48];
+
+/** The channel formats (§4.1), for the format selector. */
+export const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
+const CHANNELS = { mono: 1, stereo: 2, "3.0": 3, "5.1": 6, "7.1": 8, "5.1.4": 10, "7.1.4": 12 };
+export const channelsOf = (format) => CHANNELS[format] || 0;
+
+/** Why node `n` cannot run on a signal of `format` (a strip's when `strip`), or "" (as the server's
+ * ProcKind::supports): such a node is kept, bypassed and flagged (C10). */
+export function unsupported(n, format, strip) {
+  if (n.type === "width" && format !== "stereo") return "M/S / width needs a stereo signal";
+  if (n.type === "surround-pan" && !strip) return "the surround panner works on strips, not on buses";
+  if (n.type === "surround-pan" && format !== "mono" && format !== "stereo") return "the surround panner pans a mono or stereo strip";
+  return "";
+}
 
 export const TAPS = [
   ["input", "Input"],

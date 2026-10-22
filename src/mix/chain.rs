@@ -35,6 +35,16 @@ pub enum BandType {
     LowShelf,
     HighShelf,
     Notch,
+    /// Butterworth high-pass of `slope_db_per_oct` (as the filter node; D4).
+    HighPass,
+    /// Butterworth low-pass of `slope_db_per_oct`.
+    LowPass,
+}
+
+impl BandType {
+    pub fn is_pass(self) -> bool {
+        matches!(self, Self::HighPass | Self::LowPass)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,7 +56,40 @@ pub struct EqBand {
     pub q: f64,
     #[serde(default)]
     pub gain_db: f64,
+    /// High- and low-pass bands: 12, 24, 36 or 48 dB/oct (others: unused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slope_db_per_oct: Option<u32>,
 }
+
+impl EqBand {
+    /// Biquad sections the band runs: a pass band's Butterworth order / 2, else 1.
+    pub fn sections(&self) -> usize {
+        if self.kind.is_pass() {
+            self.slope_db_per_oct.unwrap_or(12) as usize / 12
+        } else {
+            1
+        }
+    }
+}
+
+/// The filter slopes (filter node, EQ pass bands).
+pub const SLOPES: [u32; 4] = [12, 24, 36, 48];
+
+/// How the M/S / width node reads or writes its two channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StereoMode {
+    /// Left and right.
+    #[default]
+    Lr,
+    /// Mid on the first channel, side on the second.
+    Ms,
+}
+
+/// Longest position of the surround panner, ± degrees.
+pub const MAX_AZIMUTH_DEG: f64 = 180.0;
+/// The surround panner's LFE level at or below this is off.
+pub const LFE_OFF_DB: f64 = -100.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -236,6 +279,35 @@ pub enum ProcKind {
         #[serde(default)]
         frame_rate: Option<f64>,
     },
+    /// M/S / width (D3), stereo only: decodes an M/S input, scales the side
+    /// signal by `width_pct` (0 mono, 100 unchanged, 200 double side), encodes an
+    /// M/S output. A 2 × 2 matrix the DSP thread ramps per sample.
+    Width {
+        width_pct: f64,
+        #[serde(default)]
+        input: StereoMode,
+        #[serde(default)]
+        output: StereoMode,
+    },
+    /// Surround panner (D5) of a mono or stereo strip into `layout` (5.1 or
+    /// 7.1): it replaces the strip's stereo panner, so its post-pan tap (and every
+    /// send from there) has `layout`'s channels. Position (0° front centre,
+    /// negative left, ±180° behind), spread over all speakers, centre divergence
+    /// into L and R, and the LFE send.
+    SurroundPan {
+        layout: super::format::Format,
+        azimuth_deg: f64,
+        #[serde(default)]
+        spread_pct: f64,
+        #[serde(default)]
+        divergence_pct: f64,
+        #[serde(default = "lfe_off")]
+        lfe_db: f64,
+    },
+}
+
+fn lfe_off() -> f64 {
+    LFE_OFF_DB
 }
 
 /// One node of a chain.
@@ -298,7 +370,34 @@ impl ProcKind {
             Self::Multiband { .. } => "multiband",
             Self::Delay { .. } => "delay",
             Self::Auto {} => "auto",
+            Self::Width { .. } => "width",
+            Self::SurroundPan { .. } => "surround-pan",
         }
+    }
+
+    /// Whether the node can run on a signal of `format` (a strip's when
+    /// `strip`). A node that cannot is kept, bypassed and flagged when the
+    /// signal's format changes (C10), and passes the signal through.
+    pub fn supports(&self, format: super::format::Format, strip: bool) -> Result<(), String> {
+        use super::format::Format;
+        match self {
+            Self::Width { .. } if format != Format::Stereo => {
+                Err("M/S / width needs a stereo signal".into())
+            }
+            Self::SurroundPan { .. } if !strip => {
+                Err("the surround panner works on strips, not on buses".into())
+            }
+            Self::SurroundPan { .. } if !matches!(format, Format::Mono | Format::Stereo) => {
+                Err("the surround panner pans a mono or stereo strip".into())
+            }
+            Self::BassManagement { .. } => Err("bass management is not a chain node".into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// A node the compiler runs as a gain matrix (no processor state).
+    pub fn is_matrix(&self) -> bool {
+        matches!(self, Self::Width { .. } | Self::SurroundPan { .. })
     }
 
     pub fn category(&self) -> Category {
@@ -307,7 +406,9 @@ impl ProcKind {
             Self::Delay { .. }
             | Self::Oscillator { .. }
             | Self::BassManagement { .. }
-            | Self::Auto {} => Category::Other,
+            | Self::Auto {}
+            | Self::Width { .. }
+            | Self::SurroundPan { .. } => Category::Other,
             _ => Category::Dynamics,
         }
     }
@@ -330,6 +431,21 @@ impl ProcKind {
                     freq(b.freq_hz)?;
                     range("q", b.q, 0.1, 40.0)?;
                     range("gain_db", b.gain_db, -EQ_GAIN_DB, EQ_GAIN_DB)?;
+                    match (b.kind.is_pass(), b.slope_db_per_oct) {
+                        (true, Some(slope)) if SLOPES.contains(&slope) => {}
+                        (true, _) => {
+                            return Err(
+                                "a high- or low-pass band needs slope_db_per_oct 12, 24, 36 or 48"
+                                    .into(),
+                            )
+                        }
+                        (false, Some(_)) => {
+                            return Err(
+                                "slope_db_per_oct is for high- and low-pass bands only".into()
+                            )
+                        }
+                        (false, None) => {}
+                    }
                 }
             }
             Self::Filter {
@@ -338,7 +454,7 @@ impl ProcKind {
                 ..
             } => {
                 freq(*freq_hz)?;
-                if ![12, 24, 36, 48].contains(slope_db_per_oct) {
+                if !SLOPES.contains(slope_db_per_oct) {
                     return Err("slope_db_per_oct must be 12, 24, 36 or 48".into());
                 }
             }
@@ -501,6 +617,28 @@ impl ProcKind {
                 }
             }
             Self::Auto {} => {}
+            Self::Width { width_pct, .. } => range("width_pct", *width_pct, 0.0, 200.0)?,
+            Self::SurroundPan {
+                layout,
+                azimuth_deg,
+                spread_pct,
+                divergence_pct,
+                lfe_db,
+            } => {
+                use super::format::Format;
+                if !matches!(layout, Format::Surround51 | Format::Surround71) {
+                    return Err("a surround panner's layout is 5.1 or 7.1".into());
+                }
+                range(
+                    "azimuth_deg",
+                    *azimuth_deg,
+                    -MAX_AZIMUTH_DEG,
+                    MAX_AZIMUTH_DEG,
+                )?;
+                range("spread_pct", *spread_pct, 0.0, 100.0)?;
+                range("divergence_pct", *divergence_pct, 0.0, 100.0)?;
+                range("lfe_db", *lfe_db, LFE_OFF_DB, 10.0)?;
+            }
         }
         Ok(())
     }
@@ -644,7 +782,10 @@ impl ProcKind {
                 lfe_gain_db,
                 ..
             } => vec![*crossover_hz, *lfe_gain_db],
-            Self::Delay { .. } | Self::Auto {} => Vec::new(),
+            // Matrix nodes: the compiler computes their matrix.
+            Self::Delay { .. } | Self::Auto {} | Self::Width { .. } | Self::SurroundPan { .. } => {
+                Vec::new()
+            }
         };
         v.into_iter().map(|x| x as f32).collect()
     }
@@ -657,6 +798,9 @@ impl ProcKind {
             Self::Eq { bands } => {
                 for b in bands {
                     b.kind.hash(&mut h);
+                    if b.kind.is_pass() {
+                        b.slope_db_per_oct.hash(&mut h);
+                    }
                 }
             }
             Self::Filter {
@@ -688,6 +832,8 @@ impl ProcKind {
             Self::Delay { .. } => self.delay_samples().hash(&mut h),
             Self::Oscillator { waveform, .. } => waveform.hash(&mut h),
             Self::BassManagement { lfe, .. } => lfe.hash(&mut h),
+            Self::Width { input, output, .. } => (input, output).hash(&mut h),
+            Self::SurroundPan { layout, .. } => layout.hash(&mut h),
             Self::Expander { .. } | Self::Gate { .. } | Self::Auto {} => {}
         }
         h.finish()
@@ -731,6 +877,13 @@ pub fn validate(chain: &[Proc]) -> Result<(), String> {
     }
     if chain.iter().filter(|p| p.kind == ProcKind::Auto {}).count() > 1 {
         return Err("a chain has at most one auto node".into());
+    }
+    let panners = chain
+        .iter()
+        .filter(|p| matches!(p.kind, ProcKind::SurroundPan { .. }))
+        .count();
+    if panners > 1 {
+        return Err("a chain has at most one surround panner".into());
     }
     Ok(())
 }

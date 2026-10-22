@@ -2,7 +2,8 @@
 # Milestone 4 UI (§12) in headless Chrome against the mixer on MXL: web/tests/ui.mjs
 # (two clients, actions through the UI checked on the API), then the logic editor
 # (§11.3): web/tests/logic.mjs, then the console's strip handling (1.4.0):
-# web/tests/console.mjs. Needs `npm ci` in web/
+# web/tests/console.mjs, and the format, down-mix and spatial nodes of 1.4.0:
+# web/tests/spatial.mjs. Needs `npm ci` in web/
 # and Chrome (CHROME, default /usr/bin/google-chrome). Screenshots: $IT_OUT/ui/.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -28,6 +29,7 @@ api PUT /api/v1/outputs/main >/dev/null
 TSL_UDP="$TSL_UDP" node "$ROOT/web/tests/ui.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/ui.mjs"
 node "$ROOT/web/tests/logic.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/logic.mjs"
 node "$ROOT/web/tests/console.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console.mjs"
+node "$ROOT/web/tests/spatial.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/spatial.mjs"
 
 rc=0
 stop_mixer || rc=$?

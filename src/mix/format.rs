@@ -7,6 +7,8 @@ use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_4};
 
 use serde::{Deserialize, Serialize};
 
+use super::model::Db;
+
 /// The widest format's channel count (7.1.4).
 pub const MAX_FORMAT_CHANNELS: usize = 12;
 
@@ -134,11 +136,87 @@ impl From<MonoSum> for f64 {
     }
 }
 
+/// The down-mix (§5, D1/D2): how channels a narrower format lacks fold into the
+/// ones it has. ITU-R BS.775 style: the centre and the surrounds into the front
+/// pair at their levels, the LFE dropped (or added to the front pair at its
+/// level). The defaults are the fixed down-mix of 1.3: −3 dB, −3 dB, LFE off, no
+/// normalisation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Downmix {
+    /// C into L and R.
+    #[serde(default = "minus_3")]
+    pub centre_db: Db,
+    /// The surrounds into the front pair (Ls → L, Rs → R).
+    #[serde(default = "minus_3")]
+    pub surround_db: Db,
+    /// LFE into L and R when the target has no LFE (`-inf`: dropped).
+    #[serde(default = "lfe_off")]
+    pub lfe_db: Db,
+    /// Scale a down-mix from 3.0 or wider into fewer channels so that no output
+    /// channel sums to more than unity (the largest row sum of the matrix).
+    #[serde(default)]
+    pub normalise: bool,
+}
+
+fn minus_3() -> Db {
+    Db(-3.0)
+}
+
+fn lfe_off() -> Db {
+    Db::MINUS_INF
+}
+
+impl Default for Downmix {
+    fn default() -> Self {
+        Self {
+            centre_db: minus_3(),
+            surround_db: minus_3(),
+            lfe_db: lfe_off(),
+            normalise: false,
+        }
+    }
+}
+
+/// Lowest finite down-mix level.
+pub const DOWNMIX_MIN_DB: f64 = -40.0;
+/// Highest LFE level in a down-mix.
+pub const DOWNMIX_LFE_MAX_DB: f64 = 10.0;
+
+impl Downmix {
+    pub fn validate(&self) -> Result<(), String> {
+        let check = |what: &str, db: Db, hi: f64| {
+            if db == Db::MINUS_INF || (DOWNMIX_MIN_DB..=hi).contains(&db.0) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "downmix {what} must be -inf or {DOWNMIX_MIN_DB} to {hi} dB"
+                ))
+            }
+        };
+        check("centre_db", self.centre_db, 0.0)?;
+        check("surround_db", self.surround_db, 0.0)?;
+        check("lfe_db", self.lfe_db, DOWNMIX_LFE_MAX_DB)
+    }
+}
+
 /// The laws width mapping uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Laws {
     pub pan: PanLaw,
     pub mono_sum: MonoSum,
+    pub downmix: Downmix,
+}
+
+impl Laws {
+    /// These laws with `downmix` instead of their own, when there is one (a
+    /// target's override).
+    pub fn with_downmix(self, downmix: Option<Downmix>) -> Self {
+        Self {
+            downmix: downmix.unwrap_or(self.downmix),
+            ..self
+        }
+    }
 }
 
 /// Gains (left, right) of a mono signal at pan position `p` (−1 left, 0 centre,
@@ -180,18 +258,39 @@ fn db_to_gain(db: f64) -> f64 {
 /// `dst.channels()` rows and `src.channels()` columns.
 ///
 /// Channels with the same label map 1:1. A channel `dst` lacks is folded into the
-/// ones it has (ITU-R BS.775 down-mix at −3 dB per step, LFE dropped):
-/// C → L + R; Ls → L (or Lss when `dst` has side surrounds); Lss, Lrs → Ls;
-/// Ltf → L; Ltr → Lrs (or Ls); L, R → mono with the stereo-to-mono sum; mono →
-/// C, or L + R with the pan law when `dst` has no C. Channels `dst` has and `src`
-/// lacks stay silent.
+/// ones it has (ITU-R BS.775 style down-mix, [`Downmix`]): C → L + R at the
+/// centre level; Ls → L at the surround level (or to Lss when `dst` has side
+/// surrounds); Lss, Lrs → Ls at −3 dB; Ltf → L and Ltr → Lrs (or Ls) at −3 dB;
+/// LFE → L + R at the LFE level (dropped by default); L, R → mono with the
+/// stereo-to-mono sum; mono → C, or L + R with the pan law when `dst` has no C.
+/// Channels `dst` has and `src` lacks stay silent. With normalisation, a
+/// down-mix from 3.0 or wider into fewer channels is scaled so that its largest
+/// row sum is unity.
 pub fn width_matrix(src: Format, dst: Format, laws: Laws) -> Vec<f32> {
     let columns = src.channels();
     let mut m = vec![0f64; dst.channels() * columns];
     for (s, label) in src.labels().iter().enumerate() {
         fold(label, dst, 1.0, laws, &mut |d, g| m[d * columns + s] += g);
     }
+    if laws.downmix.normalise && columns > 2 && dst.channels() < columns {
+        let most = m
+            .chunks(columns)
+            .map(|row| row.iter().map(|g| g.abs()).sum::<f64>())
+            .fold(0f64, f64::max);
+        if most > 1.0 {
+            m.iter_mut().for_each(|g| *g /= most);
+        }
+    }
     m.into_iter().map(|g| g as f32).collect()
+}
+
+/// A down-mix level as a gain: −3 dB is 1/√2 exactly (BS.775's 0.7071), as in 1.3.
+fn level(db: Db) -> f64 {
+    if db.0 == -3.0 {
+        FRAC_1_SQRT_2
+    } else {
+        db.gain()
+    }
 }
 
 fn fold(label: &str, dst: Format, gain: f64, laws: Laws, add: &mut dyn FnMut(usize, f64)) {
@@ -210,13 +309,21 @@ fn fold(label: &str, dst: Format, gain: f64, laws: Laws, add: &mut dyn FnMut(usi
         }
         "L" | "R" => to("M", db_to_gain(laws.mono_sum.into())),
         "C" => {
-            to("L", h);
-            to("R", h);
+            let c = level(laws.downmix.centre_db);
+            to("L", c);
+            to("R", c);
+        }
+        "LFE" => {
+            let g = level(laws.downmix.lfe_db);
+            if g > 0.0 {
+                to("L", g);
+                to("R", g);
+            }
         }
         "Ls" if dst.index("Lss").is_some() => to("Lss", 1.0),
         "Rs" if dst.index("Rss").is_some() => to("Rss", 1.0),
-        "Ls" => to("L", h),
-        "Rs" => to("R", h),
+        "Ls" => to("L", level(laws.downmix.surround_db)),
+        "Rs" => to("R", level(laws.downmix.surround_db)),
         "Lss" | "Lrs" => to("Ls", h),
         "Rss" | "Rrs" => to("Rs", h),
         "Ltf" => to("L", h),
@@ -298,6 +405,7 @@ mod tests {
             let laws = Laws {
                 pan: [PanLaw::Zero, PanLaw::Minus3, PanLaw::Minus4_5, PanLaw::Minus6][pan],
                 mono_sum: [MonoSum::Minus3, MonoSum::Minus6][sum],
+                ..Laws::default()
             };
             let m = width_matrix(ALL[src], ALL[dst], laws);
             proptest::prop_assert_eq!(m.len(), ALL[src].channels() * ALL[dst].channels());
@@ -374,6 +482,97 @@ mod tests {
             assert!(close(m[s].into(), expected_l[s]), "L {s}: {}", m[s]);
             assert!(close(m[6 + s].into(), expected_r[s]), "R {s}");
         }
+    }
+
+    #[test]
+    fn adjustable_down_mix() {
+        let h = FRAC_1_SQRT_2;
+        // C at −6 dB, surrounds at 0 dB, LFE at 0 dB into the front pair.
+        let laws = Laws {
+            downmix: Downmix {
+                centre_db: Db(-6.0),
+                surround_db: Db(0.0),
+                lfe_db: Db(0.0),
+                normalise: false,
+            },
+            ..Laws::default()
+        };
+        let m = width_matrix(Format::Surround51, Format::Stereo, laws);
+        let c = Db(-6.0).gain();
+        // L row: L, R, C, LFE, Ls, Rs
+        let expected_l = [1.0, 0.0, c, 1.0, 1.0, 0.0];
+        let expected_r = [0.0, 1.0, c, 1.0, 0.0, 1.0];
+        for s in 0..6 {
+            assert!(close(m[s].into(), expected_l[s]), "L {s}: {}", m[s]);
+            assert!(close(m[6 + s].into(), expected_r[s]), "R {s}: {}", m[6 + s]);
+        }
+        // Normalised: the L row sums to 1 + 0.5 + 1 + 1 = 3.5 → every gain / 3.5.
+        let normalised = Laws {
+            downmix: Downmix {
+                normalise: true,
+                ..laws.downmix
+            },
+            ..laws
+        };
+        let n = width_matrix(Format::Surround51, Format::Stereo, normalised);
+        let sum = 1.0 + c + 1.0 + 1.0;
+        for (a, b) in n.iter().zip(&m) {
+            assert!(close((*a).into(), f64::from(*b) / sum));
+        }
+        let row: f64 = n[..6].iter().map(|g| f64::from(*g)).sum();
+        assert!(close(row, 1.0), "{row}");
+        // The default BS.775 down-mix normalised: L + 0.707 C + 0.707 Ls → / 2.414.
+        let d = Laws {
+            downmix: Downmix {
+                normalise: true,
+                ..Downmix::default()
+            },
+            ..Laws::default()
+        };
+        let n = width_matrix(Format::Surround51, Format::Stereo, d);
+        assert!(close(n[0].into(), 1.0 / (1.0 + 2.0 * h)));
+        // −inf drops: no centre and no surrounds in the down-mix.
+        let none = Laws {
+            downmix: Downmix {
+                centre_db: Db::MINUS_INF,
+                surround_db: Db::MINUS_INF,
+                ..Downmix::default()
+            },
+            ..Laws::default()
+        };
+        let m = width_matrix(Format::Surround51, Format::Stereo, none);
+        assert_eq!(&m[..6], &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        // Normalisation leaves up-mixes, same formats and stereo → mono alone.
+        for (src, dst) in [
+            (Format::Stereo, Format::Surround51),
+            (Format::Surround51, Format::Surround51),
+            (Format::Stereo, Format::Mono),
+            (Format::Surround51, Format::Surround71),
+        ] {
+            assert_eq!(
+                width_matrix(src, dst, d),
+                width_matrix(src, dst, Laws::default()),
+                "{src:?} → {dst:?}"
+            );
+        }
+        // Validation and JSON.
+        assert_eq!(Downmix::default().validate(), Ok(()));
+        let bad = Downmix {
+            centre_db: Db(1.0),
+            ..Downmix::default()
+        };
+        assert!(bad.validate().unwrap_err().contains("centre_db"));
+        let bad = Downmix {
+            lfe_db: Db(12.0),
+            ..Downmix::default()
+        };
+        assert!(bad.validate().is_err());
+        let back: Downmix = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, Downmix::default());
+        assert_eq!(
+            serde_json::to_value(Downmix::default()).unwrap(),
+            serde_json::json!({"centre_db": -3.0, "surround_db": -3.0, "lfe_db": "-inf", "normalise": false})
+        );
     }
 
     #[test]

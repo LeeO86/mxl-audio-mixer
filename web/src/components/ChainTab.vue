@@ -7,9 +7,10 @@ import ChainCurve from "./ChainCurve.vue";
 import SignalSettings from "./SignalSettings.vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import NodeEditor from "./NodeEditor.vue";
-import { NODE_TYPES, DYNAMICS } from "../nodes.js";
+import FormatSelect from "./FormatSelect.vue";
+import { NODE_TYPES, DYNAMICS, unsupported } from "../nodes.js";
 import { api } from "../api.js";
-import { act, flush, live, patchNode, select, signalOf, signalPath, signals } from "../store.js";
+import { act, flush, isBus, live, patchNode, select, signalOf, signalPath, signals } from "../store.js";
 
 const sig = computed(() => signalOf(live.selected) || signals.value[0] || null);
 const chain = computed(() => sig.value?.chain || []);
@@ -82,6 +83,7 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
           </optgroup>
         </select>
         <p class="note">{{ chain.length }} of 32 nodes · latency {{ (live.latency[sig?.id] || 0).toFixed(2) }} ms</p>
+        <FormatSelect v-if="sig" :signal="sig" />
       </div>
       <div class="panel palette">
         <h3>Add</h3>
@@ -106,6 +108,7 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
           <div class="nhead" draggable="true" @dragstart="dragStart($event, `node:${n.id}`)" @dragend="(dragged = ''), (over = -1)">
             <span class="ntitle">{{ NODE_TYPES[n.type]?.label || n.type }}</span>
             <code>{{ n.id }}</code>
+            <span v-if="unsupported(n, sig.format, !isBus(sig.id))" class="state-tag bypass" :title="unsupported(n, sig.format, !isBus(sig.id))">⚠ not on {{ sig.format }}</span>
             <span v-if="DYNAMICS.has(n.type)" class="grbar"><span class="gr"><span :style="{ width: `${Math.min(100, ((meters[n.id]?.gain_reduction_db || 0) / 20) * 100)}%` }"></span></span></span>
             <span class="spacer"></span>
             <button class="btn small bypass" :class="{ secondary: !n.bypass }" :aria-pressed="n.bypass" @click="bypass(n)">Bypass</button>

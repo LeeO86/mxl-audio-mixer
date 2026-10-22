@@ -3,7 +3,8 @@
 # (EQ sample-exact, a ramped parameter change without a plan swap, bypass, a
 # 48 dB/oct high-pass, a compressor's gain reduction), a look-ahead limiter on a
 # published bus (ceiling, latency), loudness (BS.1770) with start/stop/reset and
-# its metrics, true peak.
+# its metrics, true peak; 1.4.0: M/S / width, EQ pass bands, a format change,
+# the down-mix and the surround panner.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
 
@@ -115,6 +116,97 @@ integrated_ok || fail "integration after start: $(loud integrated_lufs) LUFS, no
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$WEB/api/v1/loudness/main/explode")
 [[ "$code" == 400 ]] || fail "unknown action answered $code"
 pass "loudness stop, reset and start"
+
+# 1.4.0 (D1–D5, C10): the M/S / width node, high- and low-pass EQ bands, a format
+# change, the down-mix (global and per bus) and the surround panner.
+publish() { # <bus>: publish it and probe it from now on
+    api PUT "/api/v1/outputs/$1" >/dev/null
+    OUT_FLOW=$(json "$WEB/api/v1/outputs/$1" "d['mxl_flow_id']")
+}
+api POST /api/v1/strips '{"id": "st", "format": "stereo", "patch": [{"input": 1, "channel": 1}, null]}' >/dev/null
+api POST /api/v1/buses '{"id": "w", "format": "stereo"}' >/dev/null
+api PUT /api/v1/sends/st/w '{"tap": "post-fader"}' >/dev/null
+publish w
+api POST /api/v1/strips/st/chain '{"id": "width", "type": "width", "width_pct": 0}' >/dev/null
+sleep 0.3
+probe 1 1:1:0.5 2:1:0.5
+before=$(swaps)
+api PATCH /api/v1/strips/st/chain/width '{"width_pct": 200, "ramp_ms": 20}' >/dev/null
+sleep 0.3
+probe 1 1:1:1.5 2:1:-0.5
+[[ "$(swaps)" == "$before" ]] || fail "a width change swapped the plan"
+api PATCH /api/v1/strips/st/chain/width '{"width_pct": 100, "input": "ms"}' >/dev/null
+sleep 0.3
+probe 1 1:1:1 2:1:1
+pass "M/S / width: 0 % mono, 200 % double side (ramped, no swap), M/S decode"
+
+api PATCH /api/v1/strips/st/chain/width '{"width_pct": 100, "input": "lr"}' >/dev/null
+api POST /api/v1/strips/st/chain '{"id": "eq", "type": "eq", "bands": [{"type": "high-pass", "freq_hz": 4000, "q": 0.7, "slope_db_per_oct": 48}, {"type": "bell", "freq_hz": 1000, "q": 1, "gain_db": 0}]}' >/dev/null
+sleep 0.3
+probe 1
+python3 -c "exit(0 if $(peak 1) < -100 else 1)" || fail "EQ high-pass band: tone at $(peak 1) dBFS"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/strips/st/chain/eq" \
+    -d '{"bands": [{"type": "low-pass", "freq_hz": 4000, "q": 0.7}]}')
+[[ "$code" == 400 ]] || fail "a low-pass band without a slope answered $code"
+api PATCH /api/v1/strips/st/chain/eq '{"bands": [{"type": "low-pass", "freq_hz": 8000, "q": 0.7, "slope_db_per_oct": 12}]}' >/dev/null
+sleep 0.3
+probe 1
+python3 -c "exit(0 if abs($(peak 1) + 20.0) < 0.2 else 1)" || fail "EQ low-pass band at 8 kHz: tone at $(peak 1) dBFS"
+curl -fsS -X DELETE "$WEB/api/v1/strips/st/chain/eq"
+pass "EQ high-pass band 48 dB/oct at 4 kHz: tone at -100 dBFS or less; low-pass band at 8 kHz passes 1 kHz"
+
+answer=$(api PATCH /api/v1/strips/st '{"format": "5.1"}')
+python3 - "$answer" <<'EOF2' || fail "format change: $answer"
+import json, sys
+s = json.loads(sys.argv[1])
+assert s["format"] == "5.1" and len(s["patch"]) == 6 and len(s["polarity"]) == 6, s
+assert s["patch"][0] == {"input": 1, "channel": 1} and s["patch"][2] is None, s["patch"]
+width = [n for n in s["chain"] if n["id"] == "width"][0]
+assert width["bypass"], width
+assert any("width" in w for w in s["warnings"]), s.get("warnings")
+assert [w["node"] for w in s["chain_warnings"]] == ["width"], s["chain_warnings"]
+EOF2
+[[ "$(json "$WEB/api/v1/sends/st/w" "d['tap']")" == post-fader ]] || fail "the send went away"
+sleep 0.3
+probe 1 1:1:1 2:1:0
+pass "format change stereo → 5.1: chain kept (width bypassed and flagged), send kept and down-mixed, patch extended"
+
+# A 5.1 strip with the tone on C into a stereo bus: the global down-mix (−3 dB),
+# the bus's own (−6 dB), a global change the bus does not follow, then the global.
+api POST /api/v1/strips '{"id": "film", "format": "5.1", "patch": [null, null, {"input": 1, "channel": 1}, null, null, null]}' >/dev/null
+api POST /api/v1/buses '{"id": "dm", "format": "stereo"}' >/dev/null
+api PUT /api/v1/sends/film/dm '{"tap": "post-fader"}' >/dev/null
+publish dm
+sleep 0.3
+probe 1 1:1:0.7071068 2:1:0.7071068
+api PATCH /api/v1/buses/dm '{"downmix": {"centre_db": -6}}' >/dev/null
+sleep 0.3
+probe 1 1:1:0.5011872 2:1:0.5011872
+api PATCH /api/v1/mix/settings '{"downmix": {"centre_db": 0}}' >/dev/null
+sleep 0.3
+probe 1 1:1:0.5011872
+api PATCH /api/v1/buses/dm '{"downmix": null}' >/dev/null
+sleep 0.3
+probe 1 1:1:1 2:1:1
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/mix/settings" -d '{"downmix": {"centre_db": 3}}')
+[[ "$code" == 400 ]] || fail "a +3 dB centre answered $code"
+pass "down-mix: BS.775 default, per-bus override, global change, back to the global"
+
+# A mono strip with a surround panner into a 5.1 bus: Rs at 110°, L at −30° (a
+# value change, no plan swap), the LFE send.
+api POST /api/v1/strips '{"id": "fx", "format": "mono", "patch": [{"input": 1, "channel": 1}]}' >/dev/null
+api POST /api/v1/strips/fx/chain '{"id": "pan", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 110}' >/dev/null
+api POST /api/v1/buses '{"id": "sur", "format": "5.1"}' >/dev/null
+api PUT /api/v1/sends/fx/sur >/dev/null
+publish sur
+sleep 0.3
+probe 1 1:1:0 2:1:0 3:1:0 4:1:0 5:1:0 6:1:1
+before=$(swaps)
+api PATCH /api/v1/strips/fx/chain/pan '{"azimuth_deg": -30, "lfe_db": 0, "ramp_ms": 20}' >/dev/null
+sleep 0.3
+probe 1 1:1:1 2:1:0 3:1:0 4:1:1 6:1:0
+[[ "$(swaps)" == "$before" ]] || fail "moving the panner swapped the plan"
+pass "surround panner: mono → 5.1 Rs, then L with the LFE send (no plan swap)"
 
 rc=0
 stop_mixer || rc=$?

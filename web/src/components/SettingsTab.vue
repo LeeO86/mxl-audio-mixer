@@ -4,6 +4,7 @@
 import { computed, onMounted, ref } from "vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
+import DownmixEdit from "./DownmixEdit.vue";
 import { api, copyText, download } from "../api.js";
 import { act, live, refreshConfig, settingValue } from "../store.js";
 
@@ -92,6 +93,11 @@ const seed = computed(() => settingValue("NMOS_SEED") || settingValue("HOST_ID")
       </div>
       <Pot label="Loudness target" unit="LUFS" :value="settings.loudness_target_lufs ?? -23" :min="-60" :max="0" :def="-23" :fine="0.5" @change="(v) => setMix({ loudness_target_lufs: v })" />
       <Pot label="Loudness tolerance" unit="± LU" :value="settings.loudness_tolerance_lu ?? 1" :min="0" :max="10" :def="1" :fine="0.1" @change="(v) => setMix({ loudness_tolerance_lu: v })" />
+    </div>
+    <h3 style="margin-top: 1rem">Down-mix</h3>
+    <p class="note" style="margin-top: 0">Wherever a wider format meets a narrower one: sends, monitors, solo, published layouts. A bus or monitor can have its own.</p>
+    <div class="params">
+      <DownmixEdit v-if="settings.downmix" :value="settings.downmix" label="Down-mix" @change="(d) => setMix({ downmix: d })" />
     </div>
   </div>
 

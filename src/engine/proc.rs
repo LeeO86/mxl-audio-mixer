@@ -185,8 +185,10 @@ fn pulse_gain(index: u64) -> f32 {
 
 /// The type-specific part: coefficients and state.
 pub enum Kind {
+    /// Per band its type and order (2 for bells, shelves and notches; a pass
+    /// band's Butterworth order); `order / 2` sections each, in band order.
     Eq {
-        types: Vec<BandType>,
+        types: Vec<(BandType, usize)>,
         coefficients: Vec<Coefficients>,
         states: Vec<State>,
     },
@@ -330,11 +332,14 @@ impl Processor {
         let channels = channels.min(MAX_CH);
         let latency = kind.latency();
         let k = match kind {
-            ProcKind::Eq { bands } => Kind::Eq {
-                types: bands.iter().map(|b| b.kind).collect(),
-                coefficients: vec![Coefficients::IDENTITY; bands.len()],
-                states: vec![State::default(); bands.len() * channels],
-            },
+            ProcKind::Eq { bands } => {
+                let sections: usize = bands.iter().map(|b| b.sections()).sum();
+                Kind::Eq {
+                    types: bands.iter().map(|b| (b.kind, 2 * b.sections())).collect(),
+                    coefficients: vec![Coefficients::IDENTITY; sections],
+                    states: vec![State::default(); sections * channels],
+                }
+            }
             ProcKind::Filter {
                 mode,
                 slope_db_per_oct,
@@ -441,8 +446,11 @@ impl Processor {
                 }
             }
             ProcKind::Delay { .. } => Kind::Delay(Delay::new(channels, kind.delay_samples())),
-            // The compiler makes the auto node a gain step; a processor of it passes through.
-            ProcKind::Auto {} => Kind::Delay(Delay::new(channels, 0)),
+            // The compiler makes the auto node a gain step and the width and the
+            // surround panner gain matrices; a processor of them passes through.
+            ProcKind::Auto {} | ProcKind::Width { .. } | ProcKind::SurroundPan { .. } => {
+                Kind::Delay(Delay::new(channels, 0))
+            }
         };
         Self {
             id,
@@ -524,14 +532,28 @@ impl Processor {
                 coefficients,
                 ..
             } => {
-                for (b, (t, c)) in types.iter().zip(coefficients.iter_mut()).enumerate() {
+                let mut at = 0;
+                for (b, (t, order)) in types.iter().enumerate() {
                     let (f, q, g) = (p(1 + 3 * b), p(2 + 3 * b), p(3 + 3 * b));
-                    *c = match t {
+                    let single = match t {
                         BandType::Bell => biquad::bell(f, q, g),
                         BandType::LowShelf => biquad::low_shelf(f, q, g),
                         BandType::HighShelf => biquad::high_shelf(f, q, g),
                         BandType::Notch => biquad::notch(f, q),
+                        BandType::HighPass | BandType::LowPass => {
+                            for (k, bq) in biquad::butterworth_q(*order).enumerate() {
+                                coefficients[at + k] = if *t == BandType::HighPass {
+                                    biquad::high_pass(f, bq)
+                                } else {
+                                    biquad::low_pass(f, bq)
+                                };
+                            }
+                            at += order / 2;
+                            continue;
+                        }
                     };
+                    coefficients[at] = single;
+                    at += 1;
                 }
             }
             Kind::Filter {
@@ -1289,9 +1311,145 @@ mod tests {
                         freq_hz: 200.0 * (k + 1) as f64,
                         q: 1.0,
                         gain_db: 3.0,
+                        slope_db_per_oct: None,
                     })
                     .collect(),
             }),
+        );
+        let pass = |kind, f, slope| EqBand {
+            kind,
+            freq_hz: f,
+            q: 0.707,
+            gain_db: 0.0,
+            slope_db_per_oct: Some(slope),
+        };
+        time(
+            "eq (hp 24, 4 bells, lp 12)",
+            node(ProcKind::Eq {
+                bands: std::iter::once(pass(BandType::HighPass, 80.0, 24))
+                    .chain((0..4).map(|k| EqBand {
+                        kind: BandType::Bell,
+                        freq_hz: 200.0 * (k + 1) as f64,
+                        q: 1.0,
+                        gain_db: 3.0,
+                        slope_db_per_oct: None,
+                    }))
+                    .chain(std::iter::once(pass(BandType::LowPass, 16_000.0, 12)))
+                    .collect(),
+            }),
+        );
+        time(
+            "filter (hp 24)",
+            node(ProcKind::Filter {
+                mode: FilterMode::HighPass,
+                freq_hz: 80.0,
+                slope_db_per_oct: 24,
+            }),
+        );
+        // Gain-matrix steps (the width node, the surround panner, a send's
+        // down-mix), on the plan: steady and while the values ramp.
+        use super::super::plan::{InputSource, OutputSink, PlanBuilder, Step};
+        struct Tone<'a>(&'a [f32]);
+        impl InputSource for Tone<'_> {
+            fn channel(&self, _: usize, _: usize) -> Option<&[f32]> {
+                Some(self.0)
+            }
+        }
+        struct Null;
+        impl OutputSink for Null {
+            fn write(&mut self, _: usize, _: usize, _: usize, _: &[f32]) {}
+        }
+        let matrix = |what: &str, inputs: usize, values: Vec<f32>, send: bool| {
+            let outputs = values.len() / inputs;
+            for ramping in [false, true] {
+                let mut b = PlanBuilder::new(B);
+                let src = b.buffers(inputs);
+                for c in 0..inputs {
+                    let dst = b.buffer(src, c);
+                    b.step(Step::Patch {
+                        input: 0,
+                        channel: c as u32,
+                        dst,
+                    });
+                }
+                let dst = b.buffers(outputs);
+                let node = if send {
+                    b.node(1, &[1.0], 0)
+                } else {
+                    b.node(1, &values, 0)
+                };
+                let coefficients = b.coefficients(&values);
+                b.step(if send {
+                    Step::Send {
+                        node,
+                        src,
+                        dst,
+                        coefficients,
+                    }
+                } else {
+                    Step::Matrix { node, src, dst }
+                });
+                let mut plan = b.finish();
+                // Without the matrix: the patch steps alone, taken off.
+                let mut bare = PlanBuilder::new(B);
+                let s2 = bare.buffers(inputs);
+                for c in 0..inputs {
+                    let dst = bare.buffer(s2, c);
+                    bare.step(Step::Patch {
+                        input: 0,
+                        channel: c as u32,
+                        dst,
+                    });
+                }
+                let mut bare = bare.finish();
+                let blocks = 20_000u64;
+                let t = |p: &mut super::super::plan::Plan, ramp: bool| {
+                    let started = std::time::Instant::now();
+                    for k in 0..blocks {
+                        if ramp && k % 8 == 0 {
+                            p.set_param(1, &values, 8 * B as u32);
+                        }
+                        p.process(k * B as u64, &Tone(&tone[..B]), &mut Null);
+                    }
+                    started.elapsed().as_nanos() as f64 / blocks as f64
+                };
+                let base = t(&mut bare, false);
+                let ns = t(&mut plan, ramping) - base;
+                let label = format!("{what}{}", if ramping { " (ramping)" } else { "" });
+                eprintln!("{label:28} {ns:8.0} ns per block");
+            }
+        };
+        let width: Vec<f32> = crate::mix::spatial::width_matrix(
+            150.0,
+            crate::mix::chain::StereoMode::Lr,
+            crate::mix::chain::StereoMode::Lr,
+        )
+        .iter()
+        .map(|v| *v as f32)
+        .collect();
+        matrix("width (2 × 2)", 2, width, false);
+        use crate::mix::format::Format;
+        let pan = |layout, inputs| {
+            crate::mix::spatial::surround_pan(layout, inputs, 40.0, 20.0, 30.0, -10.0)
+        };
+        matrix(
+            "surround pan mono → 5.1",
+            1,
+            pan(Format::Surround51, 1),
+            false,
+        );
+        matrix(
+            "surround pan stereo → 7.1",
+            2,
+            pan(Format::Surround71, 2),
+            false,
+        );
+        let laws = crate::mix::format::Laws::default();
+        matrix(
+            "send 5.1 → stereo (down-mix)",
+            6,
+            crate::mix::format::width_matrix(Format::Surround51, Format::Stereo, laws),
+            true,
         );
         // A metered channel on the meter thread: peak, energy, true peak, PPM.
         let mut meterer = crate::engine::meter::Meterer::default();
@@ -1560,6 +1718,7 @@ mod tests {
                     freq_hz: 1000.0,
                     q: 1.0,
                     gain_db: 6.0,
+                    slope_db_per_oct: None,
                 }],
             },
             1,
@@ -1580,6 +1739,96 @@ mod tests {
             "{}",
             tail_peak(&out[0], 0.5)
         );
+    }
+
+    #[test]
+    fn eq_pass_bands_match_the_filter_node() {
+        let band = |kind, f, slope| EqBand {
+            kind,
+            freq_hz: f,
+            q: 0.707,
+            gain_db: 0.0,
+            slope_db_per_oct: Some(slope),
+        };
+        for (kind, mode) in [
+            (BandType::HighPass, FilterMode::HighPass),
+            (BandType::LowPass, FilterMode::LowPass),
+        ] {
+            for slope in [12, 24, 36, 48] {
+                let x = sine(
+                    if kind == BandType::HighPass {
+                        250.0
+                    } else {
+                        4000.0
+                    },
+                    0.0,
+                    1.0,
+                );
+                let mut eq = proc(
+                    ProcKind::Eq {
+                        bands: vec![band(kind, 1000.0, slope)],
+                    },
+                    1,
+                );
+                let mut filter = proc(
+                    ProcKind::Filter {
+                        mode,
+                        freq_hz: 1000.0,
+                        slope_db_per_oct: slope,
+                    },
+                    1,
+                );
+                let a = run(&mut eq, std::slice::from_ref(&x), None);
+                let b = run(&mut filter, std::slice::from_ref(&x), None);
+                assert_eq!(a, b, "{kind:?} {slope}");
+                // Two octaves away: about slope × 2 down (the bilinear transform
+                // adds a little towards Nyquist).
+                let p = tail_peak(&a[0], 0.5);
+                assert!(
+                    (p + 2.0 * slope as f64).abs() < 3.0,
+                    "{kind:?} {slope} dB/oct: {p}"
+                );
+            }
+        }
+        // All in one EQ: high-pass 24, a bell, low-pass 12 (4 sections).
+        let mut eq = proc(
+            ProcKind::Eq {
+                bands: vec![
+                    band(BandType::HighPass, 80.0, 24),
+                    EqBand {
+                        kind: BandType::Bell,
+                        freq_hz: 1000.0,
+                        q: 1.0,
+                        gain_db: 6.0,
+                        slope_db_per_oct: None,
+                    },
+                    band(BandType::LowPass, 15_000.0, 12),
+                ],
+            },
+            2,
+        );
+        let x = sine(1000.0, -20.0, 1.0);
+        let out = run(&mut eq, &[x.clone(), x], None);
+        assert!(
+            (tail_peak(&out[0], 0.5) + 14.0).abs() < 0.1,
+            "{}",
+            tail_peak(&out[0], 0.5)
+        );
+        assert_eq!(out[0], out[1]);
+        let low = run(
+            &mut eq,
+            &[sine(20.0, -20.0, 1.0), sine(20.0, -20.0, 1.0)],
+            None,
+        );
+        assert!(tail_peak(&low[0], 0.5) < -65.0);
+        // The frequency of a pass band ramps like any parameter.
+        eq.set_param(1, 160.0, 4800);
+        let out = run(
+            &mut eq,
+            &[sine(100.0, -20.0, 1.0), sine(100.0, -20.0, 1.0)],
+            None,
+        );
+        assert!(tail_peak(&out[0], 0.5) < -30.0);
     }
 
     fn compressor(threshold: f64, ratio: f64, attack: f64, release: f64) -> ProcKind {

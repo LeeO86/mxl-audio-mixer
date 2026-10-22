@@ -7,8 +7,10 @@ pub mod format;
 pub mod logic;
 pub mod model;
 pub mod operations;
+pub mod reformat;
 pub mod room;
 pub mod show;
+pub mod spatial;
 pub mod talkback;
 pub mod vca;
 

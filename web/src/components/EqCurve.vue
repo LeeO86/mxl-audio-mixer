@@ -1,9 +1,10 @@
 <script setup>
 // The EQ editor's response (§12.2): the summed curve, each band's own (dashed), and a handle per band.
-// Drag a handle for frequency and gain (a notch: frequency only), the wheel or the Q buttons for Q.
+// Drag a handle for frequency and gain (a notch, a high- or low-pass band: frequency only), the wheel or
+// the Q buttons for Q.
 // `extra` adds other nodes of the chain to the drawn sum (the whole chain's EQ).
 import { computed, ref } from "vue";
-import { bandCoefficients, biquadDb, filterDb, freqs } from "../dsp.js";
+import { bandDb, filterDb, freqs } from "../dsp.js";
 import { fmtHz } from "../api.js";
 
 const props = defineProps({
@@ -24,16 +25,18 @@ const dbOf = (py) => ((H / 2 - py) / (H / 2 - 12)) * props.range;
 
 const bands = computed(() => props.node.bands || []);
 const bandType = (b) => (props.node.type === "dynamic-eq" ? "bell" : b.type);
-const curves = computed(() => bands.value.map((b) => bandCoefficients({ ...b, type: bandType(b) })));
+// Each band's response in dB at f (high- and low-pass bands: Butterworth of their slope, D4).
+const curves = computed(() => bands.value.map((b) => (f) => bandDb({ ...b, type: bandType(b) }, f)));
+const isPass = (b) => bandType(b) === "high-pass" || bandType(b) === "low-pass";
 const path = (fn) => F.map((f, i) => `${i ? "L" : "M"}${x(f).toFixed(1)},${y(Math.max(-props.range, Math.min(props.range, fn(f)))).toFixed(1)}`).join("");
 const total = computed(() => {
   if (props.node.type === "filter") return path((f) => filterDb(props.node, f));
-  return path((f) => curves.value.reduce((s, c) => s + biquadDb(c, f), 0));
+  return path((f) => curves.value.reduce((s, c) => s + c(f), 0));
 });
-const each = computed(() => (bands.value.length > 1 ? curves.value.map((c) => path((f) => biquadDb(c, f))) : []));
+const each = computed(() => (bands.value.length > 1 ? curves.value.map((c) => path(c)) : []));
 const handles = computed(() => {
   if (props.node.type === "filter") return [{ i: 0, cx: x(props.node.freq_hz), cy: y(-3) }];
-  return bands.value.map((b, i) => ({ i, cx: x(b.freq_hz), cy: y(bandType(b) === "notch" ? 0 : b.gain_db) }));
+  return bands.value.map((b, i) => ({ i, cx: x(b.freq_hz), cy: y(isPass(b) ? -3 : bandType(b) === "notch" ? 0 : b.gain_db) }));
 });
 const GRID_F = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const gridDb = computed(() => [-props.range, -props.range / 2, 0, props.range / 2, props.range]);
@@ -65,14 +68,14 @@ function move(ev) {
   const next = bands.value.map((b) => ({ ...b }));
   const b = next[dragging];
   b.freq_hz = round(f, f < 100 ? 1 : 0);
-  if (bandType(b) !== "notch") b.gain_db = round(Math.min(24, Math.max(-24, dbOf(py))), 1);
+  if (bandType(b) !== "notch" && !isPass(b)) b.gain_db = round(Math.min(24, Math.max(-24, dbOf(py))), 1);
   emit("bands", { bands: next });
 }
 function up() {
   dragging = -1;
 }
 function wheel(i, ev) {
-  if (props.node.type === "filter") return;
+  if (props.node.type === "filter" || isPass(bands.value[i])) return;
   ev.preventDefault();
   const next = bands.value.map((b) => ({ ...b }));
   next[i].q = round(Math.min(40, Math.max(0.1, next[i].q * (ev.deltaY < 0 ? 1.1 : 1 / 1.1))), 2);

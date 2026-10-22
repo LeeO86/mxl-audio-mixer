@@ -6,6 +6,7 @@ import { computed } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import Meter from "./Meter.vue";
 import Pot from "./Pot.vue";
+import DownmixEdit from "./DownmixEdit.vue";
 import Segmented from "./Segmented.vue";
 import { api } from "../api.js";
 import { listening, toggleListen } from "../whep.js";
@@ -109,6 +110,8 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
             <Pot label="Delay" unit="ms" :value="m.delay_ms" :min="0" :max="2000" :def="0" :fine="0.1" :digits="2" @change="(v) => set({ delay_ms: v })" />
             <label>Calibration: dB SPL at a level of 0 dB (for the presets)</label>
             <input type="number" min="40" max="130" step="0.5" :value="m.calibration_spl ?? ''" placeholder="not calibrated" aria-label="Calibration" @change="set({ calibration_spl: $event.target.value === '' ? null : Number($event.target.value) })" />
+            <label class="check"><input type="checkbox" :checked="!!m.downmix" aria-label="Own down-mix" @change="set({ downmix: $event.target.checked ? { ...(live.mix?.settings?.downmix || {}) } : null })" /> Own down-mix of its source and solo</label>
+            <DownmixEdit v-if="m.downmix" :value="m.downmix" label="Monitor down-mix" @change="(d) => set({ downmix: d })" />
             <p class="note">{{ m.chain.length }} alignment nodes (EQ, filters for bass management): <code>PATCH /api/v1/monitors/{{ m.id }}</code> <code>chain</code>.</p>
             <label class="check"><input type="checkbox" :checked="m.publish" @change="set({ publish: $event.target.checked })" /> Publish as an MXL flow (NMOS sender "Monitor {{ m.name }}")</label>
             <div class="actions"><ConfirmButton label="Delete monitor" small @confirm="removeMonitor" /></div>

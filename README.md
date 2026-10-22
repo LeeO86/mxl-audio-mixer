@@ -41,8 +41,12 @@ in order on the same input (untick "Link" to choose each). Wider strips have one
 polarity button that opens a toggle per channel and shows how many are inverted.
 "Auto-mix" opens the gain-sharing auto-mixes, every strip a tile), **Processing**
 (the chain of a strip or bus: drag node types in from the palette, drag nodes to
-reorder, bypass, delete; EQ curve with band handles, filter, dynamics transfer
-curves with the live level, de-esser listen, keys), **Routing** (the send matrix,
+reorder, bypass, delete; EQ curve with band handles (high- and low-pass bands
+with their slope), filter, dynamics transfer curves with the live level, de-esser
+listen, keys, the surround panner's position pad; the signal's format, changed
+after a confirming second press, with the nodes it would bypass named first and a
+flag on every node that cannot run on the format; a bus's own down-mix),
+**Routing** (the send matrix,
 a send's tap, gain, mute, phase and block delay; publishing outputs), **Graph**
 (the routing as a graph, read-write: inputs, strips, buses, monitors and outputs
 with their patches, sends, mix-minus, monitor sources and outputs; draw from a
@@ -66,8 +70,9 @@ that remember: those actions act at once, and re-made blocks start empty),
 **Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
 history), **Meters** (the bridge on dBFS, true peak or PPM EBU, BBC, Nordic, DIN at
 an alignment level, phase correlation; loudness; spectrum and goniometer of any
-tap), **NMOS**, **Status**, **Settings** (mix settings, configuration, show export
-and import). Every client follows every change. Faders and pots take touch: drag,
+tap), **NMOS**, **Status**, **Settings** (mix settings with the down-mix, applied
+with a button; configuration, show export and import). Every client follows every
+change. Faders and pots take touch: drag,
 − and + (held: repeated), double-click resets; destructive actions want a second
 press within 3 s. The theme follows the system or is set light or dark (kept in
 the browser).
@@ -128,7 +133,8 @@ The control room (§10.1) is part of the show (`control_room`); who is soloed is
   `delay_ms`, a `chain` of processing nodes for EQ), a
   `calibration_spl` (dB SPL at 0 dB) for the SPL presets `reference_spl` (79, 82,
   85), and `publish`: an MXL flow with an NMOS sender "Monitor <name>" for physical
-  speakers. Every control ramps; at most 16 monitors.
+  speakers, and its own `downmix` of its source and the solo bus (`null`: the
+  mix's). Every control ramps; at most 16 monitors.
 - **Bass management** (formats with an LFE channel), switched on and off per
   monitor: `bass_management` `{"enabled", "crossover_hz" (40–250), "lfe_gain_db"
   (−20 … +20)}`. The other channels are high-passed and their sum low-passed into
@@ -362,7 +368,8 @@ an id gets `strip-<n>` or `bus-<n>`.
   1) or `null`. A channel the input does not have is silent and shows `missing` in
   `patch_state`. `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
   position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
-  (measure it). A mono strip is stereo after its panner.
+  (measure it). A mono strip is stereo after its panner; with a surround panner
+  (below) a mono or stereo strip is 5.1 or 7.1 there.
 - **Bus:** sum of its sends → `chain` → fader (`"-inf"` … +15) and mute; `loudness`;
   `compensate` (delay compensation, default `true`). A **subgroup** bus
   (`subgroup: true`) takes every send into it from its source's output (a strip's
@@ -399,13 +406,31 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Formats** (§4.1), channel order as SMPTE ST 2110-30: mono `M`; stereo `L R`;
   `3.0` `L R C`; `5.1` `L R C LFE Ls Rs`; `7.1` `L R C LFE Lss Rss Lrs Rrs`;
   `5.1.4` = 5.1 + `Ltf Rtf Ltr Rtr`; `7.1.4` = 7.1 + the same heights.
-- **Width mapping** (sends and outputs): same channels map 1:1; missing ones fold
-  down at −3 dB per step (ITU-R BS.775; LFE dropped): C → L + R; Ls → L (or Lss);
-  Lss, Lrs → Ls; Ltf → L; Ltr → Lrs (or Ls); stereo → mono with the stereo-to-mono
-  sum; mono → C (3.0 and the surround formats) or L + R with the pan law
-  (stereo); channels the source lacks stay silent.
+- **Width mapping** (sends, monitors, solo and outputs): same channels map 1:1;
+  missing ones fold down with the **down-mix** (ITU-R BS.775 style): C → L + R at
+  `centre_db`; Ls → L at `surround_db` (or to Lss); Lss, Lrs → Ls, Ltf → L and
+  Ltr → Lrs (or Ls) at −3 dB; LFE → L + R at `lfe_db` (`"-inf"`: dropped);
+  stereo → mono with the stereo-to-mono sum; mono → C (3.0 and the surround
+  formats) or L + R with the pan law (stereo); channels the source lacks stay
+  silent. `normalise` scales a down-mix from 3.0 or wider into fewer channels so
+  that no output channel sums to more than unity.
+- **Down-mix** (`downmix`: `{"centre_db", "surround_db", "lfe_db", "normalise"}`;
+  levels −40 … 0 dB, LFE −40 … +10 dB, or `"-inf"`): the mix's in its settings
+  (default −3, −3, `"-inf"`, `false`: the fixed down-mix of 1.3), and a bus's or a
+  monitor's own, for everything arriving there (`null`: the mix's). The solo bus
+  and published layouts use the mix's. A change rewires only the sends whose
+  coefficients change, with a fade.
+- **Format change** (`PATCH` a strip's or bus's `format`): the chain stays; nodes
+  that run on any width adapt, nodes that cannot (M/S / width off stereo, a
+  surround panner off a mono or stereo strip) are bypassed, flagged in
+  `chain_warnings` and pass the signal through; sends stay and use the width
+  mapping; a strip's patch is trimmed, or extended (a run of consecutive channels
+  of one input goes on, else unpatched) and its polarity with it; a published bus
+  keeps its flow's layout (its output gets the old `format`). The answer lists
+  what changed in `warnings`. The signal fades out and in.
 - **Mix settings:** `pan_law_db` 0, −3 (default), −4.5, −6; `mono_sum_db` −3
-  (default) or −6; `loudness_target_lufs` (−23) and `loudness_tolerance_lu` (1).
+  (default) or −6; `loudness_target_lufs` (−23) and `loudness_tolerance_lu` (1);
+  `downmix` (above).
 - **Tally:** `tally_index` and `afv` on strips (below, "Tally and
   audio-follows-video").
 - **Console:** `colour` (`#rrggbb`), `recall_safe`, `solo_safe` and `mute_safe`
@@ -628,7 +653,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 
 | `type` | Parameters |
 | --- | --- |
-| `eq` | `bands`: 1–8 of `{"type": "bell" \| "low-shelf" \| "high-shelf" \| "notch", "freq_hz", "q", "gain_db"}` (RBJ cookbook; gain ±24 dB, Q 0.1–40) |
+| `eq` | `bands`: 1–8 of `{"type": "bell" \| "low-shelf" \| "high-shelf" \| "notch" \| "high-pass" \| "low-pass", "freq_hz", "q", "gain_db", "slope_db_per_oct"}` (RBJ cookbook; gain ±24 dB, Q 0.1–40; high- and low-pass: Butterworth as the `filter` node, `slope_db_per_oct` 12 / 24 / 36 / 48 required, gain and Q unused) |
 | `filter` | `mode` `high-pass` \| `low-pass`, `freq_hz`, `slope_db_per_oct` 12 / 24 / 36 / 48 (Butterworth) |
 | `dynamic-eq` | `bands`: 1–8 of `{freq_hz, q, gain_db, threshold_db, ratio, attack_ms, release_ms}`: a bell whose gain drops by a compressor on the band's level |
 | `compressor` | `threshold_db`, `ratio` (1–1000), `knee_db` (soft knee, 0–24), `attack_ms`, `release_ms`, `makeup_db`, `detector` `peak` \| `rms`, `sidechain_hpf_hz` (optional), `key` `{signal, tap}` (optional) |
@@ -641,9 +666,13 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
 | `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
+| `width` | M/S / width, stereo only: `width_pct` 0–200 (0 mono, 100 unchanged, 200 double side), `input` and `output` `lr` \| `ms` (M = (L + R) / 2, S = (L − R) / 2; L = M + S, R = M − S); a gain matrix that ramps per sample, bypass ramps to the identity |
+| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off); constant power. It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
-±24 dB, a chain at most 32 nodes. A key is another signal's tap; its signal is
+±24 dB, a chain at most 32 nodes. A node that cannot run on its signal's format
+passes the signal through and is listed in the strip's or bus's
+`chain_warnings` (`[{"node", "message"}]`). A key is another signal's tap; its signal is
 processed first.
 
 ### Loudness and meters (§7)
@@ -776,11 +805,11 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET /api/v1/config/export` | the show file: settings (for the record), inputs, mix, active connections |
 | `POST /api/v1/config/import` | restores the inputs, the mix and the connections (through IS-05); settings are not applied |
 | `GET /api/v1/mix` | the whole mix |
-| `GET`, `PATCH /api/v1/mix/settings` | `{"pan_law_db": …, "mono_sum_db": …}` |
+| `GET`, `PATCH /api/v1/mix/settings` | `{"pan_law_db": …, "mono_sum_db": …, "loudness_target_lufs": …, "loudness_tolerance_lu": …, "downmix": …}` |
 | `GET`, `POST /api/v1/strips` | list (with `patch_state`), create (`format` required) |
-| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field (`tally_index` and `afv` take `null` to clear), `ramp_ms`; delete removes its sends and references (above, "Mute groups") |
+| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field (`tally_index` and `afv` take `null` to clear), `ramp_ms`; a `format` change keeps the chain and sends (above; answer `warnings`); GET adds `chain_warnings`; delete removes its sends and references (above, "Mute groups") |
 | `GET`, `POST /api/v1/buses` | list, create (`format` required) |
-| `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format`, `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `subgroup`, `ramp_ms`; delete removes its sends and output |
+| `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format` (as strips), `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `subgroup`, `downmix` (`null`: the mix's), `ramp_ms`; GET adds `chain_warnings`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
 | `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
 | `GET /api/v1/outputs`, `GET /api/v1/outputs/<bus>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
@@ -817,7 +846,7 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET`, `POST /api/v1/logic-macros`, `GET`, `PUT`, `PATCH`, `DELETE /api/v1/logic-macros/<id>` | logic macros: `name`, `description`, `blocks`, `wires`; answers add `revision`, `ports` and `exposed` (the instance's ports) |
 | `POST /api/v1/logic-batch`, `POST /api/v1/logic-validate` | `{"graphs", "macros", "delete_graphs", "delete_macros"}` as one change (409 `conflicts` on a stale `revision`), or only checked (`{"issues"}`) |
 | `GET /api/v1/logic-blocks` | every logic block type: `label`, `category`, `params`, `inputs`, `outputs`, `remembers` |
-| `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `ramp_ms`) |
+| `GET`, `POST /api/v1/monitors`, `GET`, `PATCH`, `DELETE /api/v1/monitors/<id>` | monitors (`format` required to create; every field, `downmix` (`null`: the mix's), `ramp_ms`) |
 | `GET`, `DELETE /api/v1/solo`, `PUT`, `DELETE /api/v1/solo/<signal>` | who is soloed; solo a signal (`{"kind": "pfl" \| "afl"}`), end one or every solo |
 | `GET /api/v1/preview` | the preview: `mode` (`own`, `shared`), the built-in MediaMTX (`child`: running, pid, restarts, last exit), `whep_url` or `whep_port`, every stream (path, state, frames, connects, error, readers, last listen) |
 | `POST /api/v1/preview/<id>/listen` | someone listens to monitor `<id>` (repeat it at least every 10 s); answers `{"path", "whep_url", "whep_port"}` |

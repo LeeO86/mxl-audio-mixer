@@ -144,20 +144,15 @@ fn build_solo_bus(
             continue;
         };
         let src = t.get(&tap).0;
-        let coefficients = c.b.coefficients(&width_matrix(from, Format::Stereo, laws));
+        let w = width_matrix(from, Format::Stereo, laws);
+        let coefficients = c.b.coefficients(&w);
         let gain = match kind {
             SoloKind::Pfl => Db(pfl_trim_db).gain() as f32,
             SoloKind::Afl => 1.0,
         };
         let node = c.node(
             format!("{key}/{id}"),
-            (
-                format_name(from),
-                *kind,
-                f64::from(laws.pan).to_bits(),
-                f64::from(laws.mono_sum).to_bits(),
-                t.chain,
-            ),
+            (format_name(from), *kind, matrix_hash(&w), t.chain),
             vec![gain],
         );
         c.b.step(Step::Send {
@@ -242,13 +237,19 @@ impl Taps {
     }
 }
 
+/// A width matrix in a node's signature: a change of the coefficients (a law
+/// or a down-mix) rewires the node with a fade; the same coefficients keep it.
+fn matrix_hash(m: &[f32]) -> u64 {
+    hash(m.iter().map(|g| g.to_bits()).collect::<Vec<_>>())
+}
+
 fn hash(value: impl Hash) -> u64 {
     let mut h = DefaultHasher::new();
     value.hash(&mut h);
     h.finish()
 }
 
-fn format_name(f: Format) -> &'static str {
+pub fn format_name(f: Format) -> &'static str {
     match f {
         Format::Mono => "mono",
         Format::Stereo => "stereo",
@@ -384,13 +385,18 @@ impl Build<'_> {
     /// and where its VAD reads. With `auto` (the node key, format and chain hash
     /// of a signal with an auto gain) the gain goes where the chain's `auto`
     /// node is, or after the chain; the VAD reads at its input.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// A node that cannot run on `format` (C10) passes the signal through, as
+    /// does a surround panner (it acts at the strip's panner, D5); the M/S /
+    /// width node is a gain matrix (D3).
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn chain(
         &mut self,
         signal: &str,
         chain: &[Proc],
         input: Span,
-        n: usize,
+        format: Format,
+        strip: bool,
         taps: &HashMap<String, Taps>,
         auto: Option<(String, Format, u64)>,
     ) -> (
@@ -399,11 +405,47 @@ impl Build<'_> {
         (Span, usize),
         Span,
     ) {
+        let n = format.channels();
         let mut cur = input;
         let mut latency = 0;
         let mut after = Vec::new();
         let mut vad = None;
         for p in chain {
+            if p.kind.supports(format, strip).is_err()
+                || matches!(p.kind, ProcKind::SurroundPan { .. })
+            {
+                after.push((p.id.clone(), cur, latency));
+                continue;
+            }
+            if let ProcKind::Width {
+                width_pct,
+                input: mode_in,
+                output: mode_out,
+            } = &p.kind
+            {
+                let values = if p.bypass {
+                    vec![1.0, 0.0, 0.0, 1.0]
+                } else {
+                    super::spatial::width_matrix(*width_pct, *mode_in, *mode_out)
+                        .iter()
+                        .map(|v| *v as f32)
+                        .collect()
+                };
+                let node = self.node(
+                    format!("proc/{signal}/{}", p.id),
+                    p.kind.signature(),
+                    values,
+                );
+                let dst = self.b.buffers(n);
+                self.b.step(Step::Matrix {
+                    node,
+                    src: cur,
+                    dst,
+                });
+                after.push((p.id.clone(), dst, latency));
+                cur = dst;
+                continue;
+            }
             if p.kind == (ProcKind::Auto {}) {
                 if let (Some((key, format, sig)), false) = (&auto, p.bypass) {
                     vad = Some(cur);
@@ -597,7 +639,7 @@ impl Compiler {
                         .contains(&s.id)
                         .then(|| (format!("strip/{}/auto", s.id), s.format, chain_sig));
                     let (after, named, pre, vad) =
-                        c.chain(&s.id, &s.chain, chain_in, n, &taps, auto);
+                        c.chain(&s.id, &s.chain, chain_in, s.format, true, &taps, auto);
                     c.vad_tap(&s.id, vad);
                     let sip_muted = mix.control_room.solo.sip
                         && !soloed_signals.is_empty()
@@ -634,27 +676,53 @@ impl Compiler {
                         });
                         post = after;
                     }
-                    let pan_values = match s.format {
-                        Format::Mono => {
-                            let (l, r) = pan_gains(s.pan, laws.pan);
-                            Some(vec![l as f32, r as f32])
-                        }
-                        Format::Stereo => Some(
-                            stereo_matrix(s.width, s.pan)
-                                .iter()
-                                .map(|v| *v as f32)
-                                .collect(),
-                        ),
+                    // The panner: mono and stereo strips to stereo, or a surround
+                    // panner's matrix into its layout (D5).
+                    let surround = s.chain.iter().find_map(|p| match &p.kind {
+                        ProcKind::SurroundPan {
+                            layout,
+                            azimuth_deg,
+                            spread_pct,
+                            divergence_pct,
+                            lfe_db,
+                        } if Some(*layout) == s.surround_layout() => Some((
+                            *layout,
+                            super::spatial::surround_pan(
+                                *layout,
+                                n,
+                                *azimuth_deg,
+                                *spread_pct,
+                                *divergence_pct,
+                                *lfe_db,
+                            ),
+                        )),
                         _ => None,
+                    });
+                    let (pan_values, pan_format) = match (surround, s.format) {
+                        (Some((layout, m)), _) => (Some(m), layout),
+                        (None, Format::Mono) => {
+                            let (l, r) = pan_gains(s.pan, laws.pan);
+                            (Some(vec![l as f32, r as f32]), Format::Stereo)
+                        }
+                        (None, Format::Stereo) => (
+                            Some(
+                                stereo_matrix(s.width, s.pan)
+                                    .iter()
+                                    .map(|v| *v as f32)
+                                    .collect(),
+                            ),
+                            Format::Stereo,
+                        ),
+                        _ => (None, s.format),
                     };
                     let pan = match pan_values {
                         Some(values) => {
                             let node = c.node(
                                 format!("strip/{}/pan", s.id),
-                                (format_name(s.format), chain_sig),
+                                (format_name(s.format), format_name(pan_format), chain_sig),
                                 values,
                             );
-                            let pan = c.b.buffers(2);
+                            let pan = c.b.buffers(pan_format.channels());
                             c.b.step(Step::Matrix {
                                 node,
                                 src: post,
@@ -684,6 +752,8 @@ impl Compiler {
                     let sum = c.b.buffers(n);
                     c.b.step(Step::Clear { dst: sum });
                     let into: Vec<_> = all_sends.iter().filter(|s| s.to == bus.id).collect();
+                    // The bus's own down-mix, if it has one (D2).
+                    let into_laws = laws.with_downmix(bus.downmix);
                     let source = |s: &super::model::Send| -> Option<(Span, usize, u64)> {
                         if s.block_delay {
                             return held
@@ -734,7 +804,7 @@ impl Compiler {
                             });
                             src = dst;
                         }
-                        let w = width_matrix(from, bus.format, laws);
+                        let w = width_matrix(from, bus.format, into_laws);
                         let coefficients = c.b.coefficients(&w);
                         let mut gain = if send.mute {
                             0.0
@@ -749,8 +819,7 @@ impl Compiler {
                             (
                                 format_name(from),
                                 format_name(bus.format),
-                                f64::from(laws.pan).to_bits(),
-                                f64::from(laws.mono_sum).to_bits(),
+                                matrix_hash(&w),
                                 &send.tap,
                                 send.block_delay,
                                 comp,
@@ -770,7 +839,7 @@ impl Compiler {
                         .contains(&bus.id)
                         .then(|| (format!("bus/{}/auto", bus.id), bus.format, chain_sig));
                     let (after, named, pre, vad) =
-                        c.chain(&bus.id, &bus.chain, sum, n, &taps, auto);
+                        c.chain(&bus.id, &bus.chain, sum, bus.format, false, &taps, auto);
                     c.vad_tap(&bus.id, vad);
                     let pre = (pre.0, pre.1 + most);
                     let shift = |(s, l): (Span, usize)| (s, l + most);
@@ -908,6 +977,8 @@ impl Compiler {
             let talk_dimmed = talk_dim && j < control_room_monitors;
             let n = m.format.channels();
             let key = m.key();
+            // The monitor's own down-mix, if it has one (D2).
+            let laws = laws.with_downmix(m.downmix);
             let mon = c.b.buffers(n);
             c.b.step(Step::Clear { dst: mon });
             let under_solo = solo_bus.is_some() && m.follows_solo;
@@ -939,15 +1010,15 @@ impl Compiler {
                 None => None,
             };
             if let Some((src, from, name, chain)) = source {
-                let coefficients = c.b.coefficients(&width_matrix(from, m.format, laws));
+                let w = width_matrix(from, m.format, laws);
+                let coefficients = c.b.coefficients(&w);
                 let node = c.node(
                     format!("{key}/source"),
                     (
                         format_name(from),
                         format_name(m.format),
                         name,
-                        f64::from(laws.pan).to_bits(),
-                        f64::from(laws.mono_sum).to_bits(),
+                        matrix_hash(&w),
                         chain,
                         under_solo,
                     ),
@@ -961,9 +1032,13 @@ impl Compiler {
                 });
             }
             if let (Some(bus), true) = (solo_bus, m.follows_solo) {
-                let coefficients =
-                    c.b.coefficients(&width_matrix(Format::Stereo, m.format, laws));
-                let node = c.node(format!("{key}/solo"), format_name(m.format), vec![1.0]);
+                let w = width_matrix(Format::Stereo, m.format, laws);
+                let coefficients = c.b.coefficients(&w);
+                let node = c.node(
+                    format!("{key}/solo"),
+                    (format_name(m.format), matrix_hash(&w)),
+                    vec![1.0],
+                );
                 c.b.step(Step::Send {
                     node,
                     src: bus,
@@ -1015,7 +1090,7 @@ impl Compiler {
                 src: cur,
                 dst: level,
             });
-            let (_, _, out, _) = c.chain(&key, &m.chain, level, n, &taps, None);
+            let (_, _, out, _) = c.chain(&key, &m.chain, level, m.format, false, &taps, None);
             cur = out.0;
             if let (Some(b), Some(lfe)) = (m.bass_management.filter(|b| b.enabled), m.lfe()) {
                 let kind = ProcKind::BassManagement {
@@ -1060,9 +1135,13 @@ impl Compiler {
                 } else {
                     let st = c.b.buffers(2);
                     c.b.step(Step::Clear { dst: st });
-                    let coefficients =
-                        c.b.coefficients(&width_matrix(m.format, Format::Stereo, laws));
-                    let node = c.node(format!("{key}/stream"), format_name(m.format), vec![1.0]);
+                    let w = width_matrix(m.format, Format::Stereo, laws);
+                    let coefficients = c.b.coefficients(&w);
+                    let node = c.node(
+                        format!("{key}/stream"),
+                        (format_name(m.format), matrix_hash(&w)),
+                        vec![1.0],
+                    );
                     c.b.step(Step::Send {
                         node,
                         src: cur,
@@ -1103,8 +1182,7 @@ impl Compiler {
                     format_name(from),
                     format_name(to),
                     slot,
-                    f64::from(laws.pan).to_bits(),
-                    f64::from(laws.mono_sum).to_bits(),
+                    matrix_hash(&w),
                     t.chain,
                 ),
                 vec![1.0],
@@ -1227,6 +1305,7 @@ mod tests {
             mute_safe: false,
             minus: None,
             subgroup: false,
+            downmix: None,
         }
     }
 
@@ -1563,6 +1642,7 @@ mod tests {
                         freq_hz: 20_000.0,
                         q: 0.7,
                         gain_db: 6.0,
+                        slope_db_per_oct: None,
                     }],
                 },
             },
@@ -1837,5 +1917,340 @@ mod tests {
             "{}",
             out.0[&0][0][120]
         );
+    }
+
+    /// A 5.1 strip on input 1 with distinct levels per channel.
+    fn surround_inputs() -> Inputs {
+        Inputs(vec![[0.1f32, 0.2, 0.4, 0.8, 0.05, 0.0]
+            .iter()
+            .map(|v| vec![*v; 48])
+            .collect()])
+    }
+
+    #[test]
+    fn down_mix_global_and_per_bus() {
+        use crate::mix::format::Downmix;
+        let mut m = Mix::default();
+        m.strips.push(strip("film", Format::Surround51, 1));
+        m.buses.push(bus("main", Format::Stereo));
+        m.buses.push(Bus {
+            downmix: Some(Downmix {
+                centre_db: Db(0.0),
+                lfe_db: Db(0.0),
+                ..Downmix::default()
+            }),
+            ..bus("own", Format::Stereo)
+        });
+        m.sends.push(send("film", "main", Tap::PostFader));
+        m.sends.push(send("film", "own", Tap::PostFader));
+        for b in ["main", "own"] {
+            m.outputs.push(Output {
+                signal: b.into(),
+                format: None,
+                commit_samples: None,
+            });
+        }
+        assert_eq!(m.validate(1, 48), Ok(()));
+        let slots = HashMap::from([("main".to_string(), 0), ("own".to_string(), 1)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &surround_inputs(), 1);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // main: the default (L + 0.707 C + 0.707 Ls, LFE dropped).
+        assert!((out.0[&0][0][0] - (0.1 + 0.4 * h + 0.05 * h)).abs() < 1e-6);
+        assert!((out.0[&0][1][0] - (0.2 + 0.4 * h)).abs() < 1e-6);
+        // own: C and LFE at 0 dB.
+        assert!((out.0[&1][0][0] - (0.1 + 0.4 + 0.8 + 0.05 * h)).abs() < 1e-6);
+        // A new global down-mix changes main's send, not own's: a rewire with a
+        // fade (the send's signature), not a jump of the coefficients.
+        let mut changed = m.clone();
+        changed.settings.downmix.centre_db = Db(-6.0);
+        let d = compiler.compile(&changed, 48, 0, &slots, &HashMap::new());
+        assert_ne!(c.structure, d.structure);
+        let differing: Vec<_> = d
+            .nodes
+            .iter()
+            .filter(|(id, n)| c.nodes[id].signature != n.signature)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(differing, vec![compiler.node_id("send/film/main").unwrap()]);
+        let mut d = d;
+        let out = run(&mut d, &surround_inputs(), 1);
+        let c6 = Db(-6.0).gain() as f32;
+        assert!((out.0[&0][0][0] - (0.1 + 0.4 * c6 + 0.05 * h)).abs() < 1e-6);
+        assert!((out.0[&1][0][0] - (0.1 + 0.4 + 0.8 + 0.05 * h)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn monitor_and_solo_down_mix() {
+        use crate::mix::format::Downmix;
+        let mut m = Mix::default();
+        m.strips.push(strip("film", Format::Surround51, 1));
+        m.control_room.monitors.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "cr", "name": "CR", "format": "stereo",
+                "source": {"signal": "film"}, "publish": true,
+                "downmix": {"centre_db": "-inf", "surround_db": "-inf"}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(m.validate(1, 48), Ok(()));
+        let slots = HashMap::from([("monitor:cr".to_string(), 0)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &surround_inputs(), 1);
+        // The monitor's own down-mix: front pair only.
+        assert!((out.0[&0][0][0] - 0.1).abs() < 1e-6);
+        assert!((out.0[&0][1][0] - 0.2).abs() < 1e-6);
+        // The solo bus (AFL) follows the mix's down-mix; the monitor maps the
+        // stereo solo bus as it is.
+        m.control_room.monitors[0].downmix = None;
+        m.settings.downmix = Downmix {
+            centre_db: Db(0.0),
+            ..Downmix::default()
+        };
+        compiler.solo = [("film".to_string(), SoloKind::Afl)].into();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &surround_inputs(), 1);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let programme = Db(-21.0).gain() as f32;
+        let front = 0.1 + 0.4 + 0.05 * h;
+        assert!(
+            (out.0[&0][0][0] - (front * programme + front)).abs() < 1e-5,
+            "{}",
+            out.0[&0][0][0]
+        );
+    }
+
+    #[test]
+    fn width_node_is_a_ramped_matrix() {
+        let mut m = mix();
+        m.strips[1].chain =
+            serde_json::from_str(r#"[{"id": "w", "type": "width", "width_pct": 0}]"#).unwrap();
+        m.buses.push(bus("after", Format::Stereo));
+        m.sends.push(send("music", "after", Tap::After("w".into())));
+        m.outputs.push(Output {
+            signal: "after".into(),
+            format: None,
+            commit_samples: None,
+        });
+        assert_eq!(m.validate(2, 48), Ok(()));
+        let slots = HashMap::from([("main".to_string(), 0), ("after".to_string(), 1)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let inputs = Inputs(vec![
+            vec![vec![0.0; 48]],
+            vec![vec![0.1; 48], vec![0.3; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 1);
+        // 0 %: mono (L + R) / 2 on both, after the node and at the output.
+        for slot in [0, 1] {
+            assert!((out.0[&slot][0][0] - 0.2).abs() < 1e-6);
+            assert!((out.0[&slot][1][0] - 0.2).abs() < 1e-6);
+        }
+        // Width and bypass are values of the node: the structure stays.
+        let mut wide = m.clone();
+        wide.strips[1].chain[0].bypass = true;
+        let d = compiler.compile(&wide, 48, 0, &slots, &HashMap::new());
+        assert_eq!(c.structure, d.structure);
+        let id = compiler.node_id("proc/music/w").unwrap();
+        assert_eq!(d.nodes[&id].values, vec![1.0, 0.0, 0.0, 1.0]);
+        let mut w = m.clone();
+        w.strips[1].chain[0] =
+            serde_json::from_str(r#"{"id": "w", "type": "width", "width_pct": 200}"#).unwrap();
+        let e = compiler.compile(&w, 48, 0, &slots, &HashMap::new());
+        assert_eq!(c.structure, e.structure);
+        // The mode is structure.
+        w.strips[1].chain[0] = serde_json::from_str(
+            r#"{"id": "w", "type": "width", "width_pct": 100, "output": "ms"}"#,
+        )
+        .unwrap();
+        let f = compiler.compile(&w, 48, 0, &slots, &HashMap::new());
+        assert_ne!(c.structure, f.structure);
+        // On a mono strip it cannot run: it passes the signal through.
+        let mut mono = mix();
+        mono.strips[0].chain =
+            serde_json::from_str(r#"[{"id": "w", "type": "width", "width_pct": 0}]"#).unwrap();
+        let mut g = compiler.compile(&mono, 48, 0, &slots, &HashMap::new());
+        let out = run(
+            &mut g,
+            &Inputs(vec![
+                vec![vec![0.5; 48]],
+                vec![vec![0.0; 48], vec![0.0; 48]],
+            ]),
+            1,
+        );
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((out.0[&0][0][0] - 0.5 * h).abs() < 1e-6);
+        assert_eq!(mono.chain_warnings("vox").len(), 1);
+    }
+
+    #[test]
+    fn surround_panner_feeds_a_surround_bus() {
+        let mut m = Mix::default();
+        m.strips.push(strip("fx", Format::Mono, 1));
+        m.strips.push(strip("amb", Format::Stereo, 2));
+        m.strips[0].chain = serde_json::from_str(
+            r#"[{"id": "p", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 110, "lfe_db": -6}]"#,
+        )
+        .unwrap();
+        m.strips[1].chain = serde_json::from_str(
+            r#"[{"id": "p", "type": "surround-pan", "layout": "7.1", "azimuth_deg": 0}]"#,
+        )
+        .unwrap();
+        m.buses.push(bus("surround", Format::Surround51));
+        m.buses.push(bus("wide", Format::Surround71));
+        m.sends.push(send("fx", "surround", Tap::PostPan));
+        m.sends.push(send("amb", "wide", Tap::PostPan));
+        for b in ["surround", "wide"] {
+            m.outputs.push(Output {
+                signal: b.into(),
+                format: None,
+                commit_samples: None,
+            });
+        }
+        assert_eq!(m.validate(2, 48), Ok(()));
+        assert_eq!(m.tap_format("fx", &Tap::PostPan), Some(Format::Surround51));
+        assert_eq!(m.tap_format("fx", &Tap::PostFader), Some(Format::Mono));
+        assert_eq!(m.tap_format("amb", &Tap::PostPan), Some(Format::Surround71));
+        let slots = HashMap::from([("surround".to_string(), 0), ("wide".to_string(), 1)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.3; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 1);
+        let surround = &out.0[&0];
+        // At 110°: Rs alone; the LFE at −6 dB.
+        for (ch, expected) in [(0, 0.0), (1, 0.0), (2, 0.0), (4, 0.0), (5, 0.5)] {
+            assert!(
+                (surround[ch][0] - expected).abs() < 1e-6,
+                "{ch}: {}",
+                surround[ch][0]
+            );
+        }
+        assert!((surround[3][0] - 0.5 * Db(-6.0).gain() as f32).abs() < 1e-6);
+        // Stereo into 7.1 at 0°: L on L, R on R (a 16-value matrix).
+        let wide = &out.0[&1];
+        assert!((wide[0][0] - 0.1).abs() < 1e-6 && (wide[1][0] - 0.3).abs() < 1e-6);
+        assert!(wide[2..].iter().all(|ch| ch[0].abs() < 1e-6));
+        // Moving it is a value change; bypassing it is a rewire back to stereo.
+        let mut moved = m.clone();
+        moved.strips[0].chain[0] = serde_json::from_str(
+            r#"{"id": "p", "type": "surround-pan", "layout": "5.1", "azimuth_deg": -30, "spread_pct": 50}"#,
+        )
+        .unwrap();
+        let d = compiler.compile(&moved, 48, 0, &slots, &HashMap::new());
+        assert_eq!(c.structure, d.structure);
+        let mut off = m.clone();
+        off.strips[0].chain[0].bypass = true;
+        assert_eq!(off.tap_format("fx", &Tap::PostPan), Some(Format::Stereo));
+        let mut e = compiler.compile(&off, 48, 0, &slots, &HashMap::new());
+        assert_ne!(c.structure, e.structure);
+        let out = run(&mut e, &inputs, 1);
+        // The stereo panner's centre, up-mixed into 5.1 L and R.
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((out.0[&0][0][0] - 0.5 * h).abs() < 1e-6);
+        // On a bus a surround panner cannot run.
+        let mut bad = m.clone();
+        bad.buses[0].chain = m.strips[0].chain.clone();
+        assert_eq!(bad.validate(2, 48), Ok(()));
+        assert_eq!(bad.chain_warnings("surround").len(), 1);
+        // Two in one chain are refused.
+        let mut two = m;
+        let again = two.strips[0].chain[0].clone();
+        two.strips[0].chain.push(crate::mix::chain::Proc {
+            id: "q".into(),
+            ..again
+        });
+        assert!(two
+            .validate(2, 48)
+            .unwrap_err()
+            .contains("one surround panner"));
+    }
+
+    /// The new nodes and the down-mix (D1–D5) as one plan.
+    fn spatial_mix() -> Mix {
+        let mut m = Mix::default();
+        m.strips.push(strip("film", Format::Surround51, 1));
+        m.strips.push(strip("music", Format::Stereo, 2));
+        m.strips.push(strip("fx", Format::Mono, 3));
+        m.strips[0].chain = serde_json::from_str(
+            r#"[{"id": "eq", "type": "eq", "bands": [
+                    {"type": "high-pass", "freq_hz": 40, "q": 0.7, "slope_db_per_oct": 24},
+                    {"type": "bell", "freq_hz": 1000, "q": 1, "gain_db": 3},
+                    {"type": "low-pass", "freq_hz": 16000, "q": 0.7, "slope_db_per_oct": 12}]},
+                {"id": "w", "type": "width", "width_pct": 50, "bypass": true}]"#,
+        )
+        .unwrap();
+        m.strips[1].chain = serde_json::from_str(
+            r#"[{"id": "w", "type": "width", "width_pct": 150, "input": "ms"}]"#,
+        )
+        .unwrap();
+        m.strips[2].chain = serde_json::from_str(
+            r#"[{"id": "p", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 60, "spread_pct": 20, "divergence_pct": 30, "lfe_db": -10}]"#,
+        )
+        .unwrap();
+        m.buses.push(bus("surround", Format::Surround51));
+        m.buses.push(Bus {
+            downmix: Some(crate::mix::format::Downmix {
+                centre_db: Db(-4.5),
+                normalise: true,
+                ..Default::default()
+            }),
+            ..bus("main", Format::Stereo)
+        });
+        for (from, to) in [
+            ("film", "surround"),
+            ("music", "surround"),
+            ("fx", "surround"),
+            ("film", "main"),
+            ("fx", "main"),
+            ("surround", "main"),
+        ] {
+            m.sends.push(send(from, to, m.default_tap(from)));
+        }
+        m.outputs.push(Output {
+            signal: "main".into(),
+            format: None,
+            commit_samples: None,
+        });
+        m
+    }
+
+    #[test]
+    fn spatial_nodes_never_allocate_on_the_dsp_thread() {
+        struct Null;
+        impl OutputSink for Null {
+            fn write(&mut self, _: usize, _: usize, _: usize, _: &[f32]) {}
+        }
+        let m = spatial_mix();
+        assert_eq!(m.validate(3, 96), Ok(()));
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 96, 480, &slots(), &HashMap::new());
+        let tone: Vec<f32> = (0..96).map(|k| (k as f32 * 0.1).sin() * 0.3).collect();
+        let inputs = Inputs(vec![
+            vec![tone.clone(); 6],
+            vec![tone.clone(); 2],
+            vec![tone.clone()],
+        ]);
+        let width = compiler.node_id("proc/music/w").unwrap();
+        let pan = compiler.node_id("strip/fx/pan").unwrap();
+        let eq = compiler.node_id("proc/film/eq").unwrap();
+        // (Computed on the control side, as the compiler does.)
+        let moved =
+            super::super::spatial::surround_pan(Format::Surround51, 1, -100.0, 0.0, 0.0, 0.0);
+        let before = crate::test_alloc::allocations();
+        for k in 0..200u64 {
+            if k == 50 {
+                // Ramps: the width, the panner's matrix, a pass band's frequency.
+                assert!(c.plan.set_param(width, &[0.5, 0.5, 0.5, 0.5], 4800));
+                assert!(c.plan.set_param(pan, &moved, 4800));
+                assert!(c.plan.set_proc_param(eq, 1, 120.0, 4800));
+            }
+            c.plan.process(k * 96, &inputs, &mut Null);
+        }
+        assert_eq!(crate::test_alloc::allocations() - before, 0);
     }
 }
