@@ -168,6 +168,7 @@ kill -STOP "${WRITERS[@]}"
 sleep 3
 after=$(misses)
 kill -CONT "${WRITERS[@]}"
+for i in 2 3 4 5 6; do wait_until 10 "input $i running again" is_state "$i" running; done
 log "five stopped writers: $((after - before)) deadline misses in 3 s"
 ((after - before < 50)) || fail "five stopped writers: $((after - before)) deadline misses in 3 s"
 pass "late inputs share one short wait: no deadline misses with five stopped writers"
