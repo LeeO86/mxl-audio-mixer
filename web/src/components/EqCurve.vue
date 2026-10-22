@@ -78,7 +78,8 @@ function up() {
 const RESET = { gain_db: 0, q: 1 };
 const RESET_DYNAMIC = { ...RESET, threshold_db: -30, ratio: 3, attack_ms: 5, release_ms: 100 };
 function reset(i) {
-  if (props.node.type === "filter") return;
+  // A filter and a high- or low-pass band have no gain or Q to reset (as the wheel).
+  if (props.node.type === "filter" || isPass(bands.value[i])) return;
   dragging = -1;
   const next = bands.value.map((b) => ({ ...b }));
   Object.assign(next[i], props.node.type === "dynamic-eq" ? RESET_DYNAMIC : RESET);

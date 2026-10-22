@@ -22,6 +22,8 @@ async function load() {
     // Removed meanwhile (Remove pressed while this was on its way): keep it gone.
     if (sessionStorage.getItem(KEY) === id) mine.value = p;
   } catch {
+    // A late answer for a monitor already removed here: leave a new one alone.
+    if (sessionStorage.getItem(KEY) !== id) return;
     sessionStorage.removeItem(KEY);
     stopListening(id);
     mine.value = null;
