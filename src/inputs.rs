@@ -94,17 +94,25 @@ pub struct Route {
 /// offset plus the delay: a rare outlier the 99.9th percentile does not show);
 /// down only after the need stayed lower by [`DELAY_LOWER_SAMPLES`] for the
 /// whole hold time, to the highest need seen in that time, and at most once per
-/// hold time. The need of a late block stays a floor for [`LATE_MEMORY_HOLDS`]
-/// hold times (5 min by default), renewed by every later block that needs about
-/// as much (the same outlier coming back, now covered): a rare outlier, e.g. once
-/// a minute, keeps its delay instead of being lost once per hold time.
+/// hold time. The need of a late block stays a floor for one hold time. When an
+/// outlier of about that size comes again within [`LATE_MEMORY_HOLDS`] hold
+/// times of the last late block (late again, or now covered), it recurs: the
+/// floor then lasts that long (5 min by default), renewed by every such block, so
+/// a rare outlier, e.g. once a minute, is lost once instead of once per hold
+/// time. A one-off late block costs its latency for about two hold times.
+/// Lags above the read offset plus the maximum delay are no outliers but a
+/// writer catching up (a stall, D230) and count for nothing here.
 #[derive(Default)]
 struct DelayHold {
     last_change: Option<Instant>,
     /// Since when the need has been lower, and the highest need since then.
     lower: Option<(Instant, u32)>,
-    /// The floor set by late blocks: its need, and when it was last renewed.
-    late: Option<(Instant, u32)>,
+    /// The floor set by late blocks: its need, when it was last renewed, and
+    /// whether the outlier recurs (the floor lasts the memory time then).
+    floor: Option<(Instant, u32, bool)>,
+    /// The last late block (or its outlier covered again) within the memory
+    /// time: when, and its need.
+    last_late: Option<(Instant, u32)>,
 }
 
 impl DelayHold {
@@ -133,27 +141,46 @@ impl DelayHold {
                 .saturating_sub(read_offset)
                 .min(delay_max)
         };
-        if self
-            .late
-            .is_some_and(|(t, _)| now.duration_since(t) >= hold * LATE_MEMORY_HOLDS)
-        {
-            self.late = None;
+        let memory = hold * LATE_MEMORY_HOLDS;
+        if self.floor.is_some_and(|(t, _, recurs)| {
+            now.duration_since(t) >= if recurs { memory } else { hold }
+        }) {
+            self.floor = None;
         }
-        if let Some(lag) = max_lag {
+        if self
+            .last_late
+            .is_some_and(|(t, _)| now.duration_since(t) >= memory)
+        {
+            self.last_late = None;
+        }
+        if let Some(lag) = max_lag.filter(|&l| l <= read_offset + delay_max) {
             let need = need_of(lag);
-            let floor = self.late.map_or(0, |(_, n)| n);
             let late = lag > read_offset + current;
-            if late || (floor > 0 && need + DELAY_LOWER_SAMPLES >= floor) {
-                self.late = Some((now, need.max(floor)));
+            // An outlier needs at least 1 ms more than the 99.9th percentile (not
+            // known in the first second: a late block then is no outlier).
+            let outlier = p999.is_some_and(|p| need > need_of(p) + DELAY_LOWER_SAMPLES);
+            let recurs = outlier && self.last_late.is_some();
+            if late || recurs {
+                let (floor, long) = self.floor.map_or((0, false), |(_, n, r)| (n, r));
+                // A higher outlier is a new one: it recurs only once it comes again.
+                let long = recurs || (long && need <= floor + DELAY_LOWER_SAMPLES);
+                self.floor = Some((now, need.max(floor), long));
             }
-            if late && need > current {
-                self.lower = None;
-                self.last_change = Some(now);
-                return Some(need.max(floor));
+            if outlier && (late || recurs) {
+                let before = self.last_late.map_or(0, |(_, n)| n);
+                self.last_late = Some((now, need.max(before)));
+            }
+            if late {
+                let floor = self.floor.map_or(need, |(_, n, _)| n);
+                if floor > current {
+                    self.lower = None;
+                    self.last_change = Some(now);
+                    return Some(floor);
+                }
             }
         }
         let p999 = p999?;
-        let need = need_of(p999).max(self.late.map_or(0, |(_, n)| n));
+        let need = need_of(p999).max(self.floor.map_or(0, |(_, n, _)| n));
         if p999 + DELAY_RAISE_HEADROOM_SAMPLES > read_offset + current && need > current {
             self.lower = None;
             self.last_change = Some(now);
@@ -851,13 +878,25 @@ mod tests {
         let (misses, changes) = gateway(30, 288, 600, 6000);
         assert_eq!(misses, 1, "{changes:?}");
         assert_eq!(changes, vec![(0, 96), (300, 144 + 288 + 48 - 96)]);
-        // Every 50 s and every 4 min: the same.
+        // Every 50 s: the same (it comes again before the one-off floor and the
+        // following hold are over, so it recurs).
         let (misses, changes) = gateway(50, 288, 600, 6000);
         assert_eq!(misses, 1, "{changes:?}");
         assert_eq!(changes.len(), 2, "{changes:?}");
-        let (misses, changes) = gateway(240, 288, 1200, 12000);
-        assert_eq!(misses, 1, "{changes:?}");
-        assert_eq!(changes.len(), 2, "{changes:?}");
+        // Every 4 min: the first is a one-off (down after 2 hold times); the
+        // second, within the memory, recurs and costs one more block; then it
+        // stays covered.
+        let (misses, changes) = gateway(240, 288, 1500, 15000);
+        assert_eq!(misses, 2, "{changes:?}");
+        assert_eq!(changes, vec![(0, 96), (2400, 384), (3000, 96), (4800, 384)]);
+    }
+
+    #[test]
+    fn a_one_off_late_block_costs_two_hold_times() {
+        // One outlier at 30 s: up at once, down 2 hold times later.
+        let (misses, changes) = gateway(30, 288, 31, 3000);
+        assert_eq!(misses, 1);
+        assert_eq!(changes, vec![(0, 96), (300, 384), (900, 96)]);
     }
 
     #[test]
@@ -898,6 +937,107 @@ mod tests {
     }
 
     #[test]
+    fn a_writer_catching_up_raises_nothing() {
+        // After a stall the first lags are seconds (beyond offset + maximum):
+        // a writer catching up, not an outlier (D230).
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::default();
+        assert_eq!(h.next(Some(144), Some(144), 96, 96, 7200, hold, t0), None);
+        for lag in [96_000, 48_000, 7297] {
+            assert_eq!(h.next(Some(144), Some(lag), 96, 96, 7200, hold, t0), None);
+        }
+        assert!(h.floor.is_none() && h.last_late.is_none());
+    }
+
+    #[test]
+    fn a_stall_keeps_the_floor_and_restarts_the_lower_period() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::default();
+        assert_eq!(
+            h.next(Some(144), Some(432), 96, 96, 7200, hold, at(0)),
+            Some(384)
+        );
+        // Stalled at 40 s (after the one-off floor of 30 s, during the lower
+        // period): the period starts again after it, the fall comes 30 s later.
+        assert_eq!(
+            h.next(Some(144), Some(144), 384, 96, 7200, hold, at(35)),
+            None
+        );
+        h.interrupt();
+        assert_eq!(
+            h.next(Some(144), Some(144), 384, 96, 7200, hold, at(50)),
+            None
+        );
+        assert_eq!(
+            h.next(Some(144), Some(144), 384, 96, 7200, hold, at(79)),
+            None
+        );
+        assert_eq!(
+            h.next(Some(144), Some(144), 384, 96, 7200, hold, at(80)),
+            Some(96)
+        );
+        // A stall during the floor does not shorten it.
+        let mut h = DelayHold::default();
+        assert_eq!(
+            h.next(Some(144), Some(432), 96, 96, 7200, hold, at(0)),
+            Some(384)
+        );
+        h.interrupt();
+        assert_eq!(
+            h.next(Some(144), Some(144), 384, 96, 7200, hold, at(29)),
+            None
+        );
+        assert!(h.floor.is_some());
+    }
+
+    #[test]
+    fn a_new_route_forgets_the_floor() {
+        // `route` and `extra_delay: auto` start the hold over (DelayHold::default).
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::default();
+        assert_eq!(
+            h.next(Some(144), Some(432), 96, 96, 7200, hold, t0),
+            Some(384)
+        );
+        h = DelayHold::default();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert_eq!(
+            h.next(Some(144), Some(144), 384, 96, 7200, hold, at(1)),
+            None
+        );
+        assert_eq!(
+            h.next(Some(144), Some(144), 384, 96, 7200, hold, at(31)),
+            Some(96)
+        );
+    }
+
+    #[test]
+    fn confirm_mode_proposes_once_for_a_recurring_outlier() {
+        // With MIXER_INPUT_DELAY_CONFIRM the delay stays until confirmed; the
+        // hold decides against the proposal, so the same outlier again proposes
+        // nothing new.
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::default();
+        let (applied, mut proposed) = (96u32, None);
+        let mut proposals = Vec::new();
+        for k in 0..3000u64 {
+            let lag = if k % 300 == 150 { 432 } else { 144 };
+            let current = proposed.unwrap_or(applied);
+            let now = t0 + Duration::from_millis(100 * k);
+            if let Some(t) = h.next(Some(144), Some(lag), current, 96, 7200, hold, now) {
+                proposed = Some(t);
+                proposals.push((k, t));
+            }
+        }
+        assert_eq!(proposals, vec![(150, 384)]);
+    }
+
+    #[test]
     fn a_late_block_counts_before_the_first_second() {
         let t0 = Instant::now();
         let mut h = DelayHold::default();
@@ -906,7 +1046,7 @@ mod tests {
         assert_eq!(h.next(None, None, 352, 96, 7200, hold, t0), None);
         // Capped at the maximum.
         assert_eq!(
-            h.next(None, Some(20_000), 352, 96, 7200, hold, t0),
+            h.next(None, Some(7296), 352, 96, 7200, hold, t0),
             Some(7200)
         );
     }

@@ -2265,18 +2265,23 @@ inputs (bursts, 960-sample batches, a mirror with outliers, per packet), 12 stri
 
 | Run | 1.3.0 | 1.4.0 | 1.4.1 |
 | --- | --- | --- | --- |
-| per packet, +6 ms every 30 s: missing samples | – | 2496 (4 changes) | 96, the first outlier (2 changes) |
-| per packet, +5 ms every 40 s | – | 1248 (3 changes) | 0 (1 change) |
-| bursts of 5 packets, +10 ms every 45 s | – | 2688 (14 changes) | 0 (1 change) |
+| per packet, +6 ms every 30 s: missing samples | – | 2496 (4 changes) | 0 (2 changes) |
+| per packet, +5 ms every 40 s | – | 1248 (3 changes) | 192: the first outlier, 2 blocks (2 changes) |
+| bursts of 5 packets, +10 ms every 45 s | – | 2688 (14 changes) | 384: the first outlier, 4 blocks (2 changes) |
 | deadline misses in 3 min after a restart | 31 (16 in the first 5 s) | 180 (all in the first second) | 0 |
-| deadline misses with five writers stopped, 3 s | 752 | 752 | 1 |
+| deadline misses with five writers stopped, 3 s | 752 | 752 | 2 |
+| automatic delays 5 s after those writers resumed | – | 150 ms (the maximum) on all five | 0–2 ms (as before the stop) |
+
+(1.4.1 numbers after the review fixes; all losses of the 1.4.1 column are in each
+input's first outlier, none recurred in the 5 min.)
 
 #### Decisions
 
 | ID | Decision | Reason |
 | --- | --- | --- |
 | D235 | A block whose lag is above the read offset plus the input's delay (late, or saved only by the read's short wait) raises the automatic delay at once to its lag plus 1 ms, within `MIXER_INPUT_DELAY_MAX_MS`, also before the first second of lags and regardless of the hold. The control tick takes the highest lag of the tick from the lags the DSP thread already reports; nothing new on the DSP thread. | A rare outlier is invisible to the 99.9th percentile; each one lost a block. A stall is no lag (D230), so a stopped writer raises nothing. |
-| D236 | The need of a late block is a floor of the automatic delay for ten hold times (5 min by default), renewed by every later block that needs at least that floor less 1 ms (the same outlier coming back, now covered). The delay goes down only after the floor has expired and then the need stayed lower for a hold time. | With a floor of one hold time, outliers every 30–50 s found the delay just lowered: one block lost per minute and a fade each way. |
+| D236 | The need of a late block is a floor of the automatic delay for one hold time. An outlier (a block needing at least 1 ms more than the 99.9th percentile; not before the first second) that comes again, late or covered, within ten hold times of the last one recurs: the floor then lasts ten hold times (5 min by default), renewed by each recurrence; a higher outlier starts a new floor. The delay goes down only after the floor has expired and then the need stayed lower for a hold time. Lags above the read offset plus `MIXER_INPUT_DELAY_MAX_MS` count for nothing (a writer catching up, D230). | A one-off hiccup should cost its latency for about two hold times (1 min), not 5.5 min; a recurring outlier (the gateways: every 30–50 s) costs one block, or two when it recurs only after the delay fell (every 1–5 min), instead of one per occurrence. |
+| D239 | After a new reader or a stall the arrival lag counts only once the writer has caught up: a lag within the window that fell by at most one block since the head's last move. | A resumed writer is seconds behind and then commits faster than real time; counted, its catch-up raised the delay to the maximum (also in 1.4.0, through the 99.9th percentile). |
 | D237 | One read wait per block for all inputs: a quarter block from the wake-up; a read after it does not wait. | A wait per input multiplied by the late inputs exceeded the block (deadline misses at every start and with stalled inputs). |
 | D238 | `inputs.sh` adds a per-packet writer with a 6 ms outlier every 8 s (nothing lost after the first) and five stopped writers (fewer than 50 deadline misses in 3 s; 1.4.0: about 750). | Both fail on 1.4.0. |
 
@@ -2284,5 +2289,5 @@ inputs (bursts, 960-sample batches, a mirror with outliers, per packet), 12 stri
 
 | ID | Request | What was done | Reason |
 | --- | --- | --- | --- |
-| X34 | "never below the highest lag that caused a miss within the hold time" | The floor lasts ten hold times and is renewed by recurring outliers. | Gateway outliers come every 30–50 s, longer than the 30 s hold: a floor of one hold time let the delay fall between two of them, and each outlier was lost again. |
+| X34 | "never below the highest lag that caused a miss within the hold time" | A one-off late block: a floor of one hold time. A recurring outlier: ten hold times, renewed by each recurrence. | Gateway outliers come every 30–50 s, longer than the 30 s hold: a floor of one hold time let the delay fall between two of them, and each outlier was lost again. The cost: a recurring outlier keeps up to its latency (e.g. 6 ms) for 5.5 min after its last occurrence. |
 

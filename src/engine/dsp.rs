@@ -179,8 +179,10 @@ impl OutputSink for Outputs<'_> {
 /// held until the head moves (they grow by one block each, so the first and a
 /// count describe them); when it does not move within the window, the writer
 /// stalled and they are dropped (a stall is not an arrival lag). After a new
-/// reader nothing counts until the head has moved once: a new flow's head is 0
-/// and a re-opened one may be stale.
+/// reader, and after a stall, nothing counts until the writer has caught up: a
+/// new flow's head is 0, a re-opened one may be stale, and a writer that resumes
+/// is seconds behind and then commits faster than real time. Caught up is a lag
+/// within the window that fell by at most one block since the head's last move.
 struct ArrivalTracker {
     last_head: Option<u64>,
     /// Lag of the first block without a commit, and how many there are.
@@ -189,6 +191,9 @@ struct ArrivalTracker {
     window: u32,
     block: u32,
     stalled: bool,
+    /// After a reset or a stall: the lag at the head's last move, until the
+    /// writer has caught up.
+    catching_up: Option<u32>,
 }
 
 impl ArrivalTracker {
@@ -200,6 +205,7 @@ impl ArrivalTracker {
             window: window_blocks,
             block,
             stalled: true,
+            catching_up: Some(u32::MAX),
         }
     }
 
@@ -207,6 +213,7 @@ impl ArrivalTracker {
         self.last_head = None;
         self.waiting = 0;
         self.stalled = true;
+        self.catching_up = Some(u32::MAX);
     }
 
     /// The block ending at index `end` reads a flow whose head index is `head`.
@@ -218,6 +225,18 @@ impl ArrivalTracker {
         };
         if head != last {
             self.last_head = Some(head);
+            if let Some(before) = self.catching_up {
+                self.waiting = 0;
+                self.stalled = false;
+                let window = self.window.saturating_mul(self.block);
+                if lag <= window && before.saturating_sub(lag) <= self.block {
+                    self.catching_up = None;
+                    push(lag);
+                } else {
+                    self.catching_up = Some(lag);
+                }
+                return;
+            }
             if !self.stalled {
                 for k in 0..self.waiting {
                     push(self.first_waiting.saturating_add(k * self.block));
@@ -235,6 +254,7 @@ impl ArrivalTracker {
             } else {
                 self.waiting = 0;
                 self.stalled = true;
+                self.catching_up = Some(u32::MAX);
             }
         }
     }
@@ -697,8 +717,6 @@ fn commit(o: &mut OutputWriter, head: u64, counters: &super::OutputCounters) {
     }
 }
 
-/// Fade in after a gap or a (re)start, fade out over a gap (holding the last
-/// sample) and around a delay change, so nothing clicks.
 /// How long a read may wait for samples that are almost there: until `wait_end`,
 /// a quarter block after the wake-up, for all inputs of the block together.
 /// Each input waiting a quarter block of its own let a few late inputs (at the
@@ -728,6 +746,8 @@ fn note_missing(c: &super::InputCounters, samples: u64, error: MxlError) {
     }
 }
 
+/// Fade in after a gap or a (re)start, fade out over a gap (holding the last
+/// sample) and around a delay change, so nothing clicks.
 fn apply_fades(input: &mut Input, block: usize, c: &super::InputCounters, have_data: bool) {
     let channels = input.channels;
     if !have_data && input.fading >= 0 && input.gain > 0.0 {
@@ -817,7 +837,7 @@ mod tests {
         let l = lags(960, 0, 1000, None);
         // Nothing counts before the first commit; the blocks after the last
         // one are still held.
-        assert!(l.len() >= 980, "{} lags", l.len());
+        assert!(l.len() >= 970, "{} lags", l.len());
         let max = *l.iter().max().unwrap();
         assert!((864..=960).contains(&max), "max {max}");
         let late = l.iter().filter(|&&x| x > 96).count();
@@ -856,7 +876,9 @@ mod tests {
                 let head = if n < 30 { stale } else { end - 20 };
                 t.observe(head, end, |l| out.push(l));
             }
-            assert_eq!(out.len(), 170, "stale head {stale}");
+            // The first real move only shows the writer is there; it counts from
+            // the second one at the same pace.
+            assert_eq!(out.len(), 169, "stale head {stale}");
             assert!(
                 out.iter().all(|&x| x == 20),
                 "stale head {stale}: {:?}",
@@ -867,6 +889,7 @@ mod tests {
             let mut after = Vec::new();
             t.observe(stale, 2_000_000, |l| after.push(l));
             t.observe(2_000_000 - 20, 2_000_096, |l| after.push(l));
+            t.observe(2_000_096 - 20, 2_000_192, |l| after.push(l));
             assert_eq!(after, vec![96 + 20]);
         }
     }
@@ -877,7 +900,7 @@ mod tests {
         // first period (before the first head move) does not count.
         let mut t = ArrivalTracker::new(76, 96);
         let mut out = Vec::new();
-        for n in 0..=10u64 {
+        for n in 0..=15u64 {
             let end = 96 * (100 + n);
             t.observe(96 * (100 + n / 5 * 5), end, |l| out.push(l));
         }
@@ -894,5 +917,26 @@ mod tests {
         assert_eq!(read_timeout(1400, 1500), Some(Duration::from_nanos(100)));
         assert_eq!(read_timeout(1500, 1500), None);
         assert_eq!(read_timeout(9000, 1500), None);
+    }
+
+    #[test]
+    fn a_writer_catching_up_after_a_stall_adds_no_lag() {
+        // On time (lag 20) for 50 blocks, stopped for 300 blocks (a stall), then
+        // it catches up 10 blocks per block and goes on on time. Neither the
+        // stall nor the catch-up (lags of seconds, falling) counts.
+        let mut t = ArrivalTracker::new(76, 96);
+        let mut out = Vec::new();
+        let mut head = 0u64;
+        for n in 0..500u64 {
+            let end = 1_000_000 + n * 96;
+            head = match n {
+                0..50 => end - 20,
+                50..350 => head,
+                _ => (head + 960).min(end - 20),
+            };
+            t.observe(head, end, |l| out.push(l));
+        }
+        assert!(out.iter().all(|&l| l == 20), "{:?}", out.iter().max());
+        assert!(out.len() > 150, "{} lags", out.len());
     }
 }

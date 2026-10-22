@@ -382,8 +382,9 @@ when the 99.9th percentile comes within 0.5 ms of the delay, and at once when a 
 was late (its lag above the read offset plus the delay: a rare outlier the percentile
 does not show), to that lag plus 1 ms. It goes down only after the need stayed at
 least 1 ms lower for `MIXER_INPUT_DELAY_HOLD_S` (30 s), to the highest need of that
-time, and at most once per hold time; the need of a late block counts for ten hold
-times (5 min), renewed whenever the same outlier comes back. A change is applied with a
+time, and at most once per hold time; the need of a late block counts for one hold
+time, and for ten (5 min, renewed each time) once the outlier comes again within
+them. The catch-up of a writer after a stall or a re-open is no lag. A change is applied with a
 fade, or waits for `POST /api/v1/inputs/<n>/delay/confirm` with
 `MIXER_INPUT_DELAY_CONFIRM=true`. A writer that commits N samples at once needs about
 N samples of read offset plus extra delay: with the 2 ms default, a browser source that

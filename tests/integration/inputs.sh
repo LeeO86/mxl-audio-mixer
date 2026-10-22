@@ -169,6 +169,14 @@ sleep 3
 after=$(misses)
 kill -CONT "${WRITERS[@]}"
 for i in 2 3 4 5 6; do wait_until 10 "input $i running again" is_state "$i" running; done
+# The writers catch up after the stop (seconds behind, then faster than real time):
+# that is no lag, the delays stay where they were (1.4.1 review: they went to the
+# maximum, 150 ms).
+sleep 2
+for i in 2 3 4 5 6; do
+    d=$(input "$i" extra_delay_ms)
+    python3 -c "import sys; sys.exit(0 if $d < 60 else 1)" || fail "input $i: delay $d ms after its writer caught up"
+done
 log "five stopped writers: $((after - before)) deadline misses in 3 s"
 ((after - before < 50)) || fail "five stopped writers: $((after - before)) deadline misses in 3 s"
 pass "late inputs share one short wait: no deadline misses with five stopped writers"
