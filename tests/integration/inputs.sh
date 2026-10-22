@@ -118,14 +118,19 @@ python3 -c "import sys; sys.exit(0 if float('$(json "$WEB/api/v1/inputs/2" "d['a
     fail "input 2: the arrival lag does not show the 20 ms batches"
 pass "batched writers at a 2 ms read offset: the arrival lag shows the batch, the delay covers it, 0 missing samples"
 
-# F2: over 28 s from routing (two outliers), input 5 gets its first automatic delay
-# and may go up once more (an outlier needs more), but not down again (hold 30 s).
+# F2: over 28 s from routing (two outliers), input 5 gets its automatic delay and may
+# go up when an outlier needs more (a slow shared runner adds rises), but it must not
+# go down again (hold 30 s). v1.3.0 went down 10 s after each outlier.
 rest=$((OUTLIERS_ROUTED + 28 - SECONDS))
 ((rest <= 0)) || sleep "$rest"
-changes=$(tail -n +$((MIXER_LOG_AT + 1)) "$IT_OUT/inputs-mixer.log" | grep -c 'input delay set input=5 ' || true)
-log "input 5: $changes automatic delay changes in 28 s, effective delay $(input 5 effective_delay_ms) ms"
-((changes >= 1)) || fail "input 5 got no automatic delay"
-((changes <= 2)) || fail "input 5: the automatic delay changed $changes times in 28 s (flapping)"
+changes=$(tail -n +$((MIXER_LOG_AT + 1)) "$IT_OUT/inputs-mixer.log" | grep 'input delay set input=5 ' || true)
+read -r ups downs < <(python3 -c "
+import re, sys
+c = [(float(a), float(b)) for a, b in re.findall(r'from_ms=([0-9.]+) to_ms=([0-9.]+)', sys.stdin.read())]
+print(sum(b > a for a, b in c), sum(b < a for a, b in c))" <<<"$changes")
+log "input 5: $ups rises and $downs falls of the automatic delay in 28 s, effective delay $(input 5 effective_delay_ms) ms"
+((ups >= 1)) || fail "input 5 got no automatic delay"
+((downs == 0)) || fail "input 5: the automatic delay went down $downs times in 28 s (flapping)"
 pass "lag outliers: the automatic delay holds instead of flapping"
 
 # master_enable false: the input stops reading.
