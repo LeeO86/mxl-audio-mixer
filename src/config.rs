@@ -49,6 +49,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MIXER_RT_PRIORITY", default: "off", description: "SCHED_FIFO priority of the DSP thread, 1–49 (needs CAP_SYS_NICE)." },
     Setting { name: "MIXER_INPUT_STALL_S", default: "2", description: "An input whose head index does not move for this long is stalled and re-opened." },
     Setting { name: "MIXER_INPUT_DELAY_MAX_MS", default: "150", description: "Upper limit of an input's automatic extra delay." },
+    Setting { name: "MIXER_INPUT_DELAY_HOLD_S", default: "30", description: "An automatic delay goes down only after the measured need stayed at least 1 ms lower for this long, and at most once per this time; it goes up at once." },
     Setting { name: "MIXER_INPUT_DELAY_CONFIRM", default: "false", description: "true: an automatic delay change waits for operator confirmation instead of applying with a fade." },
     Setting { name: "WIDGET_FRAME_ANCESTORS", default: "'self'", description: "CSP frame-ancestors of the /widget pages; /widgets answers these origins with CORS." },
     Setting { name: "TSL_ENABLE", default: "false", description: "Listen for TSL UMD 5.0 tally (audio-follows-video)." },
@@ -140,6 +141,7 @@ pub struct Config {
     pub input_stall: Duration,
     pub input_delay_max_samples: u32,
     pub input_delay_confirm: bool,
+    pub input_delay_hold: Duration,
     /// CSP source list for the widget pages.
     pub widget_frame_ancestors: String,
     pub tsl_enable: bool,
@@ -455,6 +457,8 @@ impl Parser<'_> {
             ));
         }
         let input_delay_confirm = self.boolean("MIXER_INPUT_DELAY_CONFIRM", false)?;
+        let input_delay_hold =
+            Duration::from_secs_f64(self.float("MIXER_INPUT_DELAY_HOLD_S", 30.0, 0.0, 3600.0)?);
         let widget_frame_ancestors = self
             .get("WIDGET_FRAME_ANCESTORS")
             .map(|(v, _)| v)
@@ -622,6 +626,7 @@ impl Parser<'_> {
             input_stall,
             input_delay_max_samples: ms_to_samples(delay_max_ms),
             input_delay_confirm,
+            input_delay_hold,
             widget_frame_ancestors,
             tsl_enable,
             tsl_udp_port,
@@ -706,6 +711,7 @@ impl Config {
                 f64::from(self.input_delay_max_samples) * 1000.0 / f64::from(SAMPLE_RATE)
             ),
             "MIXER_INPUT_DELAY_CONFIRM" => self.input_delay_confirm.to_string(),
+            "MIXER_INPUT_DELAY_HOLD_S" => format!("{}", self.input_delay_hold.as_secs_f64()),
             "WIDGET_FRAME_ANCESTORS" => self.widget_frame_ancestors.clone(),
             "TSL_ENABLE" => self.tsl_enable.to_string(),
             "TSL_UDP_PORT" => self.tsl_udp_port.to_string(),

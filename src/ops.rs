@@ -654,7 +654,7 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "input_lag_ms",
         "gauge",
-        "Arrival lag at the last read: TAI now minus the flow's head.",
+        "Arrival lag at the last read: the end of the block read minus the flow's head index.",
         per(&|s| s.lag_ms.to_string()),
     );
     let mut lag_lines = Vec::new();

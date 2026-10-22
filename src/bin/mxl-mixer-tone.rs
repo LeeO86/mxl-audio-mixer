@@ -9,6 +9,13 @@
 //! much late (a mirrored or batched input). The domain directory and its
 //! `domain_def.json` are created if missing (`--domain-id` sets the id).
 //!
+//! Commit timing like real writers: `--block 48` commits per packet like the
+//! ST 2110 gateway, `--block 960` a 50 Hz video frame of audio at once like the
+//! browser source. `--batch N` hands N blocks over together, when the last of
+//! them is due (a receiver that delivers a burst of packets). `--late-ms X
+//! --every-s P --for-s D` writes X ms later still for D seconds out of every P
+//! (on the TAI clock): lag outliers that come and go.
+//!
 //! `--wav FILE` writes a recording instead (speech for the VAD tests; the mean of
 //! its channels, at 48 kHz, on every channel), followed by `--gap-s` seconds of
 //! silence, repeated; sample index i plays position (i + `--offset-s` · 48000)
@@ -38,7 +45,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--block B] [--commit C] [--wav FILE [--gap-s G] [--offset-s O]]");
+        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--block B] [--commit C] [--batch N] [--late-ms X --every-s P --for-s D] [--wav FILE [--gap-s G] [--offset-s O]]");
         std::process::exit(2)
     };
     let domain_dir = PathBuf::from(arg(&args, "--domain").unwrap_or_else(|| usage()));
@@ -60,6 +67,17 @@ fn main() {
     let commit: u32 = arg(&args, "--commit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(block as u32);
+    let batch: u64 = arg(&args, "--batch")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let nanos = |name: &str| -> u64 {
+        arg(&args, name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map_or(0, |s| (s * 1e9).max(0.0) as u64)
+    };
+    let late_ns = nanos("--late-ms") / 1000;
+    let (every_ns, for_ns) = (nanos("--every-s"), nanos("--for-s"));
     let seconds = |name: &str| -> u64 {
         arg(&args, name)
             .and_then(|v| v.parse::<f64>().ok())
@@ -137,18 +155,27 @@ fn main() {
     let delay_ns = (delay_ms * 1e6) as u64;
     let mut n = index_at(tai_ns()) / block + 1;
     while !stop.load(Ordering::Relaxed) {
-        let head = (n + 1) * block;
-        sleep_until_tai(time_of(head) + delay_ns);
-        let start = head - block;
-        let _ = writer.write(head, block as usize, |c, offset, samples| {
-            for (k, s) in samples.iter_mut().enumerate() {
-                *s = sample(c, start + (offset + k) as u64);
-            }
-        });
+        let last = (n + batch) * block;
+        let due = time_of(last);
+        let late = if every_ns > 0 && due % every_ns < for_ns {
+            late_ns
+        } else {
+            0
+        };
+        sleep_until_tai(due + delay_ns + late);
+        for k in 1..=batch {
+            let head = (n + k) * block;
+            let start = head - block;
+            let _ = writer.write(head, block as usize, |c, offset, samples| {
+                for (k, s) in samples.iter_mut().enumerate() {
+                    *s = sample(c, start + (offset + k) as u64);
+                }
+            });
+        }
         // A late writer catches up block by block instead of skipping: a skipped
         // range would keep the ring's data of one buffer length earlier, which a
         // reader cannot tell from fresh samples.
-        n += 1;
+        n += batch;
     }
 }
 

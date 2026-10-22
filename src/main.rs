@@ -216,6 +216,7 @@ async fn run(mut config: Config) -> ExitCode {
         inputs: config.input_flows,
         block: config.block_samples,
         read_offset: config.read_offset_samples,
+        lag_window: config.read_offset_samples + config.input_delay_max_samples,
         rt_priority: config.rt_priority,
         cpu: timing::dsp_cpu(),
     }) {

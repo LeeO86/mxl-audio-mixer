@@ -201,10 +201,14 @@ rates other than 48 kHz, recording.
   All inputs are therefore time-aligned on the TAI timeline. Late or missing samples
   are counted and replaced by silence with a short fade (no clicks).
   - **`auto` is the default for `input_extra_delay`.** The mixer measures each input's
-    **arrival lag**: how far the flow's head index trails TAI, as a distribution, with
-    the 99.9th percentile over a sliding window. It sets the delay to that value plus a
-    margin, within a configurable maximum, and changes it only with a fade (or only on
-    operator confirmation, configurable).
+    **arrival lag**: how far the flow's head index trails the end of each read block
+    (every block, also those without a commit: a writer that commits in batches is
+    furthest behind just before its next commit), as a distribution, with the 99.9th
+    percentile over a sliding window. A block is late exactly when its lag exceeds the
+    read offset plus the extra delay. It sets the delay to that value plus a margin,
+    within a configurable maximum, and changes it only with a fade (or only on operator
+    confirmation, configurable): up at once, down only after a hold time of lower need
+    (`MIXER_INPUT_DELAY_HOLD_S`), so it does not follow every outlier.
   - Manual stays possible. The lag is exported per input (§15), so the right value can
     be read off.
   - **Measured on the platform:**
@@ -662,6 +666,7 @@ README's Settings table is the complete list, with every default):
 | `MIXER_BLOCK_SAMPLES` | 96 | DSP block size at 48 kHz: 48, 96, 144 or 240 (§4.4). |
 | `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move this long is stalled and re-opened (§4.2). |
 | `MIXER_INPUT_DELAY_MAX_MS` | 150 | Upper limit of an input's automatic extra delay (§4.2). |
+| `MIXER_INPUT_DELAY_HOLD_S` | 30 | An automatic delay goes down only after the need stayed at least 1 ms lower this long, at most once per this time; up at once (§4.2). |
 | `MIXER_INPUT_DELAY_CONFIRM` | false | An automatic delay change waits for the operator instead of applying with a fade. |
 | `MEDIAMTX_BIN` | `mediamtx` | The built-in MediaMTX executable (Appendix B.1). |
 | `MIXER_LINK_ROLE` | `off` | Remote link (§13): `off`, `master` or `slave`. |
