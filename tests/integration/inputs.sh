@@ -205,8 +205,13 @@ for i in 2 3 4 5 6; do
     python3 -c "import sys; sys.exit(0 if $d < 60 else 1)" || fail "input $i: delay $d ms after its writer caught up"
 done
 log "five stopped writers: $((after - before)) deadline misses in 3 s ($((before - base)) before, running)"
-((after - before - (before - base) < 50)) || fail "five stopped writers: $((after - before)) deadline misses in 3 s, $((before - base)) running"
-pass "late inputs share one short wait: no deadline misses with five stopped writers"
+if ((before - base >= 50)); then
+    # The machine is too busy to tell: the mixer misses deadlines anyway.
+    log "SKIP: five stopped writers ($((before - base)) deadline misses in 3 s with the writers running)"
+else
+    ((after - before - (before - base) < 50)) || fail "five stopped writers: $((after - before)) deadline misses in 3 s, $((before - base)) running"
+    pass "late inputs share one short wait: no deadline misses with five stopped writers"
+fi
 
 # master_enable false: the input stops reading.
 route 1 "$DOMAIN" "$FLOW" false

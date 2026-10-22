@@ -5,8 +5,9 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
-**Status: 1.4.0 released** (2026-10-22; the operators' feedback on the console, DSP and
-formats, and views, and the input reading fixes); 1.3.0 (2026-10-17; §19: milestone 9,
+**Status: 1.4.1 released** (2026-10-22; the input fixes from test-all: late blocks raise
+the delay, one read wait per block, catch-up and re-open fixes); 1.4.0 (2026-10-22; the
+operators' feedback on the console, DSP and formats, and views, and the input reading fixes); 1.3.0 (2026-10-17; §19: milestone 9,
 the remote link, and the complete logic editor), 1.0.0, 1.1.0 and 1.2.0 before it (milestones 0–8; notes in
 `docs/release-notes/`). Settings, probes, metrics, the NMOS node with its
 MXL audio receivers, and the inputs read on the TAI block clock (waiting, stalled
@@ -336,7 +337,7 @@ token.
 | `MIXER_CONFIG_FILE` | unset | JSON file with any of these settings (environment wins). |
 | `MIXER_STATE_DIR` | /config | Directory of everything the mixer writes itself (show file, connections); must be writable, else exit 78. |
 | `MIXER_LOG_LEVEL` | info | Log level: error, warn, info, debug, trace. |
-| `MIXER_INPUT_FLOWS` | 16 | Number of MXL audio inputs (NMOS receivers), 1–256. |
+| `MIXER_INPUT_FLOWS` | 16 | Number of MXL audio inputs (NMOS receivers), 1–256. Every distinct flow read takes an MXL instance, i.e. an inotify instance: `fs.inotify.max_user_instances` (often 128 per uid, shared with every MXL process of that uid) must leave room for them. |
 | `MIXER_BLOCK_SAMPLES` | 96 | DSP block size in samples at 48 kHz: 48, 96, 144 or 240. |
 | `MIXER_READ_OFFSET` | 2 | Read offset in ms: every input is read at t_out − (offset + its extra delay). |
 | `MIXER_OUTPUT_COMMIT_SAMPLES` | one block | Samples per MXL commit of an output (a multiple of the block size). |
