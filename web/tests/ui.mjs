@@ -261,6 +261,9 @@ try {
   await until("my headphones do not follow solo", async () => (await api("/api/v1/personal")).every((p) => p.follows_solo === false));
   await page.locator(".monitor", { hasText: "My headphones" }).getByRole("button", { name: "Remove" }).click();
   await until("my headphones removed", async () => (await api("/api/v1/personal")).length === 0);
+  await page.getByRole("button", { name: "Create my headphones" }).waitFor({ timeout: 3000 });
+  await page.waitForTimeout(2500);
+  if (!(await page.getByRole("button", { name: "Create my headphones" }).isVisible())) throw new Error("my headphones came back after Remove");
   pass("control room: My headphones' Follow PFL/AFL on and off");
 
   // Listening in the browser (WHEP from the built-in MediaMTX), only with MediaMTX.

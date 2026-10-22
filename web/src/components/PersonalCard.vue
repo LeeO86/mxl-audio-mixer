@@ -18,7 +18,9 @@ async function load() {
   const id = sessionStorage.getItem(KEY);
   if (!id) return;
   try {
-    mine.value = await api.get(`/api/v1/personal/${id}`);
+    const p = await api.get(`/api/v1/personal/${id}`);
+    // Removed meanwhile (Remove pressed while this was on its way): keep it gone.
+    if (sessionStorage.getItem(KEY) === id) mine.value = p;
   } catch {
     sessionStorage.removeItem(KEY);
     stopListening(id);
