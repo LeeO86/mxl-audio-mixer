@@ -18,6 +18,7 @@ IMPLEMENTATION_PLAN D186–D193.
 - Deleting a strip or bus keeps the logic blocks that name it, wired, with an empty target (never acting); it removed them before. A monitor, control-room source or talkback return that listened to it is cleared instead of refusing the delete (C9).
 - Subgroup buses (`subgroup: true`, "Subgroup…" in a bus's menu, with a confirmation): every send into one is taken from its source's output (a strip's post-pan, a bus's post-fader) at 0 dB; its level is locked (a PUT of another level or tap is 400) and the strip shows it with a lock; the bus fader is the group level. The `group` operation makes subgroups (C12).
 - A logic `vad` block without a target no longer asks for voice detection of `""`.
+- A strip with an active `surround-pan` node shows its pan or balance as "surround" instead of a knob that has no effect.
 
 ## 1.3.0 (2026-10-17)
 

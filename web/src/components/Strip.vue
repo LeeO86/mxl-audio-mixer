@@ -60,6 +60,8 @@ const latency = computed(() => live.latency[s.value.id] || 0);
 const tally = computed(() => tallyOf(s.value.id));
 const myVcas = computed(() => vcasAbove(s.value.id));
 const otherMute = computed(() => (vcaMuted(s.value.id) ? "VCA" : groupMuted(s.value) ? "group" : ""));
+// An active surround panner (agent B's `surround-pan` node) replaces the strip's own pan.
+const surroundPan = computed(() => s.value.chain.find((n) => n.type === "surround-pan" && !n.bypass) || null);
 const dynamics = computed(() => s.value.chain.filter((n) => DYNAMICS.has(n.type)));
 const vad = computed(() => live.vad[s.value.id] || null);
 const auto = computed(() => autoGain(s.value.id));
@@ -266,6 +268,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
         </button>
         <div v-if="menu" class="smenu" role="menu">
           <button role="menuitem" @click="choose('processing')">Processing…</button>
+          <!-- TODO(1.4.0, after PR #38): a "Format…" item opening agent B's FormatSelect.vue (C10). -->
           <button role="menuitem" @click="choose('send-to')">Send to…</button>
           <button v-if="bus" role="menuitem" @click="choose('add-source')">Add source…</button>
           <button v-if="bus" role="menuitem" @click="choose('subgroup')">{{ s.subgroup ? "Plain bus…" : "Subgroup…" }}</button>
@@ -373,7 +376,10 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
     </div>
 
     <template v-if="!bus && (s.format === 'mono' || s.format === 'stereo')">
-      <MiniPot :label="s.format === 'stereo' ? 'Bal' : 'Pan'" :value="s.pan" :min="-1" :max="1" :step="0.01" :def="0" :format="fmtPan" @change="(v) => patchSignal(s.id, { pan: v })" />
+      <div v-if="surroundPan" class="minipot surroundpan" :title="`the surround panner ${surroundPan.id} pans this strip; ${s.format === 'stereo' ? 'balance' : 'pan'} has no effect`">
+        <span class="mp-head"><span>{{ s.format === "stereo" ? "Bal" : "Pan" }}</span><span class="num">surround</span></span>
+      </div>
+      <MiniPot v-else :label="s.format === 'stereo' ? 'Bal' : 'Pan'" :value="s.pan" :min="-1" :max="1" :step="0.01" :def="0" :format="fmtPan" @change="(v) => patchSignal(s.id, { pan: v })" />
       <MiniPot v-if="s.format === 'stereo'" label="Width" :value="s.width" :min="0" :max="2" :step="0.01" :def="1" :format="(v) => `${Math.round(v * 100)}%`" @change="(v) => patchSignal(s.id, { width: v })" />
     </template>
     </div>
