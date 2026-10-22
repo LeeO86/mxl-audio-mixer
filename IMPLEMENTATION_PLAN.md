@@ -16,13 +16,14 @@ current so that work can resume after an interruption.
 | M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | done (PRs 32, 33, 35), **released in 1.3.0** (2026-10-17; tag `v1.3.0` at `1d0188f`) |
 | M9 remote link (master/slave) | done (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **released in 1.3.0** (2026-10-17; tag `v1.3.0` at `1d0188f`); maintainers' hardware runs 2026-10-16/17 on `cab382e` and the final candidate `bd720c3` (`docs/release-notes/1.3.0.md`) |
 | 1.4.0 operator feedback (console C1–C12, DSP, views, input fixes F1/F2) | done (PRs 37–41), **released in 1.4.0** (2026-10-22; tag `v1.4.0` at `b34fe4a`); maintainers' hardware run 2026-10-22 on `8d27a5d` (`docs/release-notes/1.4.0.md`) |
+| 1.4.1 input fixes from test-all (late blocks, read wait, catch-up, MXL instances) | done (PR 44), **released in 1.4.1** (2026-10-22; the tag commit is added after the tag); lab runs on `b054b9f` (`docs/release-notes/1.4.1.md`) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
 
-- 1.4.0 is released (2026-10-22). Release notes: `docs/release-notes/1.4.0.md`;
-  its image digest is filled in after the tag build. 1.3.0 (2026-10-17):
-  `docs/release-notes/1.3.0.md`.
+- 1.4.1 is released (2026-10-22). Release notes: `docs/release-notes/1.4.1.md`;
+  its image digest is filled in after the tag build. 1.4.0 (2026-10-22):
+  `docs/release-notes/1.4.0.md`; 1.3.0 (2026-10-17): `docs/release-notes/1.3.0.md`.
 - Environment: `docs/development.md`.
 
 ## Decisions
@@ -2237,6 +2238,8 @@ settling):
 | X33 | F2 "never more than one change per hold period" | Only decreases wait for the hold time; an increase is applied at once, also within a hold period. | An increase stops samples from being lost; holding it back would trade a fade for audible gaps. Increases cannot flap: the delay only goes down after a hold. |
 
 ## 1.4.1: late blocks and the read wait (test-all, 1.4.0)
+
+Released in 1.4.1 (2026-10-22; PR 44).
 
 1.4.0 on test-all at `MIXER_READ_OFFSET=2` (10 min): the ST 2110 gateway inputs lost a
 whole block every 30–50 s (1718, 1112 and 1516 samples; 0 at offset 20 on 1.3.0), with
