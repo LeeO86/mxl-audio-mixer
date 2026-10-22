@@ -13,9 +13,9 @@ current so that work can resume after an interruption.
 | M1–M6 skeleton, DSP core, processing, console, control room, preview, talkback, VCA, N-1 | done, **released in 1.0.0** (`14e9487`, 2026-10-13) |
 | M7 VAD, auto-level, auto-mix, ducking; the missing-sample split; ports 8190/3342 | done, **released in 1.1.0** (`ee2d06d`, 2026-10-14) |
 | M8a logic graphs | done, **released in 1.2.0** (`8e2aae6`, 2026-10-15); maintainers' hardware run 2026-10-15/16 (`docs/release-notes/1.2.0.md`) |
-| M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | done (PRs 32, 33, 35), **released in 1.3.0** (2026-10-17; the tag commit is added after the tag) |
-| M9 remote link (master/slave) | done (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **released in 1.3.0** (2026-10-17; the tag commit is added after the tag); maintainers' hardware runs 2026-10-16/17 on `cab382e` and the final candidate `bd720c3` (`docs/release-notes/1.3.0.md`) |
-| 1.4.0 operator feedback (console C1–C12, DSP, views, input fixes F1/F2) | done (PRs 37–41), **released in 1.4.0** (2026-10-22; the tag commit is added after the tag); maintainers' hardware run 2026-10-22 on `8d27a5d` (`docs/release-notes/1.4.0.md`) |
+| M8b logic editor complete (typed ports, all §11.1 blocks, macros, atomic API) | done (PRs 32, 33, 35), **released in 1.3.0** (2026-10-17; tag `v1.3.0` at `1d0188f`) |
+| M9 remote link (master/slave) | done (PRs 26, 27), with the platform readiness for the small cluster (PR 28): **released in 1.3.0** (2026-10-17; tag `v1.3.0` at `1d0188f`); maintainers' hardware runs 2026-10-16/17 on `cab382e` and the final candidate `bd720c3` (`docs/release-notes/1.3.0.md`) |
+| 1.4.0 operator feedback (console C1–C12, DSP, views, input fixes F1/F2) | done (PRs 37–41), **released in 1.4.0** (2026-10-22; tag `v1.4.0` at `b34fe4a`); maintainers' hardware run 2026-10-22 on `8d27a5d` (`docs/release-notes/1.4.0.md`) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
