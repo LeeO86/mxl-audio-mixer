@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.4.2 (unreleased)
+## 1.4.2 (2026-10-23)
 
-Smoother start-up of the inputs (test-all, 1.4.1 at `MIXER_READ_OFFSET=2`: losses only in the first 5 min while the delays settled, 236 samples on each local gateway input and 5793 on a mirrored one, whose delay peaked at 74.9 ms; IMPLEMENTATION_PLAN D241–D243).
+Smoother start-up of the inputs (test-all, 1.4.1 at `MIXER_READ_OFFSET=2`: losses only in the first 5 min while the delays settled, 236 samples on each local gateway input and 5793 on a mirrored one, whose delay peaked at 74.9 ms; PR #47; IMPLEMENTATION_PLAN D241–D243). Release notes: `docs/release-notes/1.4.2.md`.
 
 - An input starts at the automatic delay its flow had in the last run (`MIXER_STATE_DIR/input-delays.json`, per flow id, written when the delay changes): a floor for one hold time, and an outlier of that size recurs at once, so a gateway's rare outliers are covered from the first block.
 - The start-up phase: in an input's first minute, until a second outlier comes, a late block's short floor and the period of lower need last 5 s instead of the hold time. A backlog at the start (a mirror still filling, a first outlier) raises the delay at once and lets it fall within about 10 s instead of holding it for a minute. A recurring outlier still gets its recurring floor.
