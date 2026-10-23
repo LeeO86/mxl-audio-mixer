@@ -159,10 +159,11 @@ done
 python3 -c "import sys; sys.exit(0 if float('$(json "$WEB/api/v1/inputs/2" "d['arrival_lag_ms']['p999']")') >= 18 else 1)" ||
     fail "input 2: the arrival lag does not show the 20 ms batches"
 pass "batched writers at a 2 ms read offset: the arrival lag shows the batch, the delay covers it, 0 missing samples"
-# At least 17 s after routing input 6 its first two outliers have come: in the
-# start-up phase (1.4.2) the first falls after about 10 s and the second may be
-# late again, but it recurs and gets the recurring floor.
-rest=$((OUTLIERS_ROUTED + 17 - SECONDS))
+# At least 25 s after routing input 6 its first three outliers have come: in the
+# start-up phase (1.4.2) a first outlier falls after about 10 s and the next may be
+# late again (an outlier read smaller in between does not recur), until one recurs
+# and gets the recurring floor.
+rest=$((OUTLIERS_ROUTED + 25 - SECONDS))
 ((rest <= 0)) || sleep "$rest"
 RARE_MISSING=$(input 6 missing_samples)
 RARE_AT=$SECONDS
@@ -190,11 +191,11 @@ log "input 7 (a mirror with a 75 ms backlog at its start): delay $d ms after 28 
 python3 -c "import sys; sys.exit(0 if $d < 16 else 1)" || fail "input 7: the backlog's delay is still $d ms after 28 s"
 pass "a mirror starting with a backlog: the start-up phase brings its delay back within 28 s"
 
-# 1.4.1: since its second outlier input 6 lost nothing over two more.
+# 1.4.1: since its third outlier input 6 lost nothing over two more.
 ((SECONDS - RARE_AT >= 16)) || sleep $((16 - (SECONDS - RARE_AT)))
 missing=$(($(input 6 missing_samples) - RARE_MISSING))
-log "input 6: $missing samples lost after its second outlier, delay $(input 6 extra_delay_ms) ms"
-((missing == 0)) || fail "input 6: the rare 6 ms outliers lost $missing samples after the second one"
+log "input 6: $missing samples lost after its third outlier, delay $(input 6 extra_delay_ms) ms"
+((missing == 0)) || fail "input 6: the rare 6 ms outliers lost $missing samples after the third one"
 # The outlier reads 6-7 ms late at block granularity: a delay of 5 ms or more covers it.
 delay_above 6 4.5 || fail "input 6: the automatic delay does not cover the 6 ms outlier"
 pass "a rare long outlier: the first late block raises the delay, the later ones are covered"

@@ -130,6 +130,10 @@ struct DelayHold {
     block: u32,
     /// The first decision: the start-up phase runs [`STARTUP`] from it.
     started: Option<Instant>,
+    /// Outlier events seen in the start-up phase (late or covered after a late
+    /// one), and whether the last tick had an outlier.
+    startup_outliers: u8,
+    outlier_before: bool,
     /// The delay of the last run (D242): a floor for one (normal) hold time
     /// from the start, and an outlier of that size recurs at once.
     seeded: Option<(Instant, u32)>,
@@ -196,13 +200,15 @@ impl DelayHold {
             self.seeded = None;
         }
         let started = *self.started.get_or_insert(now);
-        let startup = now.duration_since(started) < STARTUP;
+        let memory = hold * LATE_MEMORY_HOLDS;
+        // The start-up hold only until a second outlier: outliers that come again,
+        // also of other sizes, are no backlog, the normal hold keeps them covered.
+        let startup = now.duration_since(started) < STARTUP && self.startup_outliers < 2;
         let hold = if startup {
             hold.min(STARTUP_HOLD)
         } else {
             hold
         };
-        let memory = hold * LATE_MEMORY_HOLDS;
         let expire = |f: &mut Option<(Instant, u32)>, after: Duration| {
             if f.is_some_and(|(t, _)| now.duration_since(t) >= after) {
                 *f = None;
@@ -214,9 +220,18 @@ impl DelayHold {
         if let Some(lag) = max_lag.filter(|&l| l <= read_offset + delay_max) {
             let need = need_of(lag);
             let late = lag > read_offset + current;
-            // An outlier needs at least 1 ms more than the 99.9th percentile (not
-            // known in the first second: a late block then is no outlier).
-            let outlier = p999.is_some_and(|p| need > need_of(p) + DELAY_LOWER_SAMPLES);
+            // An outlier needs at least 1 ms more than the 99.9th percentile.
+            // Before the first second (no percentile yet) a late block counts as one.
+            let outlier = p999.map_or(late, |p| need > need_of(p) + DELAY_LOWER_SAMPLES);
+            // An outlier event starts on a tick after one without: a backlog
+            // draining over many ticks is one event, rare outliers are each one.
+            // Not in the first second: a backlog then is no repeated outlier.
+            let event = outlier && !self.outlier_before && p999.is_some();
+            self.outlier_before = outlier;
+            if event && (late || self.last_late.is_some()) && now.duration_since(started) < STARTUP
+            {
+                self.startup_outliers = self.startup_outliers.saturating_add(1);
+            }
             // It recurs when it needs about as much (within 1 ms and a block) as the
             // recurring floor or the last outlier: another size, a smaller tail
             // or a single higher spike, renews nothing and does not ratchet.
@@ -1261,9 +1276,10 @@ mod tests {
 
     #[test]
     fn the_start_up_phase_settles_fast() {
-        // A fresh mirror input at 14 ms with a 75 ms outlier 2 s in (a backlog)
-        // and a 60 ms one at 30 s: up at once, back to the steady need within
-        // about 10 s (two start-up holds) each time, not after 1 min.
+        // A fresh mirror input at 14 ms with a 75 ms outlier 2 s in (a backlog):
+        // up at once, back to the steady need within about 10 s (two start-up
+        // holds), not after 1 min. A second outlier (60 ms at 30 s) ends the
+        // start-up hold: from then on the normal hold keeps it.
         let (changes, _) = start(900, None, |k| match k {
             20 => 3600,
             300 => 2880,
@@ -1276,13 +1292,10 @@ mod tests {
             changes[2].0 <= 20 + 110 && changes[2].1 == steady,
             "{changes:?}"
         );
-        assert!(
-            changes
-                .iter()
-                .any(|&(k, d)| (300..420).contains(&k) && d == steady),
-            "{changes:?}"
-        );
-        assert_eq!(changes.last().unwrap().1, steady);
+        assert_eq!(changes[3..], [(300, 2880 + 48 - 96)], "{changes:?}");
+        // A single backlog alone: down within about 10 s and stays there.
+        let (changes, _) = start(900, None, |k| if k == 20 { 3600 } else { 672 });
+        assert_eq!(changes.last().unwrap().1, steady, "{changes:?}");
         // The same outlier again within the start-up phase recurs: from then on
         // it stays covered.
         let (changes, _) = start(900, None, |k| if k == 20 || k == 300 { 3600 } else { 672 });
