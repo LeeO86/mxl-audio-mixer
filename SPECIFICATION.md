@@ -209,7 +209,8 @@ rates other than 48 kHz, recording.
     within a configurable maximum, and changes it only with a fade (or only on operator
     confirmation, configurable): up at once (also when a single block was late: its
     need then stays a floor for a hold time, for ten when the outlier recurs), down
-    only after a hold time of lower need
+    only after a hold time of lower need (5 s in an input's first minute; it starts at
+    its flow's last delay)
     (`MIXER_INPUT_DELAY_HOLD_S`), so it does not follow every outlier.
   - Manual stays possible. The lag is exported per input (§15), so the right value can
     be read off.

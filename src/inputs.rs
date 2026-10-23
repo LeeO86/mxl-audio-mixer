@@ -25,6 +25,14 @@ const DELAY_RAISE_HEADROOM_SAMPLES: u32 = DELAY_MARGIN_SAMPLES / 2;
 /// The automatic delay goes down only when the need is at least this much lower
 /// (1 ms), for `MIXER_INPUT_DELAY_HOLD_S`.
 const DELAY_LOWER_SAMPLES: u32 = 48;
+/// The start-up phase of an input (from its first automatic decision after a
+/// route or a start): the delay settles fast, a late block's short floor and
+/// the period of lower need last [`STARTUP_HOLD`] instead of the hold time. An
+/// outlier that recurs (also one the size of the last run's delay) still gets
+/// its recurring floor.
+const STARTUP: Duration = Duration::from_secs(60);
+/// The hold time in the start-up phase.
+const STARTUP_HOLD: Duration = Duration::from_secs(5);
 /// How many hold times the need of a late block keeps the automatic delay up.
 const LATE_MEMORY_HOLDS: u32 = 10;
 /// Lag samples needed before the first automatic setting: one second of blocks.
@@ -120,6 +128,15 @@ struct DelayHold {
     /// The DSP block (samples): lags are measured at block ends, so the same
     /// outlier reads up to a block apart.
     block: u32,
+    /// The first decision: the start-up phase runs [`STARTUP`] from it.
+    started: Option<Instant>,
+    /// Outlier events seen in the start-up phase (late or covered after a late
+    /// one), and whether the last tick had an outlier.
+    startup_outliers: u8,
+    outlier_before: bool,
+    /// The delay of the last run (D242): a floor for one (normal) hold time
+    /// from the start, and an outlier of that size recurs at once.
+    seeded: Option<(Instant, u32)>,
 }
 
 impl DelayHold {
@@ -130,10 +147,25 @@ impl DelayHold {
         }
     }
 
+    /// Start from the delay of the last run.
+    fn seed(&mut self, delay: u32, now: Instant) {
+        self.seeded = Some((now, delay));
+        self.last_late = Some((now, delay));
+    }
+
+    /// A hold past its start-up phase (tests of the steady state).
+    #[cfg(test)]
+    fn steady(block: u32) -> Self {
+        Self {
+            started: Some(Instant::now() - 2 * STARTUP),
+            ..Self::new(block)
+        }
+    }
+
     /// The higher of the two late-block floors (0 without one).
     fn floor(&self) -> u32 {
         let n = |f: Option<(Instant, u32)>| f.map_or(0, |(_, n)| n);
-        n(self.short).max(n(self.long))
+        n(self.short).max(n(self.long)).max(n(self.seeded))
     }
 
     /// A stall interrupts a period of lower need: it starts again afterwards.
@@ -161,7 +193,22 @@ impl DelayHold {
                 .saturating_sub(read_offset)
                 .min(delay_max)
         };
+        if self
+            .seeded
+            .is_some_and(|(t, _)| now.duration_since(t) >= hold)
+        {
+            self.seeded = None;
+        }
+        let started = *self.started.get_or_insert(now);
         let memory = hold * LATE_MEMORY_HOLDS;
+        // The start-up hold only until a second outlier: outliers that come again,
+        // also of other sizes, are no backlog, the normal hold keeps them covered.
+        let startup = now.duration_since(started) < STARTUP && self.startup_outliers < 2;
+        let hold = if startup {
+            hold.min(STARTUP_HOLD)
+        } else {
+            hold
+        };
         let expire = |f: &mut Option<(Instant, u32)>, after: Duration| {
             if f.is_some_and(|(t, _)| now.duration_since(t) >= after) {
                 *f = None;
@@ -173,9 +220,18 @@ impl DelayHold {
         if let Some(lag) = max_lag.filter(|&l| l <= read_offset + delay_max) {
             let need = need_of(lag);
             let late = lag > read_offset + current;
-            // An outlier needs at least 1 ms more than the 99.9th percentile (not
-            // known in the first second: a late block then is no outlier).
-            let outlier = p999.is_some_and(|p| need > need_of(p) + DELAY_LOWER_SAMPLES);
+            // An outlier needs at least 1 ms more than the 99.9th percentile.
+            // Before the first second (no percentile yet) a late block counts as one.
+            let outlier = p999.map_or(late, |p| need > need_of(p) + DELAY_LOWER_SAMPLES);
+            // An outlier event starts on a tick after one without: a backlog
+            // draining over many ticks is one event, rare outliers are each one.
+            // Not in the first second: a backlog then is no repeated outlier.
+            let event = outlier && !self.outlier_before && p999.is_some();
+            self.outlier_before = outlier;
+            if event && (late || self.last_late.is_some()) && now.duration_since(started) < STARTUP
+            {
+                self.startup_outliers = self.startup_outliers.saturating_add(1);
+            }
             // It recurs when it needs about as much (within 1 ms and a block) as the
             // recurring floor or the last outlier: another size, a smaller tail
             // or a single higher spike, renews nothing and does not ratchet.
@@ -376,6 +432,11 @@ pub struct Inputs {
     hold: Duration,
     stall: Duration,
     show_path: PathBuf,
+    /// The last automatic delay per flow (samples), kept in
+    /// `MIXER_STATE_DIR/input-delays.json`: an input starts at it (D242).
+    last_delays: HashMap<Uuid, u32>,
+    last_delays_path: PathBuf,
+    last_delays_dirty: bool,
     /// The DSP block in samples.
     block: u32,
     /// MXL instances by flow id and the inode of its data file (D240).
@@ -418,6 +479,9 @@ impl Inputs {
             hold: config.input_delay_hold,
             stall: config.input_stall,
             show_path: config.state_dir.join("inputs.json"),
+            last_delays: load_last_delays(&config.state_dir.join("input-delays.json")),
+            last_delays_path: config.state_dir.join("input-delays.json"),
+            last_delays_dirty: false,
             instances: HashMap::new(),
             block: config.block_samples,
         };
@@ -447,6 +511,16 @@ impl Inputs {
 
     fn set_delay(&mut self, engine: &mut Engine, index: usize, delay: u32) {
         self.slots[index].delay = delay;
+        let slot = &self.slots[index];
+        if let Some(route) = slot
+            .route
+            .as_ref()
+            .filter(|_| slot.config.extra_delay == ExtraDelay::default())
+        {
+            if self.last_delays.insert(route.flow, delay) != Some(delay) {
+                self.last_delays_dirty = true;
+            }
+        }
         engine.send(Command::SetDelay {
             index,
             samples: delay,
@@ -463,6 +537,15 @@ impl Inputs {
         }
         if slot.route.is_some() {
             engine.send(Command::ClearInput { index });
+        }
+        let slot = &mut self.slots[index];
+        // Another flow on an automatic delay starts over: from 0, or from that
+        // flow's last delay (D242), not from the old flow's delay.
+        let other_flow = slot.route.as_ref().map(|r| r.flow) != route.as_ref().map(|r| r.flow);
+        if other_flow && slot.config.extra_delay == ExtraDelay::default() && slot.delay != 0 {
+            slot.delay = 0;
+            slot.proposed = None;
+            engine.send(Command::SetDelay { index, samples: 0 });
         }
         let slot = &mut self.slots[index];
         slot.route = route;
@@ -542,6 +625,23 @@ impl Inputs {
                     slot.head_changed = Instant::now();
                     slot.last_head = head;
                 }
+                // Start at the delay this flow had last (D242): no losses while
+                // the measurement settles; the start-up phase lets it fall fast.
+                let auto = slot.config.extra_delay == ExtraDelay::default();
+                let last = self.last_delays.get(&route.flow).copied();
+                if let Some(last) =
+                    last.filter(|_| auto && was == State::Waiting && slot.delay == 0)
+                {
+                    let last = last.min(self.delay_max);
+                    tracing::info!(
+                        input = index + 1,
+                        delay_ms = ms(last),
+                        "input delay of the last run"
+                    );
+                    self.set_delay(engine, index, last);
+                    self.slots[index].hold.seed(last, Instant::now());
+                }
+                let slot = &mut self.slots[index];
                 if was != State::Waiting {
                     slot.reopens += 1;
                 }
@@ -590,6 +690,20 @@ impl Inputs {
             self.auto_delay(engine, i, now, max_lag);
         }
         self.prune_instances(None);
+        if self.last_delays_dirty {
+            self.last_delays_dirty = false;
+            let body = serde_json::json!({ "version": 1, "delays_ms": self
+                .last_delays
+                .iter()
+                .map(|(flow, d)| (flow.to_string(), ms(*d)))
+                .collect::<std::collections::BTreeMap<_, _>>() });
+            if let Err(e) = crate::state::write_atomic(
+                &self.last_delays_path,
+                &serde_json::to_vec_pretty(&body).unwrap_or_default(),
+            ) {
+                tracing::warn!("saving the input delays: {e}");
+            }
+        }
     }
 
     fn watch(&mut self, engine: &mut Engine, i: usize, now: Instant) {
@@ -799,6 +913,20 @@ impl Inputs {
     }
 }
 
+/// The last automatic delays per flow (D242); a missing or bad file is empty.
+fn load_last_delays(path: &std::path::Path) -> HashMap<Uuid, u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["delays_ms"].as_object().cloned())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.parse().ok()?, samples(v.as_f64()?))))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn load_configs(path: &std::path::Path) -> Vec<InputConfig> {
     std::fs::read_to_string(path)
         .ok()
@@ -833,7 +961,7 @@ mod tests {
     /// The delays an input takes when its p99.9 (samples) follows `p999` at 10 Hz.
     fn delays(p999: impl Fn(u64) -> u32, ticks: u64, hold_s: u64) -> Vec<(u64, u32)> {
         let t0 = Instant::now();
-        let mut hold = DelayHold::default();
+        let mut hold = DelayHold::steady(0);
         let mut current = 0;
         let mut changes = Vec::new();
         for k in 0..ticks {
@@ -907,7 +1035,7 @@ mod tests {
     fn gateway(period_s: u64, outlier: u32, until_s: u64, ticks: u64) -> (u32, Vec<(u64, u32)>) {
         let t0 = Instant::now();
         let (mut hold, mut current, mut misses, mut changes) =
-            (DelayHold::default(), 0, 0, Vec::new());
+            (DelayHold::steady(0), 0, 0, Vec::new());
         for k in 0..ticks {
             let now = t0 + Duration::from_millis(100 * k);
             let lag = if k > 0 && k % (period_s * 10) == 0 && k < until_s * 10 {
@@ -978,7 +1106,7 @@ mod tests {
         // changed the delay 9 times in 10 min.
         let t0 = Instant::now();
         let (offset, hold) = (960, Duration::from_secs(30));
-        let (mut h, mut current, mut misses, mut changes) = (DelayHold::default(), 0, 0, 0);
+        let (mut h, mut current, mut misses, mut changes) = (DelayHold::steady(0), 0, 0, 0);
         for k in 0..6000u64 {
             let now = t0 + Duration::from_millis(100 * k);
             let p999 = 576; // 12 ms
@@ -1002,7 +1130,7 @@ mod tests {
     /// `lag(k)` is the highest lag of tick k. Returns the delay per tick.
     fn run(ticks: u64, lag: impl Fn(u64) -> u32) -> Vec<u32> {
         let t0 = Instant::now();
-        let (mut h, mut current, mut out) = (DelayHold::default(), 96, Vec::new());
+        let (mut h, mut current, mut out) = (DelayHold::steady(0), 96, Vec::new());
         for k in 0..ticks {
             let now = t0 + Duration::from_millis(100 * k);
             if let Some(d) = h.next(
@@ -1079,7 +1207,7 @@ mod tests {
         assert_eq!(w.quantile_upto(0.999, 96 + 7200), Some(148));
         assert!(w.quantile(0.999).unwrap() > 7296);
         // Through the hold: no change.
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         let p999 = w.quantile_upto(0.999, 96 + 7200);
         assert_eq!(
             h.next(
@@ -1105,7 +1233,7 @@ mod tests {
         // (within 1 ms and a block), so the delay does not fall between them.
         let t0 = Instant::now();
         let hold = Duration::from_secs(30);
-        let mut h = DelayHold::new(96);
+        let mut h = DelayHold::steady(96);
         let (mut current, mut misses) = (96, 0);
         for k in 0..6000u64 {
             let now = t0 + Duration::from_millis(100 * k);
@@ -1123,13 +1251,113 @@ mod tests {
         assert!(current >= 384, "{current}");
     }
 
+    /// A fresh hold, 10 Hz for `ticks`, p99.9 14 ms, offset 2 ms; `seed`: the
+    /// last run's delay. Returns the changes and the late blocks after tick 10.
+    fn start(ticks: u64, seed: Option<u32>, lag: impl Fn(u64) -> u32) -> (Vec<(u64, u32)>, u32) {
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::new(96);
+        let mut current = 0;
+        if let Some(d) = seed {
+            h.seed(d, t0);
+            current = d;
+        }
+        let (mut changes, mut late) = (Vec::new(), 0);
+        for k in 0..ticks {
+            let now = t0 + Duration::from_millis(100 * k);
+            late += u32::from(k > 10 && lag(k) > 96 + current);
+            if let Some(d) = h.next(Some(672), Some(lag(k)), current, 96, 7200, hold, now) {
+                current = d;
+                changes.push((k, d));
+            }
+        }
+        (changes, late)
+    }
+
+    #[test]
+    fn the_start_up_phase_settles_fast() {
+        // A fresh mirror input at 14 ms with a 75 ms outlier 2 s in (a backlog):
+        // up at once, back to the steady need within about 10 s (two start-up
+        // holds), not after 1 min. A second outlier (60 ms at 30 s) ends the
+        // start-up hold: from then on the normal hold keeps it.
+        let (changes, _) = start(900, None, |k| match k {
+            20 => 3600,
+            300 => 2880,
+            _ => 672,
+        });
+        let steady = 672 + 48 - 96;
+        assert_eq!(changes[0], (0, steady));
+        assert_eq!(changes[1], (20, 3600 + 48 - 96));
+        assert!(
+            changes[2].0 <= 20 + 110 && changes[2].1 == steady,
+            "{changes:?}"
+        );
+        assert_eq!(changes[3..], [(300, 2880 + 48 - 96)], "{changes:?}");
+        // A single backlog alone: down within about 10 s and stays there.
+        let (changes, _) = start(900, None, |k| if k == 20 { 3600 } else { 672 });
+        assert_eq!(changes.last().unwrap().1, steady, "{changes:?}");
+        // The same outlier again within the start-up phase recurs: from then on
+        // it stays covered.
+        let (changes, _) = start(900, None, |k| if k == 20 || k == 300 { 3600 } else { 672 });
+        assert_eq!(changes.last().unwrap(), &(300, 3552), "{changes:?}");
+    }
+
+    #[test]
+    fn the_last_runs_delay_covers_the_first_outliers() {
+        // A gateway with +6 ms every 30 s, started at its last run's 6 ms delay:
+        // nothing late at the start nor later (1.4.2 without the seed fell to the
+        // steady need after 5 s and lost the next outlier).
+        let gw = |k: u64| if k % 300 == 150 { 144 + 288 } else { 144 };
+        let t0 = Instant::now();
+        let hold = Duration::from_secs(30);
+        let mut h = DelayHold::new(96);
+        h.seed(384, t0);
+        let (mut current, mut late) = (384, 0);
+        for k in 0..6000u64 {
+            let now = t0 + Duration::from_millis(100 * k);
+            late += u32::from(gw(k) > 96 + current);
+            if let Some(d) = h.next(Some(144), Some(gw(k)), current, 96, 7200, hold, now) {
+                current = d;
+            }
+        }
+        assert_eq!((late, current), (0, 384));
+        // A stale high delay from the last run (100 ms, nothing that big now):
+        // down after its hold time and a start-up hold, about 35 s.
+        let (changes, late) = start(600, Some(4800), |_| 672);
+        assert_eq!(late, 0);
+        assert!(
+            changes
+                .first()
+                .is_some_and(|&(k, d)| (300..=360).contains(&k) && d == 624),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn the_last_delays_load_by_flow() {
+        let dir = std::env::temp_dir().join(format!("amx-delays-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("input-delays.json");
+        let flow = Uuid::new_v4();
+        std::fs::write(
+            &path,
+            format!(r#"{{"version": 1, "delays_ms": {{"{flow}": 14.0, "x": 3.0}}}}"#),
+        )
+        .unwrap();
+        let delays = load_last_delays(&path);
+        assert_eq!(delays.get(&flow), Some(&672));
+        assert_eq!(delays.len(), 1);
+        assert!(load_last_delays(&dir.join("missing.json")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_writer_catching_up_raises_nothing() {
         // After a stall the first lags are seconds (beyond offset + maximum):
         // a writer catching up, not an outlier (D230).
         let t0 = Instant::now();
         let hold = Duration::from_secs(30);
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         assert_eq!(h.next(Some(144), Some(144), 96, 96, 7200, hold, t0), None);
         for lag in [96_000, 48_000, 7297] {
             assert_eq!(h.next(Some(144), Some(lag), 96, 96, 7200, hold, t0), None);
@@ -1142,7 +1370,7 @@ mod tests {
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
         let hold = Duration::from_secs(30);
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         assert_eq!(
             h.next(Some(144), Some(432), 96, 96, 7200, hold, at(0)),
             Some(384)
@@ -1167,7 +1395,7 @@ mod tests {
             Some(96)
         );
         // A stall during the floor does not shorten it.
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         assert_eq!(
             h.next(Some(144), Some(432), 96, 96, 7200, hold, at(0)),
             Some(384)
@@ -1185,12 +1413,12 @@ mod tests {
         // `route` and `extra_delay: auto` start the hold over (DelayHold::default).
         let t0 = Instant::now();
         let hold = Duration::from_secs(30);
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         assert_eq!(
             h.next(Some(144), Some(432), 96, 96, 7200, hold, t0),
             Some(384)
         );
-        h = DelayHold::default();
+        h = DelayHold::steady(0);
         let at = |s: u64| t0 + Duration::from_secs(s);
         assert_eq!(
             h.next(Some(144), Some(144), 384, 96, 7200, hold, at(1)),
@@ -1209,7 +1437,7 @@ mod tests {
         // nothing new.
         let t0 = Instant::now();
         let hold = Duration::from_secs(30);
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         let (applied, mut proposed) = (96u32, None);
         let mut proposals = Vec::new();
         for k in 0..3000u64 {
@@ -1227,7 +1455,7 @@ mod tests {
     #[test]
     fn a_late_block_counts_before_the_first_second() {
         let t0 = Instant::now();
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         let hold = Duration::from_secs(30);
         assert_eq!(h.next(None, Some(400), 0, 96, 7200, hold, t0), Some(352));
         assert_eq!(h.next(None, None, 352, 96, 7200, hold, t0), None);
@@ -1243,7 +1471,7 @@ mod tests {
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
         let hold = Duration::from_secs(30);
-        let mut h = DelayHold::default();
+        let mut h = DelayHold::steady(0);
         assert_eq!(h.next(Some(480), None, 0, 96, 7200, hold, at(0)), Some(432));
         assert_eq!(h.next(Some(192), None, 432, 96, 7200, hold, at(1)), None);
         h.interrupt(); // stalled at 20 s

@@ -2298,3 +2298,36 @@ the mixer's CPUs: a one-off, its 2 ms went again after 1 min.)
 | --- | --- | --- | --- |
 | X34 | "never below the highest lag that caused a miss within the hold time" | A one-off late block: a floor of one hold time. A recurring outlier: ten hold times, renewed by each recurrence. | Gateway outliers come every 30–50 s, longer than the 30 s hold: a floor of one hold time let the delay fall between two of them, and each outlier was lost again. The cost: a recurring outlier keeps up to its latency (e.g. 6 ms) for 5.5 min after its last occurrence. |
 
+## 1.4.2: start-up of the inputs (test-all, 1.4.1)
+
+1.4.1 on test-all at `MIXER_READ_OFFSET=2` lost samples only in the first 5 min after a
+start, while the delays settled: 236 on each local gateway input, 5793 on the mirrored
+one (gateway-02 over RDMA), whose delay peaked at 74.9 ms and then fell to about 16 ms.
+
+**What happened at a start (lab).** A new reader's lags counted only after 0.5 s of a
+head keeping real time (D239), so a batched writer read at delay 0 for half a second:
+a browser source lost 23 136 samples, gateway bursts 10 368. A backlog at the start (a
+mirror still filling: here 75 ms, draining at 1.05 times real time, too slow to be
+skipped as a catch-up) was a one-off late block: its short floor and the period of lower
+need held 27–61 ms for a minute. A gateway's rare outlier was lost once per start,
+again after every restart, because nothing of the last run was kept.
+
+Lab (CPUs 43, 45, 47, SCHED_FIFO 49, offset 2; writers on: gateway +6 ms every 30 s,
+gateway +5 ms every 40 s, a mirror 12 ms late starting 75 ms behind at 1.05×, gateway
+bursts of 5, a browser source; A a fresh start, B a restart with A's state; missing
+samples per input in the first 5 min):
+
+| Run | 1.4.1 | 1.4.2 |
+| --- | --- | --- |
+| A, fresh | 576 / 192 / 0 / 10 368 / 23 232 | 288 / 288 / 0 / 2 208 / 6 240 |
+| B, restart | 192 / 192 / 0 / 11 712 / 22 848 | 0 / 0 / 0 / 96 / 0 |
+| the mirror's delay | up to 27 (A) / 61 ms (B), down after 60 s | up to 47 / 81 ms, down after 15 / 20 s |
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D241 | The start-up phase: for 60 s from an input's first automatic decision (after a route or a start), a late block's short floor and the period of lower need last 5 s instead of `MIXER_INPUT_DELAY_HOLD_S`, until the second outlier event after the first second (a backlog draining over many ticks is one event; outliers that come again are no backlog: the normal hold then keeps them covered). A late block in the first second counts as an outlier for recurrence. Recurring outliers still get the recurring floor. | A backlog or a first outlier at the start should not hold a large delay for a minute; the steady need is not known yet. |
+| D242 | The last automatic delay per flow id is kept in `MIXER_STATE_DIR/input-delays.json` (written when it changes, at most once per tick). An input with `extra_delay: auto` that opens with delay 0 (a start, or a route to another flow, which sets the delay back to 0) starts at it: a floor for one normal hold time, and an outlier of that size recurs at once. | A restart should not lose what the last run learnt: a gateway's rare outlier was lost once after every start. A stale high value goes after a hold time and a start-up hold (about 35 s). Not in the show file: it is state, and 1.4.1 reads the show unchanged. |
+| D243 | A new reader without a lag from before (a start, or a route to another flow: the DSP thread forgets the last lag on `ClearInput`) counts its lags after 0.1 s of a head that keeps real time (after a stall: 0.5 s). | The first 0.5 s of a batched writer were lost before its first delay; a mirror still filling may count now, and D241 lets that fall. |
+

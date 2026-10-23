@@ -14,7 +14,9 @@
 //! browser source. `--batch N` hands N blocks over together, when the last of
 //! them is due (a receiver that delivers a burst of packets). `--late-ms X
 //! --every-s P --for-s D` writes X ms later still for D seconds out of every P
-//! (on the TAI clock): lag outliers that come and go.
+//! (on the TAI clock): lag outliers that come and go. `--start-behind-ms X
+//! --catch-up R` starts X ms behind and catches up at R times real time (a
+//! mirror filling at the start).
 //!
 //! `--wav FILE` writes a recording instead (speech for the VAD tests; the mean of
 //! its channels, at 48 kHz, on every channel), followed by `--gap-s` seconds of
@@ -45,7 +47,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--block B] [--commit C] [--batch N] [--late-ms X --every-s P --for-s D] [--wav FILE [--gap-s G] [--offset-s O]]");
+        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--block B] [--commit C] [--batch N] [--late-ms X --every-s P --for-s D] [--start-behind-ms X --catch-up R] [--wav FILE [--gap-s G] [--offset-s O]]");
         std::process::exit(2)
     };
     let domain_dir = PathBuf::from(arg(&args, "--domain").unwrap_or_else(|| usage()));
@@ -77,6 +79,11 @@ fn main() {
             .map_or(0, |s| (s * 1e9).max(0.0) as u64)
     };
     let late_ns = nanos("--late-ms") / 1000;
+    let mut behind_ns = nanos("--start-behind-ms") / 1000;
+    let catch_up: f64 = arg(&args, "--catch-up")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2.0_f64)
+        .max(1.001);
     let (every_ns, for_ns) = (nanos("--every-s"), nanos("--for-s"));
     let seconds = |name: &str| -> u64 {
         arg(&args, name)
@@ -162,7 +169,10 @@ fn main() {
         } else {
             0
         };
-        sleep_until_tai(due + delay_ns + late);
+        sleep_until_tai(due + delay_ns + late + behind_ns);
+        // Behind by `behind_ns`, catching up at `catch_up` times real time.
+        behind_ns =
+            behind_ns.saturating_sub((time_of(batch * block) as f64 * (catch_up - 1.0)) as u64);
         for k in 1..=batch {
             let head = (n + k) * block;
             let start = head - block;
