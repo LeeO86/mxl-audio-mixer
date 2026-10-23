@@ -524,6 +524,15 @@ impl Inputs {
             engine.send(Command::ClearInput { index });
         }
         let slot = &mut self.slots[index];
+        // Another flow on an automatic delay starts over: from 0, or from that
+        // flow's last delay (D242), not from the old flow's delay.
+        let other_flow = slot.route.as_ref().map(|r| r.flow) != route.as_ref().map(|r| r.flow);
+        if other_flow && slot.config.extra_delay == ExtraDelay::default() && slot.delay != 0 {
+            slot.delay = 0;
+            slot.proposed = None;
+            engine.send(Command::SetDelay { index, samples: 0 });
+        }
+        let slot = &mut self.slots[index];
         slot.route = route;
         slot.inode = None;
         slot.lag.clear();

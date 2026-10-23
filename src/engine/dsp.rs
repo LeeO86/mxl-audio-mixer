@@ -246,6 +246,12 @@ impl ArrivalTracker {
         });
     }
 
+    /// A new route: no lag from before, the start span applies (D243).
+    fn forget(&mut self) {
+        self.last_pushed = None;
+        self.reset();
+    }
+
     fn reset(&mut self) {
         self.last_head = None;
         self.waiting = 0;
@@ -442,6 +448,8 @@ pub(super) fn run(
                             let _ = returned.push(Returned::Reader(old));
                         }
                         input.started = false;
+                        // The next reader is a new route or flow: no lag from before.
+                        input.arrival.forget();
                         counters.inputs[index].ok.store(false, Ordering::Relaxed);
                     }
                 }
@@ -1076,5 +1084,28 @@ mod tests {
             "{:?}",
             l.iter().max()
         );
+    }
+
+    #[test]
+    fn a_new_route_counts_after_the_start_span() {
+        // After lags of a first flow, a new route (ClearInput: forget) counts
+        // after 0.1 s like a first open, not after the 0.5 s of a re-open.
+        let mut t = ArrivalTracker::new(76, 96);
+        let mut n = 0u64;
+        let mut first = Vec::new();
+        for _ in 0..200 {
+            let end = 1_000_000 + n * 96;
+            t.observe(end - 20, end, |l| first.push(l));
+            n += 1;
+        }
+        assert!(!first.is_empty());
+        t.forget();
+        let mut after = Vec::new();
+        for k in 0..100u64 {
+            let end = 1_000_000 + n * 96;
+            t.observe(end - 500 - (k % 2) * 30, end, |l| after.push(l));
+            n += 1;
+        }
+        assert!(after.len() >= 40, "{} lags", after.len());
     }
 }
