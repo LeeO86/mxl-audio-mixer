@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "mxl-audio-mixer"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "axum",
  "futures-util",
