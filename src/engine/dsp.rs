@@ -213,6 +213,11 @@ struct CatchUp {
 /// that advanced at most 1/8 more than the time did (a batched writer moves at
 /// real time on average; one catching up faster).
 const CATCH_UP_SPAN_SAMPLES: u64 = 24_000;
+/// The span for a reader without a lag from before (a new route or a start):
+/// 0.1 s, five 50 Hz frames. Its lags count sooner, so a batched writer gets its
+/// delay at once (1.4.1 lost the first 0.5 s of a browser source); a mirror
+/// still filling may count, and the start-up phase of the delay lets that fall.
+const START_SPAN_SAMPLES: u64 = 4_800;
 
 impl ArrivalTracker {
     fn new(window_blocks: u32, block: u32) -> Self {
@@ -266,7 +271,14 @@ impl ArrivalTracker {
                 let mut paced = false;
                 match c.since {
                     None => c.since = Some((end, head)),
-                    Some((e0, h0)) if end - e0 >= CATCH_UP_SPAN_SAMPLES => {
+                    Some((e0, h0))
+                        if end - e0
+                            >= if c.target.is_some() {
+                                CATCH_UP_SPAN_SAMPLES
+                            } else {
+                                START_SPAN_SAMPLES
+                            } =>
+                    {
                         let (time, advance) = (end - e0, head.saturating_sub(h0));
                         paced = advance <= time + time / 8;
                         c.since = Some((end, head));
@@ -926,9 +938,9 @@ mod tests {
                 let head = if n < 30 { stale } else { end - 20 };
                 t.observe(head, end, |l| out.push(l));
             }
-            // A new reader counts once the lag has held for 0.5 s (250 blocks).
+            // A new reader counts once its head kept real time for 0.1 s (50 blocks).
             assert!(
-                (300..=330).contains(&out.len()),
+                (510..=530).contains(&out.len()),
                 "stale head {stale}: {}",
                 out.len()
             );

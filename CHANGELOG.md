@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.2 (unreleased)
+
+Smoother start-up of the inputs (test-all, 1.4.1 at `MIXER_READ_OFFSET=2`: losses only in the first 5 min while the delays settled, 236 samples on each local gateway input and 5793 on a mirrored one, whose delay peaked at 74.9 ms; IMPLEMENTATION_PLAN D241–D243).
+
+- An input starts at the automatic delay its flow had in the last run (`MIXER_STATE_DIR/input-delays.json`, per flow id, written when the delay changes): a floor for one hold time, and an outlier of that size recurs at once, so a gateway's rare outliers are covered from the first block.
+- The start-up phase: in an input's first minute a late block's short floor and the period of lower need last 5 s instead of the hold time. A backlog at the start (a mirror still filling, a first outlier) raises the delay at once and lets it fall within about 10 s instead of holding it for a minute. A recurring outlier still gets its recurring floor.
+- A new reader's lags count after 0.1 s of a head that keeps real time (0.5 s after a stall): 1.4.1 lost the first 0.5 s of a batched writer (a browser source, gateway bursts) before its first delay.
+- Lab (fresh start / restart with the saved state, 5 min, missing samples per input: gateway +6 ms / 30 s, gateway +5 ms / 40 s, mirror with a 75 ms backlog, gateway bursts, browser source): 1.4.1 576/192/0/10368/23232 and 192/192/0/11712/22848; 1.4.2 288/288/0/2208/6240 and 0/0/0/96/0. The mirror's backlog delay (47–81 ms) falls in 15–20 s (1.4.1: 60 s).
+- `mxl-mixer-tone --start-behind-ms X --catch-up R`; `tests/integration/inputs.sh` checks a mirror with a backlog.
+
 ## 1.4.1 (2026-10-22)
 
 From the 1.4.0 deployment on test-all (PR #44; IMPLEMENTATION_PLAN D235–D240, X34). Release notes: `docs/release-notes/1.4.1.md`.

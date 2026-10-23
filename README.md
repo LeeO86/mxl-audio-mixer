@@ -388,7 +388,12 @@ time, and for ten (5 min, renewed each time) once the outlier comes again within
 them. The catch-up of a writer after a stall or a re-open is no lag. Lags beyond the
 read offset plus `MIXER_INPUT_DELAY_MAX_MS` never move the delay; they are shown, but
 the percentiles of a writer always that late read the edge of the measured range
-(`lag_ms`, the last lag, is exact). A change is applied with a
+(`lag_ms`, the last lag, is exact). An input starts at the automatic delay its flow
+had last (`MIXER_STATE_DIR/input-delays.json`, per flow id), which holds for a hold
+time and covers outliers of that size; in its first minute (the start-up phase) a
+late block's floor and the period of lower need last 5 s instead of the hold time, so
+a backlog at the start (a mirror still filling) does not keep a large delay for
+minutes. A change is applied with a
 fade, or waits for `POST /api/v1/inputs/<n>/delay/confirm` with
 `MIXER_INPUT_DELAY_CONFIRM=true`. A writer that commits N samples at once needs about
 N samples of read offset plus extra delay: with the 2 ms default, a browser source that

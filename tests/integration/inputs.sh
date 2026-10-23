@@ -19,7 +19,8 @@ FRAMES=66666666-6666-4666-8666-666666666666
 BURSTS=77777777-7777-4777-8777-777777777777
 OUTLIERS=88888888-8888-4888-8888-888888888888
 RARE=99999999-9999-4999-8999-999999999999
-start_mixer NMOS_SEED=it-inputs MIXER_INPUT_FLOWS=6
+BACKLOG=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+start_mixer NMOS_SEED=it-inputs MIXER_INPUT_FLOWS=7
 
 # The domain must be visible for the activation; the flow does not exist yet.
 mkdir -p "$WORK/mxl/tones"
@@ -127,7 +128,12 @@ WRITERS+=("$TONE_PID")
 # packet 6 ms late (here every 8 s). Far below the p99.9; 1.4.0 lost a block at each.
 start_tone "$WORK/mxl/tones" "$RARE" --domain-id "$DOMAIN" --block 48 --delay-ms 0.4 --late-ms 6 --every-s 8 --for-s 0.001
 WRITERS+=("$TONE_PID")
-for f in "$FRAMES" "$BURSTS" "$OUTLIERS" "$RARE"; do
+# 1.4.2: a mirror 12 ms late that starts 75 ms behind and drains at 1.05 times real
+# time (slower than a catch-up the lag skips): its delay goes up for the backlog and
+# back within the start-up phase. 1.4.1 held the backlog's delay for a minute.
+start_tone "$WORK/mxl/tones" "$BACKLOG" --domain-id "$DOMAIN" --block 96 --delay-ms 12 --start-behind-ms 75 --catch-up 1.05
+WRITERS+=("$TONE_PID")
+for f in "$FRAMES" "$BURSTS" "$OUTLIERS" "$RARE" "$BACKLOG"; do
     wait_until 10 "flow $f" test -d "$WORK/mxl/tones/$f.mxl-flow"
 done
 MIXER_LOG_AT=$(wc -l <"$IT_OUT/inputs-mixer.log")
@@ -135,8 +141,9 @@ route 2 "$DOMAIN" "$FRAMES"
 route 4 "$DOMAIN" "$BURSTS"
 route 5 "$DOMAIN" "$OUTLIERS"
 route 6 "$DOMAIN" "$RARE"
+route 7 "$DOMAIN" "$BACKLOG"
 OUTLIERS_ROUTED=$SECONDS
-for i in 2 4 5 6; do wait_until 10 "input $i running" is_state "$i" running; done
+for i in 2 4 5 6 7; do wait_until 10 "input $i running" is_state "$i" running; done
 delay_above() { # <input> <ms>
     python3 -c "import json,urllib.request as u; d=json.load(u.build_opener(u.ProxyHandler({})).open('$WEB/api/v1/inputs/$1')); exit(0 if d['extra_delay_ms'] > $2 else 1)"
 }
@@ -173,6 +180,12 @@ log "input 5: $ups rises and $downs falls of the automatic delay in 28 s, effect
 ((downs == 0)) || fail "input 5: the automatic delay went down $downs times in 28 s (flapping)"
 pass "lag outliers: the automatic delay holds instead of flapping"
 
+# 1.4.2: 28 s after its start the backlog mirror (input 7) is back near its 12 ms.
+d=$(input 7 extra_delay_ms)
+log "input 7 (a mirror with a 75 ms backlog at its start): delay $d ms after 28 s"
+python3 -c "import sys; sys.exit(0 if $d < 16 else 1)" || fail "input 7: the backlog's delay is still $d ms after 28 s"
+pass "a mirror starting with a backlog: the start-up phase brings its delay back within 28 s"
+
 # 1.4.1: since the first outlier (and its rise) input 6 lost nothing over two more.
 ((SECONDS - RARE_AT >= 16)) || sleep $((16 - (SECONDS - RARE_AT)))
 missing=$(($(input 6 missing_samples) - RARE_MISSING))
@@ -182,9 +195,9 @@ log "input 6: $missing samples lost after its first outlier, delay $(input 6 ext
 delay_above 6 4.5 || fail "input 6: the automatic delay does not cover the 6 ms outlier"
 pass "a rare long outlier: the first late block raises the delay, the later ones are covered"
 
-# Five writers stopped at once: their reads wait for samples that do not come.
+# Six writers stopped at once: their reads wait for samples that do not come.
 # The wait is a quarter block shared by all inputs of a block; 1.4.0 gave each
-# input its own, so five late inputs took longer than the block, every block a
+# input its own, so five or more late inputs took longer than the block, every block a
 # deadline miss (also at the start, before the delays were set).
 misses() { json "$WEB/api/v1/status" "d['dsp']['deadline_misses']"; }
 # The misses of 3 s with the writers running first: a loaded machine has some.
@@ -195,22 +208,22 @@ kill -STOP "${WRITERS[@]}"
 sleep 3
 after=$(misses)
 kill -CONT "${WRITERS[@]}"
-for i in 2 3 4 5 6; do wait_until 10 "input $i running again" is_state "$i" running; done
+for i in 2 3 4 5 6 7; do wait_until 10 "input $i running again" is_state "$i" running; done
 # The writers catch up after the stop (seconds behind, then faster than real time):
 # that is no lag, the delays stay where they were (1.4.1 review: they went to the
 # maximum, 150 ms).
 sleep 2
-for i in 2 3 4 5 6; do
+for i in 2 3 4 5 6 7; do
     d=$(input "$i" extra_delay_ms)
     python3 -c "import sys; sys.exit(0 if $d < 60 else 1)" || fail "input $i: delay $d ms after its writer caught up"
 done
-log "five stopped writers: $((after - before)) deadline misses in 3 s ($((before - base)) before, running)"
+log "six stopped writers: $((after - before)) deadline misses in 3 s ($((before - base)) before, running)"
 if ((before - base >= 50)); then
     # The machine is too busy to tell: the mixer misses deadlines anyway.
-    log "SKIP: five stopped writers ($((before - base)) deadline misses in 3 s with the writers running)"
+    log "SKIP: six stopped writers ($((before - base)) deadline misses in 3 s with the writers running)"
 else
-    ((after - before - (before - base) < 50)) || fail "five stopped writers: $((after - before)) deadline misses in 3 s, $((before - base)) running"
-    pass "late inputs share one short wait: no deadline misses with five stopped writers"
+    ((after - before - (before - base) < 50)) || fail "six stopped writers: $((after - before)) deadline misses in 3 s, $((before - base)) running"
+    pass "late inputs share one short wait: no deadline misses with six stopped writers"
 fi
 
 # master_enable false: the input stops reading.
