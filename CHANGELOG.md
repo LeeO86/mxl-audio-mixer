@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A flow that goes away and comes back on the same route (a writer restart) keeps the last lag: its new reader is counted by the stall rule (0.5 s, or back within a block), not the 0.1 s start span. Only a route to another flow forgets it (D243). Before, a re-created flow whose writer started behind could raise the delay for about a minute.
+
 ## 1.4.2 (2026-10-23)
 
 Smoother start-up of the inputs (test-all, 1.4.1 at `MIXER_READ_OFFSET=2`: losses only in the first 5 min while the delays settled, 236 samples on each local gateway input and 5793 on a mirrored one, whose delay peaked at 74.9 ms; PR #47; IMPLEMENTATION_PLAN D241–D243). Release notes: `docs/release-notes/1.4.2.md`.

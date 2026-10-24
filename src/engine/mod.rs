@@ -49,6 +49,9 @@ pub enum Command {
     /// Stop reading input `index` (master_enable false, unrouted, flow gone).
     ClearInput {
         index: usize,
+        /// A new route: forget the last lag, so the next reader counts after the start span
+        /// (D243). False when the same route's flow went away (it keeps the stall rule).
+        forget: bool,
     },
     /// Change input `index`'s extra delay, fading out and in.
     SetDelay {

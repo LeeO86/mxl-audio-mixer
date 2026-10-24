@@ -536,7 +536,7 @@ impl Inputs {
             return;
         }
         if slot.route.is_some() {
-            engine.send(Command::ClearInput { index });
+            engine.send(Command::ClearInput { index, forget: true });
         }
         let slot = &mut self.slots[index];
         // Another flow on an automatic delay starts over: from 0, or from that
@@ -713,7 +713,7 @@ impl Inputs {
         let inode = mxlio::flow_inode(&route.domain, route.flow);
         if inode.is_none() {
             tracing::info!(input = i + 1, flow = %route.flow, "input_flow_gone: waiting for the flow");
-            engine.send(Command::ClearInput { index: i });
+            engine.send(Command::ClearInput { index: i, forget: false });
             let slot = &mut self.slots[i];
             slot.state = State::Waiting;
             slot.reopens += 1;
