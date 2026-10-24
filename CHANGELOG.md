@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.3 (2026-10-24)
 
 - A flow that goes away and comes back on the same route (a writer restart) keeps the last lag: its new reader is counted by the stall rule (0.5 s, or back within a block), not the 0.1 s start span. Only a route to another flow forgets it (D243). Before, a re-created flow whose writer started behind could raise the delay for about a minute.
 
