@@ -442,14 +442,17 @@ pub(super) fn run(
                             .store(input.channels as u32, Ordering::Relaxed);
                     }
                 }
-                Command::ClearInput { index } => {
+                Command::ClearInput { index, forget } => {
                     if let Some(input) = inputs.get_mut(index) {
                         if let Some(old) = input.reader.take() {
                             let _ = returned.push(Returned::Reader(old));
                         }
                         input.started = false;
-                        // The next reader is a new route or flow: no lag from before.
-                        input.arrival.forget();
+                        // A new route: no lag from before. A flow that went away keeps its lag,
+                        // so its re-created flow is counted by the stall rule (0.5 s).
+                        if forget {
+                            input.arrival.forget();
+                        }
                         counters.inputs[index].ok.store(false, Ordering::Relaxed);
                     }
                 }
