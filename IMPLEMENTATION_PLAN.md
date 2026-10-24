@@ -18,6 +18,7 @@ current so that work can resume after an interruption.
 | 1.4.0 operator feedback (console C1–C12, DSP, views, input fixes F1/F2) | done (PRs 37–41), **released in 1.4.0** (2026-10-22; tag `v1.4.0` at `b34fe4a`); maintainers' hardware run 2026-10-22 on `8d27a5d` (`docs/release-notes/1.4.0.md`) |
 | 1.4.1 input fixes from test-all (late blocks, read wait, catch-up, MXL instances) | done (PR 44), **released in 1.4.1** (2026-10-22; tag `v1.4.1` at `c3d3f42`); lab runs on `b054b9f` (`docs/release-notes/1.4.1.md`) |
 | 1.4.2 start-up of the inputs (last delay per flow, start-up phase, first lags after 0.1 s) | done (PR 47), **released in 1.4.2** (2026-10-23; the tag commit is added after the tag); lab runs (`docs/release-notes/1.4.2.md`) |
+| 1.4.3 a re-created flow keeps its last lag (forget only on a route change) | done (PR 49), **released in 1.4.3** (2026-10-24) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
