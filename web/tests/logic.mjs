@@ -216,19 +216,23 @@ try {
   pass("paste into another graph: the blocks and their cable, ids free in that graph");
 
   // A webhook and a TSL out drop where they land (1.5.0, D3), without a URL (inert, marked) and at
-  // index 0; the URL is typed in the list.
+  // without an index; both are typed in the list.
   const obox = await page.locator(".logiccanvas").boundingBox();
   await page.locator('.lpalette [data-palette="webhook"]').dragTo(page.locator(".logiccanvas"), { targetPosition: { x: obox.width - 300, y: 120 } });
   await until("the webhook dropped", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "webhook" && b.url === ""));
   await page.locator('.lpalette [data-palette="tsl-out"]').dragTo(page.locator(".logiccanvas"), { targetPosition: { x: obox.width - 300, y: 260 } });
-  await until("the TSL out dropped", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "tsl-out" && b.index === 0));
+  await until("the TSL out dropped", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "tsl-out" && b.index === null));
+  await until("the TSL out marked", async () => (await graphOf(other.id)).warnings?.some((w) => w.block === "tsl-out-1" && w.message === "choose a target"));
+  await page.getByLabel("tsl-out-1 index", { exact: true }).fill("5");
+  await page.getByLabel("tsl-out-1 index", { exact: true }).press("Enter");
+  await until("the TSL index", async () => (await graphOf(other.id)).blocks.some((b) => b.id === "tsl-out-1" && b.index === 5));
   await until("the webhook marked", async () => (await graphOf(other.id)).warnings?.some((w) => w.block === "webhook-1"));
   await until("the webhook drawn", async () => (await node("webhook-1").innerText()).includes("no target yet"));
   await page.getByLabel("webhook-1 url", { exact: true }).fill("http://127.0.0.1:9/hook");
   await page.getByLabel("webhook-1 url", { exact: true }).press("Enter");
   await until("the webhook URL", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "webhook" && b.url === "http://127.0.0.1:9/hook"));
   await page.screenshot({ path: `${out}/amx15-d3-dropped.png` });
-  pass("webhook and TSL out drop where they land; the URL is chosen in the list");
+  pass("webhook and TSL out drop where they land; URL and index are chosen in the list");
 
   // A fader position's "High at" column (1.5.0, D1): on/off inputs it feeds are on from there.
   await page.getByLabel("Block type").selectOption("fader");
@@ -255,13 +259,74 @@ try {
   await until("the copy opened", async () => (await page.getByLabel("Logic graph", { exact: true }).inputValue()) === copied.id);
   await page.getByLabel("Copy the logic to").selectOption(other.id);
   await page.getByRole("button", { name: "Copy logic to" }).click();
-  await until("copied into Other", async () => {
+  const into = await until("copied into Other", async () => {
     const d = await graphOf(other.id);
-    return d.blocks.length === 2 * src.blocks.length && d.wires.length === 2 * src.wires.length && new Set(d.blocks.map((b) => b.id)).size === d.blocks.length;
+    return d.blocks.length === 2 * src.blocks.length && d.wires.length === 2 * src.wires.length && new Set(d.blocks.map((b) => b.id)).size === d.blocks.length ? d : null;
   });
+  // The copied cables join the copied blocks: every id clashed, so they point to the new ids only.
+  const old = new Set(src.blocks.map((b) => b.id));
+  const ids = new Set(into.blocks.map((b) => b.id));
+  const added = into.wires.slice(src.wires.length);
+  if (!added.length || added.some((w) => old.has(w.from_block) || old.has(w.to_block) || !ids.has(w.from_block) || !ids.has(w.to_block))) throw new Error(`copied cables: ${JSON.stringify(added)}`);
+  // Two TSL outs on index 5 now: both marked.
+  await until("TSL index shared", async () => (await graphOf(other.id)).warnings?.filter((w) => w.message.includes("TSL index 5")).length === 2);
   await until("Other opened", async () => (await page.getByLabel("Logic graph", { exact: true }).inputValue()) === other.id);
   await page.screenshot({ path: `${out}/amx15-d2-copied.png` });
-  pass("copy logic: to a new graph (dry run) and into an existing graph, ids free there");
+  pass("copy logic: to a new graph (dry run) and into an existing graph, ids free there, cables follow");
+
+  // Undo and redo of the copy, in the target graph.
+  if (!(await page.getByRole("button", { name: "Undo" }).getAttribute("title")).includes(`Copy ${src.blocks.length} blocks in`)) throw new Error("no undo step for the copy");
+  await page.getByRole("button", { name: "Undo" }).click();
+  await until("copy undone", async () => (await graphOf(other.id)).blocks.length === src.blocks.length);
+  await page.getByRole("button", { name: "Redo" }).click();
+  await until("copy redone", async () => (await graphOf(other.id)).blocks.length === 2 * src.blocks.length);
+  pass("copy into a graph: one undo step there, redo copies again");
+
+  // Into a live graph: asked first; "Switch to dry run first" switches the target, then copies.
+  const liveG = await api("/api/v1/logic", { method: "POST", headers: json, body: JSON.stringify({ name: "Live target", enabled: true, dry_run: false }) });
+  made.push(liveG.id);
+  await page.getByLabel("Logic graph", { exact: true }).selectOption(copied.id);
+  await page.getByLabel("Copy the logic to").selectOption(liveG.id);
+  await page.getByRole("button", { name: "Copy logic to" }).click();
+  await page.getByRole("alertdialog", { name: "Change a live graph" }).waitFor({ timeout: 3000 });
+  if ((await graphOf(liveG.id)).blocks.length) throw new Error("copied into a live graph before confirming");
+  await page.getByRole("button", { name: "Switch to dry run first" }).click();
+  await until("copied after the switch", async () => {
+    const d = await graphOf(liveG.id);
+    return d.dry_run && d.blocks.length === src.blocks.length;
+  });
+  pass("copy into a live graph: asked first, switched to dry run, then copied");
+
+  // Past 64 blocks: refused with a message, nothing written.
+  const full = await api("/api/v1/logic", { method: "POST", headers: json, body: JSON.stringify({ name: "Full", dry_run: true, blocks: Array.from({ length: 62 }, (_, i) => ({ id: `c${i}`, type: "const", value: 0 })) }) });
+  made.push(full.id);
+  await page.getByLabel("Logic graph", { exact: true }).selectOption(copied.id);
+  await page.getByLabel("Copy the logic to").selectOption(full.id);
+  await page.getByRole("button", { name: "Copy logic to" }).click();
+  await until("the limit message", async () => (await page.locator("body").innerText()).includes("a graph holds at most 64"));
+  if ((await graphOf(full.id)).blocks.length !== 62) throw new Error("copied past 64 blocks");
+  pass("copy past 64 blocks: refused, nothing written");
+
+  // Changed elsewhere between the read and the write: 409, nothing written.
+  const busyG = await api("/api/v1/logic", { method: "POST", headers: json, body: JSON.stringify({ name: "Busy", dry_run: true }) });
+  made.push(busyG.id);
+  let raced = false;
+  await page.route("**/api/v1/logic-batch", async (route) => {
+    if (!raced) {
+      raced = true;
+      await api(`/api/v1/logic/${busyG.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ description: "changed" }) });
+    }
+    await route.continue();
+  });
+  await page.getByLabel("Copy the logic to").selectOption(busyG.id);
+  await page.getByRole("button", { name: "Copy logic to" }).click();
+  await until("the conflict message", async () => (await page.locator("body").innerText()).includes("Changed elsewhere meanwhile"));
+  await page.unroute("**/api/v1/logic-batch");
+  const busy = await graphOf(busyG.id);
+  if (busy.blocks.length || busy.description !== "changed") throw new Error(`a conflicting copy wrote: ${JSON.stringify(busy)}`);
+  pass("copy against a change elsewhere: 409, nothing written");
+  // The banners go, so the canvas does not move under later drags.
+  for (const sel of [".banner.bad button", ".banner button"]) while (await page.locator(sel).count()) await page.locator(sel).first().click();
 
   // Somebody else changes the graph: undo refuses to overwrite it and clears the history.
   await page.getByLabel("Logic graph", { exact: true }).selectOption(g.id);

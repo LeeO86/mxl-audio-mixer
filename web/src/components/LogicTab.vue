@@ -411,6 +411,7 @@ const NUMBER_KINDS = ["number", "integer"];
 // The parameters a new block starts with. A target (the strip, VCA, snapshot, monitor, mic, destination,
 // node or parameter, a webhook's URL) is never guessed: it stays "" (the block is valid and inert, with a
 // warning) until the operator chooses one in the list, unless a strip or bus is picked in the add row.
+// A parameter the catalog marks `blank` (a TSL out's index) starts as null, also not chosen yet (D247).
 // Other parameters take the catalog's default, else 1000 ms or the lowest number allowed. So every block,
 // actions too, lands at once where it is dropped (D246). A string is why the block cannot be made.
 const BLANK_KINDS = ["signal", "signal-or-vca", "vca", "snapshot", "monitor", "mic", "destination", "node", "param", "url"];
@@ -418,7 +419,7 @@ function paramsFor(type, inView) {
   const e = entryOf(type);
   const params = {};
   for (const p of e?.params || []) {
-    let v = p.default ?? (p.kind === "source" ? null : undefined);
+    let v = p.default ?? (p.kind === "source" || p.blank ? null : undefined);
     if (p.name === "name" && (type === "macro-in" || type === "macro-out")) v = freshId(type === "macro-in" ? "in" : "out", new Set(inView.filter((b) => b.type === type).map((b) => b.name)));
     if (v === undefined && BLANK_KINDS.includes(p.kind)) v = p.kind.startsWith("signal") && signals.value.some((x) => x.id === addSignal.value) ? addSignal.value : "";
     if (v === undefined && p.name === "ms") v = 1000;
@@ -468,7 +469,8 @@ function removeBlock(id) {
 
 function setParam(b, p, raw) {
   let value = raw;
-  if (NUMBER_KINDS.includes(p.kind)) {
+  if (p.blank && String(raw).trim() === "") value = null;
+  else if (NUMBER_KINDS.includes(p.kind)) {
     value = Number(raw);
     if (!Number.isFinite(value) || (p.kind === "integer" && !Number.isInteger(value))) return void (live.actionError = `${b.id}: ${p.name} must be ${p.kind === "integer" ? "a whole number" : "a number"}.`);
   } else if (JSON_KINDS.includes(p.kind)) {
@@ -489,14 +491,16 @@ const highParamOf = (b) => paramsOf(b).find((p) => p.name === HIGH_AT[b.type]);
 function highNow(b) {
   const v = valueOf(b);
   if (v === undefined || b.signal === "") return "";
-  return typeof v === "number" && v >= (b.threshold_db ?? 0) ? "high" : "low";
+  // Like the runtime: a fader whose strip or bus is gone is off.
+  const there = signals.value.some((s) => s.id === b.signal);
+  return there && typeof v === "number" && v >= (b.threshold_db ?? 0) ? "high" : "low";
 }
 
 function labelOf(b) {
   const label = typeLabel(b.type);
   if (b.type === "macro") return `${macros.value.find((m) => m.id === b.macro)?.name || b.macro}`;
   if (b.type === "schedule") return `${label}: ${hhmm(b.start_minute)}–${hhmm(b.end_minute)}`;
-  if (paramsOf(b).some((q) => BLANK_KINDS.includes(q.kind) && b[q.name] === "")) return `${label}: no target yet`;
+  if (paramsOf(b).some((q) => (BLANK_KINDS.includes(q.kind) && b[q.name] === "") || (q.blank && b[q.name] == null))) return `${label}: no target yet`;
   const p = paramsOf(b).find((q) => q.kind !== "port-type" && b[q.name] !== undefined && b[q.name] !== null && typeof b[q.name] !== "object" && b[q.name] !== "");
   if (!p) return label;
   const v = b[p.name];
@@ -639,8 +643,8 @@ function copy() {
   return true;
 }
 
-// The clipboard into the open graph or macro (any one), with new ids, a bit further down and right on
-// each paste. A macro's own inputs and outputs are left out when pasting into a graph.
+// The clipboard into the open graph or macro (any one), with new ids where they clash, a bit further
+// down and right on each paste. A macro's own inputs and outputs are left out when pasting into a graph.
 function paste() {
   if (!view.value || (!clipboard.blocks.length && !copying)) return false;
   // After a copy that is still reading.
@@ -680,10 +684,12 @@ function copyLogic() {
       const cur = await api.get(`/api/v1/logic/${src.id}`).catch(() => null);
       if (!cur) return void (live.actionError = "The graph could not be read; nothing was copied.");
       const clip = { blocks: cur.blocks, wires: cur.wires };
+      // A name has at most 64 characters.
+      const copyName = `${[...cur.name].slice(0, 59).join("")} copy`;
       if (!to) {
         const made = await act(
-          () => api.post("/api/v1/logic", { name: `${cur.name} copy`, description: cur.description, dry_run: true, blocks: cur.blocks, wires: cur.wires }),
-          `Copied to a new graph "${cur.name} copy" (dry run).`,
+          () => api.post("/api/v1/logic", { name: copyName, description: cur.description, dry_run: true, blocks: cur.blocks, wires: cur.wires }),
+          `Copied to a new graph "${copyName}" (dry run).`,
         );
         if (made) selected.value = made.id;
         return;
@@ -982,7 +988,7 @@ const drawnKey = computed(() => {
 });
 watch([drawnKey, () => detail.ports, () => detail.warnings, () => catalog.value, issues, rejected], rebuild, { immediate: true });
 // Blocks that wait for their target (D164: valid, never acting).
-const waiting = computed(() => new Set(detail.warnings.map((w) => w.block)));
+const waiting = computed(() => new Set(detail.warnings.filter((w) => w.message === "choose a target").map((w) => w.block)));
 // Another graph or macro: start with all of it in view.
 watch(
   () => (doc.value ? keyOf(doc.value) : ""),

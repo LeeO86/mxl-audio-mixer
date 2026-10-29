@@ -2,9 +2,10 @@
 
 ## Unreleased — 1.5.0
 
-- D1: a fader position block has a threshold (`threshold_db`, −120 to +15 dB, default 0 dB; the "High at" column left of Value): where it feeds an on/off input it is on from that position (before: above 0.5 dB); without a signal it is off.
-- D2: "Copy logic to" copies all blocks and cables of a graph into a new graph (dry run) or into an existing graph (below its blocks, free ids, one undo step there).
-- D3: HTTP webhook and TSL tally out drop onto the canvas like every block (they asked first, away from the drop, and were never made); a webhook's URL may be empty (inert, amber) until typed in the list, a TSL out starts at index 0.
+- D1: a fader position block has a threshold (`threshold_db`, −120 to +15 dB, default 0 dB; the "High at" column left of Value): where it feeds an on/off input (also through macro ports) it is on from that position (before: from 0.5 dB); without a signal it is off.
+- Upgrade: a fader feeding an on/off input is now on from 0 dB (was +0.5 dB); check live graphs with faders at 0 dB.
+- D2: "Copy logic to" copies all blocks and cables of a graph into a new graph (dry run) or into an existing graph (below its blocks, one undo step there). Copy and paste rename only the block ids that clash (before: every pasted block got a new id).
+- D3: HTTP webhook and TSL tally out drop onto the canvas like every block (they asked first, away from the drop, and were never made); a webhook's URL may be empty (inert, amber) until typed in the list, a TSL out starts without an index (`null`, inert, amber). Two `tsl-out` blocks of the show on one index are marked with a warning (not refused).
 
 ## 1.4.3 (2026-10-24)
 

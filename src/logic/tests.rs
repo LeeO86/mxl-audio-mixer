@@ -118,7 +118,7 @@ fn an_action_without_a_wire_never_runs() {
                     snapshot: "s".into(),
                 },
             ),
-            block("t", K::TslOut { index: 1 }),
+            block("t", K::TslOut { index: Some(1) }),
         ],
         vec![],
     );
@@ -464,6 +464,158 @@ fn a_fader_is_on_from_its_threshold_where_it_feeds_on_off() {
     let mut a = tick(&mut logic, &mix);
     a.extend(tick(&mut logic, &mix));
     assert!(a.contains(&mute(false)), "{a:?}");
+}
+
+#[test]
+fn a_fader_keeps_its_threshold_through_macro_ports() {
+    // A macro that passes a level through (in and out of type level), and one
+    // with the fader inside it, out as a level.
+    let pass = Macro {
+        id: "pass".into(),
+        name: "Pass".into(),
+        description: String::new(),
+        blocks: vec![
+            block(
+                "i",
+                K::MacroIn {
+                    name: "x".into(),
+                    value_type: PortType::Level,
+                },
+            ),
+            block(
+                "o",
+                K::MacroOut {
+                    name: "y".into(),
+                    value_type: PortType::Level,
+                },
+            ),
+        ],
+        wires: vec![out("i", "o", "in")],
+    };
+    let inside = Macro {
+        id: "inside".into(),
+        name: "Inside".into(),
+        description: String::new(),
+        blocks: vec![
+            block(
+                "f",
+                K::Fader {
+                    signal: "vox".into(),
+                    threshold_db: -20.0,
+                },
+            ),
+            block(
+                "o",
+                K::MacroOut {
+                    name: "y".into(),
+                    value_type: PortType::Level,
+                },
+            ),
+        ],
+        wires: vec![out("f", "o", "in")],
+    };
+    let mut mix = Mix::default();
+    mix.strips.push(strip("vox", Format::Mono));
+    mix.strips.push(strip("music", Format::Mono));
+    mix.logic_macros.push(pass);
+    mix.logic_macros.push(inside);
+    let set = |id: &str, signal: &str| {
+        block(
+            id,
+            K::SetMute {
+                signal: signal.into(),
+            },
+        )
+    };
+    mix.logic.push(graph(
+        vec![
+            block(
+                "f",
+                K::Fader {
+                    signal: "vox".into(),
+                    threshold_db: -20.0,
+                },
+            ),
+            block(
+                "p",
+                K::Macro {
+                    macro_id: "pass".into(),
+                },
+            ),
+            block(
+                "q",
+                K::Macro {
+                    macro_id: "inside".into(),
+                },
+            ),
+            set("a", "music"),
+            set("b", "vox"),
+        ],
+        vec![
+            out("f", "p", "x"),
+            wire("p", "y", "a", "in"),
+            wire("q", "y", "b", "in"),
+        ],
+    ));
+    assert_eq!(crate::mix::logic::issues(&mix), vec![]);
+    mix.strips[0].fader_db = Db(-10.0);
+    let mut logic = Logic::default();
+    let a = tick(&mut logic, &mix);
+    let on = |signal: &str| Act::Mute {
+        signal: signal.into(),
+        on: true,
+    };
+    assert!(a.contains(&on("music")), "through a macro: {a:?}");
+    assert!(a.contains(&on("vox")), "from inside a macro: {a:?}");
+}
+
+#[test]
+fn a_webhook_without_a_url_never_posts() {
+    let mix = mix_of(
+        vec![
+            block("b", K::Button),
+            block("w", K::Webhook { url: String::new() }),
+        ],
+        vec![out("b", "w", "in")],
+    );
+    let mut logic = Logic::default();
+    for n in 0..20 {
+        logic.set_button("g", "b", n % 2 == 0);
+        assert!(tick(&mut logic, &mix).is_empty());
+    }
+}
+
+#[test]
+fn a_tsl_out_without_an_index_never_sends_and_a_shared_index_is_marked() {
+    let mut mix = mix_of(
+        vec![
+            block("b", K::Button),
+            block("t", K::TslOut { index: None }),
+            block("u", K::TslOut { index: Some(4) }),
+        ],
+        vec![out("b", "t", "left"), out("b", "u", "left")],
+    );
+    let mut logic = Logic::default();
+    logic.set_button("g", "b", true);
+    let a = tick(&mut logic, &mix);
+    assert_eq!(a.len(), 1, "only u: {a:?}");
+    assert!(matches!(a[0], Act::Tsl { index: 4, .. }));
+    let w = crate::mix::logic::warnings(&mix, &mix.logic[0].blocks);
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0].message, "choose a target");
+    // Another graph with index 4: both are marked, not refused.
+    let mut other = graph(vec![block("v", K::TslOut { index: Some(4) })], vec![]);
+    other.id = "h".into();
+    mix.logic.push(other);
+    assert_eq!(crate::mix::logic::issues(&mix), vec![]);
+    let w = crate::mix::logic::warnings(&mix, &mix.logic[0].blocks);
+    assert_eq!(w.len(), 2);
+    assert_eq!(w[1].block.as_deref(), Some("u"));
+    assert!(w[1].message.contains("TSL index 4"));
+    assert_eq!(
+        crate::mix::logic::warnings(&mix, &mix.logic[1].blocks).len(),
+        1
+    );
 }
 
 #[test]
@@ -867,7 +1019,7 @@ fn every_action_says_what_it_asks() {
                     url: "https://user:pw@example.test/x?k=1".into(),
                 },
             ),
-            block("tsl", K::TslOut { index: 7 }),
+            block("tsl", K::TslOut { index: Some(7) }),
             block(
                 "log",
                 K::Log {
@@ -1374,7 +1526,7 @@ fn a_changed_action_acts_on_its_new_target_at_once() {
     tick(&mut logic, &mix);
     assert_eq!(logic.recent("g").last().unwrap().action, "PFL music on");
     // A TSL block moved to another index sends there.
-    mix.logic[0].blocks[1].kind = K::TslOut { index: 3 };
+    mix.logic[0].blocks[1].kind = K::TslOut { index: Some(3) };
     mix.logic[0].wires[0] = out("c", "m", "left");
     assert_eq!(
         tick(&mut logic, &mix),
@@ -1593,7 +1745,7 @@ fn an_action_without_a_target_is_valid_and_never_acts() {
             out("in", "r", "in"),
         ],
     );
-    let w = crate::mix::logic::warnings(&mix.logic[0].blocks);
+    let w = crate::mix::logic::warnings(&mix, &mix.logic[0].blocks);
     let marked: Vec<&str> = w.iter().filter_map(|i| i.block.as_deref()).collect();
     assert_eq!(marked, ["m", "f", "v", "p", "t", "mon", "r", "in"]);
     assert!(w.iter().all(|i| i.message == "choose a target"));
