@@ -13,8 +13,8 @@ use std::sync::Arc;
 pub use super::proc::{NodeMeter, Processor, MAX_CH};
 
 /// Values per node: the widest format's channels (12), a 2 × 2 panner, or a
-/// surround panner's matrix (stereo into 7.1: 16).
-pub const MAX_NODE_VALUES: usize = 16;
+/// surround panner's matrix (stereo into 7.1.4: 24, A10).
+pub const MAX_NODE_VALUES: usize = 24;
 
 /// Stable id of a node across plans (assigned by the compiler per node key).
 pub type NodeId = u32;

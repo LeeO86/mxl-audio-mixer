@@ -1,8 +1,10 @@
 <script setup>
 // A channel fader (§12.1): drag the cap (mouse, touch, pen), − / + for 0.5 dB steps (held: repeated),
 // arrow keys (shift: 0.1 dB), Home for 0 dB, End for −∞, double-click for 0 dB. While dragged, it shows
-// its own value so pushes from the server do not make it jump.
-import { computed, onUnmounted, ref, watch } from "vue";
+// its own value so pushes from the server do not make it jump. A click on the value below types a level
+// (A5): 0 or -20, then Enter (Escape keeps the fader as it is).
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
+import { parseFaderDb } from "../console.js";
 import { FADER_MARKS, FADER_MAX_DB, dbToPos, posToDb } from "../dsp.js";
 import { dbValue, fmtDb } from "../api.js";
 
@@ -88,6 +90,21 @@ function key(ev) {
   else return;
   ev.preventDefault();
 }
+// Typing a level (A5).
+const typing = ref(false);
+const typed = ref("");
+const typeEl = ref(null);
+function startTyping() {
+  typed.value = Number.isFinite(db.value) ? String(db.value) : "-inf";
+  typing.value = true;
+  nextTick(() => typeEl.value?.select());
+}
+function endTyping(save) {
+  if (!typing.value) return;
+  typing.value = false;
+  const v = parseFaderDb(typed.value, FADER_MAX_DB);
+  if (save && v !== null) send(v);
+}
 onUnmounted(() => {
   release();
   clearTimeout(pendingTimer);
@@ -119,6 +136,16 @@ onUnmounted(() => {
       <span class="cap" :style="{ bottom: `${pos * 100}%`, '--cap': colour || 'var(--muted)' }"></span>
     </div>
     <button class="btn secondary step" :aria-label="`${label} down`" @pointerdown="press(-1, $event)" @pointerup="release" @pointercancel="release" @contextmenu.prevent>−</button>
-    <span class="vvalue num">{{ fmtDb(db) }}</span>
+    <input
+      v-if="typing"
+      ref="typeEl"
+      v-model="typed"
+      class="vvalue vtype num"
+      :aria-label="`${label} level in dB`"
+      @keydown.enter.prevent="endTyping(true)"
+      @keydown.escape.prevent="endTyping(false)"
+      @blur="endTyping(true)"
+    />
+    <button v-else class="vvalue num" :aria-label="`${label} level ${fmtDb(db)} dB; click to type a level`" title="click to type a level (0, -20, -inf), Enter" @click="startTyping">{{ fmtDb(db) }}</button>
   </div>
 </template>

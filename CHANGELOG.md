@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — 1.5.0
+
+- A1: the browser tab's title names the tab and the node ("Console – <label> – MXL Audio Mixer").
+- A2: strips of 7.1 and wider are wider (124 px) and their meter bars narrower, so the fader stays usable; the strip meter only shows whether there is signal.
+- A3: a muted strip's meter still shows its level (it now reads after the fader and before the mute), grey instead of green.
+- A4: the gear and ⋮ sit in the format row ("mono ⚙ ⋮"); the name has the strip's full width.
+- A5: a click on the fader value types a level (0, -20, -inf), Enter applies, Escape keeps it.
+- A6: the strip shows its send levels only (no send faders); a click opens Routing.
+- A7: MIDI control from the browser (Web MIDI, https or localhost): Mackie Control (banks of 8, motor faders, mute, solo, select, V-pot pan, master, display; extender) and generic MIDI learn (fader, mute, PFL, AFL, pan; kept per browser, export/import JSON).
+- A8: a strip with a surround panner shows where it pans (speaker ring with the source) and moves it by drag; a mono or stereo strip sending to a surround bus offers "+ Surround pan".
+- A9: meters above 3 channels have narrower bars with the channel labels (L R C LFE …) below, a little less tall.
+- A10: the surround panner pans into 5.1.4 and 7.1.4 too, with a height (`elevation_deg` 0–90: bed to top layer); front/rear on the strip's picture, height on the strip. A plan node holds up to 24 values (a stereo strip into 7.1.4).
+
 ## 1.4.3 (2026-10-24)
 
 - A flow that goes away and comes back on the same route (a writer restart) keeps the last lag: its new reader is counted by the stall rule (0.5 s, or back within a block), not the 0.1 s start span. Only a route to another flow forgets it (D243). Before, a re-created flow whose writer started behind could raise the delay for about a minute.
