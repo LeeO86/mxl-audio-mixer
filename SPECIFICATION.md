@@ -489,7 +489,8 @@ The control room is a dedicated part of the engine and UI, not just another bus.
     counter.
   - **Actions:** mute/unmute, set fader/VCA (with ramp), set any node parameter, PFL,
     talkback on/off, recall snapshot, start/reset loudness measurement, change monitor
-    source, publish/unpublish signal, TSL tally out, HTTP webhook out, log/marker.
+    source, publish/unpublish signal, route an input straight to a virtual output
+    (while on; cleared when off), TSL tally out, HTTP webhook out, log/marker.
 - Each graph can be enabled/disabled, has a name and description, and is saved in the
   show file.
 

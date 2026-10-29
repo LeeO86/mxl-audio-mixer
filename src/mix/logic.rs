@@ -304,6 +304,15 @@ pub enum BlockKind {
     SetPublish {
         signal: String,
     },
+    /// While `in` is on, virtual output `output` (a slot, from 1) takes input
+    /// `input` (from 1) straight through; when it turns off, the output is
+    /// cleared if it still has that input (D248). `null`: not chosen yet.
+    SetRoute {
+        #[serde(default)]
+        input: Option<u32>,
+        #[serde(default)]
+        output: Option<u32>,
+    },
     /// Monitor `monitor` listens to `source` when `in` fires.
     SetMonitor {
         monitor: String,
@@ -482,7 +491,8 @@ impl BlockKind {
             Self::SetMute { .. }
             | Self::SetPfl { .. }
             | Self::SetTalk { .. }
-            | Self::SetPublish { .. } => (vec![port("in", B)], vec![]),
+            | Self::SetPublish { .. }
+            | Self::SetRoute { .. } => (vec![port("in", B)], vec![]),
             Self::SetFader { .. } | Self::SetVca { .. } => (vec![port("level", L)], vec![]),
             Self::SetParam { .. } => (vec![port("value", N)], vec![]),
             Self::SetMonitor { .. }
@@ -619,6 +629,7 @@ impl BlockKind {
             Self::SetPfl { .. } => "set-pfl",
             Self::SetTalk { .. } => "set-talk",
             Self::SetPublish { .. } => "set-publish",
+            Self::SetRoute { .. } => "set-route",
             Self::SetMonitor { .. } => "set-monitor",
             Self::LoudnessControl { .. } => "loudness-control",
             Self::Recall { .. } => "recall",
@@ -641,6 +652,7 @@ impl BlockKind {
             Self::Recall { snapshot } => snapshot.is_empty(),
             Self::Webhook { url } => url.is_empty(),
             Self::TslOut { index } => index.is_none(),
+            Self::SetRoute { input, output } => input.is_none() || output.is_none(),
             Self::SetTalk { mic, destination } => mic.is_empty() || destination.is_empty(),
             Self::SetMonitor { monitor, .. } => monitor.is_empty(),
             Self::SetParam {
@@ -892,15 +904,26 @@ impl Context {
 /// Not errors, but markers for the UI: blocks whose target is not chosen yet
 /// ([`BlockKind::target_unset`], "choose a target"), and `tsl-out` blocks whose
 /// index another `tsl-out` of the show (any graph or macro) uses too: they
-/// would write one display (D247).
+/// would write one display (D247); route blocks of different graphs or
+/// macros on one virtual output likewise (D248).
 pub fn warnings(mix: &Mix, blocks: &[Block]) -> Vec<Issue> {
     let tsl = |k: &BlockKind| match k {
         BlockKind::TslOut { index } => *index,
         _ => None,
     };
+    let route = |k: &BlockKind| match k {
+        BlockKind::SetRoute { output, .. } => *output,
+        _ => None,
+    };
     let mut uses: BTreeMap<u16, usize> = BTreeMap::new();
-    for i in mix.logic_blocks().filter_map(|b| tsl(&b.kind)) {
-        *uses.entry(i).or_default() += 1;
+    let mut routes: BTreeMap<u32, usize> = BTreeMap::new();
+    for b in mix.logic_blocks() {
+        if let Some(i) = tsl(&b.kind) {
+            *uses.entry(i).or_default() += 1;
+        }
+        if let Some(o) = route(&b.kind) {
+            *routes.entry(o).or_default() += 1;
+        }
     }
     let issue = |b: &Block, message: String| Issue {
         graph: None,
@@ -915,6 +938,14 @@ pub fn warnings(mix: &Mix, blocks: &[Block]) -> Vec<Issue> {
         .filter_map(|b| {
             if b.kind.target_unset() {
                 return Some(issue(b, "choose a target".into()));
+            }
+            if let Some(o) = route(&b.kind) {
+                return (routes.get(&o).copied().unwrap_or(0) > 1).then(|| {
+                    issue(
+                        b,
+                        format!("virtual output {o} is set by another route block too"),
+                    )
+                });
             }
             let i = tsl(&b.kind)?;
             (uses.get(&i).copied().unwrap_or(0) > 1)
@@ -1152,8 +1183,22 @@ fn check_level(
     let mut ids = BTreeSet::new();
     let mut names_in = BTreeSet::new();
     let mut names_out = BTreeSet::new();
+    let mut routed = BTreeSet::new();
     let mut ports: BTreeMap<&str, Ports> = BTreeMap::new();
     for b in blocks {
+        if let BlockKind::SetRoute {
+            output: Some(o), ..
+        } = &b.kind
+        {
+            if !routed.insert(*o) {
+                out.push(at.issue(
+                    Some(&b.id),
+                    None,
+                    None,
+                    format!("another route block of this graph sets virtual output {o}"),
+                ));
+            }
+        }
         if let Err(e) = check_id("logic block", &b.id) {
             out.push(at.issue(Some(&b.id), None, None, e));
         }
@@ -1404,6 +1449,21 @@ fn check_block(mix: &Mix, kind: &BlockKind, in_macro: bool) -> BlockCheck {
                 }
                 Some(Source::Input(0)) => Err((None, "inputs count from 1".into())),
                 _ => Ok(()),
+            }
+        }
+        BlockKind::SetRoute {
+            input: Some(input),
+            output: Some(output),
+        } => {
+            if !(1..=1024).contains(input) {
+                Err((None, "input must be 1 to 1024".into()))
+            } else if !(1..=crate::config::MAX_VIRTUAL_OUTPUTS as u32).contains(output) {
+                Err((
+                    None,
+                    format!("output must be 1 to {}", crate::config::MAX_VIRTUAL_OUTPUTS),
+                ))
+            } else {
+                Ok(())
             }
         }
         BlockKind::TslOut { index: Some(index) } if *index > 65534 => {

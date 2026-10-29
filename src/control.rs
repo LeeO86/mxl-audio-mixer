@@ -375,6 +375,7 @@ impl Control {
                 Act::Pfl { .. }
                     | Act::Talk { .. }
                     | Act::Publish { .. }
+                    | Act::Route { .. }
                     | Act::Monitor { .. }
                     | Act::Recall { .. }
             ) {
@@ -513,6 +514,20 @@ impl Control {
                             format: None,
                             commit_samples: None,
                         });
+                    }
+                }
+                Act::Route { input, output, on } => {
+                    let source = crate::mix::model::OutputSource::Input {
+                        input: input as usize,
+                        format: None,
+                    };
+                    let slot = output as usize;
+                    if on {
+                        next.set_virtual_source(slot, Some(source));
+                    } else if next.virtual_source(slot) == Some(&source) {
+                        // Only what this route set: another source chosen
+                        // since stays (D248).
+                        next.set_virtual_source(slot, None);
                     }
                 }
                 Act::Monitor { monitor, source } => {

@@ -816,7 +816,9 @@ those publish last tick's value.
 - actions: `set-mute`, `set-fader` and `set-vca` (with `ramp_ms`), `set-param` (a
   node parameter the DSP smooths, e.g. `threshold_db` or `bands/1/gain_db`, or
   `bypass`; clamped to its range, ramped), `set-pfl`, `set-talk`, `set-publish`,
-  `set-monitor` (a monitor's source), `loudness-control` (start, stop, reset),
+  `set-monitor` (a monitor's source), `set-route` (while on, virtual output
+  `output` takes input `input` straight through; off clears it if it still has
+  that input; both `null` until chosen), `loudness-control` (start, stop, reset),
   `recall` (a snapshot), `webhook` (POST `{"graph", "block", "value"}`), `tsl-out`
   (TSL UMD 5.0 to `TSL_OUT_TARGET`: left lamp red, right lamp green, a label; the
   `index` is `null` until chosen; on
