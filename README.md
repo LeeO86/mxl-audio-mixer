@@ -63,7 +63,8 @@ flow id), **Graph**
 strips, buses, monitors and outputs (virtual and published, the same way) with
 their patches, sends, mix-minus, monitor sources and output sources; draw from a
 strip or bus to a bus to send, click a send to edit it (its tap list offers only
-the taps its source has; from a mono or stereo strip its pan, from a wider
+the taps its source has; from a mono or stereo source into 5.1 or wider its own
+surround pan (`pan`), else a mono or stereo strip's pan, from a wider
 source into a narrower bus that bus's down-mix), Delete removes it; draw from a
 strip, bus, monitor or input into a virtual output to feed it (Delete on the
 wire: silence); click an input to give it an alias and choose its MXL flow;

@@ -4,7 +4,7 @@
 
 - C7: virtual outputs: `MIXER_OUTPUT_FLOWS` / `MIXER_OUTPUTS` fixed MXL flows and NMOS senders (`out-vout:<n>`, stable ids) the designer wires; the operator picks a bus, a direct out, a monitor or an input straight through; silent without a source; `/api/v1/virtual-outputs`, metric `virtual_output_routed`.
 - C6: control-room monitors can feed a virtual output.
-- C1: the graph's send panel edits the strip's pan (mono or stereo source) and the target bus's down-mix (wider into narrower).
+- C1: the graph's send panel edits the send's surround pan (`Send.pan`, B6) into 5.1 or wider, else the strip's pan (mono or stereo source) and the target bus's down-mix (wider into narrower).
 - C2: inputs show the name of what is connected (IS-04 sender label from the Query API, else the MXL flow label) and take an alias, inherited by their strips; virtual and published outputs show what feeds them.
 - C3: an input's MXL flow is chosen in the graph (`GET /api/v1/flows`, `PUT /api/v1/inputs/<n>/route` through the own IS-05 receiver).
 - C4: double-click in the graph opens a strip's or bus's processing, a monitor's control room.

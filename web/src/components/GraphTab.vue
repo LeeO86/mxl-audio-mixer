@@ -245,8 +245,12 @@ async function remove() {
 }
 const fromSig = computed(() => (current.value ? signalOf(current.value.from) : null));
 const toBus = computed(() => (current.value ? signalOf(current.value.to) : null));
-// A send's own pan, once sends have one; else the strip's pan, which every post-pan send of it takes.
-const sendPan = computed(() => current.value && typeof current.value.pan === "number");
+// A send's own surround pan (`Send.pan`, part B6: a mono or stereo source into a 5.1 or wider bus);
+// else the strip's pan, which every post-pan send of it takes.
+const SEND_PAN = { azimuth_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 };
+const sendPan = computed(() => !!current.value?.pan && typeof current.value.pan === "object");
+const canSendPan = computed(() => !sendPan.value && fromSig.value && ["mono", "stereo"].includes(fromSig.value.format) && channelsOf(toBus.value?.format) >= 6);
+const setSendPan = (key, v) => put({ pan: { ...SEND_PAN, ...current.value.pan, [key]: v } });
 const stripPan = computed(() => !sendPan.value && fromSig.value && !isBus(fromSig.value.id) && ["mono", "stereo"].includes(fromSig.value.format) && current.value.tap === "post-pan");
 const folds = computed(() => fromSig.value && toBus.value && channelsOf(fromSig.value.format) > channelsOf(toBus.value.format));
 const mixDownmix = computed(() => live.mix?.settings?.downmix || DEFAULT_DOWNMIX);
@@ -333,7 +337,14 @@ function setVoutInputFormat(f) {
         </select>
       </div>
       <div v-if="sendPan" data-send-pan>
-        <Pot label="Pan of this send" :value="current.pan" :min="-1" :max="1" :def="0" :fine="0.01" :digits="2" @change="(v) => put({ pan: v })" />
+        <Pot label="Send pan: position" unit="°" :value="current.pan.azimuth_deg ?? 0" :min="-180" :max="180" :def="0" :fine="0.5" :digits="0" @change="(v) => setSendPan('azimuth_deg', v)" />
+        <Pot label="Send pan: spread" unit="%" :value="current.pan.spread_pct ?? 0" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setSendPan('spread_pct', v)" />
+        <Pot label="Send pan: divergence" unit="%" :value="current.pan.divergence_pct ?? 0" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setSendPan('divergence_pct', v)" />
+        <Pot label="Send pan: LFE" unit="dB (−100: off)" :value="current.pan.lfe_db ?? -100" :min="-100" :max="10" :def="-100" :fine="0.5" @change="(v) => setSendPan('lfe_db', v)" />
+        <button class="btn small secondary" @click="put({ pan: null })">No send pan</button>
+      </div>
+      <div v-else-if="canSendPan" data-send-pan-add>
+        <button class="btn small secondary" @click="put({ pan: { ...SEND_PAN } })">Surround-pan this send</button>
       </div>
       <div v-else-if="stripPan" data-strip-pan>
         <Pot :label="fromSig.format === 'mono' ? 'Pan' : 'Balance'" :value="fromSig.pan" :min="-1" :max="1" :def="0" :fine="0.01" :digits="2" @change="(v) => patchSignal(fromSig.id, { pan: v })" />
