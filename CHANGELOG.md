@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a memory leak of about 16 kB/s per Silero VAD (test-all: OOM at the 1 GiB limit about every 2.75 h, since 1.3.0). `ort` 2.0.0-rc.14 leaks an `OrtTypeInfo` (about 290 bytes) for every output tensor it creates itself, two per inference (31 per second per detector). The two outputs are now preallocated once and reused. `tests/silero_memory.rs` checks that 3750 inferences keep no heap (2.2 MB before).
+
 ## 1.4.3 (2026-10-24)
 
 - A flow that goes away and comes back on the same route (a writer restart) keeps the last lag: its new reader is counted by the stall rule (0.5 s, or back within a block), not the 0.1 s start span. Only a route to another flow forgets it (D243). Before, a re-created flow whose writer started behind could raise the delay for about a minute.

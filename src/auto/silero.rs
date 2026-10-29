@@ -8,10 +8,16 @@
 //! probability is that of the last chunk completed. One session serves every
 //! signal (the state is each detector's own), with one thread, so inference runs
 //! on the control side's thread and never next to the DSP thread.
+//!
+//! Both outputs are preallocated once and reused by every run: `ort`
+//! 2.0.0-rc.14 leaks an `OrtTypeInfo` (about 290 bytes) for every output tensor
+//! it creates itself (`Value::from_session_output_ptr`), about 16 kB/s per
+//! detector (fixed in rc.15).
 
 use std::sync::{Mutex, OnceLock};
 
-use ort::session::Session;
+use ort::memory::Allocator;
+use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session};
 use ort::value::Tensor;
 
 use super::vad::{Detector, Frame, FRAME};
@@ -25,7 +31,8 @@ const DECIMATE: usize = 3;
 const TAPS: usize = 95;
 
 struct Model {
-    session: Mutex<Session>,
+    /// The session and its run options with the preallocated outputs.
+    session: Mutex<(Session, RunOptions<HasSelectedOutputs>)>,
     _environment: ort::environment::Environment,
 }
 
@@ -39,8 +46,18 @@ fn model() -> &'static Result<Model, String> {
                 .with_intra_threads(1)?
                 .with_inter_threads(1)?
                 .commit_from_memory(MODEL)?;
+            let outputs = OutputSelector::default()
+                .preallocate(
+                    session.outputs()[0].name(),
+                    Tensor::<f32>::new(&Allocator::default(), [1usize, 1])?,
+                )
+                .preallocate(
+                    session.outputs()[1].name(),
+                    Tensor::<f32>::new(&Allocator::default(), [2usize, 1, 128])?,
+                );
+            let options = RunOptions::new()?.with_outputs(outputs);
             Ok(Model {
-                session: Mutex::new(session),
+                session: Mutex::new((session, options)),
                 _environment: environment,
             })
         };
@@ -104,23 +121,27 @@ impl SileroDetector {
         let Ok(model) = model() else {
             return Err("no model".into());
         };
-        let mut session = model.session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = model.session.lock().unwrap_or_else(|e| e.into_inner());
+        let (session, options) = &mut *guard;
         let mut input = Vec::with_capacity(CONTEXT + CHUNK);
         input.extend_from_slice(&self.context);
         input.extend_from_slice(&self.pending[..CHUNK]);
         self.context
             .copy_from_slice(&input[input.len() - CONTEXT..]);
         let run = |session: &mut Session, input: Vec<f32>, state: Vec<f32>| {
-            let outputs = session.run(ort::inputs![
-                "input" => Tensor::from_array(([1usize, CONTEXT + CHUNK], input))?,
-                "state" => Tensor::from_array(([2usize, 1, 128], state))?,
-                "sr" => Tensor::from_array(([1usize], vec![RATE]))?,
-            ])?;
+            let outputs = session.run_with_options(
+                ort::inputs![
+                    "input" => Tensor::from_array(([1usize, CONTEXT + CHUNK], input))?,
+                    "state" => Tensor::from_array(([2usize, 1, 128], state))?,
+                    "sr" => Tensor::from_array(([1usize], vec![RATE]))?,
+                ],
+                options,
+            )?;
             let (_, p) = outputs[0].try_extract_tensor::<f32>()?;
             let (_, s) = outputs[1].try_extract_tensor::<f32>()?;
             Ok::<_, ort::Error>((p.first().copied().unwrap_or(0.0), s.to_vec()))
         };
-        let (p, state) = run(&mut session, input, self.state.clone()).map_err(|e| e.to_string())?;
+        let (p, state) = run(session, input, self.state.clone()).map_err(|e| e.to_string())?;
         if state.len() == STATE {
             self.state = state;
         }
