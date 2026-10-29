@@ -1,7 +1,9 @@
 <script setup>
 // The surround panner's position (D5): the speakers of its layout on a circle (front at the top), the
-// source where it sits; click or drag on the pad to move it. Spread shows as a ring around the source,
-// divergence as the share drawn towards L and R.
+// chosen position as a small ring on the circle; click or drag on the pad to move it. The blue bubble is
+// where the sound is (B5): with spread it moves from the position towards the centre and grows, at 100 %
+// it covers every speaker (the panner then feeds all of them alike). Also the per-send panner (B6):
+// `node` is then the send's pan with the bus's surround bed as `layout`.
 import { computed, ref } from "vue";
 
 const props = defineProps({ node: { type: Object, required: true } });
@@ -16,8 +18,11 @@ const SPEAKERS = {
 };
 const at = (deg, r = R) => [C + r * Math.sin((deg * Math.PI) / 180), C - r * Math.cos((deg * Math.PI) / 180)];
 const speakers = computed(() => (SPEAKERS[props.node.layout] || SPEAKERS["5.1"]).map(([label, a]) => ({ label, a, xy: at(a) })));
-const source = computed(() => at(props.node.azimuth_deg || 0));
-const spreadR = computed(() => 7 + ((props.node.spread_pct || 0) / 100) * 40);
+const origin = computed(() => at(props.node.azimuth_deg || 0));
+const spread = computed(() => Math.max(0, Math.min(1, (props.node.spread_pct || 0) / 100)));
+// The bubble: from the position to the centre, from a dot to the whole speaker ring.
+const bubble = computed(() => at(props.node.azimuth_deg || 0, R * (1 - spread.value)));
+const bubbleR = computed(() => 7 + spread.value * R);
 
 const svg = ref(null);
 let dragging = false;
@@ -48,8 +53,9 @@ function up() {
       <rect :x="s.xy[0] - 5" :y="s.xy[1] - 5" width="10" height="10" rx="2" />
       <text :x="at(s.a, R + 15)[0]" :y="at(s.a, R + 15)[1] + 3" text-anchor="middle">{{ s.label }}</text>
     </g>
-    <circle :cx="source[0]" :cy="source[1]" :r="spreadR" class="spread" />
-    <circle :cx="source[0]" :cy="source[1]" r="6" class="source" />
+    <circle :cx="bubble[0]" :cy="bubble[1]" :r="bubbleR" class="spread" data-bubble />
+    <circle :cx="bubble[0]" :cy="bubble[1]" r="4" class="source" />
+    <circle :cx="origin[0]" :cy="origin[1]" r="6" class="origin" />
   </svg>
 </template>
 
@@ -80,9 +86,15 @@ function up() {
 .spread {
   fill: var(--accent);
   fill-opacity: 0.15;
-  stroke: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.5;
 }
 .source {
   fill: var(--accent);
+}
+.origin {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
 }
 </style>

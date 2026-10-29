@@ -3,7 +3,8 @@
 # (two clients, actions through the UI checked on the API), then the logic editor
 # (§11.3): web/tests/logic.mjs, then the console's strip handling (1.4.0):
 # web/tests/console.mjs, and the format, down-mix and spatial nodes of 1.4.0:
-# web/tests/spatial.mjs. Needs `npm ci` in web/
+# web/tests/spatial.mjs, and the processing items of 1.5.0 (B1–B6): web/tests/dsp15.mjs.
+# Needs `npm ci` in web/
 # and Chrome (CHROME, default /usr/bin/google-chrome). Screenshots: $IT_OUT/ui/.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -30,6 +31,7 @@ TSL_UDP="$TSL_UDP" node "$ROOT/web/tests/ui.mjs" "$WEB" "$IT_OUT/ui" || fail "we
 node "$ROOT/web/tests/logic.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/logic.mjs"
 node "$ROOT/web/tests/console.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console.mjs"
 node "$ROOT/web/tests/spatial.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/spatial.mjs"
+node "$ROOT/web/tests/dsp15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/dsp15.mjs"
 
 rc=0
 stop_mixer || rc=$?

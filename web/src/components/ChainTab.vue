@@ -5,12 +5,17 @@
 // size in a grid, in chain order (left to right, then down); a click on a tile's header opens or closes
 // it. Dragging uses pointer events, so the wheel scrolls meanwhile; near the window's top or bottom
 // edge it scrolls by itself. The palette stays in view. The chain's response is drawn on top.
+// Copy puts a unit on the clipboard (this browser, B1); on any chain the clipboard bar pastes all of it,
+// or one unit (appended), and a unit's Paste takes the last copied unit of its type (parameters only).
+// The flow view at the bottom shows the signal flow with its endpoints (B4).
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import ChainCurve from "./ChainCurve.vue";
 import SignalSettings from "./SignalSettings.vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import NodeEditor from "./NodeEditor.vue";
 import FormatSelect from "./FormatSelect.vue";
+import FlowView from "./FlowView.vue";
+import { clear, clipboard, copy, forget, latestOf, replacePatch } from "../clipboard.js";
 import { NODE_TYPES, DYNAMICS, unsupported } from "../nodes.js";
 import { api } from "../api.js";
 import { act, flush, isBus, live, patchNode, select, signalOf, signalPath, signals } from "../store.js";
@@ -60,6 +65,29 @@ async function remove(node) {
   await act(() => api.del(`${signalPath(sig.value.id)}/chain/${encodeURIComponent(node)}`));
 }
 const bypass = (n) => patchNode(sig.value.id, n.id, { bypass: !n.bypass });
+
+// Copy and paste (B1).
+const copied = ref("");
+function copyNode(n) {
+  copy(n, sig.value.id);
+  copied.value = n.id;
+  setTimeout(() => copied.value === n.id && (copied.value = ""), 1200);
+}
+const nameOf = (id) => signals.value.find((s) => s.id === id)?.name || id;
+const unitLabel = (u) => NODE_TYPES[u.unit.type]?.label || u.unit.type;
+async function pasteUnits(units) {
+  for (const u of units) {
+    const ok = await act(() => api.post(`${signalPath(sig.value.id)}/chain`, JSON.parse(JSON.stringify(u.unit))));
+    if (!ok) return;
+  }
+}
+const pasteAll = () => pasteUnits(clipboard.units);
+async function pasteOnto(n) {
+  const u = latestOf(n.type);
+  if (!u) return;
+  flush();
+  await act(() => api.patch(`${signalPath(sig.value.id)}/chain/${encodeURIComponent(n.id)}`, replacePatch(n, u.unit)));
+}
 
 // Dragging with pointer events: a palette chip carries "type:<t>", a tile's header "node:<id>". It
 // starts after 6 px of movement; less is a click. The drop target is the tile under the pointer (insert
@@ -194,6 +222,16 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
         <span class="spacer"></span>
         <span class="muted small">[ and ]: previous, next</span>
       </div>
+      <div v-if="clipboard.units.length" class="panel clipbar" role="group" aria-label="Clipboard">
+        <span class="muted small">Clipboard</span>
+        <span v-for="(u, i) in clipboard.units" :key="i" class="clipchip">
+          <button class="btn small secondary" :title="`Paste ${unitLabel(u)} (copied from ${nameOf(u.from)}, ${u.label}) at the end of this chain`" @click="pasteUnits([u])">{{ unitLabel(u) }} <span class="muted">· {{ nameOf(u.from) }}</span></button>
+          <button class="btn small secondary" :aria-label="`Remove ${unitLabel(u)} from the clipboard`" @click="forget(i)">✕</button>
+        </span>
+        <span class="spacer"></span>
+        <button class="btn small" :disabled="chain.length + clipboard.units.length > 32" @click="pasteAll">Paste all</button>
+        <button class="btn small secondary" @click="clear">Clear</button>
+      </div>
       <div class="chaintop">
         <SignalSettings v-if="sig" :signal="sig" />
         <div v-if="chainCurve.length" class="panel">
@@ -209,6 +247,8 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
             <span v-if="unsupported(n, sig.format, !isBus(sig.id))" class="state-tag bypass" :title="unsupported(n, sig.format, !isBus(sig.id))">⚠ not on {{ sig.format }}</span>
             <span v-if="DYNAMICS.has(n.type)" class="grbar"><span class="gr"><span :style="{ width: `${Math.min(100, ((meters[n.id]?.gain_reduction_db || 0) / 20) * 100)}%` }"></span></span></span>
             <span class="spacer"></span>
+            <button class="btn small secondary" :title="`Copy ${n.id} to the clipboard`" :aria-label="`Copy ${n.id}`" @click="copyNode(n)">{{ copied === n.id ? "✓" : "⧉" }}</button>
+            <button v-if="latestOf(n.type)" class="btn small secondary" :title="`Paste the copied ${NODE_TYPES[n.type]?.label || n.type} (from ${nameOf(latestOf(n.type).from)}) onto ${n.id}: its parameters`" :aria-label="`Paste onto ${n.id}`" @click="pasteOnto(n)">⇩</button>
             <button class="btn small bypass" :class="{ secondary: !n.bypass }" :aria-pressed="n.bypass" @click="bypass(n)">Bypass</button>
             <button class="btn small secondary" :disabled="i === 0" :aria-label="`Move ${n.id} earlier`" @click="move(n.id, i - 1)">←</button>
             <button class="btn small secondary" :disabled="i === chain.length - 1" :aria-label="`Move ${n.id} later`" @click="move(n.id, i + 1)">→</button>
@@ -223,7 +263,21 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
           {{ chain.length ? "Drop here to append" : "No processing yet: drag a node type here, or click one in the palette." }}
         </div>
       </div>
+      <FlowView v-if="sig" :signal="sig" />
     </div>
     <div v-if="drag.active" class="dragghost" :style="{ left: `${drag.x + 12}px`, top: `${drag.y + 8}px` }">{{ drag.label }}</div>
   </div>
 </template>
+
+<style scoped>
+.clipbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+.clipchip {
+  display: inline-flex;
+  gap: 1px;
+}
+</style>

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — 1.5.0
+
+- B1: copy and paste of processing units: copy on a unit, on any chain "Paste all", one unit, or onto a unit of the same type (its parameters).
+- B2: multiband and dynamic EQ show the gain reduction of every band at all times (`band_reduction_db` in the node meters).
+- B3: new `leveler` node for buses and streams (inspired by the idea of master_me, own code): slow gain riding to a short-term loudness target, gate, max gain/cut, speed, optional 1 ms safety limiter.
+- B4: flow view below the processing chain: reorder nodes, move sends, the direct/bus out and keys to another tap by drag; outputs take a `tap`.
+- B5: surround panner spread drawn as a bubble that moves to the centre and grows, at 100 % over every speaker.
+- B6: per-send surround panner (`pan` on a send) for a mono or stereo source into a 5.1 or bigger bus, edited in the Routing tab's send editor.
+
 ## 1.4.3 (2026-10-24)
 
 - A flow that goes away and comes back on the same route (a writer restart) keeps the last lag: its new reader is counted by the stall rule (0.5 s, or back within a block), not the 0.1 s start span. Only a route to another flow forgets it (D243). Before, a re-created flow whose writer started behind could raise the delay for about a minute.

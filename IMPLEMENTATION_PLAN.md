@@ -2334,3 +2334,39 @@ samples per input in the first 5 min):
 | D242 | The last automatic delay per flow id is kept in `MIXER_STATE_DIR/input-delays.json` (written when it changes, at most once per tick). An input with `extra_delay: auto` that opens with delay 0 (a start, or a route to another flow, which sets the delay back to 0) starts at it: a floor for one normal hold time, and an outlier of that size recurs at once. | A restart should not lose what the last run learnt: a gateway's rare outlier was lost once after every start. A stale high value goes after a hold time and a start-up hold (about 35 s). Not in the show file: it is state, and 1.4.1 reads the show unchanged. |
 | D243 | A new reader without a lag from before (a start, or a route to another flow: the DSP thread forgets the last lag on `ClearInput` with `forget`; a flow that went away on the same route keeps it and is counted by the stall rule) counts its lags after 0.1 s of a head that keeps real time (after a stall: 0.5 s). | The first 0.5 s of a batched writer were lost before its first delay; a mirror still filling may count now, and D241 lets that fall. |
 
+## 1.5.0: processing view and DSP (B1–B6)
+
+From the operators' feedback (Confluence "Feedback MXL Audio-Mixer", scope of
+2026-10-29, part B): copy and paste of units, every band's gain reduction, a leveler
+for buses, a flow view with endpoints, the spread of the surround panner, a
+surround panner per send.
+
+#### What exists
+
+- `src/mix/chain.rs`: node type `leveler` (`LEVELER_LOOKAHEAD`),
+  `ProcKind::metered_bands`.
+- `src/engine/proc.rs`: `Kind::Leveler` (K-weighting, 100 ms segments, 3 s window,
+  gain ramp, `lookahead_limit` shared with the limiter); `NodeMeter.bands` (per band,
+  multiband and dynamic EQ) and `NodeMeter.level` (the leveler's gain); `leveler_cost`
+  measures it.
+- `src/meters.rs`: `band_reduction_db`, `leveler_gain_db` in the node values.
+- `src/mix/model.rs`: `Output.tap`, `Send.pan` (`SendPan`), `Mix::send_pan`.
+- `src/mix/compile.rs`: an output reads its tap; a send with a pan applying is a
+  ramped matrix (`sendpan/<from>/<to>`) into the bus's channels, then an identity send.
+- UI: `clipboard.js` and the clipboard bar in `ChainTab.vue`, the band bars and the
+  leveler's gain in `NodeEditor.vue`, `FlowView.vue`, the bubble in `SurroundPad.vue`,
+  `sendpan.js` and the send panner in `RoutingTab.vue`.
+- Tests: unit tests in `proc.rs` (leveler, per-band meters), `meters.rs`,
+  `compile.rs` (direct out at a tap, send pan); `web/tests/dsp15.mjs` in
+  `tests/integration/ui.sh`.
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D250 | The clipboard is per browser (localStorage, all its tabs), a list of units; "Paste all" appends them all, a chip appends one, a unit's paste takes the last copied unit of its type as a merge patch (fields it lacks set to null), keeping the target's id and place. | "The user chooses what goes where" (B1) without a server-side clipboard; units are plain chain JSON, the server validates as for any new node. |
+| D251 | Per-band gain reduction is a fixed array of 8 atomics in `NodeMeter` (`MAX_BANDS`), written per block by the processor, taken (swapped) by the meter tick like the node's total. | Inside the existing meter path; nothing allocated on the DSP thread (B2). |
+| D252 | The leveler measures in the node (K-weighting, 100 ms segments, the last 3 s, less right after a start, from 400 ms) instead of reading the control side's loudness meter; above `gate_lufs` it heads for `target − loudness` within the limits, at most `speed_db_per_s`; below the gate it holds; the safety limiter is the limiter's look-ahead gain at 1 ms. Inspired by the idea of master_me (GPL-3); no code was copied or translated. | Real-time and self-contained: no control-side round trip, no allocation (B3). The gate keeps pauses from being pulled up. |
+| D253 | Endpoints in the flow view are the mix's own objects: sends (bus outs), the published output (`outputs[].tap`: a strip's direct out, a bus's bus out, default post-fader) and chain keys (sidechain in/out). A drop on gap k sets `{after: node k−1}`, the end of the chain `pre-fader`, the start `pre-eq`/`pre-dynamics` when one starts there. | No second model for the same points: the Graph view reads the same mix (B4). `Output.tap` is left out of the JSON while unset, so a 1.4 show loads and a 1.5 show without taps loads in 1.4. |
+| D254 | Spread keeps its matrix (power = (1 − spread) × point + spread × equal share); the pad draws the bubble at the position moved towards the centre by the spread, radius growing to the speaker ring at 100 %. | It is what the DSP does: the image moves to the middle and widens (B5). |
+| D255 | A send's `pan` applies when its source is mono or stereo at the send's tap (post-pan of a strip without a surround panner counts as the strip's own format, read before the strip's panner) and the bus is 5.1, 7.1, 5.1.4 or 7.1.4 (the bed; heights get nothing); it is a ramped matrix node, so moving it changes values only. | Panning "fixed in the processing" per send (B6), smooth while dragging; the same field serves the Graph view's wire editing (C1). |

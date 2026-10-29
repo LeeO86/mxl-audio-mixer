@@ -358,6 +358,47 @@ pub struct Send {
     /// routing loop close through this send (§4.4).
     #[serde(default)]
     pub block_delay: bool,
+    /// The send's own surround panner (B6): a mono or stereo source into a
+    /// bus of 5.1 or more is panned here instead of by the strip's panner (a
+    /// post-pan send then reads the strip before its panner). Ignored for other
+    /// sources and buses. Left out of the JSON while unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<SendPan>,
+}
+
+/// A send's surround position (B6), as the surround panner node's (D5): 0°
+/// front centre, negative left, ±180° behind; spread over all speakers, centre
+/// divergence into L and R, the LFE send.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendPan {
+    pub azimuth_deg: f64,
+    #[serde(default)]
+    pub spread_pct: f64,
+    #[serde(default)]
+    pub divergence_pct: f64,
+    #[serde(default = "lfe_off")]
+    pub lfe_db: f64,
+}
+
+fn lfe_off() -> f64 {
+    super::chain::LFE_OFF_DB
+}
+
+impl SendPan {
+    pub fn validate(&self) -> Result<(), String> {
+        let ok = |what: &str, v: f64, lo: f64, hi: f64| {
+            if v.is_finite() && (lo..=hi).contains(&v) {
+                Ok(())
+            } else {
+                Err(format!("pan {what} must be {lo} to {hi}, not {v}"))
+            }
+        };
+        ok("azimuth_deg", self.azimuth_deg, -180.0, 180.0)?;
+        ok("spread_pct", self.spread_pct, 0.0, 100.0)?;
+        ok("divergence_pct", self.divergence_pct, 0.0, 100.0)?;
+        ok("lfe_db", self.lfe_db, super::chain::LFE_OFF_DB, 10.0)
+    }
 }
 
 /// A signal published as an MXL flow and an NMOS sender (§4.3).
@@ -371,6 +412,17 @@ pub struct Output {
     /// Samples per MXL commit; `null`: `MIXER_OUTPUT_COMMIT_SAMPLES`.
     #[serde(default)]
     pub commit_samples: Option<u32>,
+    /// Where the output is taken (B4: a strip's direct out, a bus out); left
+    /// out: post-fader. Left out of the JSON while unset (a 1.4 show loads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap: Option<Tap>,
+}
+
+impl Output {
+    /// The tap the output reads: its own, or post-fader.
+    pub fn tap(&self) -> Tap {
+        self.tap.clone().unwrap_or(Tap::PostFader)
+    }
 }
 
 /// Mix-wide laws and the loudness target.
@@ -524,6 +576,26 @@ impl Mix {
             (Kind::Strip, Tap::PostPan, Format::Mono) => Format::Stereo,
             _ => format,
         })
+    }
+
+    /// What a send's own panner (B6) pans: the source's span tap (a strip's
+    /// post-pan read before its stereo panner) and its format, mono or stereo,
+    /// with the bus's surround bed (5.1 or 7.1); `None` when the send has no
+    /// panner or it does not apply (a wider source, a bus narrower than 5.1, a
+    /// strip with its own surround panner at post-pan).
+    pub fn send_pan(&self, send: &Send) -> Option<(SendPan, Tap, Format, Format)> {
+        let pan = send.pan?;
+        let bed = match self.bus(&send.to)?.format {
+            Format::Surround51 | Format::Surround514 => Format::Surround51,
+            Format::Surround71 | Format::Surround714 => Format::Surround71,
+            _ => return None,
+        };
+        let tap = match (self.strip(&send.from), &send.tap) {
+            (Some(s), Tap::PostPan) if s.surround_layout().is_none() => Tap::PostFader,
+            _ => send.tap.clone(),
+        };
+        let from = self.tap_format(&send.from, &tap)?;
+        matches!(from, Format::Mono | Format::Stereo).then_some((pan, tap, from, bed))
     }
 
     /// The laws for what arrives at bus `to` (its down-mix override, D2).
@@ -719,6 +791,10 @@ impl Mix {
             if !pairs.insert((send.from.as_str(), send.to.as_str())) {
                 return Err(format!("send {} → {} exists twice", send.from, send.to));
             }
+            if let Some(pan) = &send.pan {
+                pan.validate()
+                    .map_err(|e| format!("send {} → {}: {e}", send.from, send.to))?;
+            }
         }
         for (id, chain) in self.chains() {
             super::chain::validate(chain).map_err(|e| format!("{id}: {e}"))?;
@@ -755,6 +831,10 @@ impl Mix {
             }
             if !published.insert(o.signal.as_str()) {
                 return Err(format!("signal {} is published twice", o.signal));
+            }
+            if let Some(tap) = &o.tap {
+                self.check_tap(&o.signal, tap)
+                    .map_err(|e| format!("output {}: {e}", o.signal))?;
             }
             if let Some(c) = o.commit_samples {
                 if c == 0 || c % block != 0 || c > 48_000 {
@@ -1135,6 +1215,7 @@ pub(crate) mod tests {
             mute: false,
             phase: false,
             block_delay: false,
+            pan: None,
         }
     }
 
@@ -1202,6 +1283,7 @@ pub(crate) mod tests {
             signal: "main".into(),
             format: None,
             commit_samples: Some(100),
+            tap: None,
         });
         assert!(bad.validate(4, 96).unwrap_err().contains("multiple"));
         let mut bad = mix.clone();
@@ -1209,6 +1291,7 @@ pub(crate) mod tests {
             signal: "nope".into(),
             format: None,
             commit_samples: None,
+            tap: None,
         });
         assert!(bad.validate(4, 96).unwrap_err().contains("does not exist"));
         // A strip is published as its post-fader direct out.
@@ -1217,6 +1300,7 @@ pub(crate) mod tests {
             signal: "vox".into(),
             format: None,
             commit_samples: None,
+            tap: None,
         });
         assert_eq!(direct.validate(4, 96), Ok(()));
     }

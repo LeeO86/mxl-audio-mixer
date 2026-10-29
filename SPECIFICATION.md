@@ -245,6 +245,9 @@ rates other than 48 kHz, recording.
   published signal is an NMOS sender (Source + Flow + Sender), group hint by signal
   name. Publishing/unpublishing at runtime creates/removes the sender; IDs derive from
   `NMOS_SEED` + stable signal ID, so they survive restarts (G3).
+- A strip is published as its direct out, a bus as its bus out: post-fader, or at any
+  tap of the signal (`outputs[].tap`, set in the flow view of the processing view,
+  §12.2).
 - Outputs are written into the mixer's own domain (G2) on the TAI timeline.
   - **Commit size is separate from the DSP block size:** `MIXER_OUTPUT_COMMIT_SAMPLES`
     (default = one block; per output overridable, e.g. 240 or 480).
@@ -288,6 +291,11 @@ rates other than 48 kHz, recording.
 - **Matrix:** any signal → any summing point at a gain (−∞…+10 dB), with mute and
   phase; pre/post tap selectable per send (tap points: input, pre-EQ, post-EQ,
   pre-dynamics, post-dynamics, pre-fader, post-fader, post-pan, or after any node).
+- **Per-send surround panning:** a send from a mono or stereo source into a 5.1, 7.1,
+  5.1.4 or 7.1.4 bus can have its own surround panner (`pan`: position, spread,
+  divergence, LFE, as the surround panner node; the heights of 5.1.4/7.1.4 get none).
+  It replaces the strip's stereo panner for that send (a post-pan send then reads the
+  strip before its panner); for other sources and buses it is ignored.
 - **Width mapping:** mono→stereo (pan law selectable: −3 dB default, −4.5, −6, 0),
   stereo→mono (sum −3 dB or −6 dB), up/down-mix for 5.1/7.1. The down-mix is
   adjustable (ITU-R BS.775 style: centre, surround and LFE levels, normalisation):
@@ -313,20 +321,36 @@ across multichannel signals, parameter smoothing.
 | Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (mono/stereo into 5.1/7.1: position, spread, divergence, LFE), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
 | EQ | parametric EQ (up to 8 bands: bell, shelf, notch, high-pass, low-pass), high-pass/low-pass (12–48 dB/oct), **dynamic EQ** (per-band threshold/ratio/attack/release) |
 | Dynamics | compressor (feed-forward, soft knee, sidechain with filter), limiter (look-ahead, true-peak option), expander, gate (with hysteresis, hold), **de-esser** (split-band and wide-band modes, frequency 2–12 kHz, threshold, range, listen/sidechain monitor), ducker (keyed by any signal or by VAD), multiband dynamics (3–5 bands, linear-phase crossover option) |
-| Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs |
+| Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs, **leveler** for buses and streams (below) |
 | Utility | oscillator/tone (sine, pink/white noise, sweep, EBU stereo ident), block delay (feedback), meter tap |
 
 - Filter design: biquads/state-variable filters with coefficient smoothing; designs
   documented with references; verified against reference responses (§14).
 - Compressor/limiter/de-esser: documented detector types (peak/RMS), ballistics,
-  and gain-reduction metering exposed to the UI.
+  and gain-reduction metering exposed to the UI. Multiband and dynamic EQ also
+  report the gain reduction of every band.
+- Surround panner spread: each speaker's power is (1 − spread) × the point source's
+  plus spread × an equal share; the UI draws it as a bubble that moves from the
+  position to the centre and grows, at 100 % over every speaker.
+- **Leveler** (inspired by the idea of master_me, an own implementation, no code
+  taken from it): the short-term loudness (BS.1770 K-weighting and channel weights,
+  100 ms segments, the last 3 s) is measured in the node; every 100 ms, above the gate
+  (`gate_lufs`), the gain it heads for is `target_lufs` minus that loudness, within
+  `max_gain_db` up and `max_cut_db` down; the gain moves there at most
+  `speed_db_per_s` (linear ramps per block). Below the gate (pauses) it holds. The
+  optional safety stage is a 1 ms look-ahead peak limiter at `ceiling_db` (50 ms
+  release; 48 samples of latency). The UI shows the leveler's gain and the limiter's
+  reduction. Cost per 96-sample block (release build, one core of the lab host):
+  stereo 1.3 µs, with the limiter 3.7 µs; 5.1 3.5 µs, with the limiter 7.2 µs.
 
 ---
 
 ## 7. Metering and measurement
 
 - Per signal: sample peak, **true peak** (ITU-R BS.1770 oversampling), RMS, PPM
-  (selectable scales: EBU, Nordic, BBC, DIN), gain reduction per dynamics node.
+  (selectable scales: EBU, Nordic, BBC, DIN), gain reduction per dynamics node (per
+  band for multiband and dynamic EQ: `band_reduction_db`), a leveler's gain
+  (`leveler_gain_db`).
 - **Loudness** per configurable signal (outputs, buses, any monitor point):
   momentary, short-term, integrated, Loudness Range, max true peak, per ITU-R BS.1770
   and EBU R 128 (target −23 LUFS, tolerances configurable); start/stop/reset of
@@ -533,10 +557,22 @@ new ones:
 - Select any signal → its chain is shown; drag processing nodes from a palette into
   the chain ("I want an EQ here"), reorder by drag, bypass, detail editors for each
   node (EQ curve with handles, compressor transfer curve, de-esser with listen).
+- Copy and paste of units: a unit's copy button puts it on the clipboard (this
+  browser); on any chain the clipboard bar pastes all of it or one unit (appended), and
+  a unit's paste button takes the last copied unit of its type (its parameters; id and
+  place stay).
+- Flow view below the chain: the signal flow (input, trim, nodes, fader, pan, out) with
+  its endpoints where they are taken: sends (bus outs), the published output (direct
+  out of a strip, bus out of a bus), keys other nodes take from it (sidechain out), and
+  on a keyed node where its key comes from (sidechain in). Dragging a node moves it;
+  dragging an endpoint sets its tap. They are the mix's sends, `outputs[].tap` and
+  chain keys, so the graph view shows the same.
 
 ### 12.3 Other views
 
-Control room (§10), routing matrix (grid of sources × destinations), graph view (§5),
+Control room (§10), routing matrix (grid of sources × destinations; a send from a mono
+or stereo source into a 5.1 or bigger bus shows a surround panner for that send, §5),
+graph view (§5),
 logic editor (§11), snapshots, loudness and metering bridge, NMOS (receivers, senders,
 input patch), remote link (§13), settings (G1, G10).
 

@@ -51,12 +51,18 @@ or closes it, bypass, delete; ◀ ▶ or the `[` and `]` keys step to the previo
 next strip or bus; EQ curve with band handles (a double-click resets a band;
 high- and low-pass bands with their slope), one band's controls at a time, filter,
 dynamics transfer curves with the live level, de-esser listen, keys, the surround
-panner's position pad; the signal's format, changed after a confirming second
+panner's position pad (spread: the bubble moves to the centre and grows); every
+band's gain reduction of a multiband or dynamic EQ; copy and paste of units (a
+unit's ⧉ puts it on the browser's clipboard; the clipboard bar pastes all or one,
+a unit's ⇩ takes the copied unit of its type); the signal flow below the chain
+(drag nodes to reorder, drag sends, the direct or bus out and keys to another tap);
+the signal's format, changed after a confirming second
 press, with the nodes it would bypass named first and a flag on every node that
 cannot run on the format; a bus's own down-mix), **Routing** (the send matrix,
 sources in rows, destination buses in columns: a click on an empty cell marks it
 yellow, a second click on it within 3 s sends at 0 dB; a send's tap (only those
-its source has), gain, mute, phase and block delay; publishing outputs, a strip as
+its source has), gain, mute, phase and block delay; a send from a mono or stereo
+source into a 5.1 or bigger bus has a surround panner of its own; publishing outputs, a strip as
 its direct out, and copying a flow id), **Graph**
 (the routing as a graph, read-write: inputs, strips, buses, monitors and outputs
 with their patches, sends, mix-minus, monitor sources and outputs; draw from a
@@ -444,7 +450,7 @@ an id gets `strip-<n>` or `bus-<n>`.
   Keys and block-delay sends are not compensated. Each output reports its
   `processing_latency_ms` and `latency_ms` (read offset + one block + processing).
 - **Output:** a bus (post-fader) or a strip (its direct out: post-fader, before
-  the pan) published as an `audio/float32` MXL flow in the own domain and an NMOS
+  the pan; or at another `tap`) published as an `audio/float32` MXL flow in the own domain and an NMOS
   Source, Flow and Sender (label = its name, group hint `<name>:Audio`).
   `format` (default: the signal's) maps it to another layout; `commit_samples`
   (default `MIXER_OUTPUT_COMMIT_SAMPLES`) is a multiple of the block size. The MXL
@@ -716,6 +722,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `de-esser` | `mode` `split-band` (reduces the band above `freq_hz`) \| `wide-band` (reduces everything), `freq_hz` 2000–12000, `threshold_db`, `range_db`, `attack_ms`, `release_ms`, `listen` (output the band) |
 | `ducker` | `key` `{signal, tap}`, `threshold_db`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms` |
 | `multiband` | `crossovers_hz` (2–4, rising; Linkwitz-Riley 24 dB/oct, sum flat), `bands` (one more: `{threshold_db, ratio, attack_ms, release_ms, makeup_db}`) |
+| `leveler` | for buses and streams (inspired by the idea of master_me; own code): `target_lufs` −40 … −5, `max_gain_db` 0–30, `max_cut_db` 0–30, `speed_db_per_s` 0.1–20, `gate_lufs` −90 … −10, `limiter` (default true), `ceiling_db` −20 … 0 (default −1). Rides the gain so the short-term loudness (BS.1770, 3 s, measured in the node every 100 ms) meets the target; holds below the gate; the optional safety limiter has 1 ms look-ahead (the node's latency) |
 | `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
 | `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
@@ -864,16 +871,16 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET`, `POST /api/v1/buses` | list, create (`format` required) |
 | `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format` (as strips), `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `subgroup`, `downmix` (`null`: the mix's), `ramp_ms`; GET adds `chain_warnings`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
-| `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
+| `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms`, `pan` (`{azimuth_deg, spread_pct, divergence_pct, lfe_db}`, as `surround-pan`; a mono or stereo source into a 5.1, 7.1, 5.1.4 or 7.1.4 bus is panned in the send, a post-pan send then reads the strip before its panner; ignored otherwise; `null` removes it) |
 | `GET /api/v1/outputs`, `GET /api/v1/outputs/<signal>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
-| `PUT`, `DELETE /api/v1/outputs/<signal>` | publish a bus or a strip (its direct out) (`{"format": …, "commit_samples": …}`, both optional) or unpublish |
+| `PUT`, `DELETE /api/v1/outputs/<signal>` | publish a bus or a strip (its direct out) (`{"format": …, "commit_samples": …, "tap": …}`, all optional; `tap`: where it is taken, default post-fader) or unpublish |
 | `GET /api/v1/taps` | the taps each strip and bus offers (for sends, keys, the analyser): `{"<signal>": ["input", …, {"after": "<node>"}]}` |
 | `GET`, `POST /api/v1/{strips,buses}/<id>/chain` | the chain; add a node (its JSON, `id` optional, `position` optional) |
 | `GET`, `PATCH`, `DELETE /api/v1/{strips,buses}/<id>/chain/<node>` | a node; change it with a JSON merge patch (RFC 7396) plus `ramp_ms` |
 | `POST /api/v1/{strips,buses}/<id>/chain/<node>/move` | `{"position": n}` |
 | `GET /api/v1/loudness` | per measured signal: `momentary_lufs`, `short_term_lufs`, `integrated_lufs`, `range_lu`, `max_true_peak_dbtp`, `running`, `in_tolerance` |
 | `POST /api/v1/loudness/<id>/{start,stop,reset}` | control the integration |
-| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms), `ppm_type1_dbfs`, `ppm_type2_dbfs`; `correlation` (two or more channels); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs` |
+| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms), `ppm_type1_dbfs`, `ppm_type2_dbfs`; `correlation` (two or more channels); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs`, `band_reduction_db` (multiband, dynamic EQ: per band), `leveler_gain_db` (leveler) |
 | `POST /api/v1/meters/clear`, `POST /api/v1/meters/<id>/clear` | clear every peak hold, or one signal's |
 | `GET`, `PUT`, `DELETE /api/v1/analysis` | the analyser: `{"signal", "tap"}` (tap default `post-fader`); GET gives `target` and `values` (`bands_hz`, `spectrum_db`, `correlation`, `xy`) |
 | `GET`, `POST /api/v1/snapshots` | list; take one (`{"id"?, "name"?}`) |

@@ -11,7 +11,7 @@ use crate::dsp::dynamics::{
     compressor_gain, expander_gain, from_db, power_to_db, to_db, Ballistics, LookaheadGain,
 };
 use crate::dsp::truepeak::{self, TruePeak, PHASES, TAPS};
-use crate::mix::chain::{BandType, DeEsserMode, Detector, FilterMode, ProcKind};
+use crate::mix::chain::{BandType, DeEsserMode, Detector, FilterMode, ProcKind, MAX_BANDS};
 use crate::mix::format::MAX_FORMAT_CHANNELS;
 
 use super::plan::NodeId;
@@ -22,12 +22,29 @@ pub const MAX_CH: usize = MAX_FORMAT_CHANNELS;
 type Taps = [[f32; TAPS]; PHASES];
 
 /// Per-node meters, written by the DSP thread only.
-#[derive(Default)]
 pub struct NodeMeter {
     /// Largest gain reduction since the control side last took it (dB ≥ 0, f32 bits).
     pub reduction: AtomicU32,
     pub in_peak: AtomicU32,
     pub out_peak: AtomicU32,
+    /// Per band of a multiband or dynamic EQ: the largest gain reduction since
+    /// the control side last took it (dB ≥ 0, f32 bits); unused slots stay 0.
+    pub bands: [AtomicU32; MAX_BANDS],
+    /// A leveler's gain after its last block (dB, signed, f32 bits); NaN for
+    /// other nodes.
+    pub level: AtomicU32,
+}
+
+impl Default for NodeMeter {
+    fn default() -> Self {
+        Self {
+            reduction: AtomicU32::new(0),
+            in_peak: AtomicU32::new(0),
+            out_peak: AtomicU32::new(0),
+            bands: Default::default(),
+            level: AtomicU32::new(f32::NAN.to_bits()),
+        }
+    }
 }
 
 fn max_into(a: &AtomicU32, v: f32) {
@@ -282,6 +299,20 @@ pub enum Kind {
         ballistics: Vec<Ballistics>,
         envelopes: Vec<f64>,
     },
+    /// The leveler (B3): K-weighted energy in 100 ms segments, the last 3 s of
+    /// them, the gain it heads for and the gain it has, and the safety limiter.
+    Leveler {
+        k_states: Vec<[State; 2]>,
+        weights: Vec<f64>,
+        energy: f64,
+        samples: usize,
+        segments: Vec<f64>,
+        at: usize,
+        filled: usize,
+        desired: f64,
+        gain: f64,
+        limit: Option<(Delay, LookaheadGain)>,
+    },
     Delay(Delay),
     /// One block of a signal, kept for the next block (a feedback send's block delay).
     Hold(Vec<f32>),
@@ -301,6 +332,8 @@ pub struct Processor {
     pub kind: Kind,
     /// The absolute sample index (TAI) of the block being processed.
     pub start: u64,
+    /// The gain reduction of each band in the last block (multiband, dynamic EQ).
+    band_reduction: [f32; MAX_BANDS],
 }
 
 fn allpass(freq: f64) -> Coefficients {
@@ -318,6 +351,72 @@ fn allpass(freq: f64) -> Coefficients {
 }
 
 const Q_BUTTERWORTH: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+/// The leveler's loudness segment (100 ms) and window (3 s: short-term loudness).
+const LEVELER_SEGMENT: usize = 4800;
+const LEVELER_SEGMENTS: usize = 30;
+/// Segments the leveler waits for after a start before it moves (400 ms).
+const LEVELER_FIRST: usize = 4;
+/// Release of the leveler's safety limiter, ms.
+const LEVELER_RELEASE_MS: f64 = 50.0;
+
+/// BS.1770 channel weights of a signal with `channels` channels (its format
+/// follows from the count): LFE 0, the surrounds 1.41, the rest 1.
+fn loudness_weights(channels: usize) -> Vec<f64> {
+    use crate::mix::format::Format;
+    let format = [
+        Format::Mono,
+        Format::Stereo,
+        Format::Lcr,
+        Format::Surround51,
+        Format::Surround71,
+        Format::Surround514,
+        Format::Surround714,
+    ]
+    .into_iter()
+    .find(|f| f.channels() == channels);
+    match format {
+        Some(f) => crate::dsp::loudness::weights(f.labels()),
+        None => vec![1.0; channels],
+    }
+}
+
+/// Run a look-ahead peak limiter (`delay` holds the look-ahead) at linear
+/// `ceiling` over a block; returns the largest gain reduction in dB.
+fn lookahead_limit(
+    io: &mut [&mut [f32]],
+    delay: &mut Delay,
+    gain: &mut LookaheadGain,
+    mut true_peak: Option<&mut (Box<Taps>, Vec<TruePeak>)>,
+    ceiling: f64,
+    block: usize,
+) -> f64 {
+    let lines = &mut delay.lines;
+    let len = lines.first().map_or(0, |l| l.len()).max(1);
+    let mut at = delay.at;
+    let mut least = 1f64;
+    for k in 0..block {
+        let mut peak = 0f64;
+        for (c, ch) in io.iter().enumerate() {
+            let x = ch[k];
+            let v = match true_peak.as_deref_mut() {
+                Some((taps, tp)) => tp[c].step(taps, x),
+                None => x.abs(),
+            };
+            peak = peak.max(f64::from(v));
+        }
+        let g = gain.next(peak, ceiling);
+        least = least.min(g);
+        for (c, ch) in io.iter_mut().enumerate() {
+            let out = lines[c][at];
+            lines[c][at] = ch[k];
+            ch[k] = (f64::from(out) * g) as f32;
+        }
+        at = (at + 1) % len;
+    }
+    delay.at = at;
+    -to_db(least)
+}
 
 impl Processor {
     /// Build a node of `kind` for `channels` channels and blocks of `block`.
@@ -445,6 +544,22 @@ impl Processor {
                     envelopes: vec![0.0; n],
                 }
             }
+            ProcKind::Leveler { limiter, .. } => Kind::Leveler {
+                k_states: vec![[State::default(); 2]; channels],
+                weights: loudness_weights(channels),
+                energy: 0.0,
+                samples: 0,
+                segments: vec![0.0; LEVELER_SEGMENTS],
+                at: 0,
+                filled: 0,
+                desired: 0.0,
+                gain: 0.0,
+                limit: limiter.then(|| {
+                    let mut gain = LookaheadGain::new(latency);
+                    gain.set_release(LEVELER_RELEASE_MS);
+                    (Delay::new(channels, latency), gain)
+                }),
+            },
             ProcKind::Delay { .. } => Kind::Delay(Delay::new(channels, kind.delay_samples())),
             // The compiler makes the auto node a gain step and the width and the
             // surround panner gain matrices; a processor of them passes through.
@@ -464,6 +579,7 @@ impl Processor {
             meter,
             kind: k,
             start: 0,
+            band_reduction: [0.0; MAX_BANDS],
         }
     }
 
@@ -481,6 +597,7 @@ impl Processor {
             meter: usize::MAX,
             kind: Kind::Hold(vec![0.0; channels * block]),
             start: 0,
+            band_reduction: [0.0; MAX_BANDS],
         }
     }
 
@@ -643,7 +760,7 @@ impl Processor {
                 *low = biquad::low_pass(p(1), Q_BUTTERWORTH);
                 *high = biquad::high_pass(p(1), Q_BUTTERWORTH);
             }
-            Kind::Delay(_) | Kind::Oscillator { .. } | Kind::Hold(_) => {}
+            Kind::Delay(_) | Kind::Oscillator { .. } | Kind::Hold(_) | Kind::Leveler { .. } => {}
         }
     }
 
@@ -682,6 +799,14 @@ impl Processor {
         let reduction = self.run(io, key, block);
         if let Some(m) = meter {
             max_into(&m.reduction, reduction as f32);
+            if matches!(self.kind, Kind::Multiband { .. } | Kind::DynamicEq { .. }) {
+                for (slot, gr) in m.bands.iter().zip(self.band_reduction.iter()) {
+                    max_into(slot, *gr);
+                }
+            }
+            if let Kind::Leveler { gain, .. } = &self.kind {
+                m.level.store((*gain as f32).to_bits(), Ordering::Relaxed);
+            }
         }
         if crossfade {
             let mut dry: [&mut [f32]; MAX_CH] = std::array::from_fn(|_| <&mut [f32]>::default());
@@ -718,6 +843,7 @@ impl Processor {
         let p = |i: usize| f64::from(cur[i]);
         let n = io.len();
         let chans = self.channels;
+        let band_reduction = &mut self.band_reduction;
         match &mut self.kind {
             Kind::Eq {
                 coefficients,
@@ -776,6 +902,7 @@ impl Processor {
                     }
                     envelopes[b] = env;
                     most = most.max(-env);
+                    band_reduction[b] = (-env).max(0.0) as f32;
                     bells[b] = biquad::bell(p(o), p(o + 1), gain + env);
                     for (c, ch) in io.iter_mut().enumerate() {
                         bell_states[b * per + c].run(&bells[b], ch);
@@ -862,33 +989,67 @@ impl Processor {
                 delay,
                 gain,
                 true_peak,
+            } => lookahead_limit(io, delay, gain, true_peak.as_mut(), from_db(p(1)), block),
+            Kind::Leveler {
+                k_states,
+                weights,
+                energy,
+                samples,
+                segments,
+                at,
+                filled,
+                desired,
+                gain,
+                limit,
             } => {
-                let ceiling = from_db(p(1));
-                let lines = &mut delay.lines;
-                let len = lines.first().map_or(0, |l| l.len()).max(1);
-                let mut at = delay.at;
-                let mut least = 1f64;
-                for k in 0..block {
-                    let mut peak = 0f64;
-                    for (c, ch) in io.iter().enumerate() {
-                        let x = ch[k];
-                        let v = match true_peak {
-                            Some((taps, tp)) => tp[c].step(taps, x),
-                            None => x.abs(),
-                        };
-                        peak = peak.max(f64::from(v));
+                use crate::dsp::loudness::{K_HIGH_PASS, K_SHELF};
+                let (target, max_gain, max_cut, speed, gate) = (p(1), p(2), p(3), p(4), p(5));
+                // The block's K-weighted, channel-weighted energy.
+                let mut e = 0f64;
+                for (c, ch) in io.iter().enumerate() {
+                    let [shelf, hp] = &mut k_states[c];
+                    let mut acc = 0f64;
+                    for &x in ch.iter() {
+                        let y = hp.tick(&K_HIGH_PASS, shelf.tick(&K_SHELF, f64::from(x)));
+                        acc += y * y;
                     }
-                    let g = gain.next(peak, ceiling);
-                    least = least.min(g);
-                    for (c, ch) in io.iter_mut().enumerate() {
-                        let out = lines[c][at];
-                        lines[c][at] = ch[k];
-                        ch[k] = (f64::from(out) * g) as f32;
-                    }
-                    at = (at + 1) % len;
+                    e += weights[c] * acc;
                 }
-                delay.at = at;
-                -to_db(least)
+                *energy += e;
+                *samples += block;
+                // Every 100 ms: the loudness of the last 3 s (less after a start),
+                // and, above the gate, the gain that meets the target.
+                if *samples >= LEVELER_SEGMENT {
+                    segments[*at] = *energy / *samples as f64;
+                    *at = (*at + 1) % LEVELER_SEGMENTS;
+                    *filled = (*filled + 1).min(LEVELER_SEGMENTS);
+                    *energy = 0.0;
+                    *samples = 0;
+                    if *filled >= LEVELER_FIRST {
+                        let power = segments.iter().sum::<f64>() / *filled as f64;
+                        let lufs = -0.691 + 10.0 * power.max(1e-20).log10();
+                        if lufs > gate {
+                            *desired = target - lufs;
+                        }
+                    }
+                }
+                // Toward the desired gain (within the limits) at the speed.
+                let want = desired.clamp(-max_cut, max_gain);
+                let step = speed * block as f64 / f64::from(crate::config::SAMPLE_RATE);
+                let next = *gain + (want - *gain).clamp(-step, step);
+                let (g0, g1) = (from_db(*gain), from_db(next));
+                *gain = next;
+                let inv = 1.0 / block as f64;
+                for ch in io.iter_mut() {
+                    for (k, x) in ch.iter_mut().enumerate() {
+                        let g = g0 + (g1 - g0) * (k + 1) as f64 * inv;
+                        *x = (f64::from(*x) * g) as f32;
+                    }
+                }
+                match limit {
+                    Some((delay, lg)) => lookahead_limit(io, delay, lg, None, from_db(p(6)), block),
+                    None => 0.0,
+                }
             }
             Kind::Expander {
                 ballistics,
@@ -1114,6 +1275,7 @@ impl Processor {
                     }
                     envelopes[b] = env;
                     most = most.max(-env);
+                    band_reduction[b] = (-env).max(0.0) as f32;
                 }
                 for (c, ch) in io.iter_mut().enumerate() {
                     for (k, s) in ch.iter_mut().enumerate() {
@@ -1709,6 +1871,105 @@ mod tests {
         20.0 * f64::from(x[from..].iter().fold(0f32, |m, v| m.max(v.abs()))).log10()
     }
 
+    fn leveler(target: f64, max_gain: f64, speed: f64, gate: f64, limiter: bool) -> ProcKind {
+        ProcKind::Leveler {
+            target_lufs: target,
+            max_gain_db: max_gain,
+            max_cut_db: 12.0,
+            speed_db_per_s: speed,
+            gate_lufs: gate,
+            limiter,
+            ceiling_db: -1.0,
+        }
+    }
+
+    /// BS.1770 loudness (one channel, weight 1) of the last `secs` seconds.
+    fn tail_lufs(x: &[f32], secs: f64) -> f64 {
+        use crate::dsp::loudness::{K_HIGH_PASS, K_SHELF};
+        let (mut a, mut b) = (State::default(), State::default());
+        let from = x.len() - (secs * 48_000.0) as usize;
+        let mut e = 0.0;
+        for (k, v) in x.iter().enumerate() {
+            let y = b.tick(&K_HIGH_PASS, a.tick(&K_SHELF, f64::from(*v)));
+            if k >= from {
+                e += y * y;
+            }
+        }
+        -0.691 + 10.0 * (e / (x.len() - from) as f64).log10()
+    }
+
+    #[test]
+    fn leveler_meets_the_target_within_its_limits() {
+        // −33 LUFS-ish into a −23 target: about +10 dB after a few seconds.
+        let input = sine(997.0, -30.0, 12.0);
+        let before = tail_lufs(&input, 2.0);
+        let mut p = proc(leveler(-23.0, 15.0, 5.0, -60.0, false), 1);
+        let out = run(&mut p, std::slice::from_ref(&input), None);
+        let after = tail_lufs(&out[0], 2.0);
+        assert!((after + 23.0).abs() < 0.5, "{before} → {after}");
+        // The gain is limited: at most +6 dB.
+        let mut p = proc(leveler(-23.0, 6.0, 5.0, -60.0, false), 1);
+        let out = run(&mut p, std::slice::from_ref(&input), None);
+        let gain = tail_lufs(&out[0], 2.0) - before;
+        assert!((gain - 6.0).abs() < 0.2, "{gain}");
+        // It moves at its speed: after 1 s at 2 dB/s, about 2 dB (the first
+        // 400 ms it waits for a measurement).
+        let short = sine(997.0, -30.0, 1.4);
+        let mut p = proc(leveler(-23.0, 15.0, 2.0, -60.0, false), 1);
+        run(&mut p, std::slice::from_ref(&short), None);
+        match &p.kind {
+            Kind::Leveler { gain, .. } => assert!((gain - 2.0).abs() < 0.2, "{gain}"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn leveler_holds_below_the_gate_and_limits() {
+        // −63 LUFS-ish is below a −50 gate: the gain stays at 0.
+        let quiet = sine(997.0, -60.0, 6.0);
+        let mut p = proc(leveler(-23.0, 15.0, 5.0, -50.0, false), 1);
+        let out = run(&mut p, std::slice::from_ref(&quiet), None);
+        assert!((tail_peak(&out[0], 1.0) - tail_peak(&quiet, 1.0)).abs() < 0.01);
+        // Levelled to −10 LUFS (a sine's peak about −7 dBFS): the safety
+        // limiter at −10 dBFS holds it, with 1 ms latency.
+        let loud = sine(997.0, -20.0, 8.0);
+        let mut kind = leveler(-10.0, 15.0, 10.0, -60.0, true);
+        if let ProcKind::Leveler { ceiling_db, .. } = &mut kind {
+            *ceiling_db = -10.0;
+        }
+        let mut p = proc(kind, 1);
+        assert_eq!(p.latency, 48);
+        let out = run(&mut p, std::slice::from_ref(&loud), None);
+        let peak = tail_peak(&out[0], 2.0);
+        assert!(peak <= -9.99 && peak > -10.5, "{peak}");
+    }
+
+    /// Not a check: the leveler's cost per 96-sample block, stereo and 5.1:
+    /// `cargo test --release --lib leveler_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn leveler_cost() {
+        for channels in [2, 6] {
+            for limiter in [false, true] {
+                let mut p = proc(leveler(-23.0, 12.0, 2.0, -50.0, limiter), channels);
+                let tone = sine(997.0, -20.0, 1.0);
+                let mut bufs = vec![vec![0f32; B]; channels];
+                let blocks = 20_000;
+                let started = std::time::Instant::now();
+                for b in 0..blocks {
+                    let at = (b * B) % (tone.len() - B);
+                    for c in bufs.iter_mut() {
+                        c.copy_from_slice(&tone[at..at + B]);
+                    }
+                    let mut io: Vec<&mut [f32]> = bufs.iter_mut().map(|c| &mut c[..]).collect();
+                    p.process(&mut io, &[], B, &[]);
+                }
+                let ns = started.elapsed().as_nanos() as f64 / blocks as f64;
+                eprintln!("leveler {channels} ch, limiter {limiter}: {ns:6.0} ns per block");
+            }
+        }
+    }
+
     #[test]
     fn eq_and_filter() {
         let mut eq = proc(
@@ -2000,6 +2261,29 @@ mod tests {
             "{}",
             tail_peak(&out[0], 0.3)
         );
+        // Every band's gain reduction goes to the node meter (B2): band 2 about
+        // 15 dB, the others none.
+        let mut m = proc(kind(-40.0), 1);
+        m.meter = 0;
+        let meters = [NodeMeter::default()];
+        let x = sine(700.0, -20.0, 1.0);
+        let mut io = x.clone();
+        for block in io.chunks_exact_mut(B) {
+            p_block(&mut m, block, &meters);
+        }
+        let gr: Vec<f32> = meters[0]
+            .bands
+            .iter()
+            .map(|a| f32::from_bits(a.load(Ordering::Relaxed)))
+            .collect();
+        assert!((gr[1] - 15.0).abs() < 1.0, "{gr:?}");
+        assert!(gr[0] < 0.5 && gr[2] < 0.5 && gr[3] < 0.5, "{gr:?}");
+        assert!(gr[4..].iter().all(|g| *g == 0.0));
+    }
+
+    fn p_block(p: &mut Processor, block: &mut [f32], meters: &[NodeMeter]) {
+        let mut io = [block];
+        p.process(&mut io, &[], B, meters);
     }
 
     #[test]

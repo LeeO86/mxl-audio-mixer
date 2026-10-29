@@ -16,7 +16,7 @@ use crate::inputs::Inputs;
 use crate::loudness::LoudnessMeters;
 use crate::meters::Meters;
 use crate::mix::compile::{Compiler, LayoutNode};
-use crate::mix::model::{Kind, Mix, Patch, Strip, Tap};
+use crate::mix::model::{Kind, Mix, Patch, Strip};
 use crate::outputs::{OutputSpec, Outputs};
 
 /// Time between fading out the nodes a change removes or rewires and the swap:
@@ -507,6 +507,7 @@ impl Control {
                             signal,
                             format: None,
                             commit_samples: None,
+                            tap: None,
                         });
                     }
                 }
@@ -795,7 +796,7 @@ impl Control {
                 let (name, _) = mix.signal(&o.signal)?;
                 let format = match o.format {
                     Some(f) => f,
-                    None => mix.tap_format(&o.signal, &Tap::PostFader)?,
+                    None => mix.tap_format(&o.signal, &o.tap())?,
                 };
                 Some(OutputSpec {
                     signal: o.signal.clone(),

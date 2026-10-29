@@ -180,6 +180,7 @@ mod tests {
             signal: "main".into(),
             format: None,
             commit_samples: None,
+            tap: None,
         });
         assert_eq!(mix.validate(2, 96), Ok(()));
 

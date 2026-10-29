@@ -2,11 +2,14 @@
 // Routing (§12.3): the send matrix (rows: sources, columns: destination buses; a click on an empty cell
 // marks it yellow, a second click on it within 3 s sends at 0 dB from the source's output, a click
 // elsewhere or the 3 s cancel; a click on a send edits it) and the published outputs (an MXL flow and an
-// NMOS sender each; a strip as its post-fader direct out).
+// NMOS sender each; a strip as its post-fader direct out). A send from a mono or stereo source into a
+// 5.1 or bigger bus shows a surround panner (B6): moving it gives the send its own panning.
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import Pot from "./Pot.vue";
 import Pill from "./Pill.vue";
+import SurroundPad from "./SurroundPad.vue";
+import { DEFAULT_SEND_PAN, sendPanBed } from "../sendpan.js";
 import { tapLabel } from "../nodes.js";
 import { loadTaps, tapOptions } from "../taps.js";
 import { api, copyText, dbValue, fmtDb } from "../api.js";
@@ -63,6 +66,10 @@ const tapChoices = computed(() => (current.value ? tapOptions(current.value.from
 function setTap(v) {
   put({ tap: v.startsWith("after:") ? { after: v.slice(6) } : v });
 }
+// The send's own surround panner (B6).
+const panBed = computed(() => sendPanBed(current.value));
+const panNode = computed(() => ({ layout: panBed.value, ...(current.value?.pan || DEFAULT_SEND_PAN) }));
+const setPan = (change) => put({ pan: { ...DEFAULT_SEND_PAN, ...(current.value?.pan || {}), ...change } });
 const gain = computed(() => {
   const v = dbValue(current.value?.gain_db);
   return Number.isFinite(v) ? v : -80;
@@ -105,7 +112,7 @@ async function copyFlow(o) {
                 :title="cellTitle(s, b)"
                 @click="cell(s.id, b.id)"
               >
-                {{ sendOf(s.id, b.id) ? fmtDb(sendOf(s.id, b.id).gain_db) : armed === cellKey(s.id, b.id) ? "0.0?" : "" }}
+                {{ sendOf(s.id, b.id) ? fmtDb(sendOf(s.id, b.id).gain_db) : armed === cellKey(s.id, b.id) ? "0.0?" : "" }}<span v-if="sendOf(s.id, b.id)?.pan && sendPanBed(sendOf(s.id, b.id))" class="panmark" title="panned in the send"> ◎</span>
               </button>
             </td>
           </tr>
@@ -140,12 +147,24 @@ async function copyFlow(o) {
         </label>
       </div>
     </div>
+    <div v-if="panBed && !current.block_delay" class="sendpan" data-send-pan>
+      <label>Surround panning ({{ panBed }} bed)</label>
+      <SurroundPad :node="panNode" @change="setPan" />
+      <template v-if="current.pan">
+        <Pot label="Position" unit="°" :value="current.pan.azimuth_deg" :min="-180" :max="180" :def="0" :fine="0.5" :digits="0" @change="(v) => setPan({ azimuth_deg: v })" />
+        <Pot label="Spread" unit="%" :value="current.pan.spread_pct" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setPan({ spread_pct: v })" />
+        <Pot label="Divergence" unit="% (C into L/R)" :value="current.pan.divergence_pct" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setPan({ divergence_pct: v })" />
+        <Pot label="LFE" unit="dB (−100: off)" :value="current.pan.lfe_db" :min="-100" :max="10" :def="-100" :fine="0.5" @change="(v) => setPan({ lfe_db: v })" />
+        <button class="btn small secondary" title="Remove the send's own panning: the strip's panner again" @click="put({ pan: null })">Use the strip's panner</button>
+      </template>
+      <p v-else class="note">Click or drag on the pad to pan this send (it then has its own panning, kept in the mix).</p>
+    </div>
     <div class="actions"><ConfirmButton label="Remove send" @confirm="remove" /></div>
   </div>
 
   <div class="panel">
     <h3>Published outputs</h3>
-    <p class="note" style="margin-top: 0">A bus is published post-fader; a strip as its direct out (post-fader, before the pan).</p>
+    <p class="note" style="margin-top: 0">A bus is published post-fader; a strip as its direct out (post-fader, before the pan). Another tap: drag the output in the Processing view's signal flow.</p>
     <table>
       <thead>
         <tr><th>Signal</th><th>Format</th><th>State</th><th class="num">Latency ms</th><th class="num">Commit lag ms</th><th>MXL flow</th><th></th></tr>
@@ -155,6 +174,7 @@ async function copyFlow(o) {
           <td>
             <strong>{{ s.name }}</strong> <span class="muted small">{{ s.id }}</span>
             <span v-if="!isBus(s.id)" class="muted small"> · direct out</span>
+            <span v-if="live.mix?.outputs?.find((o) => o.signal === s.id)?.tap" class="muted small"> · {{ tapLabel(live.mix.outputs.find((o) => o.signal === s.id).tap) }}</span>
           </td>
           <td>{{ outputOf(s.id)?.format || s.format }}</td>
           <td>
@@ -178,3 +198,13 @@ async function copyFlow(o) {
     </table>
   </div>
 </template>
+
+<style scoped>
+.sendpan {
+  max-width: 420px;
+  margin-top: 0.5rem;
+}
+.panmark {
+  font-size: 0.75em;
+}
+</style>
