@@ -649,9 +649,9 @@ impl Compiler {
                         && !soloed_signals.is_empty()
                         && !soloed_signals.contains_key(&s.id)
                         && !s.solo_safe;
-                    // The fader, then the mute as a gain of its own: the strip's
-                    // meter reads between them, so a muted strip still shows its
-                    // level (A3).
+                    // The fader, audio-follows-video, then the mute as a gain of
+                    // its own: the strip's meter reads before the mute, so a muted
+                    // strip still shows its level (A3).
                     let fader = if sip_muted {
                         0.0
                     } else {
@@ -662,27 +662,11 @@ impl Compiler {
                         (format_name(s.format), chain_sig),
                         vec![fader; n],
                     );
-                    let level = c.b.buffers(n);
+                    let mut level = c.b.buffers(n);
                     c.b.step(Step::Gain {
                         node,
                         src: pre.0,
                         dst: level,
-                    });
-                    let open = if mix.silenced(&s.id, s.mute, &vca_effects, &grouped) {
-                        0.0
-                    } else {
-                        1.0
-                    };
-                    let node = c.node(
-                        format!("strip/{}/mute", s.id),
-                        (format_name(s.format), chain_sig),
-                        vec![open; n],
-                    );
-                    let mut post = c.b.buffers(n);
-                    c.b.step(Step::Gain {
-                        node,
-                        src: level,
-                        dst: post,
                     });
                     if s.afv.is_some_and(|a| a.enabled) {
                         let g = c.compiler.afv.get(&s.id).copied().unwrap_or(0.0);
@@ -694,11 +678,27 @@ impl Compiler {
                         let after = c.b.buffers(n);
                         c.b.step(Step::Gain {
                             node,
-                            src: post,
+                            src: level,
                             dst: after,
                         });
-                        post = after;
+                        level = after;
                     }
+                    let open = if mix.silenced(&s.id, s.mute, &vca_effects, &grouped) {
+                        0.0
+                    } else {
+                        1.0
+                    };
+                    let node = c.node(
+                        format!("strip/{}/mute", s.id),
+                        (format_name(s.format), chain_sig),
+                        vec![open; n],
+                    );
+                    let post = c.b.buffers(n);
+                    c.b.step(Step::Gain {
+                        node,
+                        src: level,
+                        dst: post,
+                    });
                     // The panner: mono and stereo strips to stereo, or a surround
                     // panner's matrix into its layout (D5).
                     let surround = s.chain.iter().find_map(|p| match &p.kind {
