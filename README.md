@@ -348,7 +348,7 @@ token.
 | `MIXER_LOG_LEVEL` | info | Log level: error, warn, info, debug, trace. |
 | `MIXER_INPUT_FLOWS` | 16 | Number of MXL audio inputs (NMOS receivers), 1–256. Every distinct flow read takes an MXL instance, i.e. an inotify instance: `fs.inotify.max_user_instances` (often 128 per uid, shared with every MXL process of that uid) must leave room for them. |
 | `MIXER_OUTPUT_FLOWS` | length of MIXER_OUTPUTS, else 0 | Number of virtual outputs, 0–64: fixed MXL flows and NMOS senders (`out-vout:1` …) the designer can wire; the operator picks what feeds each. 0: only the published outputs. Each takes one of the 128 output slots. |
-| `MIXER_OUTPUTS` | [] | JSON array, one entry per virtual output: `{"label": "PGM", "format": "5.1"}`; both optional ("Output <n>", stereo). The format of a flow never changes while it runs. In `MIXER_CONFIG_FILE` also as a JSON array. |
+| `MIXER_OUTPUTS` | [] | JSON array, one entry per virtual output: `{"key": "pgm", "label": "PGM", "format": "5.1"}`; all optional (key: the slot number; "Output <n>"; stereo). `key` (`a-z`, `0-9`, `-`, 1–32, not only digits, unique) names the output's ids and its source in the mix, so reordering the list keeps both. The format of a flow never changes while it runs. In `MIXER_CONFIG_FILE` also as a JSON array. |
 | `MIXER_BLOCK_SAMPLES` | 96 | DSP block size in samples at 48 kHz: 48, 96, 144 or 240. |
 | `MIXER_READ_OFFSET` | 2 | Read offset in ms: every input is read at t_out − (offset + its extra delay). |
 | `MIXER_OUTPUT_COMMIT_SAMPLES` | one block | Samples per MXL commit of an output (a multiple of the block size). |
@@ -461,19 +461,29 @@ an id gets `strip-<n>` or `bus-<n>`.
   flow id is UUIDv5 of `NMOS_SEED` and the signal id, so it survives restarts. At
   most 128 outputs.
 - **Virtual output** (`MIXER_OUTPUT_FLOWS`, `MIXER_OUTPUTS`): a fixed output the
-  designer wires, there from the start whatever the mix: signal `vout:<n>`, an MXL
-  flow in the own domain (id UUIDv5 of `"<NMOS_SEED>/output/vout:<n>/mxl-flow"`)
-  and an NMOS Source, Flow and Sender keyed `out-vout:<n>` (sender id UUIDv5 of
-  `"sender:out-vout:<n>"` in the node id's namespace; label the configured one,
-  group hint `<label>:Audio`). The mix's `virtual_outputs` say what feeds each:
-  `[{"slot": n, "source": …}]` with a source `{"signal": "<strip or bus>",
+  designer wires, there from the start whatever the mix. Its id is its `key`, else
+  its slot number: signal `vout:<id>`, an MXL flow in the own domain (id UUIDv5 of
+  `"<NMOS_SEED>/output/vout:<id>/mxl-flow"`) and an NMOS Source, Flow and Sender
+  keyed `out-vout:<id>` (sender id UUIDv5 of `"sender:out-vout:<id>"` in the node
+  id's namespace; label the configured one, group hint `<label>:Audio`). They
+  take their output slots first; the published outputs and monitors share the
+  other `128 − MIXER_OUTPUT_FLOWS`. The mix's `virtual_outputs` say what feeds
+  each: `[{"output": "<id>", "source": …}]` with a source `{"signal": "<strip or bus>",
   "tap"?: <tap>}` (a strip's direct out, a bus; default post-fader), `{"monitor":
   "<id>"}` (a control-room monitor's output) or `{"input": n, "format"?: …}` (an
   input straight through, no strip; `format` says what it carries, default the
   output's, channel for channel). The source is mapped to the output's format by
   the width mapping below; without one the flow is written with silence. A deleted
-  signal or monitor leaves its virtual outputs silent. Left out of the show while
-  empty.
+  signal or monitor leaves its virtual outputs silent; linking or unlinking
+  strips moves it (and a published output) to the first new strip. A source
+  has exactly one of `signal` (with `tap`), `monitor` or `input` (with
+  `format`). Left out of the show while empty. Sources of outputs this host
+  does not have are kept, silent. Restoring a show-history version from before
+  the sources clears them. The flows are made again at every start (the writer
+  deletes them at a stop) with the configured format; after an unclean stop a
+  slot whose format changed fails until its old flow is gone (as a published
+  output). An IS-05 `master_enable: false` on their senders is accepted but
+  writes on, as for published outputs.
 - **Formats** (§4.1), channel order as SMPTE ST 2110-30: mono `M`; stereo `L R`;
   `3.0` `L R C`; `5.1` `L R C LFE Ls Rs`; `7.1` `L R C LFE Lss Rss Lrs Rrs`;
   `5.1.4` = 5.1 + `Ltf Rtf Ltr Rtr`; `7.1.4` = 7.1 + the same heights.
@@ -939,11 +949,11 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `POST /api/v1/talkback/browser`, `DELETE …/browser/<id>` | `{"client"}`: this browser's microphone is on (repeat within 30 s); answers `{"id", "path", "whip_url", "whip_port"}` |
 | `GET`, `PUT`, `DELETE /api/v1/listen-back` | `{"destination"}` (its return) or `{"source"}` |
 | `GET /api/v1/tally` | the TSL settings, packets, every tally index's lamps (screen, display, LH, RH, label, age) and the strips that follow one (on air, preview, AFV open) |
-| `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens; `sender_id` (from the IS-05 activation) and `connected_label`: the name of what is connected (the IS-04 sender label from the Query API, else the MXL flow's label; looked up off the control path every 2 s) |
-| `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}`; `label` is the input's alias: strips that read only this input and still have the old alias as name take the new one |
+| `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens; `sender_id` (from the IS-05 activation) and `connected_label`: the name of what is connected (the IS-04 sender label from the Query API v1.3, else the MXL flow's label; looked up off the control path when the route changes and every minute; a Query API that does not answer is retried with a backoff of 5 s to 1 min, meanwhile the last sender label stays) |
+| `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}`; `label` is the input's alias (`""`: back to "Input n"): strips that read only this input and still have the old alias as name take a new one |
 | `PUT /api/v1/inputs/<n>/route` | `{"flow_id", "domain_id", "sender_id"?}` or `{"flow_id": null}`: routes (or disconnects) the input through its own IS-05 receiver |
 | `GET /api/v1/flows` | the audio flows in the visible MXL domains: `domain_id`, `domain_label`, `own`, `flow_id`, `label`, `channels` |
-| `GET /api/v1/virtual-outputs`, `GET /api/v1/virtual-outputs/<n>` | the virtual outputs: `slot`, `signal`, `label`, `format`, `source`, `nmos_sender_id`, `mxl_flow_id`, `running`, `errors`, `commit_lag_ms` (also in `GET /api/v1/status`) |
+| `GET /api/v1/virtual-outputs`, `GET /api/v1/virtual-outputs/<n>` | `<n>`: the slot number or the key. The virtual outputs: `slot`, `id`, `key`, `signal`, `label`, `format`, `source`, `nmos_sender_id`, `mxl_flow_id`, `running`, `errors`, `commit_lag_ms` (also in `GET /api/v1/status`) |
 | `PUT /api/v1/virtual-outputs/<n>`, `DELETE …/<n>` | `{"source": <source> \| null}`: what feeds it (above); DELETE: silence. 404 for a slot above `MIXER_OUTPUT_FLOWS`, 400 for a source that does not exist |
 | `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |
 | `/x-nmos/…` on `NMOS_PORT` | IS-04 v1.3, IS-05 v1.2, BCP-007-03 ([mxl-nmos](https://github.com/LeeO86/mxl-nmos) v0.1.1) |
@@ -973,7 +983,7 @@ their answers at once.
 the control engine did not get), `signals`,
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}` (virtual outputs as `vout:<n>`),
-`virtual_output_routed{slot,label}` (1 with a source, 0 silent), `loudness_lufs{signal,window}` (window
+`virtual_output_routed{slot,output,label}` (`output`: key or slot; 1 with a source, 0 silent), `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,
 `timing_trusted`, `tally_packets_total`, `vad_active{signal}`, `preview_state{path}` (0 idle, 1
 connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,

@@ -9,6 +9,7 @@
 - C3: an input's MXL flow is chosen in the graph (`GET /api/v1/flows`, `PUT /api/v1/inputs/<n>/route` through the own IS-05 receiver).
 - C4: double-click in the graph opens a strip's or bus's processing, a monitor's control room.
 - C5: the graph keeps zoom, pan and its open panel over a tab switch.
+- Downgrade: 1.4.x refuses a mix with virtual output sources (`virtual_outputs`): it moves `mix.json` to `mix.json.bad` and starts empty. Before going back, silence every virtual output (`DELETE /api/v1/virtual-outputs/<n>`); their routing is lost, and the 1.4 mixer has no virtual outputs (the designer's wiring to them goes dead).
 
 ## 1.4.3 (2026-10-24)
 

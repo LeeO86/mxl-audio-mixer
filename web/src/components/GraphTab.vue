@@ -270,8 +270,10 @@ async function openInput(n) {
 }
 const flowLabel = (f) => `${f.label || f.flow_id.slice(0, 8)} · ${f.channels} ch · ${f.domain_label || f.domain_id.slice(0, 8)}${f.own ? " (own)" : ""}`;
 async function saveAlias() {
+  // Empty: back to the default name "Input n".
   const label = inputForm.value.label.trim();
-  if (label && label !== editedInput.value?.label) await act(() => api.patch(`/api/v1/inputs/${inputEdit.value}`, { label }));
+  if (label !== editedInput.value?.label && !(label === "" && editedInput.value?.label === `Input ${inputEdit.value}`))
+    await act(() => api.patch(`/api/v1/inputs/${inputEdit.value}`, { label }));
 }
 async function connectFlow() {
   const [domain_id, flow_id] = inputForm.value.flow.split("|");
@@ -377,7 +379,7 @@ function setVoutInputFormat(f) {
         <label>Alias</label>
         <input v-model="inputForm.label" aria-label="Alias" maxlength="64" @keydown.enter="saveAlias" @blur="saveAlias" />
       </div>
-      <p class="note">Strips of this input still named after the old alias take the new one.</p>
+      <p class="note">Strips of this input still named after the old alias take the new one. Empty: back to "Input {{ editedInput.input }}".</p>
       <div class="row">
         <label>Flow</label>
         <select v-model="inputForm.flow" aria-label="MXL flow">

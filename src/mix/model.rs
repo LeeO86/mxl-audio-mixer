@@ -373,9 +373,11 @@ pub struct Output {
     pub commit_samples: Option<u32>,
 }
 
-/// What feeds a virtual output (C7).
+/// What feeds a virtual output (C7). In JSON exactly one of `signal`,
+/// `monitor` or `input`, with `tap` only beside `signal` and `format` only
+/// beside `input`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, try_from = "RawSource")]
 pub enum OutputSource {
     /// A strip (its direct out) or a bus at `tap` (default: post-fader).
     Signal {
@@ -395,11 +397,46 @@ pub enum OutputSource {
     },
 }
 
-/// The source of virtual output `slot` (from 1). A slot without one is silent.
+/// Every field a source may have, checked by [`OutputSource`]'s `TryFrom`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSource {
+    signal: Option<String>,
+    tap: Option<Tap>,
+    monitor: Option<String>,
+    input: Option<usize>,
+    format: Option<Format>,
+}
+
+impl TryFrom<RawSource> for OutputSource {
+    type Error = String;
+
+    fn try_from(r: RawSource) -> Result<Self, String> {
+        match (r.signal, r.monitor, r.input) {
+            (Some(signal), None, None) if r.format.is_none() => {
+                Ok(Self::Signal { signal, tap: r.tap })
+            }
+            (None, Some(monitor), None) if r.tap.is_none() && r.format.is_none() => {
+                Ok(Self::Monitor { monitor })
+            }
+            (None, None, Some(input)) if r.tap.is_none() => Ok(Self::Input {
+                input,
+                format: r.format,
+            }),
+            _ => Err(
+                "a source has exactly one of signal (with tap), monitor or input (with format)"
+                    .into(),
+            ),
+        }
+    }
+}
+
+/// The source of virtual output `output`: its configured `key`, else its slot
+/// number (from 1) as text. An output without a route is silent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualRoute {
-    pub slot: usize,
+    pub output: String,
     pub source: OutputSource,
 }
 
@@ -802,23 +839,19 @@ impl Mix {
         Ok(())
     }
 
-    /// The virtual outputs' sources (C7): one per slot, each naming what exists.
-    /// Slots above `MIXER_OUTPUT_FLOWS` are kept (another host may have them)
+    /// The virtual outputs' sources (C7): one per output, each naming what
+    /// exists. Outputs this host does not have (another `MIXER_OUTPUTS`) are kept
     /// and stay silent.
     fn validate_virtual_outputs(&self, inputs: usize) -> Result<(), String> {
-        let mut slots = BTreeSet::new();
+        let mut outputs = BTreeSet::new();
         for r in &self.virtual_outputs {
-            if r.slot == 0 || r.slot > crate::config::MAX_VIRTUAL_OUTPUTS {
-                return Err(format!(
-                    "virtual output {}: the slot is 1 to {}",
-                    r.slot,
-                    crate::config::MAX_VIRTUAL_OUTPUTS
-                ));
+            if r.output.is_empty() || r.output.len() > 32 {
+                return Err(format!("virtual output {:?}: 1 to 32 characters", r.output));
             }
-            if !slots.insert(r.slot) {
-                return Err(format!("virtual output {} has two sources", r.slot));
+            if !outputs.insert(r.output.as_str()) {
+                return Err(format!("virtual output {} has two sources", r.output));
             }
-            let at = |e: String| format!("virtual output {}: {e}", r.slot);
+            let at = |e: String| format!("virtual output {}: {e}", r.output);
             match &r.source {
                 OutputSource::Signal { signal, tap } => {
                     if self.kind(signal).is_none() {
@@ -859,21 +892,24 @@ impl Mix {
         }
     }
 
-    /// The source of virtual output `slot`, if it has one.
-    pub fn virtual_source(&self, slot: usize) -> Option<&OutputSource> {
+    /// The source of virtual output `output` (its key, else its slot number as
+    /// text), if it has one.
+    pub fn virtual_source(&self, output: &str) -> Option<&OutputSource> {
         self.virtual_outputs
             .iter()
-            .find(|r| r.slot == slot)
+            .find(|r| r.output == output)
             .map(|r| &r.source)
     }
 
-    /// Set (or with `None` clear) the source of virtual output `slot`; the
+    /// Set (or with `None` clear) the source of virtual output `output`; the
     /// caller validates the mix after (the logic's route action, D4, too).
-    pub fn set_virtual_source(&mut self, slot: usize, source: Option<OutputSource>) {
-        self.virtual_outputs.retain(|r| r.slot != slot);
+    pub fn set_virtual_source(&mut self, output: &str, source: Option<OutputSource>) {
+        self.virtual_outputs.retain(|r| r.output != output);
         if let Some(source) = source {
-            self.virtual_outputs.push(VirtualRoute { slot, source });
-            self.virtual_outputs.sort_by_key(|r| r.slot);
+            self.virtual_outputs.push(VirtualRoute {
+                output: output.to_string(),
+                source,
+            });
         }
     }
 

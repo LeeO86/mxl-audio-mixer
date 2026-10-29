@@ -195,9 +195,10 @@ rates other than 48 kHz, recording.
 - **What is connected, and an alias (C2, 1.5.0):** each input shows the name of what
   is connected: the IS-04 label of the sender named by the IS-05 activation
   (`sender_id`), read from the Query API, else the `label` of the MXL flow's
-  `flow_def.json`. It is looked up off the control path (a background task, every 2 s,
-  once per change of sender or flow; a miss again after 30 s), never by the DSP or a
-  change. The input's label is the operator's alias, kept with the inputs; strips that
+  `flow_def.json`. It is looked up off the control path (a background task: on a
+  change of sender or flow, again every minute for renames, a miss after 30 s; a Query
+  API that does not answer is left alone for a backoff of 5 s growing to 1 min, shared
+  by all inputs), never by the DSP or a change. The input's label is the operator's alias, kept with the inputs; strips that
   read only that input and still carry the old alias as name take a new alias.
 - **Routing from the UI (C3, 1.5.0):** the graph view lists the audio flows of the
   visible domains and routes an input through its own IS-05 receiver (a PATCH of its
@@ -267,9 +268,9 @@ rates other than 48 kHz, recording.
   `NMOS_SEED` + the stable signal id, like the NMOS ids. Downstream readers then keep
   receiving after a mixer restart or upgrade.
 - **Virtual outputs (C7, 1.5.0):** `MIXER_OUTPUT_FLOWS` fixed outputs (labels and
-  formats from `MIXER_OUTPUTS`, default stereo), symmetric to the receivers: each an
-  MXL flow and an NMOS sender (key `out-vout:<n>`) from the start, with ids from
-  `NMOS_SEED` and the slot, so the production's designer can wire them before the
+  formats and optional stable keys from `MIXER_OUTPUTS`, default stereo), symmetric to
+  the receivers: each an MXL flow and an NMOS sender (key `out-vout:<key or slot>`) from
+  the start, with ids from `NMOS_SEED` and the key (else the slot), so the production's designer can wire them before the
   operator does anything. The mix says what feeds each (`virtual_outputs`): a strip's
   direct out or a bus at a tap, a control-room monitor, or an input straight through
   (no strip). A source of another format goes through the width mapping (down-mix,
@@ -703,7 +704,7 @@ README's Settings table is the complete list, with every default):
 | `TSL_OUT_TARGET` | unset | `host:port` of the logic editor's TSL UMD 5.0 output over UDP (§11.1 "TSL tally out"); invalid: exit 78. |
 | `TSL_OUT_SCREEN` | 0 | Its TSL screen, 0–65534. |
 | `MIXER_OUTPUT_FLOWS` | length of `MIXER_OUTPUTS`, else 0 | Number of virtual outputs, 0–64 (§4.3). |
-| `MIXER_OUTPUTS` | `[]` | Per virtual output `{"label", "format"}`, both optional ("Output <n>", stereo). |
+| `MIXER_OUTPUTS` | `[]` | Per virtual output `{"key", "label", "format"}`, all optional (the slot number, "Output <n>", stereo). |
 
 ---
 
@@ -728,7 +729,7 @@ Also:
   `input_overrun_samples_total{input}` (the ring had already overwritten the
   samples; `input_late_samples_total` is the source that had not written them);
 - `output_commit_lag_ms{output}`;
-- `virtual_output_routed{slot,label}` (1 with a source, 0 silent; §4.3);
+- `virtual_output_routed{slot,output,label}` (1 with a source, 0 silent; §4.3);
 - `timing_trusted` (0/1, §4.4);
 - `preview_state{path}` and `preview_readers{path}` (Appendix B.1);
 - `tally_packets_total`.

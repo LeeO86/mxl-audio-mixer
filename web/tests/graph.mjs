@@ -87,16 +87,22 @@ try {
     pass(`Graph: monitor ${mon} into Clean (C6)`);
   }
 
-  // C1: a mono strip's send into a stereo bus edits its pan; a 5.1 send into stereo its down-mix.
-  await page.locator('.vue-flow__edge[data-id="send:vox:main"]').click({ force: true });
+  // C1: a mono strip's post-pan send into a stereo bus edits its pan; a 5.1 send into stereo its down-mix.
+  // Its own mono strip and post-pan send (the earlier scripts change the others).
+  await send("POST", "/api/v1/strips", { id: "c1", name: "C1 mono", format: "mono", patch: [{ input: 1, channel: 1 }] });
+  await send("PUT", "/api/v1/sends/c1/main", { tap: "post-pan" });
+  // A click on the edge itself (a forced click at its box's centre may hit another wire).
+  const edgeClick = (id) => page.locator(`.vue-flow__edge[data-id="${id}"]`).dispatchEvent("click");
+  await until("c1 → main edge", async () => (await page.locator('.vue-flow__edge[data-id="send:c1:main"]').count()) === 1);
+  await edgeClick("send:c1:main");
   await page.locator("[data-send-edit] [data-strip-pan]").waitFor();
   await page.screenshot({ path: `${out}/graph-c1-pan.png` });
-  pass("Graph: the vox → main send shows the strip's pan");
+  pass("Graph: the c1 → main send shows the strip's pan");
   const buses = (await api("/api/v1/mix")).buses.map((b) => b.id);
   if (buses.includes("surround")) {
     await send("PUT", "/api/v1/sends/surround/main", {}).catch(() => {});
     await until("surround → main edge", async () => (await page.locator('.vue-flow__edge[data-id="send:surround:main"]').count()) === 1);
-    await page.locator('.vue-flow__edge[data-id="send:surround:main"]').click({ force: true });
+    await edgeClick("send:surround:main");
     await page.locator("[data-send-edit] [data-send-downmix]").waitFor();
     await page.locator("[data-send-downmix]").getByRole("button", { name: "Own down-mix" }).click();
     await until("main has its own down-mix", async () => !!(await api("/api/v1/buses/main")).downmix);
@@ -134,11 +140,13 @@ try {
   pass("Graph: zoom and pan stay over a tab switch");
 
   // C4: double-click a strip for its processing, a monitor for the control room.
-  await page.locator('[data-gnode="gtr"]').dblclick();
+  await page.getByRole("button", { name: "Fit" }).click();
+  await page.waitForTimeout(300);
+  await page.locator('[data-gnode="c1"]').dblclick();
   await until("processing tab", async () => (await page.locator('nav button[aria-current="page"]').textContent()).trim() === "Processing");
   const sel = await page.getByLabel("Signal", { exact: true }).inputValue();
-  if (sel !== "gtr") throw new Error(`processing shows ${sel}, not gtr`);
-  pass("Graph: double-click on Guitar opens its processing");
+  if (sel !== "c1") throw new Error(`processing shows ${sel}, not c1`);
+  pass("Graph: double-click on a strip opens its processing");
   if (mon) {
     await page.locator("nav button", { hasText: "Graph" }).click();
     await page.locator(`[data-gnode="_mon_${mon}"]`).dblclick();

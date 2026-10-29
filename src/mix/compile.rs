@@ -73,15 +73,15 @@ pub struct Compiler {
     /// What the monitors that follow solo play instead of their source
     /// (listen-back, runtime).
     pub listen_back: Option<Source>,
-    /// The format of each virtual output (C7), slot 1 first; its output slot
-    /// is `outputs[vout_key(n)]`.
-    pub vouts: Vec<Format>,
+    /// The id (key or slot number) and format of each virtual output (C7),
+    /// slot 1 first; its output slot is `outputs[vout_key(id)]`.
+    pub vouts: Vec<(String, Format)>,
 }
 
-/// The output key of virtual output `slot` (from 1): its published signal,
-/// NMOS key `out-vout:<n>` (a colon: no signal id has one).
-pub fn vout_key(slot: usize) -> String {
-    format!("vout:{slot}")
+/// The output key of virtual output `id` (its key, else its slot number): its
+/// published signal, NMOS key `out-vout:<id>` (a colon: no signal id has one).
+pub fn vout_key(id: &str) -> String {
+    format!("vout:{id}")
 }
 
 /// A talkback mic with where the engine reads it (input index, channel).
@@ -1220,14 +1220,13 @@ impl Compiler {
 
         // Virtual outputs (C7): their source through the width rules, else silence,
         // so the flow keeps running for its readers.
-        for (i, to) in c.compiler.vouts.clone().into_iter().enumerate() {
-            let n = i + 1;
-            let Some(&slot) = outputs.get(&vout_key(n)) else {
+        for (n, to) in c.compiler.vouts.clone() {
+            let Some(&slot) = outputs.get(&vout_key(&n)) else {
                 continue;
             };
             let out = c.b.buffers(to.channels());
             c.b.step(Step::Clear { dst: out });
-            let source: Option<(Span, Format, String, u64)> = match mix.virtual_source(n) {
+            let source: Option<(Span, Format, String, u64)> = match mix.virtual_source(&n) {
                 Some(OutputSource::Signal { signal, tap }) => {
                     let tap = tap.clone().unwrap_or(Tap::PostFader);
                     match (taps.get(signal), mix.tap_format(signal, &tap)) {
@@ -1467,34 +1466,39 @@ mod tests {
     #[test]
     fn virtual_outputs_take_their_source_or_stay_silent() {
         let mut compiler = Compiler {
-            vouts: vec![
+            vouts: [
                 Format::Surround51,
                 Format::Stereo,
                 Format::Stereo,
                 Format::Mono,
                 Format::Stereo,
-            ],
+                Format::Stereo,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| ((i + 1).to_string(), f))
+            .collect(),
             ..Default::default()
         };
         let mut m = mix();
         // 1: the main bus (stereo) up-mixed into 5.1; 2: nothing; 3: input 2
         // straight through; 4: the vox strip's direct out.
         m.set_virtual_source(
-            1,
+            "1",
             Some(OutputSource::Signal {
                 signal: "main".into(),
                 tap: None,
             }),
         );
         m.set_virtual_source(
-            3,
+            "3",
             Some(OutputSource::Input {
                 input: 2,
                 format: None,
             }),
         );
         m.set_virtual_source(
-            4,
+            "4",
             Some(OutputSource::Signal {
                 signal: "vox".into(),
                 tap: Some(Tap::PreFader),
@@ -1508,19 +1512,28 @@ mod tests {
         monitor.source = Some(Source::Signal("music".into()));
         m.control_room.monitors.push(monitor);
         m.set_virtual_source(
-            5,
+            "5",
             Some(OutputSource::Monitor {
                 monitor: "cr".into(),
             }),
         );
+        // 6: input 1 said to carry mono, into stereo: −3 dB on both sides.
+        m.set_virtual_source(
+            "6",
+            Some(OutputSource::Input {
+                input: 1,
+                format: Some(Format::Mono),
+            }),
+        );
         m.validate(2, 48).unwrap();
         let slots = HashMap::from([
-            (vout_key(5), 5),
+            (vout_key("6"), 6),
+            (vout_key("5"), 5),
             ("main".to_string(), 0),
-            (vout_key(1), 1),
-            (vout_key(2), 2),
-            (vout_key(3), 3),
-            (vout_key(4), 4),
+            (vout_key("1"), 1),
+            (vout_key("2"), 2),
+            (vout_key("3"), 3),
+            (vout_key("4"), 4),
         ]);
         let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
         let inputs = Inputs(vec![
@@ -1541,13 +1554,15 @@ mod tests {
         assert_eq!(out.0[&3][1][0], 0.2);
         assert_eq!(out.0[&4][0][0], 0.5, "pre-fader direct out");
         assert!(out.0[&5][1][0] > 0.0, "the monitor's output");
+        let h = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((out.0[&6][0][0] - h).abs() < 1e-6 && (out.0[&6][1][0] - h).abs() < 1e-6);
         // A source that is gone leaves the slot silent, never an error.
         m.remove_signal("main");
-        assert!(m.virtual_source(1).is_none());
+        assert!(m.virtual_source("1").is_none());
         // Bad sources are refused.
         let mut bad = mix();
         bad.set_virtual_source(
-            1,
+            "1",
             Some(OutputSource::Monitor {
                 monitor: "x".into(),
             }),
@@ -1555,7 +1570,7 @@ mod tests {
         assert!(bad.validate(2, 48).is_err());
         let mut bad = mix();
         bad.set_virtual_source(
-            1,
+            "1",
             Some(OutputSource::Input {
                 input: 3,
                 format: None,
@@ -1581,13 +1596,23 @@ mod tests {
     #[test]
     fn virtual_output_sources_round_trip_in_json() {
         for text in [
-            r#"{"slot":1,"source":{"signal":"main"}}"#,
-            r#"{"slot":2,"source":{"signal":"vox","tap":"pre-fader"}}"#,
-            r#"{"slot":3,"source":{"monitor":"cr"}}"#,
-            r#"{"slot":4,"source":{"input":2,"format":"mono"}}"#,
+            r#"{"output":"1","source":{"signal":"main"}}"#,
+            r#"{"output":"pgm","source":{"signal":"vox","tap":"pre-fader"}}"#,
+            r#"{"output":"3","source":{"monitor":"cr"}}"#,
+            r#"{"output":"4","source":{"input":2,"format":"mono"}}"#,
         ] {
             let r: crate::mix::model::VirtualRoute = serde_json::from_str(text).unwrap();
             assert_eq!(serde_json::to_string(&r).unwrap(), text);
+        }
+        // Mixed or unknown fields are refused.
+        for bad in [
+            r#"{"signal":"main","monitor":"cr"}"#,
+            r#"{"monitor":"cr","tap":"pre-fader"}"#,
+            r#"{"signal":"main","format":"mono"}"#,
+            r#"{"signal":"main","gain":1}"#,
+            r#"{}"#,
+        ] {
+            assert!(serde_json::from_str::<OutputSource>(bad).is_err(), "{bad}");
         }
         // An old mix has none, and an empty list is left out (rollback to 1.4).
         let m: Mix = serde_json::from_str("{}").unwrap();
