@@ -373,6 +373,36 @@ pub struct Output {
     pub commit_samples: Option<u32>,
 }
 
+/// What feeds a virtual output (C7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OutputSource {
+    /// A strip (its direct out) or a bus at `tap` (default: post-fader).
+    Signal {
+        signal: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tap: Option<Tap>,
+    },
+    /// A monitor of the control room (its output, after its level).
+    Monitor { monitor: String },
+    /// An input straight through, no strip. `format`: what the input carries
+    /// (default: the output's format, channel for channel); another format is
+    /// up- or down-mixed like a send.
+    Input {
+        input: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<Format>,
+    },
+}
+
+/// The source of virtual output `slot` (from 1). A slot without one is silent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualRoute {
+    pub slot: usize,
+    pub source: OutputSource,
+}
+
 /// Mix-wide laws and the loudness target.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -439,6 +469,9 @@ pub struct Mix {
     pub sends: Vec<Send>,
     #[serde(default)]
     pub outputs: Vec<Output>,
+    /// What feeds the virtual outputs (C7); left out while empty (a rollback).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub virtual_outputs: Vec<VirtualRoute>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layouts: Vec<super::show::Layout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -765,7 +798,83 @@ impl Mix {
                 }
             }
         }
+        self.validate_virtual_outputs(inputs)?;
         Ok(())
+    }
+
+    /// The virtual outputs' sources (C7): one per slot, each naming what exists.
+    /// Slots above `MIXER_OUTPUT_FLOWS` are kept (another host may have them)
+    /// and stay silent.
+    fn validate_virtual_outputs(&self, inputs: usize) -> Result<(), String> {
+        let mut slots = BTreeSet::new();
+        for r in &self.virtual_outputs {
+            if r.slot == 0 || r.slot > crate::config::MAX_VIRTUAL_OUTPUTS {
+                return Err(format!(
+                    "virtual output {}: the slot is 1 to {}",
+                    r.slot,
+                    crate::config::MAX_VIRTUAL_OUTPUTS
+                ));
+            }
+            if !slots.insert(r.slot) {
+                return Err(format!("virtual output {} has two sources", r.slot));
+            }
+            let at = |e: String| format!("virtual output {}: {e}", r.slot);
+            match &r.source {
+                OutputSource::Signal { signal, tap } => {
+                    if self.kind(signal).is_none() {
+                        return Err(at(format!("signal {signal} does not exist")));
+                    }
+                    if let Some(t) = tap {
+                        self.check_tap(signal, t).map_err(at)?;
+                    }
+                }
+                OutputSource::Monitor { monitor } => {
+                    if !self.control_room.monitors.iter().any(|m| &m.id == monitor) {
+                        return Err(at(format!("monitor {monitor} does not exist")));
+                    }
+                }
+                OutputSource::Input { input, .. } => {
+                    if *input == 0 || *input > inputs {
+                        return Err(at(format!("input {input} does not exist")));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// C2: input `input` (from 1) was renamed from `old` to `new`: every strip
+    /// that reads only that input and is still named `old` is named `new`.
+    pub fn inherit_input_label(&mut self, input: usize, old: &str, new: &str) {
+        for s in &mut self.strips {
+            let inputs: BTreeSet<usize> = s
+                .patch
+                .iter()
+                .flatten()
+                .filter_map(|p| p.input().map(|p| p.input))
+                .collect();
+            if s.name == old && inputs.len() == 1 && inputs.contains(&input) {
+                s.name = new.to_string();
+            }
+        }
+    }
+
+    /// The source of virtual output `slot`, if it has one.
+    pub fn virtual_source(&self, slot: usize) -> Option<&OutputSource> {
+        self.virtual_outputs
+            .iter()
+            .find(|r| r.slot == slot)
+            .map(|r| &r.source)
+    }
+
+    /// Set (or with `None` clear) the source of virtual output `slot`; the
+    /// caller validates the mix after (the logic's route action, D4, too).
+    pub fn set_virtual_source(&mut self, slot: usize, source: Option<OutputSource>) {
+        self.virtual_outputs.retain(|r| r.slot != slot);
+        if let Some(source) = source {
+            self.virtual_outputs.push(VirtualRoute { slot, source });
+            self.virtual_outputs.sort_by_key(|r| r.slot);
+        }
     }
 
     /// Every signal's chain.
@@ -972,6 +1081,8 @@ impl Mix {
         self.buses.retain(|b| b.id != id);
         self.sends.retain(|s| s.from != id && s.to != id);
         self.outputs.retain(|o| o.signal != id);
+        self.virtual_outputs
+            .retain(|r| !matches!(&r.source, OutputSource::Signal { signal, .. } if signal == id));
         self.control_room
             .talkback
             .destinations

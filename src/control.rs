@@ -126,6 +126,8 @@ pub struct Control {
     block: u32,
     read_offset: u32,
     input_count: usize,
+    /// The virtual outputs (C7), slot 1 first.
+    pub virtual_outputs: Vec<crate::config::VirtualOutput>,
     default_commit: u32,
     mix_path: PathBuf,
     pub history: crate::history::History,
@@ -159,6 +161,8 @@ impl Control {
         node: mxl_nmos::Node,
         config: &Config,
     ) -> Self {
+        let mut compiler = Compiler::with_talk_base(config.input_flows);
+        compiler.vouts = config.virtual_outputs.iter().map(|v| v.format).collect();
         Self {
             engine,
             inputs,
@@ -167,7 +171,7 @@ impl Control {
             loudness: LoudnessMeters::default(),
             mix: Mix::default(),
             node,
-            compiler: Compiler::with_talk_base(config.input_flows),
+            compiler,
             analyser: crate::analysis::Analyser::new(config.block_samples as usize),
             tally: crate::tally::Tally::default(),
             streams: crate::preview::Streams::new(config),
@@ -192,6 +196,7 @@ impl Control {
             block: config.block_samples,
             read_offset: config.read_offset_samples,
             input_count: config.input_flows,
+            virtual_outputs: config.virtual_outputs.clone(),
             default_commit: config.output_commit_samples,
             mix_path: config.state_dir.join("mix.json"),
             history: crate::history::History::new(&config.state_dir),
@@ -813,6 +818,17 @@ impl Control {
                         signal: m.key(),
                         name: format!("Monitor {}", m.name),
                         format: m.format,
+                        commit: self.default_commit,
+                    }),
+            )
+            .chain(
+                self.virtual_outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| OutputSpec {
+                        signal: crate::mix::compile::vout_key(i + 1),
+                        name: v.label.clone(),
+                        format: v.format,
                         commit: self.default_commit,
                     }),
             )

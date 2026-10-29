@@ -113,6 +113,9 @@ onUnmounted(() => {
     </button>
   </nav>
   <main :class="{ full: tab.full }">
-    <component :is="tab.component" @open="go('processing')" />
+    <!-- The graph keeps its zoom, pan and panels across a tab switch (C5). -->
+    <KeepAlive include="GraphTab">
+      <component :is="tab.component" @open="(to) => go(to?.tab || 'processing')" />
+    </KeepAlive>
   </main>
 </template>
