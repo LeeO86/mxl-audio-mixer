@@ -71,9 +71,19 @@ try {
     return c.id === "compressor-1" && c.threshold_db === -31 && c.ratio === 5 && c.sidechain_hpf_hz == null;
   });
   await page.screenshot({ path: `${out}/dsp15-B1-clipboard.png`, fullPage: true });
+  // Paste all is all or nothing: a second surround panner is refused, the EQ pasted before it is removed.
+  await send("POST", "/api/v1/strips/dx2/chain", { type: "surround-pan", layout: "5.1", azimuth_deg: 30 });
+  await until("a panner on Dx 2", async () => (await strip("dx2")).chain.length === 3);
+  await page.getByRole("button", { name: "Clear", exact: true }).click();
+  await page.getByLabel("Copy eq-1").click();
+  await page.getByLabel("Copy surround-pan-1").click();
+  await page.getByRole("button", { name: "Paste all" }).click();
+  await page.locator(".banner", { hasText: "nothing pasted" }).waitFor();
+  if ((await strip("dx2")).chain.length !== 3) throw new Error("paste all left a part behind");
+  await send("DELETE", "/api/v1/strips/dx2/chain/surround-pan-1");
   await page.getByRole("button", { name: "Clear", exact: true }).click();
   await page.getByRole("group", { name: "Clipboard" }).waitFor({ state: "detached" });
-  pass("B1: two units copied, pasted all onto another strip, one pasted onto a changed unit (its parameters), clipboard cleared");
+  pass("B1: two units copied, pasted all onto another strip, one pasted onto a changed unit (its parameters), a refused paste all left nothing behind, clipboard cleared");
 
   // B2: a multiband on Stream with band 2 far below the tone: every band's reduction shows.
   await send("POST", "/api/v1/buses/stream/chain", {
@@ -163,6 +173,9 @@ try {
     return p && Math.abs(Math.abs(p.azimuth_deg) - 180) < 10 ? p.azimuth_deg : null;
   });
   await page.screenshot({ path: `${out}/dsp15-B6-send-pan.png`, fullPage: true });
+  // A send with a block delay cannot have its own pan.
+  const r = await fetch(`${base}/api/v1/sends/dx/s514`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ block_delay: true }) });
+  if (r.status !== 400 || !(await r.text()).includes("block delay")) throw new Error(`pan + block delay: HTTP ${r.status}`);
   // Not offered into a stereo bus.
   await page.getByLabel("Dx to Stream").click();
   await page.waitForTimeout(200);

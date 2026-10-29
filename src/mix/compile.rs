@@ -42,6 +42,8 @@ pub struct Compiled {
     pub node_meters: Vec<(String, String, usize, usize)>,
     /// Processing latency of each signal's post-fader point, in samples.
     pub latency: HashMap<String, usize>,
+    /// Processing latency of each published signal at its output's tap.
+    pub output_latency: HashMap<String, usize>,
     /// Equal for two compiles exactly when only values differ.
     pub structure: u64,
 }
@@ -825,18 +827,17 @@ impl Compiler {
                                 p.divergence_pct,
                                 p.lfe_db,
                             );
-                            // The bed's rows; the heights of 5.1.4 and 7.1.4 get none.
-                            let mut values = vec![0f32; n * f.channels()];
-                            values[..m.len()].copy_from_slice(&m);
+                            // Into the bed (at most 8 × 2 values a node); the send
+                            // maps the bed into 5.1.4 / 7.1.4 (heights none).
                             let node = c.node(
                                 format!("sendpan/{}/{}", send.from, send.to),
-                                (format_name(f), format_name(bus.format)),
-                                values,
+                                (format_name(f), format_name(bed)),
+                                m,
                             );
-                            let dst = c.b.buffers(n);
+                            let dst = c.b.buffers(bed.channels());
                             c.b.step(Step::Matrix { node, src, dst });
                             src = dst;
-                            from = bus.format;
+                            from = bed;
                         }
                         let w = width_matrix(from, bus.format, into_laws);
                         let coefficients = c.b.coefficients(&w);
@@ -1203,6 +1204,7 @@ impl Compiler {
             }
         }
 
+        let mut output_latency = HashMap::new();
         for o in &mix.outputs {
             let (Some(&slot), Some(t)) = (outputs.get(&o.signal), taps.get(&o.signal)) else {
                 continue;
@@ -1211,7 +1213,8 @@ impl Compiler {
             let Some(from) = mix.tap_format(&o.signal, &tap) else {
                 continue;
             };
-            let (src, _) = t.get(&tap);
+            let (src, tap_latency) = t.get(&tap);
+            output_latency.insert(o.signal.clone(), tap_latency);
             let to = o.format.unwrap_or(from);
             let out = c.b.buffers(to.channels());
             c.b.step(Step::Clear { dst: out });
@@ -1268,6 +1271,7 @@ impl Compiler {
             meters,
             node_meters: c.node_meters,
             latency,
+            output_latency,
             structure,
         }
     }
@@ -1995,6 +1999,51 @@ mod tests {
         assert!(feed(&mut c) > 0.01, "uncompensated paths do not null");
     }
 
+    /// The leveler's safety limiter (48 samples) is compensated like a limiter:
+    /// at unity gain the two paths null. An output taken before it reports no
+    /// processing latency.
+    #[test]
+    fn leveler_latency_is_compensated() {
+        let mut m = Mix::default();
+        m.strips.push(strip("a", Format::Mono, 1));
+        m.strips.push(strip("b", Format::Mono, 1));
+        m.strips[0].chain = serde_json::from_str(
+            r#"[{"id": "lev", "type": "leveler", "target_lufs": -23, "max_gain_db": 0, "max_cut_db": 0, "speed_db_per_s": 1, "gate_lufs": -50, "limiter": true, "ceiling_db": 0}]"#,
+        )
+        .unwrap();
+        m.buses.push(bus("main", Format::Mono));
+        m.sends.push(send("a", "main", Tap::PostFader));
+        m.sends.push(Send {
+            phase: true,
+            ..send("b", "main", Tap::PostFader)
+        });
+        for (signal, tap) in [("main", None), ("a", Some(Tap::Input))] {
+            m.outputs.push(Output {
+                signal: signal.into(),
+                format: None,
+                commit_samples: None,
+                tap,
+            });
+        }
+        assert_eq!(m.validate(1, 96), Ok(()));
+        let slots = HashMap::from([("main".to_string(), 3), ("a".to_string(), 4)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 96, 0, &slots, &HashMap::new());
+        assert_eq!(c.latency["a"], 48);
+        assert_eq!(c.output_latency["a"], 0);
+        assert_eq!(c.output_latency["main"], 48);
+        let mut out = Outputs::default();
+        for k in 0..50 {
+            let block: Vec<f32> = (0..96)
+                .map(|i| ((k * 96 + i) as f32 * 0.01).sin() * 0.3)
+                .collect();
+            c.plan
+                .process((k * 96) as u64, &Inputs(vec![vec![block]]), &mut out);
+        }
+        let rest = out.0[&3][0][960..].iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(rest < 1e-6, "{rest}");
+    }
+
     /// §4.4: a loop closes through an explicit block delay; the signal comes back
     /// one block later at the send's gain.
     #[test]
@@ -2391,6 +2440,47 @@ mod tests {
         // Out of range is refused.
         m.sends[0].pan.as_mut().unwrap().spread_pct = 120.0;
         assert!(m.validate(2, 48).unwrap_err().contains("spread_pct"));
+    }
+
+    #[test]
+    fn a_send_pans_a_stereo_strip_into_7_1_4() {
+        use crate::mix::model::SendPan;
+        let mut m = Mix::default();
+        m.strips.push(strip("music", Format::Stereo, 1));
+        m.buses.push(bus("imm", Format::Surround714));
+        m.sends.push(Send {
+            pan: Some(SendPan {
+                azimuth_deg: 0.0,
+                spread_pct: 0.0,
+                divergence_pct: 0.0,
+                lfe_db: crate::mix::chain::LFE_OFF_DB,
+            }),
+            ..send("music", "imm", Tap::PostPan)
+        });
+        m.outputs.push(Output {
+            signal: "imm".into(),
+            format: None,
+            commit_samples: None,
+            tap: None,
+        });
+        assert_eq!(m.validate(2, 48), Ok(()));
+        let slots = HashMap::from([("imm".to_string(), 0)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let inputs = Inputs(vec![vec![vec![0.5; 48], vec![0.25; 48]]]);
+        let out = run(&mut c, &inputs, 1);
+        let o = &out.0[&0];
+        assert_eq!(o.len(), 12);
+        // Front centre: the strip's L at −30° (L), its R at +30° (R); nothing
+        // else, the heights (channels 9–12) included.
+        for (ch, x) in o.iter().enumerate() {
+            let want = match ch {
+                0 => 0.5,
+                1 => 0.25,
+                _ => 0.0,
+            };
+            assert!((x[0] - want).abs() < 1e-5, "ch {ch}: {}", x[0]);
+        }
     }
 
     fn spatial_mix() -> Mix {

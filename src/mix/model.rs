@@ -1521,4 +1521,50 @@ pub(crate) mod tests {
         let json = serde_json::to_value(&mix.buses[1]).unwrap();
         assert!(json.get("subgroup").is_none(), "not written while off");
     }
+
+    /// A 1.4.x show's mix loads; written back it has no 1.5 fields (no `pan`,
+    /// no output `tap`), so 1.4 can still read it. A 1.5 mix with a leveler,
+    /// a send pan and an output tap goes through JSON unchanged.
+    #[test]
+    fn shows_of_1_4_and_1_5_round_trip() {
+        let old = r#"{
+            "strips": [{"id": "vox", "name": "Vox", "format": "mono", "patch": [{"input": 1, "channel": 1}],
+                "trim_db": 0, "polarity": [false], "fader_db": 0, "mute": false, "pan": 0, "width": 1,
+                "chain": [{"id": "comp", "type": "compressor", "threshold_db": -20, "ratio": 3, "knee_db": 6,
+                    "attack_ms": 10, "release_ms": 150, "makeup_db": 0, "detector": "rms"}]}],
+            "buses": [{"id": "main", "name": "Main", "format": "5.1", "fader_db": 0, "mute": false, "chain": []}],
+            "sends": [{"from": "vox", "to": "main", "tap": "post-pan", "gain_db": 0, "mute": false, "phase": false}],
+            "outputs": [{"signal": "main", "format": null, "commit_samples": null}]
+        }"#;
+        let mix: Mix = serde_json::from_str(old).unwrap();
+        assert_eq!(mix.validate(2, 96), Ok(()));
+        let back = serde_json::to_value(&mix).unwrap();
+        assert!(back["sends"][0].get("pan").is_none());
+        assert!(back["outputs"][0].get("tap").is_none());
+        assert_eq!(serde_json::from_value::<Mix>(back).unwrap(), mix);
+
+        let mut new = mix.clone();
+        new.buses[0].chain = serde_json::from_str(
+            r#"[{"id": "lev", "type": "leveler", "target_lufs": -23, "max_gain_db": 9, "max_cut_db": 9, "speed_db_per_s": 1, "gate_lufs": -50}]"#,
+        )
+        .unwrap();
+        match &new.buses[0].chain[0].kind {
+            super::super::chain::ProcKind::Leveler {
+                limiter,
+                ceiling_db,
+                ..
+            } => assert!(*limiter && *ceiling_db == -1.0),
+            _ => unreachable!(),
+        }
+        new.sends[0].pan = Some(SendPan {
+            azimuth_deg: -110.0,
+            spread_pct: 20.0,
+            divergence_pct: 0.0,
+            lfe_db: super::super::chain::LFE_OFF_DB,
+        });
+        new.outputs[0].tap = Some(Tap::PreFader);
+        assert_eq!(new.validate(2, 96), Ok(()));
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<Mix>(&json).unwrap(), new);
+    }
 }

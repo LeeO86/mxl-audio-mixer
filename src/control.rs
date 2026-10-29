@@ -95,6 +95,8 @@ pub struct Control {
     procs: HashMap<NodeId, LayoutNode>,
     /// Processing latency of each signal's post-fader point, in samples.
     pub latency: HashMap<String, usize>,
+    /// Processing latency of each published signal at its output's tap.
+    pub output_latency: HashMap<String, usize>,
     /// Counts changes of the mix; clients reload it when it moves.
     pub revision: u64,
     structure: Option<u64>,
@@ -177,6 +179,7 @@ impl Control {
             layout: HashMap::new(),
             procs: HashMap::new(),
             latency: HashMap::new(),
+            output_latency: HashMap::new(),
             revision: 0,
             structure: None,
             pending: None,
@@ -1265,6 +1268,7 @@ impl Control {
         self.layout = compiled.nodes;
         self.procs = compiled.procs;
         self.latency = compiled.latency;
+        self.output_latency = compiled.output_latency;
         self.structure = Some(compiled.structure);
         self.mix = next;
         self.save()?;
@@ -1330,7 +1334,13 @@ impl Control {
     pub fn output_status(&self) -> Vec<crate::outputs::OutputStatus> {
         let mut status = self.outputs.status(&self.engine, &self.node);
         for o in &mut status {
-            let processing = self.latency.get(&o.signal).copied().unwrap_or(0) as f64 / 48.0;
+            let processing = self
+                .output_latency
+                .get(&o.signal)
+                .or_else(|| self.latency.get(&o.signal))
+                .copied()
+                .unwrap_or(0) as f64
+                / 48.0;
             o.processing_latency_ms = processing;
             o.latency_ms = f64::from(self.read_offset + self.block) / 48.0 + processing;
         }

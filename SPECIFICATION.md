@@ -247,7 +247,7 @@ rates other than 48 kHz, recording.
   `NMOS_SEED` + stable signal ID, so they survive restarts (G3).
 - A strip is published as its direct out, a bus as its bus out: post-fader, or at any
   tap of the signal (`outputs[].tap`, set in the flow view of the processing view,
-  §12.2).
+  §12.2); its reported processing latency is the tap's.
 - Outputs are written into the mixer's own domain (G2) on the TAI timeline.
   - **Commit size is separate from the DSP block size:** `MIXER_OUTPUT_COMMIT_SAMPLES`
     (default = one block; per output overridable, e.g. 240 or 480).
@@ -295,7 +295,8 @@ rates other than 48 kHz, recording.
   5.1.4 or 7.1.4 bus can have its own surround panner (`pan`: position, spread,
   divergence, LFE, as the surround panner node; the heights of 5.1.4/7.1.4 get none).
   It replaces the strip's stereo panner for that send (a post-pan send then reads the
-  strip before its panner); for other sources and buses it is ignored.
+  strip before its panner); for other sources and buses it is ignored. A send with a
+  block delay cannot have one (the API refuses it).
 - **Width mapping:** mono→stereo (pan law selectable: −3 dB default, −4.5, −6, 0),
   stereo→mono (sum −3 dB or −6 dB), up/down-mix for 5.1/7.1. The down-mix is
   adjustable (ITU-R BS.775 style: centre, surround and LFE levels, normalisation):
@@ -334,12 +335,15 @@ across multichannel signals, parameter smoothing.
   position to the centre and grows, at 100 % over every speaker.
 - **Leveler** (inspired by the idea of master_me, an own implementation, no code
   taken from it): the short-term loudness (BS.1770 K-weighting and channel weights,
-  100 ms segments, the last 3 s) is measured in the node; every 100 ms, above the gate
-  (`gate_lufs`), the gain it heads for is `target_lufs` minus that loudness, within
-  `max_gain_db` up and `max_cut_db` down; the gain moves there at most
-  `speed_db_per_s` (linear ramps per block). Below the gate (pauses) it holds. The
+  100 ms segments, the last 3 s) is measured in the node, gated per segment: a
+  segment below `gate_lufs` (a pause) is left out and holds the gain. After a segment
+  above the gate, the gain it heads for is `target_lufs` minus the loudness of the
+  window's segments above the gate (at least 4), within `max_gain_db` up and
+  `max_cut_db` down; the gain moves there at most `speed_db_per_s` (linear ramps per
+  block). A non-finite sample restarts the measurement. Switching `limiter` on or off
+  rebuilds the node, so its gain starts again at 0 dB. The
   optional safety stage is a 1 ms look-ahead peak limiter at `ceiling_db` (50 ms
-  release; 48 samples of latency). The UI shows the leveler's gain and the limiter's
+  release; 48 samples of latency, delay-compensated like a limiter). The UI shows the leveler's gain and the limiter's
   reduction. Cost per 96-sample block (release build, one core of the lab host):
   stereo 1.3 µs, with the limiter 3.7 µs; 5.1 3.5 µs, with the limiter 7.2 µs.
 

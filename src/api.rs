@@ -791,6 +791,11 @@ async fn put_send(
             if let Some(v) = b.pan {
                 s.pan = v;
             }
+            if s.pan.is_some() && s.block_delay {
+                return Err(bad(format!(
+                    "send {from} → {to}: a send with a block delay cannot have its own pan (remove pan or block_delay)"
+                )));
+            }
             Ok(())
         })
         .await?;

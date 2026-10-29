@@ -75,11 +75,21 @@ function copyNode(n) {
 }
 const nameOf = (id) => signals.value.find((s) => s.id === id)?.name || id;
 const unitLabel = (u) => NODE_TYPES[u.unit.type]?.label || u.unit.type;
+// All or nothing: when the server refuses a unit (a limit, a key to itself …), the units this paste
+// added are removed again and its message stays.
 async function pasteUnits(units) {
+  const path = `${signalPath(sig.value.id)}/chain`;
+  const added = [];
   for (const u of units) {
-    const ok = await act(() => api.post(`${signalPath(sig.value.id)}/chain`, JSON.parse(JSON.stringify(u.unit))));
-    if (!ok) return;
+    try {
+      added.push((await api.post(path, JSON.parse(JSON.stringify(u.unit)))).id);
+    } catch (e) {
+      for (const id of added.reverse()) await api.del(`${path}/${encodeURIComponent(id)}`).catch(() => {});
+      live.actionError = `Paste: ${e.message}${added.length ? " (nothing pasted)" : ""}`;
+      return;
+    }
   }
+  live.actionError = "";
 }
 const pasteAll = () => pasteUnits(clipboard.units);
 async function pasteOnto(n) {

@@ -300,7 +300,8 @@ pub enum Kind {
         envelopes: Vec<f64>,
     },
     /// The leveler (B3): K-weighted energy in 100 ms segments, the last 3 s of
-    /// them, the gain it heads for and the gain it has, and the safety limiter.
+    /// them (a segment below the gate as −1: left out), the gain it heads for
+    /// and the gain it has, and the safety limiter.
     Leveler {
         k_states: Vec<[State; 2]>,
         weights: Vec<f64>,
@@ -308,7 +309,6 @@ pub enum Kind {
         samples: usize,
         segments: Vec<f64>,
         at: usize,
-        filled: usize,
         desired: f64,
         gain: f64,
         limit: Option<(Delay, LookaheadGain)>,
@@ -355,7 +355,8 @@ const Q_BUTTERWORTH: f64 = std::f64::consts::FRAC_1_SQRT_2;
 /// The leveler's loudness segment (100 ms) and window (3 s: short-term loudness).
 const LEVELER_SEGMENT: usize = 4800;
 const LEVELER_SEGMENTS: usize = 30;
-/// Segments the leveler waits for after a start before it moves (400 ms).
+/// Segments above the gate the leveler needs in its window before it moves
+/// (400 ms).
 const LEVELER_FIRST: usize = 4;
 /// Release of the leveler's safety limiter, ms.
 const LEVELER_RELEASE_MS: f64 = 50.0;
@@ -549,9 +550,8 @@ impl Processor {
                 weights: loudness_weights(channels),
                 energy: 0.0,
                 samples: 0,
-                segments: vec![0.0; LEVELER_SEGMENTS],
+                segments: vec![-1.0; LEVELER_SEGMENTS],
                 at: 0,
-                filled: 0,
                 desired: 0.0,
                 gain: 0.0,
                 limit: limiter.then(|| {
@@ -997,7 +997,6 @@ impl Processor {
                 samples,
                 segments,
                 at,
-                filled,
                 desired,
                 gain,
                 limit,
@@ -1015,21 +1014,35 @@ impl Processor {
                     }
                     e += weights[c] * acc;
                 }
-                *energy += e;
-                *samples += block;
-                // Every 100 ms: the loudness of the last 3 s (less after a start),
-                // and, above the gate, the gain that meets the target.
-                if *samples >= LEVELER_SEGMENT {
-                    segments[*at] = *energy / *samples as f64;
-                    *at = (*at + 1) % LEVELER_SEGMENTS;
-                    *filled = (*filled + 1).min(LEVELER_SEGMENTS);
+                if e.is_finite() {
+                    *energy += e;
+                    *samples += block;
+                } else {
+                    // A NaN or infinite sample: start the measurement again
+                    // rather than keep a state that never recovers.
+                    k_states.fill([State::default(); 2]);
                     *energy = 0.0;
                     *samples = 0;
-                    if *filled >= LEVELER_FIRST {
-                        let power = segments.iter().sum::<f64>() / *filled as f64;
-                        let lufs = -0.691 + 10.0 * power.max(1e-20).log10();
-                        if lufs > gate {
-                            *desired = target - lufs;
+                }
+                // Every 100 ms: a segment above the gate counts, and the loudness
+                // of the counted segments of the last 3 s gives the gain that meets
+                // the target. A segment below the gate (a pause) is left out and
+                // holds the gain (BS.1770's absolute gate, per segment).
+                if *samples >= LEVELER_SEGMENT {
+                    let seg = *energy / *samples as f64;
+                    let lufs = |power: f64| -0.691 + 10.0 * power.max(1e-20).log10();
+                    let above = lufs(seg) > gate;
+                    segments[*at] = if above { seg } else { -1.0 };
+                    *at = (*at + 1) % LEVELER_SEGMENTS;
+                    *energy = 0.0;
+                    *samples = 0;
+                    if above {
+                        let (sum, n) = segments
+                            .iter()
+                            .filter(|p| **p >= 0.0)
+                            .fold((0.0, 0usize), |(s, n), p| (s + p, n + 1));
+                        if n >= LEVELER_FIRST {
+                            *desired = target - lufs(sum / n as f64);
                         }
                     }
                 }
@@ -1942,6 +1955,63 @@ mod tests {
         let out = run(&mut p, std::slice::from_ref(&loud), None);
         let peak = tail_peak(&out[0], 2.0);
         assert!(peak <= -9.99 && peak > -10.5, "{peak}");
+    }
+
+    fn leveler_gain(p: &Processor) -> f64 {
+        match &p.kind {
+            Kind::Leveler { gain, .. } => *gain,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn leveler_holds_through_a_pause_and_recovers_from_nan() {
+        // Settled at about +6 dB on a −26 dBFS tone, then 4 s of silence: the
+        // gain does not climb (each silent segment is below the gate).
+        let mut p = proc(leveler(-23.0, 15.0, 10.0, -50.0, false), 1);
+        run(&mut p, &[sine(997.0, -26.0, 6.0)], None);
+        let speech = leveler_gain(&p);
+        assert!((speech - 6.0).abs() < 0.5, "{speech}");
+        run(&mut p, &[vec![0.0; 4 * 48_000]], None);
+        assert!(
+            (leveler_gain(&p) - speech).abs() < 0.01,
+            "{}",
+            leveler_gain(&p)
+        );
+        // The next speech at the same level gets the same gain.
+        let out = run(&mut p, &[sine(997.0, -26.0, 2.0)], None);
+        assert!((tail_lufs(&out[0], 1.0) + 23.0).abs() < 0.5);
+        // A NaN restarts the measurement; it levels again afterwards.
+        let mut bad = vec![0.0f32; B];
+        bad[3] = f32::NAN;
+        run(&mut p, &[bad], None);
+        run(&mut p, &[sine(997.0, -36.0, 6.0)], None);
+        let g = leveler_gain(&p);
+        assert!(g.is_finite() && (g - 15.0).abs() < 0.5, "{g}");
+    }
+
+    #[test]
+    fn leveler_on_5_1_ignores_the_lfe() {
+        let silent = vec![0.0f32; 6 * 48_000];
+        // Only the LFE, loud: weight 0, below the gate, the gain stays.
+        let mut input = vec![silent.clone(); 6];
+        input[3] = sine(60.0, -6.0, 6.0);
+        let mut p = proc(leveler(-23.0, 15.0, 10.0, -50.0, false), 6);
+        run(&mut p, &input, None);
+        assert_eq!(leveler_gain(&p), 0.0);
+        // A −30 dBFS tone on L: about +10 dB, as on a mono signal.
+        let mut input = vec![silent; 6];
+        input[0] = sine(997.0, -30.0, 6.0);
+        let mut p = proc(leveler(-23.0, 15.0, 10.0, -50.0, false), 6);
+        run(&mut p, &input, None);
+        let mut mono = proc(leveler(-23.0, 15.0, 10.0, -50.0, false), 1);
+        run(&mut mono, &[sine(997.0, -30.0, 6.0)], None);
+        assert!((leveler_gain(&p) - leveler_gain(&mono)).abs() < 0.01);
+        assert!(
+            (leveler_gain(&p) - 10.0).abs() < 0.7,
+            "{}",
+            leveler_gain(&p)
+        );
     }
 
     /// Not a check: the leveler's cost per 96-sample block, stereo and 5.1:

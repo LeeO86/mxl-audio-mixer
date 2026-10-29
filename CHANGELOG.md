@@ -8,6 +8,7 @@
 - B4: flow view below the processing chain: reorder nodes, move sends, the direct/bus out and keys to another tap by drag; outputs take a `tap`.
 - B5: surround panner spread drawn as a bubble that moves to the centre and grows, at 100 % over every speaker.
 - B6: per-send surround panner (`pan` on a send) for a mono or stereo source into a 5.1 or bigger bus, edited in the Routing tab's send editor.
+- **Downgrade:** a show that uses a send's `pan`, an output's `tap` or a `leveler` node cannot be loaded by 1.4.x (unknown fields there): a rollback to 1.4.3 keeps the file as `mix.json.bad` and starts with an empty mix unless those are removed first.
 
 ## 1.4.3 (2026-10-24)
 
