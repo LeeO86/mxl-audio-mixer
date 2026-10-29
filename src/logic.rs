@@ -489,12 +489,21 @@ impl Run {
         })
     }
 
-    /// Input `k` of block `i`, converted to the input's type.
+    /// Input `k` of block `i`, converted to the input's type. A fader feeding
+    /// an on/off input is on from its threshold (1.5.0), not from 0.5.
     fn read(&mut self, i: usize, k: usize) -> Value {
         let want = self.plan.blocks[i].ports.inputs[k].ty;
         match self.plan.inputs[i][k] {
             None => Value::default_of(want),
-            Some(src) => convert(&self.outs[src], want, &mut self.states[i].conv[k]),
+            Some(src) => {
+                let on_off = matches!(want, PortType::Boolean | PortType::Event);
+                if on_off && matches!(self.plan.blocks[src].kind, BlockKind::Fader { .. }) {
+                    let high = Value::Bool(self.states[src].held);
+                    convert(&high, want, &mut self.states[i].conv[k])
+                } else {
+                    convert(&self.outs[src], want, &mut self.states[i].conv[k])
+                }
+            }
         }
     }
 
@@ -563,7 +572,16 @@ impl Run {
             BlockKind::Trigger => Value::Event(triggered.contains(id)),
             BlockKind::Mute { signal } => b(muted(r.mix, signal)),
             BlockKind::Pfl { signal } => b(r.pfl.contains(signal)),
-            BlockKind::Fader { signal } => Value::Num(fader(r.mix, signal)),
+            BlockKind::Fader {
+                signal,
+                threshold_db,
+            } => {
+                let db = fader(r.mix, signal);
+                // On/off for the inputs it feeds (read): a missing or unset
+                // signal is off.
+                self.states[i].held = db.is_some_and(|db| db >= *threshold_db);
+                Value::Num(db.unwrap_or(0.0))
+            }
             BlockKind::Vad { signal } => b(r.speech.get(signal).copied().unwrap_or(false)),
             BlockKind::Level { signal } => Value::Num(level(signal)),
             BlockKind::Above {
@@ -1205,11 +1223,10 @@ fn muted(mix: &Mix, signal: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn fader(mix: &Mix, signal: &str) -> f64 {
+fn fader(mix: &Mix, signal: &str) -> Option<f64> {
     mix.strip(signal)
         .map(|s| s.fader_db.0)
         .or_else(|| mix.bus(signal).map(|b| b.fader_db.0))
-        .unwrap_or(0.0)
 }
 
 /// Clamp a fader a logic graph asked for: at most `MAX_FADER_DB` (also +∞),

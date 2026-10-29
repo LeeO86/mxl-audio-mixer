@@ -161,9 +161,13 @@ pub enum BlockKind {
     Pfl {
         signal: String,
     },
-    /// The signal's fader, dB.
+    /// The signal's fader, dB. Where it feeds an on/off input (boolean or
+    /// event) it is on while the fader is at `threshold_db` or above (1.5.0;
+    /// a show without it: 0 dB).
     Fader {
         signal: String,
+        #[serde(default)]
+        threshold_db: f64,
     },
     /// The signal's voice detection.
     Vad {
@@ -627,12 +631,14 @@ impl BlockKind {
     }
 
     /// A target the block needs (a signal, VCA, snapshot, monitor, talkback
-    /// mic or destination, a node or parameter) is not chosen yet (`""`). Such
+    /// mic or destination, a node or parameter, a webhook's URL) is not chosen
+    /// yet (`""`). Such
     /// a block validates, never acts, reads off, 0 or the floor, and is listed
     /// in the graph's `warnings` (D164).
     pub fn target_unset(&self) -> bool {
         match self {
             Self::Recall { snapshot } => snapshot.is_empty(),
+            Self::Webhook { url } => url.is_empty(),
             Self::SetTalk { mic, destination } => mic.is_empty() || destination.is_empty(),
             Self::SetMonitor { monitor, .. } => monitor.is_empty(),
             Self::SetParam {
@@ -650,7 +656,7 @@ impl BlockKind {
         match self {
             Self::Mute { signal }
             | Self::Pfl { signal }
-            | Self::Fader { signal }
+            | Self::Fader { signal, .. }
             | Self::Vad { signal }
             | Self::Level { signal }
             | Self::Above { signal, .. }
@@ -672,7 +678,7 @@ impl BlockKind {
         match self {
             Self::Mute { signal }
             | Self::Pfl { signal }
-            | Self::Fader { signal }
+            | Self::Fader { signal, .. }
             | Self::Vad { signal }
             | Self::Level { signal }
             | Self::Above { signal, .. }
@@ -1282,6 +1288,12 @@ fn check_block(mix: &Mix, kind: &BlockKind, in_macro: bool) -> BlockCheck {
                 Ok(())
             }
         }
+        BlockKind::Fader { threshold_db, .. } => plain(range(
+            "threshold_db",
+            *threshold_db,
+            -120.0,
+            super::model::MAX_FADER_DB,
+        )),
         BlockKind::Above {
             threshold_db,
             hysteresis_db,
@@ -1860,6 +1872,25 @@ pub(crate) mod tests {
             signal: "nope".into()
         }));
         assert!(bad(BlockKind::Timer { ms: -1.0 }));
+        // A webhook dropped from the palette has no URL yet: valid and inert (D164).
+        let hook = BlockKind::Webhook { url: String::new() };
+        assert!(hook.target_unset());
+        assert!(!bad(hook));
+        assert!(bad(BlockKind::Webhook {
+            url: "ftp://x".into()
+        }));
+        assert!(bad(BlockKind::Fader {
+            signal: "vox".into(),
+            threshold_db: 16.0,
+        }));
+        assert!(bad(BlockKind::Fader {
+            signal: "vox".into(),
+            threshold_db: f64::NAN,
+        }));
+        assert!(!bad(BlockKind::Fader {
+            signal: "vox".into(),
+            threshold_db: -20.0,
+        }));
         assert!(bad(BlockKind::Above {
             signal: "vox".into(),
             threshold_db: 40.0,

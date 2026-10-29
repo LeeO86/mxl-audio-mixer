@@ -783,9 +783,20 @@ pub fn catalog_json() -> Value {
             vec![p("signal", "signal-or-vca")],
         ),
         (
-            BlockKind::Fader { signal: s() },
+            BlockKind::Fader {
+                signal: s(),
+                threshold_db: 0.0,
+            },
             "Fader position",
-            vec![p("signal", "signal")],
+            vec![
+                p("signal", "signal"),
+                num(
+                    "threshold_db",
+                    -120.0,
+                    crate::mix::model::MAX_FADER_DB,
+                    Some(0.0),
+                ),
+            ],
         ),
         (
             BlockKind::Vad { signal: s() },
@@ -1009,7 +1020,7 @@ pub fn catalog_json() -> Value {
         (
             BlockKind::TslOut { index: 0 },
             "TSL tally out",
-            vec![int("index", 0.0, 65534.0)],
+            vec![json!({"name": "index", "kind": "integer", "min": 0, "max": 65534, "default": 0})],
         ),
         (
             BlockKind::Log { message: s() },

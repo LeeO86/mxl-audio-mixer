@@ -215,15 +215,53 @@ try {
   });
   pass("paste into another graph: the blocks and their cable, ids free in that graph");
 
-  // A webhook's URL is asked for before the block is made.
-  await page.locator('.lpalette [data-palette="webhook"]').click();
-  await page.getByRole("dialog", { name: "Choose the target" }).waitFor({ timeout: 3000 });
-  if (!(await page.getByRole("button", { name: "Add", exact: true }).isDisabled())) throw new Error("Add is enabled before the URL is given");
-  await page.getByLabel("new url", { exact: true }).fill("http://127.0.0.1:9/hook");
-  await page.getByLabel("new url", { exact: true }).press("Enter");
-  await page.getByRole("button", { name: "Add", exact: true }).click();
-  await until("the webhook", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "webhook" && b.url === "http://127.0.0.1:9/hook"));
-  pass("a webhook asks for its URL first");
+  // A webhook and a TSL out drop where they land (1.5.0, D3), without a URL (inert, marked) and at
+  // index 0; the URL is typed in the list.
+  const obox = await page.locator(".logiccanvas").boundingBox();
+  await page.locator('.lpalette [data-palette="webhook"]').dragTo(page.locator(".logiccanvas"), { targetPosition: { x: obox.width - 300, y: 120 } });
+  await until("the webhook dropped", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "webhook" && b.url === ""));
+  await page.locator('.lpalette [data-palette="tsl-out"]').dragTo(page.locator(".logiccanvas"), { targetPosition: { x: obox.width - 300, y: 260 } });
+  await until("the TSL out dropped", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "tsl-out" && b.index === 0));
+  await until("the webhook marked", async () => (await graphOf(other.id)).warnings?.some((w) => w.block === "webhook-1"));
+  await until("the webhook drawn", async () => (await node("webhook-1").innerText()).includes("no target yet"));
+  await page.getByLabel("webhook-1 url", { exact: true }).fill("http://127.0.0.1:9/hook");
+  await page.getByLabel("webhook-1 url", { exact: true }).press("Enter");
+  await until("the webhook URL", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "webhook" && b.url === "http://127.0.0.1:9/hook"));
+  await page.screenshot({ path: `${out}/amx15-d3-dropped.png` });
+  pass("webhook and TSL out drop where they land; the URL is chosen in the list");
+
+  // A fader position's "High at" column (1.5.0, D1): on/off inputs it feeds are on from there.
+  await page.getByLabel("Block type").selectOption("fader");
+  await page.getByLabel("Block signal").selectOption("vox");
+  await page.getByRole("button", { name: "+ Block" }).click();
+  await until("the fader block", async () => (await graphOf(other.id)).blocks.some((b) => b.type === "fader" && b.threshold_db === 0));
+  const high = page.locator('[data-high="fader-1"]');
+  await high.getByLabel("fader-1 threshold_db", { exact: true }).fill("-20");
+  await high.getByLabel("fader-1 threshold_db", { exact: true }).press("Enter");
+  await until("the threshold", async () => (await graphOf(other.id)).blocks.some((b) => b.id === "fader-1" && b.threshold_db === -20));
+  await until("high shown", async () => (await high.innerText()).includes("high")); // vox at 0 dB
+  if (await page.locator('[data-block="fader-1"] .lparams').first().getByLabel("fader-1 threshold_db").count()) throw new Error("the threshold is in the parameters column too");
+  await page.locator('[data-block="fader-1"]').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${out}/amx15-d1-high-at.png` });
+  pass("fader position: High at column, left of Value");
+
+  // Copy the whole logic (1.5.0, D2): into a new graph (dry run), then into an existing one.
+  const src = await graphOf(other.id);
+  await page.getByRole("button", { name: "Copy logic to" }).click();
+  const copied = await until("the copy", async () => (await api("/api/v1/logic")).find((x) => x.name === "Other copy"));
+  made.push(copied.id);
+  const cg = await graphOf(copied.id);
+  if (!cg.dry_run || cg.blocks.length !== src.blocks.length || cg.wires.length !== src.wires.length) throw new Error(`copy to a new graph: ${JSON.stringify(cg)}`);
+  await until("the copy opened", async () => (await page.getByLabel("Logic graph", { exact: true }).inputValue()) === copied.id);
+  await page.getByLabel("Copy the logic to").selectOption(other.id);
+  await page.getByRole("button", { name: "Copy logic to" }).click();
+  await until("copied into Other", async () => {
+    const d = await graphOf(other.id);
+    return d.blocks.length === 2 * src.blocks.length && d.wires.length === 2 * src.wires.length && new Set(d.blocks.map((b) => b.id)).size === d.blocks.length;
+  });
+  await until("Other opened", async () => (await page.getByLabel("Logic graph", { exact: true }).inputValue()) === other.id);
+  await page.screenshot({ path: `${out}/amx15-d2-copied.png` });
+  pass("copy logic: to a new graph (dry run) and into an existing graph, ids free there");
 
   // Somebody else changes the graph: undo refuses to overwrite it and clears the history.
   await page.getByLabel("Logic graph", { exact: true }).selectOption(g.id);

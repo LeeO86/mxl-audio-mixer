@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 1.5.0
+
+- D1: a fader position block has a threshold (`threshold_db`, −120 to +15 dB, default 0 dB; the "High at" column left of Value): where it feeds an on/off input it is on from that position (before: above 0.5 dB); without a signal it is off.
+- D2: "Copy logic to" copies all blocks and cables of a graph into a new graph (dry run) or into an existing graph (below its blocks, free ids, one undo step there).
+- D3: HTTP webhook and TSL tally out drop onto the canvas like every block (they asked first, away from the drop, and were never made); a webhook's URL may be empty (inert, amber) until typed in the list, a TSL out starts at index 0.
+
 ## 1.4.3 (2026-10-24)
 
 - A flow that goes away and comes back on the same route (a writer restart) keeps the last lag: its new reader is counted by the stall rule (0.5 s, or back within a block), not the 0.1 s start span. Only a route to another flow forgets it (D243). Before, a re-created flow whose writer started behind could raise the delay for about a minute.

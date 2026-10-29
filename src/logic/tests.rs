@@ -269,6 +269,7 @@ fn compare_math_scale_map_and_select() {
                 "f",
                 K::Fader {
                     signal: "vox".into(),
+                    threshold_db: 0.0,
                 },
             ),
             block("c", K::Const { value: -10.0 }),
@@ -384,6 +385,100 @@ fn select_clamps_and_numbers_become_text() {
 }
 
 #[test]
+fn a_fader_is_on_from_its_threshold_where_it_feeds_on_off() {
+    let mut mix = mix_of(
+        vec![
+            block(
+                "f",
+                K::Fader {
+                    signal: "vox".into(),
+                    threshold_db: -20.0,
+                },
+            ),
+            block(
+                "m",
+                K::SetMute {
+                    signal: "music".into(),
+                },
+            ),
+            block("e", K::Edge),
+            block(
+                "r",
+                K::Recall {
+                    snapshot: "s".into(),
+                },
+            ),
+            block(
+                "sc",
+                K::Scale {
+                    factor: 1.0,
+                    offset: 0.0,
+                },
+            ),
+            block(
+                "none",
+                K::Fader {
+                    signal: String::new(),
+                    threshold_db: -120.0,
+                },
+            ),
+            block(
+                "m2",
+                K::SetMute {
+                    signal: "vox".into(),
+                },
+            ),
+        ],
+        vec![
+            out("f", "m", "in"),
+            out("f", "e", "in"),
+            out("e", "r", "in"),
+            out("f", "sc", "in"),
+            out("none", "m2", "in"),
+        ],
+    );
+    let mute = |on| Act::Mute {
+        signal: "music".into(),
+        on,
+    };
+    let mut logic = Logic::default();
+    mix.strips[0].fader_db = Db(-30.0);
+    // Below the threshold: off; a fader without a signal is off whatever its threshold.
+    let a = tick(&mut logic, &mix);
+    assert!(a.contains(&mute(false)));
+    assert!(a.contains(&Act::Mute {
+        signal: "vox".into(),
+        on: false
+    }));
+    // The level still goes out as it is.
+    assert_eq!(value(&logic, "sc"), json!(-30.0));
+    // At the threshold: on, and an event input sees the rise.
+    mix.strips[0].fader_db = Db(-20.0);
+    // (Two ticks: a mute runs at most every 20 ms, D173.)
+    let mut a = tick(&mut logic, &mix);
+    a.extend(tick(&mut logic, &mix));
+    assert!(a.contains(&mute(true)), "{a:?}");
+    assert!(a.iter().any(|x| matches!(x, Act::Recall { .. })), "{a:?}");
+    // A closed fader is off.
+    mix.strips[0].fader_db = Db(f64::NEG_INFINITY);
+    let mut a = tick(&mut logic, &mix);
+    a.extend(tick(&mut logic, &mix));
+    assert!(a.contains(&mute(false)), "{a:?}");
+}
+
+#[test]
+fn a_fader_block_of_an_old_show_is_on_from_0_db() {
+    let k: K = serde_json::from_value(json!({"type": "fader", "signal": "vox"})).unwrap();
+    assert_eq!(
+        k,
+        K::Fader {
+            signal: "vox".into(),
+            threshold_db: 0.0
+        }
+    );
+}
+
+#[test]
 fn compare_and_fader_with_its_ramp() {
     let mut mix = mix_of(
         vec![
@@ -391,6 +486,7 @@ fn compare_and_fader_with_its_ramp() {
                 "f",
                 K::Fader {
                     signal: "vox".into(),
+                    threshold_db: 0.0,
                 },
             ),
             block("c", K::Const { value: -10.0 }),
