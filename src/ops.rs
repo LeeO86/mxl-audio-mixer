@@ -94,6 +94,8 @@ pub fn router(app: App) -> Router {
         .merge(crate::logic_api::routes())
         .merge(crate::widgets::routes())
         .merge(crate::link::routes())
+        .merge(crate::vout_api::routes())
+        .merge(crate::sources::routes())
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
             mix_revision,
@@ -199,6 +201,7 @@ pub fn status_json(app: &App) -> Value {
             "sends": control.mix.sends.len(),
         },
         "outputs": control.output_status(),
+        "virtual_outputs": crate::vout_api::status(&control),
         "tally": {
             "enabled": app.config.tsl_enable,
             "state": control.tally_status(),
@@ -382,15 +385,33 @@ async fn patch_input(
         Ok(p) => p,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    let result = {
+    let (old, result) = {
         let mut control = app.control();
         let c = &mut *control;
-        c.inputs
-            .update(&mut c.engine, i, patch.label, patch.extra_delay)
+        let old = c.inputs.configs()[i].label.clone();
+        let result = c
+            .inputs
+            .update(&mut c.engine, i, patch.label, patch.extra_delay);
+        (old, result)
     };
     match result {
         Ok(config) => {
             let _ = app.node.insert_receiver(crate::nmos::receiver(&config));
+            // C2: strips of this input still named after its old alias take the new one.
+            if config.label != old {
+                let renamed = crate::api::apply(&app, 0, |m| {
+                    m.inherit_input_label(config.input, &old, &config.label);
+                    Ok(())
+                })
+                .await;
+                if let Err(r) = renamed {
+                    tracing::warn!(
+                        input = config.input,
+                        "renaming its strips failed ({})",
+                        r.status()
+                    );
+                }
+            }
             Json(json!(app.control().inputs.status()[i])).into_response()
         }
         Err(e) => error(StatusCode::BAD_REQUEST, e),
@@ -567,6 +588,25 @@ async fn metrics(State(app): State<App>) -> Response {
             .step_counts
             .iter()
             .map(|(kind, n)| format!("{{type=\"{kind}\"}} {n}"))
+            .collect(),
+    );
+    metric(
+        "virtual_output_routed",
+        "gauge",
+        "Per virtual output (MIXER_OUTPUT_FLOWS): 1 when a source feeds it, 0 while it is silent.",
+        control
+            .virtual_outputs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let routed = control.mix.virtual_source(i + 1).is_some();
+                format!(
+                    "{{slot=\"{}\",label=\"{}\"}} {}",
+                    i + 1,
+                    v.label.replace('\\', "\\\\").replace('"', "\\\""),
+                    u8::from(routed)
+                )
+            })
             .collect(),
     );
     metric(

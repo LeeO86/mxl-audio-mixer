@@ -1,8 +1,9 @@
 <script setup>
 // Routing (§12.3): the send matrix (rows: sources, columns: destination buses; a click on an empty cell
 // marks it yellow, a second click on it within 3 s sends at 0 dB from the source's output, a click
-// elsewhere or the 3 s cancel; a click on a send edits it) and the published outputs (an MXL flow and an
-// NMOS sender each; a strip as its post-fader direct out).
+// elsewhere or the 3 s cancel; a click on a send edits it), the virtual outputs (C7: fixed MXL flows and
+// NMOS senders the designer wires, MIXER_OUTPUT_FLOWS; pick what feeds each) and the published outputs
+// (an MXL flow and an NMOS sender each, made here with Publish; a strip as its post-fader direct out).
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import Pot from "./Pot.vue";
@@ -11,6 +12,7 @@ import { tapLabel } from "../nodes.js";
 import { loadTaps, tapOptions } from "../taps.js";
 import { api, copyText, dbValue, fmtDb } from "../api.js";
 import { act, buses, isBus, isSubgroup, live, patchSend, sendOf, sends, signalOf, signals } from "../store.js";
+import { setVoutSource, sourceChoices, sourceLabel, vouts } from "../vouts.js";
 
 const editing = ref(null); // { from, to }
 const current = computed(() => (editing.value ? sendOf(editing.value.from, editing.value.to) : null));
@@ -68,7 +70,14 @@ const gain = computed(() => {
   return Number.isFinite(v) ? v : -80;
 });
 
-const outputs = computed(() => live.status?.outputs || []);
+const outputs = computed(() => (live.status?.outputs || []).filter((o) => o.virtual_output == null));
+// A virtual output's source as its select key: the source without the tap or format (set in the Graph).
+const voutKey = (v) => {
+  const s = v.source;
+  if (!s) return "";
+  return JSON.stringify("signal" in s ? { signal: s.signal } : "monitor" in s ? { monitor: s.monitor } : { input: s.input });
+};
+const pickVout = (v, key) => setVoutSource(v.slot, key ? JSON.parse(key) : null);
 const outputOf = (id) => outputs.value.find((o) => o.signal === id);
 const publish = (id) => act(() => api.put(`/api/v1/outputs/${encodeURIComponent(id)}`), `${signalOf(id)?.name || id} published.`);
 const unpublish = (id) => act(() => api.del(`/api/v1/outputs/${encodeURIComponent(id)}`));
@@ -141,6 +150,36 @@ async function copyFlow(o) {
       </div>
     </div>
     <div class="actions"><ConfirmButton label="Remove send" @confirm="remove" /></div>
+  </div>
+
+  <div v-if="vouts.length" class="panel" data-vouts>
+    <h3>Virtual outputs</h3>
+    <p class="note" style="margin-top: 0">Fixed MXL flows and NMOS senders (the designer wires them): pick what feeds each. Their format stays; a wider or narrower source is down- or up-mixed. Without a source they send silence.</p>
+    <table>
+      <thead>
+        <tr><th>Output</th><th>Format</th><th>Source</th><th>State</th><th class="num">Commit lag ms</th><th>MXL flow</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="v in vouts" :key="v.slot" :class="{ dim: !v.source }" :data-vout="v.slot">
+          <td><strong>{{ v.label }}</strong> <span class="muted small">virtual {{ v.slot }}</span></td>
+          <td>{{ v.format }}</td>
+          <td>
+            <select :value="voutKey(v)" :aria-label="`Source of ${v.label}`" :title="sourceLabel(v.source)" @change="pickVout(v, $event.target.value)">
+              <option value="">– silence –</option>
+              <option v-for="[k, , l] in sourceChoices" :key="k" :value="k">{{ l }}</option>
+            </select>
+          </td>
+          <td><Pill :text="!v.running ? 'not running' : v.errors ? `${v.errors} errors` : v.source ? 'on' : 'silent'" :kind="!v.running || v.errors ? 'bad' : v.source ? 'ok' : 'neutral'" /></td>
+          <td class="num">{{ v.commit_lag_ms == null ? "–" : v.commit_lag_ms.toFixed(3) }}</td>
+          <td>
+            <template v-if="v.mxl_flow_id">
+              <code :title="v.mxl_flow_id">{{ v.mxl_flow_id.slice(0, 8) }}</code>
+              <button class="btn small secondary copy" title="Copy the MXL flow id" :aria-label="`Copy the MXL flow id of ${v.label}`" @click="copyFlow({ ...v, signal: v.label })">⧉</button>
+            </template>
+          </td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 
   <div class="panel">

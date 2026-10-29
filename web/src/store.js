@@ -48,6 +48,8 @@ export const signals = computed(() => [...strips.value, ...buses.value]);
 export const signalOf = (id) => strips.value.find((s) => s.id === id) || buses.value.find((b) => b.id === id) || null;
 export const isBus = (id) => buses.value.some((b) => b.id === id);
 export const sendOf = (from, to) => sends.value.find((s) => s.from === from && s.to === to) || null;
+/** An input's name (C2): its alias, else the name of what is connected, else "Input n". */
+export const inputName = (i) => (i.label && i.label !== `Input ${i.input}` ? i.label : i.connected_label || `Input ${i.input}`);
 export const settingValue = (key) => live.config?.settings?.find((s) => s.key === key)?.value ?? "";
 
 export function select(id) {
