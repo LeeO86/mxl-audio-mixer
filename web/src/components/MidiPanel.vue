@@ -6,8 +6,8 @@
 import { computed, ref } from "vue";
 import Modal from "./Modal.vue";
 import { download } from "../api.js";
-import { exportMappings, importMappings } from "../midicodec.js";
-import { controlText, deviceOf, midi, moveBank, removeMapping, setDevice, setMappings, startLearn, startMidi, stopMidi, surface, targetText } from "../midi.js";
+import { LEARN_PARAMS, exportMappings, importMappings } from "../midicodec.js";
+import { controlText, deviceOf, midi, moveBank, removeMapping, setDevice, setLatch, setMappings, startLearn, startMidi, stopMidi, surface, targetText } from "../midi.js";
 import { buses, live } from "../store.js";
 
 const emit = defineEmits(["close"]);
@@ -39,10 +39,10 @@ async function importFile(ev) {
   ev.target.value = "";
   if (!file) return;
   try {
-    const list = importMappings(await file.text());
-    setMappings(list);
-    importError.value = "";
-    live.notice = `${list.length} MIDI mapping${list.length === 1 ? "" : "s"} imported.`;
+    const { ok, dropped } = importMappings(await file.text());
+    setMappings(ok);
+    importError.value = dropped.length ? `${dropped.length} not imported: ${dropped.join("; ")}.` : "";
+    live.notice = `${ok.length} MIDI mapping${ok.length === 1 ? "" : "s"} imported.`;
   } catch (e) {
     importError.value = `Import failed: ${e.message}.`;
   }
@@ -111,8 +111,8 @@ async function importFile(ev) {
 
       <h4>MIDI learn</h4>
       <p class="note">
-        Learn mode: click a fader, mute, PFL, AFL or pan on the console, then move a control on a device in generic mode. A button toggles on its press; a fader, knob or pitch bend sets the
-        value. Kept in this browser; export them to take them to another one.
+        Learn mode: click a fader, mute, PFL, AFL or pan on the console, then move a control on a device in generic mode. A button toggles on its press (tick "latching" for a button that sends on and off
+        itself); a fader, knob or pitch bend sets the value. Kept in this browser; export them to take them to another one.
       </p>
       <div class="row tight">
         <button class="btn" :disabled="midi.state !== 'ready' || !anyGeneric" :title="anyGeneric ? '' : 'set a device to Generic first'" @click="learn">Learn…</button>
@@ -128,6 +128,11 @@ async function importFile(ev) {
             <td>{{ controlText(m.control) }}</td>
             <td class="muted small">{{ m.device }}</td>
             <td>→ {{ targetText(m.target) }}</td>
+            <td>
+              <label v-if="LEARN_PARAMS[m.target.param].kind === 'toggle'" class="check small" title="a latching button: on while its value is high (127), off at 0; otherwise each press toggles"
+                ><input type="checkbox" :checked="!!m.latch" :aria-label="`Mapping ${i + 1} latching`" @change="setLatch(i, $event.target.checked)" /> latching</label
+              >
+            </td>
             <td style="text-align: right"><button class="btn small secondary" :aria-label="`Remove mapping ${i + 1}`" @click="removeMapping(i)">Remove</button></td>
           </tr>
         </tbody>

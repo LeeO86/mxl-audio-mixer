@@ -1627,6 +1627,54 @@ mod tests {
         assert!((safe - vca).abs() < 1e-6, "mute-safe");
     }
 
+    /// The plan's cost per 96-sample block: 32 mono and 8 stereo strips into
+    /// a stereo main and 4 aux buses (`cargo test --release plan_cost --
+    /// --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn plan_cost() {
+        let mut m = Mix::default();
+        for i in 0..40 {
+            let f = if i < 32 { Format::Mono } else { Format::Stereo };
+            m.strips.push(strip(&format!("s{i}"), f, 1 + i % 2));
+        }
+        m.buses.push(bus("main", Format::Stereo));
+        for a in 0..4 {
+            m.buses.push(bus(&format!("aux{a}"), Format::Mono));
+        }
+        for i in 0..40 {
+            m.sends.push(send(&format!("s{i}"), "main", Tap::PostPan));
+            for a in 0..4 {
+                m.sends
+                    .push(send(&format!("s{i}"), &format!("aux{a}"), Tap::PreFader));
+            }
+        }
+        m.outputs.push(Output {
+            signal: "main".into(),
+            format: None,
+            commit_samples: None,
+        });
+        let mut compiler = Compiler::default();
+        let mut c = compile(&mut compiler, &m, 96);
+        let inputs = Inputs(vec![
+            vec![vec![0.1; 96]],
+            vec![vec![0.1; 96], vec![0.2; 96]],
+        ]);
+        let mut out = Outputs::default();
+        let blocks = 20_000;
+        for k in 0..1000 {
+            c.plan.process((k * 96) as u64, &inputs, &mut out);
+            out.0.clear();
+        }
+        let start = std::time::Instant::now();
+        for k in 0..blocks {
+            c.plan.process((k * 96) as u64, &inputs, &mut out);
+            out.0.clear();
+        }
+        let us = start.elapsed().as_secs_f64() * 1e6 / blocks as f64;
+        println!("plan: {us:.1} µs per 96-sample block");
+    }
+
     #[test]
     fn a_muted_strip_meters_its_level_and_is_silent() {
         #[derive(Default)]
@@ -1661,6 +1709,100 @@ mod tests {
         assert!((muted_meter - 0.25).abs() < 1e-4, "{muted_meter}");
         assert!((open - muted - 0.25 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
         assert_eq!(s, structure, "a mute is a value change");
+    }
+
+    /// The mute node (A3): a pre-fader send and the meter keep the strip, its
+    /// direct out and the mix lose it, for its own mute, a muted VCA and a mute
+    /// group alike; muting ramps without a step.
+    #[test]
+    fn the_mute_node_silences_after_the_fader_only() {
+        #[derive(Default)]
+        struct Seen(Outputs, HashMap<usize, f32>);
+        impl OutputSink for Seen {
+            fn write(&mut self, slot: usize, channel: usize, channels: usize, samples: &[f32]) {
+                self.0.write(slot, channel, channels, samples);
+            }
+            fn meter(&mut self, _: u32, slot: usize, chans: &[&[f32]]) {
+                self.1.insert(slot, chans[0][0]);
+            }
+        }
+        let mut base = mix();
+        base.buses.push(bus("aux", Format::Mono));
+        base.sends.push(send("vox", "aux", Tap::PreFader));
+        for signal in ["aux", "vox"] {
+            base.outputs.push(Output {
+                signal: signal.into(),
+                format: None,
+                commit_samples: None,
+            });
+        }
+        let slots = HashMap::from([
+            ("main".to_string(), 3),
+            ("aux".to_string(), 4),
+            ("vox".to_string(), 5),
+        ]);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 96]],
+            vec![vec![0.1; 96], vec![0.2; 96]],
+        ]);
+        let mut compiler = Compiler::default();
+        let mut play = |m: &Mix| {
+            assert_eq!(m.validate(2, 96), Ok(()));
+            let mut c = compiler.compile(m, 96, 0, &slots, &HashMap::new());
+            let mut seen = Seen::default();
+            c.plan.process(0, &inputs, &mut seen);
+            let slot = c.meters.iter().find(|(id, ..)| id == "vox").unwrap().1 as usize;
+            let o = &seen.0 .0;
+            (seen.1[&slot], o[&3][0][0], o[&4][0][0], o[&5][0][0])
+        };
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        let (meter, main, aux, direct) = play(&base);
+        assert!(
+            close(meter, 0.5)
+                && close(main, 0.5 * h + 0.1)
+                && close(aux, 0.5)
+                && close(direct, 0.5)
+        );
+        let mut own = base.clone();
+        own.strips[0].mute = true;
+        let mut vca = base.clone();
+        vca.vcas.push(crate::mix::vca::Vca {
+            id: "talent".into(),
+            name: "Talent".into(),
+            fader_db: Db(0.0),
+            mute: true,
+            members: vec!["vox".into()],
+            colour: None,
+            recall_safe: false,
+        });
+        let mut group = base.clone();
+        group.mute_groups.push(crate::mix::vca::MuteGroup {
+            id: "g".into(),
+            name: "G".into(),
+            active: true,
+            members: vec!["vox".into()],
+        });
+        for (what, m) in [("mute", own), ("VCA", vca), ("group", group)] {
+            let (meter, main, aux, direct) = play(&m);
+            assert!(close(meter, 0.5), "{what}: meter {meter}");
+            assert!(close(main, 0.1), "{what}: main {main}");
+            assert!(close(aux, 0.5), "{what}: pre-fader send {aux}");
+            assert!(close(direct, 0.0), "{what}: direct out {direct}");
+        }
+        // Muting ramps: over 48 samples from the level to nothing, no step.
+        let mut c = compiler.compile(&base, 96, 0, &slots, &HashMap::new());
+        let id = compiler.node_id("strip/vox/mute").expect("mute node");
+        assert!(c.plan.set_param(id, &[0.0], 48));
+        let mut out = Outputs::default();
+        c.plan.process(0, &inputs, &mut out);
+        let l = &out.0[&3][0];
+        let most = l
+            .windows(2)
+            .map(|w| (w[0] - w[1]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(most <= 0.5 * h / 48.0 * 1.01, "a step of {most}");
+        assert!(close(l[47], 0.1) && close(l[95], 0.1) && l[0] > 0.1 + 0.4 * h);
     }
 
     #[test]
@@ -2372,6 +2514,32 @@ mod tests {
         assert!((imm[0][0] - 0.4 * h).abs() < 1e-6);
         let top: f32 = imm[8..].iter().map(|ch| ch[0] * ch[0]).sum();
         assert!((top - 0.08).abs() < 1e-6, "{top}");
+        // At 0° the height is not written: 1.4.3 (deny_unknown_fields) reads
+        // the panner as before; a lifted one carries it.
+        let flat = serde_json::to_value(&m.strips[1].chain[0]).unwrap();
+        let mut lifted = m.strips[1].chain[0].clone();
+        if let ProcKind::SurroundPan { elevation_deg, .. } = &mut lifted.kind {
+            *elevation_deg = 0.0;
+        }
+        let at_zero = serde_json::to_value(&lifted).unwrap();
+        assert!(flat.get("elevation_deg").is_some());
+        assert!(at_zero.get("elevation_deg").is_none(), "{at_zero}");
+        let mut keys: Vec<_> = at_zero.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        let v143 = [
+            "azimuth_deg",
+            "divergence_pct",
+            "id",
+            "layout",
+            "lfe_db",
+            "spread_pct",
+            "type",
+        ];
+        assert!(
+            keys.iter()
+                .all(|k| v143.contains(&k.as_str()) || k == "bypass"),
+            "{keys:?}"
+        );
         // Old shows without a height load at 0°; above 90° is refused.
         let old: crate::mix::chain::Proc = serde_json::from_str(
             r#"{"id": "p", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 0}"#,

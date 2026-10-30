@@ -300,7 +300,9 @@ pub enum ProcKind {
     SurroundPan {
         layout: super::format::Format,
         azimuth_deg: f64,
-        #[serde(default)]
+        /// Left out at 0, so a show without height loads in 1.4.3
+        /// (`deny_unknown_fields`).
+        #[serde(default, skip_serializing_if = "is_zero")]
         elevation_deg: f64,
         #[serde(default)]
         spread_pct: f64,
@@ -309,6 +311,10 @@ pub enum ProcKind {
         #[serde(default = "lfe_off")]
         lfe_db: f64,
     },
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn lfe_off() -> f64 {

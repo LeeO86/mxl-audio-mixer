@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright-core";
 import { parseFaderDb } from "../src/console.js";
-import { bendToDb, controlValue, dbToBend, exportMappings, feedback, importMappings, lcd, panRing, parseControl, parseMcu, vpotTicks } from "../src/midicodec.js";
+import { bendToDb, checkMappings, controlValue, dbToBend, exportMappings, feedback, importMappings, lcd, panRing, parseControl, parseMcu, vpotTicks } from "../src/midicodec.js";
 
 const pass = (what) => console.log(`[midi.mjs] PASS: ${what}`);
 
@@ -45,7 +45,21 @@ assert.deepEqual(feedback({ type: "cc", channel: 0, number: 7 }, "fader", 0), [0
 assert.deepEqual(feedback({ type: "note", channel: 2, number: 36 }, "mute", true), [0x92, 36, 127]);
 assert.deepEqual(feedback({ type: "pb", channel: 3, number: 0 }, "pan", 0), [0xe3, 0, 64]);
 const maps = [{ device: "nano", control: { type: "cc", channel: 0, number: 7 }, target: { signal: "vox", param: "fader" } }];
-assert.deepEqual(importMappings(exportMappings(maps)), maps);
+assert.deepEqual(importMappings(exportMappings(maps)), { ok: maps, dropped: [] });
+const mixed = checkMappings([
+  ...maps,
+  { control: { type: "cc", channel: 1.5, number: 7 }, target: { signal: "vox", param: "fader" } },
+  { control: { type: "cc", channel: 16, number: 7 }, target: { signal: "vox", param: "fader" } },
+  { control: { type: "note", channel: 0, number: "36" }, target: { signal: "vox", param: "mute" } },
+  { control: { type: "cc", channel: 0, number: 20 }, target: { signal: "vox", param: "toString" } },
+  { control: { type: "cc", channel: 0, number: 20 }, target: { signal: "vox", param: "mute" }, latch: true },
+]);
+assert.equal(mixed.ok.length, 2);
+assert.equal(mixed.dropped.length, 4);
+assert.equal(mixed.ok[1].latch, true);
+// A latching button: its value says on or off.
+assert.deepEqual(controlValue("mute", parseControl([0xb0, 20, 127]), true), { on: true });
+assert.deepEqual(controlValue("mute", parseControl([0xb0, 20, 0]), true), { on: false });
 assert.throws(() => importMappings("nope"), /not a JSON file/);
 assert.throws(() => importMappings('{"mappings": [{"control": {"type": "cc", "channel": 0, "number": 7}, "target": {"signal": "vox", "param": "eq"}}]}'), /target/);
 assert.equal(parseFaderDb("-20", 15), -20);
@@ -54,6 +68,8 @@ assert.equal(parseFaderDb("+20", 15), 15);
 assert.equal(parseFaderDb("-90", 15), -Infinity);
 assert.equal(parseFaderDb("-∞", 15), -Infinity);
 assert.equal(parseFaderDb("loud", 15), null);
+assert.equal(parseFaderDb("inf", 15), null);
+assert.equal(parseFaderDb("+inf", 15), null);
 pass("the Mackie Control and MIDI learn messages, the mappings file, typed fader levels");
 
 // ---- in the browser ------------------------------------------------------------------------
@@ -196,7 +212,13 @@ try {
   await hasSent("nanoKONTROL", [0xb0, 7, 95]);
   pass("MIDI learn: CC 7 → vox fader, note 36 → gtr mute (toggles on the press); the LED and the fader value go back");
 
-  // Kept in this browser: after a reload MIDI connects again and the mappings work.
+  // Kept in this browser: after a reload MIDI connects again and the mappings work; a bad stored entry
+  // (an edited copy) is dropped.
+  await page.evaluate(() => {
+    const key = "mxl-audio-mixer.midi.mappings";
+    const list = JSON.parse(localStorage.getItem(key));
+    localStorage.setItem(key, JSON.stringify([...list, { control: { type: "cc", channel: "x" }, target: {} }]));
+  });
   await page.reload();
   await page.locator('[data-signal="vox"]').waitFor();
   await page.waitForTimeout(500);
@@ -209,9 +231,16 @@ try {
   const file = await (await download).path();
   const { readFileSync } = await import("node:fs");
   const exported = importMappings(readFileSync(file, "utf8"));
-  assert.equal(exported.length, 2);
+  assert.equal(exported.ok.length, 2);
+  assert.equal(exported.dropped.length, 0);
   await page.getByRole("dialog").screenshot({ path: `${out}/midi-mappings.png` });
-  pass("kept over a reload (MIDI connects again by itself); export gives both mappings");
+  // A latching button on gtr's mute: 127 mutes, 0 unmutes.
+  await page.getByLabel("Mapping 2 latching").check();
+  await push("nanoKONTROL", [0x90, 36, 0x7f]);
+  await until("gtr muted by the latching note", async () => (await api("/api/v1/strips/gtr")).mute === true);
+  await push("nanoKONTROL", [0x80, 36, 0x00]);
+  await until("gtr unmuted when it is let go", async () => (await api("/api/v1/strips/gtr")).mute === false);
+  pass("kept over a reload (MIDI connects again by itself, a bad stored entry dropped); export gives both mappings; a latching button follows its value");
 
   await page.getByRole("button", { name: "Disconnect" }).click();
   if (errors.length) throw new Error(`page errors: ${errors.join("; ")}`);

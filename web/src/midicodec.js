@@ -110,12 +110,15 @@ export const controlText = (c) => `${{ cc: "CC", note: "Note", pb: "Pitch bend" 
 
 /**
  * What a learnt control does with a message (`parsed` from parseControl) on `param`: { fader_db } or
- * { pan } for continuous controls, "toggle" for a button press (a toggle acts on the press and ignores the
- * release), or null.
+ * { pan } for continuous controls; for a button "toggle" on its press (the release does nothing), or with
+ * `latch` (a latching button: 127 on, 0 off; a note on while held) { on } from its value; or null.
  */
-export function controlValue(param, parsed) {
+export function controlValue(param, parsed, latch = false) {
   const kind = LEARN_PARAMS[param]?.kind;
-  if (kind === "toggle") return parsed.press ? "toggle" : null;
+  if (kind === "toggle") {
+    if (latch) return { on: parsed.value >= 0.5 };
+    return parsed.press ? "toggle" : null;
+  }
   if (parsed.control.type === "note") return null;
   if (kind === "level") {
     const d = posToDb(parsed.value);
@@ -145,7 +148,33 @@ export function feedback(control, param, value) {
 /** The mappings file (export): { version: 1, mappings: [...] }. */
 export const exportMappings = (mappings) => JSON.stringify({ format: "mxl-audio-mixer-midi", version: 1, mappings }, null, 2);
 
-/** The mappings of a file (import), checked; throws with the reason. */
+/**
+ * Mappings checked one by one (a file's, or the browser's own): the valid ones, and why the others were
+ * dropped. A control is { type: "cc" | "note" | "pb", channel: 0–15, number: 0–127 } (integers), a target a
+ * signal id and one of LEARN_PARAMS; `latch` is optional.
+ */
+export function checkMappings(list) {
+  const ok = [];
+  const dropped = [];
+  const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  (Array.isArray(list) ? list : []).forEach((m, i) => {
+    const c = m?.control;
+    const t = m?.target;
+    if (!c || !["cc", "note", "pb"].includes(c.type) || !int(c.channel, 0, 15) || !(c.type === "pb" || int(c.number, 0, 127)))
+      dropped.push(`mapping ${i + 1}: the MIDI control is not valid`);
+    else if (!t || typeof t.signal !== "string" || !t.signal || !Object.hasOwn(LEARN_PARAMS, t.param)) dropped.push(`mapping ${i + 1}: the target is not valid`);
+    else
+      ok.push({
+        device: typeof m.device === "string" ? m.device : "",
+        control: { type: c.type, channel: c.channel, number: c.type === "pb" ? 0 : c.number },
+        target: { signal: t.signal, param: t.param },
+        ...(m.latch === true && LEARN_PARAMS[t.param].kind === "toggle" ? { latch: true } : {}),
+      });
+  });
+  return { ok, dropped };
+}
+
+/** The mappings of a file (import): { ok, dropped } as checkMappings; throws when it has none to read. */
 export function importMappings(text) {
   let d;
   try {
@@ -155,12 +184,7 @@ export function importMappings(text) {
   }
   const list = Array.isArray(d) ? d : d?.mappings;
   if (!Array.isArray(list)) throw new Error("no mappings in the file");
-  return list.map((m, i) => {
-    const c = m?.control;
-    const t = m?.target;
-    if (!c || !["cc", "note", "pb"].includes(c.type) || !(c.channel >= 0 && c.channel < 16) || !(c.number >= 0 && c.number < 128))
-      throw new Error(`mapping ${i + 1}: the MIDI control is not valid`);
-    if (!t || typeof t.signal !== "string" || !LEARN_PARAMS[t.param]) throw new Error(`mapping ${i + 1}: the target is not valid`);
-    return { device: typeof m.device === "string" ? m.device : "", control: { type: c.type, channel: c.channel, number: c.type === "pb" ? 0 : c.number }, target: { signal: t.signal, param: t.param } };
-  });
+  const r = checkMappings(list);
+  if (list.length && !r.ok.length) throw new Error(r.dropped[0]);
+  return r;
 }

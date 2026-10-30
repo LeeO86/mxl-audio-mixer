@@ -38,12 +38,13 @@ export function numbered(base, count) {
 }
 
 /**
- * A fader level typed by the operator (A5): "0", "-20", "−3,5", "+4", "-inf" or "−∞". Below −80 dB is
+ * A fader level typed by the operator (A5): "0", "-20", "−3,5", "+4", "-inf" or "−∞" ("inf" and "+inf"
+ * are none). Below −80 dB is
  * −∞, above `max` is `max`. Returns dB (a number, −Infinity for −∞), or null for text that is no level.
  */
 export function parseFaderDb(text, max) {
   const t = String(text).trim().toLowerCase().replace(/\s*db$/, "").replace(/[−–]/g, "-").replace(",", ".");
-  if (/^-?(inf|∞|oo)$/.test(t)) return -Infinity;
+  if (/^-(inf|∞|oo)$/.test(t)) return -Infinity; // only minus infinity: "inf", "+inf" are no level
   if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(t)) return null;
   const v = Number(t);
   if (v < -80) return -Infinity;

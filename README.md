@@ -146,12 +146,14 @@ for the feedback (by default the port of the same name):
   the display shows names and levels. **Mackie Control extender**: the next 8 strips.
 - **Generic (MIDI learn)**: "Learn…", then click a fader, mute, PFL, AFL or pan on
   the console (it is picked, not changed) and move a control (CC, note or pitch
-  bend) on the device. A button toggles on its press; a fader, knob or pitch bend
-  sets the value. The value goes back to the control (LED, motor fader). The
+  bend) on the device. A button toggles on its press (tick "latching" in the list
+  for a button that sends on and off itself); a fader, knob or pitch bend sets the
+  value. The value goes back to the control (LED, motor fader). The
   mappings are kept in the browser; Export and Import move them as a JSON file
   (`{"format": "mxl-audio-mixer-midi", "version": 1, "mappings": [{"device",
   "control": {"type": "cc" | "note" | "pb", "channel": 0–15, "number"}, "target":
-  {"signal", "param": "fader" | "mute" | "pfl" | "afl" | "pan"}}]}`).
+  {"signal", "param": "fader" | "mute" | "pfl" | "afl" | "pan"}, "latch": true?}]}`).
+  A bad entry, in a file or in the browser's storage, is dropped with a warning.
 
 ## Tally and audio-follows-video
 
@@ -776,7 +778,8 @@ started again. It continues over changes of the mix; blocks the DSP thread misse
 count as silence.
 
 `GET /api/v1/meters` gives, per strip (after its fader, before its mute: a muted
-strip still reads its level) and bus (its output) and channel: sample peak
+strip still reads its level, also in `true_peak_dbtp{signal}`; logic Level and
+Above blocks read a muted strip as silent) and bus (its output) and channel: sample peak
 (since the last 40 ms update), peak hold (until cleared), true peak (4×
 oversampling), RMS (300 ms) and the PPM readings (IEC 60268-10 Type I: 5 ms
 integration, 20 dB in 1.7 s; Type II: 10 ms, 24 dB in 2.8 s; a steady 1 kHz tone

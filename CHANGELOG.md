@@ -12,6 +12,10 @@
 - A8: a strip with a surround panner shows where it pans (speaker ring with the source) and moves it by drag; a mono or stereo strip sending to a surround bus offers "+ Surround pan".
 - A9: meters above 3 channels have narrower bars with the channel labels (L R C LFE …) below, a little less tall.
 - A10: the surround panner pans into 5.1.4 and 7.1.4 too, with a height (`elevation_deg` 0–90: bed to top layer); front/rear on the strip's picture, height on the strip. A plan node holds up to 24 values (a stereo strip into 7.1.4).
+- A3 behaviour change for the platform: the metric `mxl_audio_mixer_true_peak_dbtp{signal}` and `GET /api/v1/meters` (also the far side's meters over the remote link) read a muted strip's level now, not silence. Logic Level and Above blocks still read a muted strip (its mute, a muted VCA, a mute group) as silent.
+- Fixed: the meter tick no longer runs back-to-back after a late tick (missed ticks are delayed); the second read found the peaks empty, so wide signals flickered to −∞ and logic level blocks saw false edges.
+- Faster gain steps on the DSP thread: a gain reads only its channel's ramp values instead of copying the whole node per channel (lab plan of 40 strips and 5 buses, 96 samples: 1.4.3 22.6 µs, this branch before 25.1 µs, now 22.9 µs per block).
+- Downgrade: a show is read by 1.4.3 unless a surround panner has a height (`elevation_deg` above 0, written only then) or a 5.1.4/7.1.4 layout; set those back to 0 and 5.1/7.1 before a rollback.
 
 ## 1.4.3 (2026-10-24)
 

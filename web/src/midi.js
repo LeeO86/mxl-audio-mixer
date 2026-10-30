@@ -10,7 +10,7 @@
 // one of the same name). Web MIDI needs a secure page (https or localhost).
 import { reactive, watch } from "vue";
 import { dbValue } from "./api.js";
-import { MCU, bendToDb, controlKey, controlText, controlValue, dbToBend, feedback, lcd, lcdCell, lcdDb, panRing, parseControl, parseMcu, LEARN_PARAMS } from "./midicodec.js";
+import { MCU, bendToDb, checkMappings, controlKey, controlText, controlValue, dbToBend, feedback, lcd, lcdCell, lcdDb, panRing, parseControl, parseMcu, LEARN_PARAMS } from "./midicodec.js";
 import { buses, live, patchSignal, select, signalOf, soloed, store, stored, strips, toggleSolo } from "./store.js";
 
 function load(key, fallback) {
@@ -21,16 +21,33 @@ function load(key, fallback) {
   }
 }
 
+// What this browser kept, checked: a bad entry (an older or edited copy) is dropped with a warning.
+const MODES = new Set(["off", "mcu", "mcu-xt", "generic"]);
+function loadDevices() {
+  const d = load("midi.devices", {});
+  const out = {};
+  for (const [name, v] of Object.entries(d && typeof d === "object" ? d : {})) {
+    if (v && MODES.has(v.mode)) out[name] = { mode: v.mode, output: typeof v.output === "string" ? v.output : name };
+    else console.warn(`MIDI: the stored setting of ${name} is not valid; dropped`);
+  }
+  return out;
+}
+function loadMappings() {
+  const { ok, dropped } = checkMappings(load("midi.mappings", []));
+  for (const why of dropped) console.warn(`MIDI: stored ${why}; dropped`);
+  return ok;
+}
+
 export const midi = reactive({
   enabled: stored("midi.enabled", "") === "1",
   state: "off", // off, connecting, ready, insecure, unsupported, denied
   sysex: false,
   inputs: [], // { name, state }
   outputs: [],
-  devices: load("midi.devices", {}), // input name -> { mode: "off" | "mcu" | "mcu-xt" | "generic", output: name }
+  devices: loadDevices(), // input name -> { mode: "off" | "mcu" | "mcu-xt" | "generic", output: name }
   bank: 0, // the first strip of the Mackie Control bank
   master: stored("midi.master", ""), // the bus on the master fader; "" the first bus
-  mappings: load("midi.mappings", []), // { device, control, target: { signal, param } }
+  mappings: loadMappings(), // { device, control, target: { signal, param } }
   learning: false,
   target: null, // { signal, param } being learnt
   learnt: "", // the last mapping learnt, as text
@@ -254,11 +271,12 @@ function onGeneric(name, data) {
     if (m.device !== name || controlKey(m.control) !== key) continue;
     const s = signalOf(m.target.signal);
     if (!s) continue;
-    const v = controlValue(m.target.param, parsed);
+    const v = controlValue(m.target.param, parsed, m.latch);
     if (!v) continue;
-    if (v === "toggle") {
-      if (m.target.param === "mute") patchSignal(s.id, { mute: !s.mute });
-      else toggleSolo(s.id, m.target.param);
+    if (v === "toggle" || "on" in v) {
+      const on = v === "toggle" ? !valueOf(m.target) : v.on;
+      if (m.target.param === "mute") patchSignal(s.id, { mute: on });
+      else if (on !== valueOf(m.target)) toggleSolo(s.id, m.target.param);
     } else {
       markMoved(`${name}|${key}`);
       patchSignal(s.id, v);
@@ -277,6 +295,12 @@ function refreshGeneric(name, force) {
     if (v === undefined) continue;
     send(port, `${key}`, feedback(m.control, m.target.param, v), force);
   }
+}
+
+/** A toggle mapping follows a latching button's value instead of toggling on each press. */
+export function setLatch(i, on) {
+  midi.mappings = midi.mappings.map((m, k) => (k === i ? { ...m, latch: on || undefined } : m));
+  saveMappings();
 }
 
 export function removeMapping(i) {
