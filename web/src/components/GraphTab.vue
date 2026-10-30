@@ -16,11 +16,13 @@ import "@vue-flow/core/dist/style.css";
 import GraphNode from "./GraphNode.vue";
 import Pot from "./Pot.vue";
 import DownmixEdit from "./DownmixEdit.vue";
+import SurroundPad from "./SurroundPad.vue";
+import { DEFAULT_SEND_PAN, sendPanBed } from "../sendpan.js";
 import { DEFAULT_DOWNMIX, FORMATS, channelsOf, tapLabel } from "../nodes.js";
 import { loadTaps, tapOptions } from "../taps.js";
 import { api, dbValue, fmtDb } from "../api.js";
 import { act, buses, inputName, isBus, isSubgroup, live, patchSend, patchSignal, select, sendOf, signalOf, store, stored, strips } from "../store.js";
-import { setVoutSource, sourceLabel, vouts } from "../vouts.js";
+import { setVoutFeed, setVoutSource, sourceLabel, vouts } from "../vouts.js";
 
 const emit = defineEmits(["open"]);
 const { applyNodeChanges, applyEdgeChanges, fitView } = useVueFlow();
@@ -245,12 +247,12 @@ async function remove() {
 }
 const fromSig = computed(() => (current.value ? signalOf(current.value.from) : null));
 const toBus = computed(() => (current.value ? signalOf(current.value.to) : null));
-// A send's own surround pan (`Send.pan`, part B6: a mono or stereo source into a 5.1 or wider bus);
-// else the strip's pan, which every post-pan send of it takes.
-const SEND_PAN = { azimuth_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 };
-const sendPan = computed(() => !!current.value?.pan && typeof current.value.pan === "object");
-const canSendPan = computed(() => !sendPan.value && fromSig.value && ["mono", "stereo"].includes(fromSig.value.format) && channelsOf(toBus.value?.format) >= 6);
-const setSendPan = (key, v) => put({ pan: { ...SEND_PAN, ...current.value.pan, [key]: v } });
+// A send's own surround pan (`Send.pan`, B6) where the server applies one (sendpan.js); else the
+// strip's pan, which every post-pan send of it takes.
+const panBed = computed(() => (current.value && !current.value.block_delay ? sendPanBed(current.value) : ""));
+const panNode = computed(() => ({ layout: panBed.value, ...(current.value?.pan || DEFAULT_SEND_PAN) }));
+const setPan = (change) => put({ pan: { ...DEFAULT_SEND_PAN, ...(current.value?.pan || {}), ...change } });
+const sendPan = computed(() => !!panBed.value);
 const stripPan = computed(() => !sendPan.value && fromSig.value && !isBus(fromSig.value.id) && ["mono", "stereo"].includes(fromSig.value.format) && current.value.tap === "post-pan");
 const folds = computed(() => fromSig.value && toBus.value && channelsOf(fromSig.value.format) > channelsOf(toBus.value.format));
 const mixDownmix = computed(() => live.mix?.settings?.downmix || DEFAULT_DOWNMIX);
@@ -270,8 +272,10 @@ async function openInput(n) {
 }
 const flowLabel = (f) => `${f.label || f.flow_id.slice(0, 8)} · ${f.channels} ch · ${f.domain_label || f.domain_id.slice(0, 8)}${f.own ? " (own)" : ""}`;
 async function saveAlias() {
+  // Empty: back to the default name "Input n".
   const label = inputForm.value.label.trim();
-  if (label && label !== editedInput.value?.label) await act(() => api.patch(`/api/v1/inputs/${inputEdit.value}`, { label }));
+  if (label !== editedInput.value?.label && !(label === "" && editedInput.value?.label === `Input ${inputEdit.value}`))
+    await act(() => api.patch(`/api/v1/inputs/${inputEdit.value}`, { label }));
 }
 async function connectFlow() {
   const [domain_id, flow_id] = inputForm.value.flow.split("|");
@@ -336,15 +340,17 @@ function setVoutInputFormat(f) {
           <option v-for="[v, l] in tapChoices" :key="v" :value="v">{{ l }}</option>
         </select>
       </div>
-      <div v-if="sendPan" data-send-pan>
-        <Pot label="Send pan: position" unit="°" :value="current.pan.azimuth_deg ?? 0" :min="-180" :max="180" :def="0" :fine="0.5" :digits="0" @change="(v) => setSendPan('azimuth_deg', v)" />
-        <Pot label="Send pan: spread" unit="%" :value="current.pan.spread_pct ?? 0" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setSendPan('spread_pct', v)" />
-        <Pot label="Send pan: divergence" unit="%" :value="current.pan.divergence_pct ?? 0" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setSendPan('divergence_pct', v)" />
-        <Pot label="Send pan: LFE" unit="dB (−100: off)" :value="current.pan.lfe_db ?? -100" :min="-100" :max="10" :def="-100" :fine="0.5" @change="(v) => setSendPan('lfe_db', v)" />
-        <button class="btn small secondary" @click="put({ pan: null })">No send pan</button>
-      </div>
-      <div v-else-if="canSendPan" data-send-pan-add>
-        <button class="btn small secondary" @click="put({ pan: { ...SEND_PAN } })">Surround-pan this send</button>
+      <div v-if="sendPan" class="sendpan" data-send-pan>
+        <label>Surround panning ({{ panBed }} bed)</label>
+        <SurroundPad :node="panNode" :size="140" @change="setPan" />
+        <template v-if="current.pan">
+          <Pot label="Position" unit="°" :value="current.pan.azimuth_deg" :min="-180" :max="180" :def="0" :fine="0.5" :digits="0" @change="(v) => setPan({ azimuth_deg: v })" />
+          <Pot label="Spread" unit="%" :value="current.pan.spread_pct" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setPan({ spread_pct: v })" />
+          <Pot label="Divergence" unit="% (C into L/R)" :value="current.pan.divergence_pct" :min="0" :max="100" :def="0" :fine="0.5" :digits="0" @change="(v) => setPan({ divergence_pct: v })" />
+          <Pot label="LFE" unit="dB (−100: off)" :value="current.pan.lfe_db" :min="-100" :max="10" :def="-100" :fine="0.5" @change="(v) => setPan({ lfe_db: v })" />
+          <button class="btn small secondary" @click="put({ pan: null })">Use the strip's panner</button>
+        </template>
+        <p v-else class="note">Click or drag on the pad to pan this send (it then has its own panning).</p>
       </div>
       <div v-else-if="stripPan" data-strip-pan>
         <Pot :label="fromSig.format === 'mono' ? 'Pan' : 'Balance'" :value="fromSig.pan" :min="-1" :max="1" :def="0" :fine="0.01" :digits="2" @change="(v) => patchSignal(fromSig.id, { pan: v })" />
@@ -377,7 +383,7 @@ function setVoutInputFormat(f) {
         <label>Alias</label>
         <input v-model="inputForm.label" aria-label="Alias" maxlength="64" @keydown.enter="saveAlias" @blur="saveAlias" />
       </div>
-      <p class="note">Strips of this input still named after the old alias take the new one.</p>
+      <p class="note">Strips of this input still named after the old alias take the new one. Empty: back to "Input {{ editedInput.input }}".</p>
       <div class="row">
         <label>Flow</label>
         <select v-model="inputForm.flow" aria-label="MXL flow">
@@ -401,6 +407,11 @@ function setVoutInputFormat(f) {
           <option v-for="[v, l] in voutTapChoices" :key="v" :value="v">{{ l }}</option>
         </select>
       </div>
+      <div v-if="editedVout.source && 'monitor' in editedVout.source" class="row" role="group" aria-label="Monitor feed">
+        <label>Feed</label>
+        <button v-for="f in ['clean', 'speaker']" :key="f" class="btn small" :class="(editedVout.source.feed || 'clean') === f ? '' : 'secondary'" :aria-pressed="(editedVout.source.feed || 'clean') === f" @click="setVoutFeed(editedVout, f)">{{ f === "clean" ? "Clean" : "Speaker" }}</button>
+      </div>
+      <p v-if="editedVout.source && 'monitor' in editedVout.source" class="note">Clean: the monitor's source, before solo, talkback, checks and level. Speaker: exactly what its speakers get.</p>
       <div v-if="editedVout.source && 'input' in editedVout.source" class="row">
         <label>Input is</label>
         <select :value="editedVout.source.format || ''" aria-label="Input format" @change="setVoutInputFormat($event.target.value)">

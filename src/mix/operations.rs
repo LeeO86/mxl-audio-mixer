@@ -69,6 +69,7 @@ fn send(from: &str, to: &str, tap: Tap) -> Send {
         mute: false,
         phase: false,
         block_delay: false,
+        pan: None,
     }
 }
 
@@ -298,6 +299,45 @@ fn replace_refs(mix: &mut Mix, old: &[String], new: &[String]) {
         }
     }
     mix.control_room.sources.dedup();
+    let Some(n) = first else { return };
+    // A published output of one of them is the first new strip's (once).
+    if let Some(o) = mix
+        .outputs
+        .iter()
+        .find(|o| old.contains(&o.signal))
+        .cloned()
+    {
+        mix.outputs.retain(|x| !old.contains(&x.signal));
+        if !mix.outputs.iter().any(|x| x.signal == n) {
+            // A tap after another strip's node becomes the default.
+            let tap = o.tap.clone().filter(|t| mix.check_tap(&n, t).is_ok());
+            mix.outputs.push(super::model::Output {
+                signal: n.clone(),
+                tap,
+                ..o
+            });
+        }
+    }
+    // Virtual outputs fed by one of them take the first new strip; a tap it
+    // does not have (after a node of another strip) becomes the default.
+    let taps: Vec<Option<Tap>> = mix
+        .virtual_outputs
+        .iter()
+        .map(|r| match &r.source {
+            super::model::OutputSource::Signal { tap: Some(t), .. } => {
+                mix.check_tap(&n, t).is_ok().then(|| t.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for (r, tap) in mix.virtual_outputs.iter_mut().zip(taps) {
+        if let super::model::OutputSource::Signal { signal, tap: t } = &mut r.source {
+            if old.contains(signal) {
+                *signal = n.clone();
+                *t = tap;
+            }
+        }
+    }
 }
 
 /// Link mono `strips` into one strip of `format` (by default the format of that
@@ -621,5 +661,51 @@ mod tests {
         );
         assert_eq!(ids(&m.vcas[0].members), ["pair-l", "pair-r"]);
         assert!(m.send("pair-r", "aux").is_some());
+    }
+
+    #[test]
+    fn link_and_unlink_keep_outputs_and_virtual_outputs() {
+        use crate::mix::model::{Output, OutputSource};
+        let mut m = mix();
+        m.outputs.push(Output {
+            signal: "guest".into(),
+            format: None,
+            commit_samples: Some(96),
+            tap: None,
+        });
+        m.set_virtual_source(
+            "1",
+            Some(OutputSource::Signal {
+                signal: "host".into(),
+                tap: Some(Tap::PreFader),
+            }),
+        );
+        link(
+            &mut m,
+            &["host".into(), "guest".into()],
+            None,
+            Some("pair".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.validate(4, 96), Ok(()));
+        assert_eq!(m.outputs.len(), 1);
+        assert_eq!(
+            (m.outputs[0].signal.as_str(), m.outputs[0].commit_samples),
+            ("pair", Some(96))
+        );
+        assert_eq!(
+            m.virtual_source("1"),
+            Some(&OutputSource::Signal {
+                signal: "pair".into(),
+                tap: Some(Tap::PreFader)
+            })
+        );
+        unlink(&mut m, "pair").unwrap();
+        assert_eq!(m.validate(4, 96), Ok(()));
+        assert_eq!(m.outputs[0].signal, "pair-l");
+        assert!(
+            matches!(m.virtual_source("1"), Some(OutputSource::Signal { signal, .. }) if signal == "pair-l")
+        );
     }
 }

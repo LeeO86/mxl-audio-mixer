@@ -13,8 +13,8 @@ use std::sync::Arc;
 pub use super::proc::{NodeMeter, Processor, MAX_CH};
 
 /// Values per node: the widest format's channels (12), a 2 × 2 panner, or a
-/// surround panner's matrix (stereo into 7.1: 16).
-pub const MAX_NODE_VALUES: usize = 16;
+/// surround panner's matrix (stereo into 7.1.4: 24, A10).
+pub const MAX_NODE_VALUES: usize = 24;
 
 /// Stable id of a node across plans (assigned by the compiler per node key).
 pub type NodeId = u32;
@@ -327,6 +327,13 @@ impl PlanBuilder {
 
     /// A node with `values`, starting at zero (the swap carries values over).
     pub fn node(&mut self, id: NodeId, values: &[f32], ramp: u32) -> u32 {
+        // On the control side: a node wider than the fixed arrays is a bug in
+        // the compiler, not something to cut silently.
+        assert!(
+            values.len() <= MAX_NODE_VALUES,
+            "node {id} has {} values, at most {MAX_NODE_VALUES}",
+            values.len()
+        );
         self.plan.nodes.push(Node::new(id, values, ramp));
         (self.plan.nodes.len() - 1) as u32
     }
@@ -510,14 +517,18 @@ impl Plan {
                             self.indices[src.start as usize + c],
                             self.indices[dst.start as usize + c],
                         );
+                        // Only this channel's values: copying the whole node
+                        // per channel cost more than the gain itself.
                         let n = &self.nodes[node as usize];
-                        let ramping = n.ramping();
-                        let g = n.target[c];
-                        let node = n.clone();
+                        let (g, cur, step, left) = (n.target[c], n.cur[c], n.step[c], n.left);
                         let (s, d) = self.pair(s, d);
-                        if ramping {
-                            for k in 0..block {
-                                d[k] = s[k] * node.at(c, k);
+                        if left > 0 {
+                            let r = (left as usize).min(block);
+                            for k in 0..r {
+                                d[k] = s[k] * (cur + step * (k + 1) as f32);
+                            }
+                            for k in r..block {
+                                d[k] = s[k] * g;
                             }
                         } else {
                             for k in 0..block {

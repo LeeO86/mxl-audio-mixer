@@ -16,7 +16,7 @@ use crate::inputs::Inputs;
 use crate::loudness::LoudnessMeters;
 use crate::meters::Meters;
 use crate::mix::compile::{Compiler, LayoutNode};
-use crate::mix::model::{Kind, Mix, Patch, Strip, Tap};
+use crate::mix::model::{Kind, Mix, Patch, Strip};
 use crate::outputs::{OutputSpec, Outputs};
 
 /// Time between fading out the nodes a change removes or rewires and the swap:
@@ -95,6 +95,8 @@ pub struct Control {
     procs: HashMap<NodeId, LayoutNode>,
     /// Processing latency of each signal's post-fader point, in samples.
     pub latency: HashMap<String, usize>,
+    /// Processing latency of each published signal at its output's tap.
+    pub output_latency: HashMap<String, usize>,
     /// Counts changes of the mix; clients reload it when it moves.
     pub revision: u64,
     structure: Option<u64>,
@@ -162,7 +164,11 @@ impl Control {
         config: &Config,
     ) -> Self {
         let mut compiler = Compiler::with_talk_base(config.input_flows);
-        compiler.vouts = config.virtual_outputs.iter().map(|v| v.format).collect();
+        compiler.vouts = config
+            .virtual_outputs
+            .iter()
+            .map(|v| (v.id.clone(), v.format))
+            .collect();
         Self {
             engine,
             inputs,
@@ -181,6 +187,7 @@ impl Control {
             layout: HashMap::new(),
             procs: HashMap::new(),
             latency: HashMap::new(),
+            output_latency: HashMap::new(),
             revision: 0,
             structure: None,
             pending: None,
@@ -280,7 +287,8 @@ impl Control {
         for b in self.mix.logic_blocks() {
             let key = match &b.kind {
                 BlockKind::Level { signal } | BlockKind::Above { signal, .. } => {
-                    if let Some(db) = self.meters.peak_dbfs(signal) {
+                    if let Some(db) = logic_level(&self.mix, signal, self.meters.peak_dbfs(signal))
+                    {
                         level_db.insert(signal.clone(), db);
                     }
                     continue;
@@ -513,6 +521,7 @@ impl Control {
                             signal,
                             format: None,
                             commit_samples: None,
+                            tap: None,
                         });
                     }
                 }
@@ -521,13 +530,12 @@ impl Control {
                         input: input as usize,
                         format: None,
                     };
-                    let slot = output as usize;
                     if on {
-                        next.set_virtual_source(slot, Some(source));
-                    } else if next.virtual_source(slot) == Some(&source) {
+                        next.set_virtual_source(&output, Some(source));
+                    } else if next.virtual_source(&output) == Some(&source) {
                         // Only what this route set: another source chosen
                         // since stays (D248).
-                        next.set_virtual_source(slot, None);
+                        next.set_virtual_source(&output, None);
                     }
                 }
                 Act::Monitor { monitor, source } => {
@@ -808,46 +816,40 @@ impl Control {
         self.analyser.set_target(target);
     }
 
+    /// Every output to publish: the virtual outputs first, so they take their
+    /// slots before the published ones at a start (D267).
     fn specs(&self, mix: &Mix) -> Vec<OutputSpec> {
-        mix.outputs
-            .iter()
-            .filter_map(|o| {
-                let (name, _) = mix.signal(&o.signal)?;
-                let format = match o.format {
-                    Some(f) => f,
-                    None => mix.tap_format(&o.signal, &Tap::PostFader)?,
-                };
-                Some(OutputSpec {
-                    signal: o.signal.clone(),
-                    name: name.to_string(),
-                    format,
-                    commit: o.commit_samples.unwrap_or(self.default_commit),
-                })
+        let virtual_outputs = self.virtual_outputs.iter().map(|v| OutputSpec {
+            signal: crate::mix::compile::vout_key(&v.id),
+            name: v.label.clone(),
+            format: v.format,
+            commit: self.default_commit,
+        });
+        let published = mix.outputs.iter().filter_map(|o| {
+            let (name, _) = mix.signal(&o.signal)?;
+            let format = match o.format {
+                Some(f) => f,
+                None => mix.tap_format(&o.signal, &o.tap())?,
+            };
+            Some(OutputSpec {
+                signal: o.signal.clone(),
+                name: name.to_string(),
+                format,
+                commit: o.commit_samples.unwrap_or(self.default_commit),
             })
-            .chain(
-                mix.control_room
-                    .monitors
-                    .iter()
-                    .filter(|m| m.publish)
-                    .map(|m| OutputSpec {
-                        signal: m.key(),
-                        name: format!("Monitor {}", m.name),
-                        format: m.format,
-                        commit: self.default_commit,
-                    }),
-            )
-            .chain(
-                self.virtual_outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| OutputSpec {
-                        signal: crate::mix::compile::vout_key(i + 1),
-                        name: v.label.clone(),
-                        format: v.format,
-                        commit: self.default_commit,
-                    }),
-            )
-            .collect()
+        });
+        let monitors = mix
+            .control_room
+            .monitors
+            .iter()
+            .filter(|m| m.publish)
+            .map(|m| OutputSpec {
+                signal: m.key(),
+                name: format!("Monitor {}", m.name),
+                format: m.format,
+                commit: self.default_commit,
+            });
+        virtual_outputs.chain(published).chain(monitors).collect()
     }
 
     /// Solo `signal` (PFL or AFL), or end its solo; interlock replaces the others.
@@ -1145,6 +1147,22 @@ impl Control {
         // keep what is heard (C12, D186).
         next.lock_subgroup_sends();
         next.validate_except_logic(self.input_count, self.block)?;
+        // The virtual outputs hold their slots: the published outputs and
+        // monitors share the rest (D267).
+        let free = crate::engine::MAX_OUTPUTS - self.virtual_outputs.len();
+        let published = next.outputs.len()
+            + next
+                .control_room
+                .monitors
+                .iter()
+                .filter(|m| m.publish)
+                .count();
+        if published > free {
+            return Err(format!(
+                "at most {free} published outputs and monitors (MIXER_OUTPUT_FLOWS takes {})",
+                self.virtual_outputs.len()
+            ));
+        }
         self.check_logic(&next)?;
         self.compiler.afv = self.afv_targets(&next);
         self.compiler.auto = self.auto.compile_gains(&next);
@@ -1258,6 +1276,13 @@ impl Control {
         let errors = self.outputs.sync(&mut self.engine, &self.node, &specs);
         let slots = self.outputs.slots();
         next.outputs.retain(|o| slots.contains_key(&o.signal));
+        // A monitor whose output could not be published is not shown as
+        // published (its error is in `errors`).
+        for m in &mut next.control_room.monitors {
+            if m.publish && !slots.contains_key(&m.key()) {
+                m.publish = false;
+            }
+        }
         self.loudness.sync(&mut self.engine, &next);
         let started = Instant::now();
         let mut compiled = self.compiler.compile(
@@ -1295,6 +1320,7 @@ impl Control {
         self.layout = compiled.nodes;
         self.procs = compiled.procs;
         self.latency = compiled.latency;
+        self.output_latency = compiled.output_latency;
         self.structure = Some(compiled.structure);
         self.mix = next;
         self.save()?;
@@ -1360,7 +1386,13 @@ impl Control {
     pub fn output_status(&self) -> Vec<crate::outputs::OutputStatus> {
         let mut status = self.outputs.status(&self.engine, &self.node);
         for o in &mut status {
-            let processing = self.latency.get(&o.signal).copied().unwrap_or(0) as f64 / 48.0;
+            let processing = self
+                .output_latency
+                .get(&o.signal)
+                .or_else(|| self.latency.get(&o.signal))
+                .copied()
+                .unwrap_or(0) as f64
+                / 48.0;
             o.processing_latency_ms = processing;
             o.latency_ms = f64::from(self.read_offset + self.block) / 48.0 + processing;
         }
@@ -1484,8 +1516,61 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
+/// The level a logic Level or Above block reads: the signal's peak, but the
+/// floor for a silenced strip (its mute, a muted VCA, a mute group). A strip's
+/// meter reads before its mute (A3); the logic still hears a muted strip as
+/// silent, as before 1.5.0.
+fn logic_level(mix: &crate::mix::model::Mix, signal: &str, peak: Option<f64>) -> Option<f64> {
+    let silenced = mix
+        .strip(signal)
+        .is_some_and(|s| mix.silenced(signal, s.mute, &mix.vca_effects(), &mix.group_muted()));
+    if silenced {
+        Some(crate::logic::FLOOR_DB)
+    } else {
+        peak
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logic_hears_a_silenced_strip_as_silent() {
+        use super::logic_level;
+        use crate::mix::format::Format;
+        use crate::mix::model::{Mix, Strip};
+        use crate::mix::vca::{MuteGroup, Vca};
+        let floor = crate::logic::FLOOR_DB;
+        let mut m = Mix::default();
+        m.strips.push(Strip::new("vox", Format::Mono));
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(-20.0));
+        assert_eq!(logic_level(&m, "vox", None), None);
+        m.strips[0].mute = true;
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(floor));
+        m.strips[0].mute = false;
+        m.vcas.push(Vca {
+            id: "talent".into(),
+            name: "Talent".into(),
+            fader_db: crate::mix::model::Db(0.0),
+            mute: true,
+            members: vec!["vox".into()],
+            colour: None,
+            recall_safe: false,
+        });
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(floor));
+        m.vcas[0].mute = false;
+        m.mute_groups.push(MuteGroup {
+            id: "g".into(),
+            name: "G".into(),
+            active: true,
+            members: vec!["vox".into()],
+        });
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(floor));
+        m.strips[0].mute_safe = true;
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(-20.0));
+        // A bus's meter is after its mute already.
+        assert_eq!(logic_level(&m, "main", Some(-30.0)), Some(-30.0));
+    }
+
     #[test]
     fn webhook_urls_are_logged_without_secrets() {
         use super::redact_url;

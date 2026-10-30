@@ -147,13 +147,21 @@ pass "meters: vox peak $peak dBFS"
 
 hold=$(json "$WEB/api/v1/meters" "d['vox']['peak_hold_dbfs'][0]")
 python3 -c "exit(0 if -20.5 < $hold < -19.5 else 1)" || fail "vox peak hold $hold dBFS"
+# A muted strip still meters its level (A3: the meter reads before the mute);
+# the fader at −∞ silences it, so its peak hold can be cleared.
 api PATCH /api/v1/strips/vox '{"mute": true}' >/dev/null
+sleep 0.3
+muted=$(json "$WEB/api/v1/meters" "d['vox']['peak_dbfs'][0]")
+python3 -c "exit(0 if -20.5 < $muted < -19.5 else 1)" || fail "muted vox meter peak $muted dBFS, not about −20"
+api PATCH /api/v1/strips/vox '{"mute": false}' >/dev/null
+fader=$(json "$WEB/api/v1/strips/vox" "d['fader_db']")
+api PATCH /api/v1/strips/vox '{"fader_db": "-inf"}' >/dev/null
 sleep 0.3
 curl -fsS -X POST "$WEB/api/v1/meters/vox/clear"
 sleep 0.2
 [[ "$(json "$WEB/api/v1/meters" "d['vox']['peak_hold_dbfs'][0]")" == -inf ]] || fail "peak hold not cleared"
-api PATCH /api/v1/strips/vox '{"mute": false}' >/dev/null
-pass "peak hold $hold dBFS, cleared on request"
+api PATCH /api/v1/strips/vox "{\"fader_db\": $fader}" >/dev/null
+pass "peak hold $hold dBFS, cleared on request; muted, the meter still reads $muted dBFS"
 
 sender=$(json "$NMOS/x-nmos/node/v1.3/senders" "[s['id'] for s in d if s['label'] == 'Main'][0]")
 active_flow=$(json "$NMOS/x-nmos/connection/v1.2/single/senders/$sender/active" "d['transport_params'][0]['mxl_flow_id']")

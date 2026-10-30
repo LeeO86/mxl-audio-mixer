@@ -12,7 +12,7 @@ FLOW=12121212-1212-4121-8121-121212121212
 DOMAIN=34343434-3434-4343-8343-343434343434
 start_tone "$WORK/mxl/tones" "$FLOW" --domain-id "$DOMAIN" --channels 2
 wait_until 10 "tone flow" test -d "$WORK/mxl/tones/$FLOW.mxl-flow"
-OUTPUTS='[{"label": "PGM", "format": "5.1"}, {"label": "Clean"}, {"format": "mono"}]'
+OUTPUTS='[{"key": "pgm", "label": "PGM", "format": "5.1"}, {"label": "Clean"}, {"format": "mono"}]'
 start_mixer NMOS_SEED=it-vouts MIXER_OUTPUTS="$OUTPUTS"
 
 # C3: the flows, and a route through the input's own receiver.
@@ -28,6 +28,7 @@ pass "input 1 shows what is connected: Test tone"
 
 [[ "$(json "$WEB/api/v1/virtual-outputs" "len(d)")" == 3 ]] || fail "three virtual outputs"
 [[ "$(json "$WEB/api/v1/virtual-outputs/3" "d['label'] + ' ' + d['format']")" == "Output 3 mono" ]] || fail "defaults of slot 3"
+[[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['slot']")" == 1 ]] || fail "PGM by its key"
 OWN=$(json "$WEB/api/v1/status" "d['mxl']['output_domain_dir']")
 PGM=$(json "$WEB/api/v1/virtual-outputs/1" "d['mxl_flow_id']")
 CLEAN=$(json "$WEB/api/v1/virtual-outputs/2" "d['mxl_flow_id']")
@@ -39,8 +40,8 @@ python3 - "$PGM" "$SENDER" <<'EOF' || fail "the ids are not UUIDv5 of NMOS_SEED"
 import sys, uuid
 ns = uuid.UUID("8c76aff5-a8f9-53ce-97d0-766f1074b699")
 node = uuid.uuid5(ns, "it-vouts")
-assert sys.argv[1] == str(uuid.uuid5(ns, "it-vouts/output/vout:1/mxl-flow")), sys.argv[1]
-assert sys.argv[2] == str(uuid.uuid5(node, "sender:out-vout:1")), sys.argv[2]
+assert sys.argv[1] == str(uuid.uuid5(ns, "it-vouts/output/vout:pgm/mxl-flow")), sys.argv[1]
+assert sys.argv[2] == str(uuid.uuid5(node, "sender:out-vout:pgm")), sys.argv[2]
 EOF
 pass "3 virtual outputs: MXL flows and NMOS senders with stable ids"
 
@@ -60,6 +61,11 @@ api PUT /api/v1/virtual-outputs/2 '{"source": {"signal": "vox"}}' >/dev/null
 sleep 0.2
 probe 1 1:1:0.70710677 2:1:0.70710677
 pass "Clean from the vox direct out (mono into stereo, −3 dB)"
+api PATCH /api/v1/strips/vox '{"mute": true}' >/dev/null
+sleep 0.5
+probe 1 1:1:0 2:1:0
+api PATCH /api/v1/strips/vox '{"mute": false}' >/dev/null
+pass "a muted strip's direct out is silent"
 api PUT /api/v1/virtual-outputs/2 '{"source": {"input": 1}}' >/dev/null
 sleep 0.2
 probe 1 1:1:1 2:2:1
@@ -69,48 +75,85 @@ api PUT /api/v1/virtual-outputs/1 '{"source": {"signal": "main"}}' >/dev/null
 sleep 0.2
 probe 1 1:1:0.70710677 2:1:0.70710677 3:1:0 4:1:0 5:1:0 6:1:0
 pass "PGM (5.1) from the stereo main bus: L, R; the rest silent"
-api POST /api/v1/monitors '{"id": "cr", "name": "CR", "kind": "speakers", "format": "stereo", "source": {"signal": "main"}}' >/dev/null
+api POST /api/v1/monitors '{"id": "cr", "name": "CR", "kind": "speakers", "format": "stereo", "source": {"signal": "main"}, "follows_solo": true, "level_db": -6.0206}' >/dev/null
 api PUT /api/v1/virtual-outputs/1 '{"source": {"monitor": "cr"}}' >/dev/null
 [[ "$(json "$WEB/api/v1/virtual-outputs/1" "d['source']['monitor']")" == cr ]] || fail "monitor source"
 pass "PGM from the control-room monitor"
 
+# The monitor's two feeds (C6), with a PFL pressed: clean stays the main bus,
+# speaker has the monitor's level and follows the solo.
+OUT_FLOW=$CLEAN
+api PUT /api/v1/virtual-outputs/2 '{"source": {"monitor": "cr"}}' >/dev/null
+sleep 0.5
+probe 1 1:1:0.70710677 2:1:0.70710677
+api PUT /api/v1/virtual-outputs/2 '{"source": {"monitor": "cr", "feed": "speaker"}}' >/dev/null
+sleep 0.5
+probe 1 1:1:0.35355338 2:1:0.35355338
+api POST /api/v1/strips '{"id": "spot", "format": "mono", "patch": [{"input": 1, "channel": 2}]}' >/dev/null
+api PUT /api/v1/solo/spot '{"kind": "pfl"}' >/dev/null
+sleep 0.5
+out=$("$PROBE_BIN" --domain "$OWN" --flow "$CLEAN" --seconds 1 --expect 1:1:0.35355338)
+python3 - "$out" <<'EOF2' || fail "the speaker feed did not follow the PFL: $out"
+import json, sys
+assert json.loads(sys.argv[1])["checks"][0]["max_error"] > 1e-3
+EOF2
+api PUT /api/v1/virtual-outputs/2 '{"source": {"monitor": "cr"}}' >/dev/null
+sleep 0.5
+probe 1 1:1:0.70710677 2:1:0.70710677
+curl -fsS -X DELETE "$WEB/api/v1/solo" >/dev/null
+curl -fsS -X DELETE "$WEB/api/v1/strips/spot"
+pass "monitor feeds: clean is the main bus under a PFL, speaker has the level and follows the PFL"
+
 # Bad sources are refused; a deleted signal silences its outputs.
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/virtual-outputs/2" -d '{"source": {"signal": "nope"}}')
 [[ "$code" == 400 ]] || fail "an unknown signal answered $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/virtual-outputs/2" -d '{"source": {"signal": "main", "monitor": "cr"}}')
+[[ "$code" == 400 ]] || fail "a mixed source answered $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/virtual-outputs/9" -d '{"source": null}')
 [[ "$code" == 404 ]] || fail "slot 9 answered $code"
 api PUT /api/v1/virtual-outputs/2 '{"source": {"signal": "vox"}}' >/dev/null
 curl -fsS -X DELETE "$WEB/api/v1/strips/vox"
 [[ "$(json "$WEB/api/v1/virtual-outputs/2" "d['source']")" == None ]] || fail "the deleted strip still feeds Clean"
-curl -fsS "$WEB/metrics" | grep -q '^mxl_audio_mixer_virtual_output_routed{slot="1",label="PGM"} 1$' || fail "metric virtual_output_routed"
+curl -fsS "$WEB/metrics" | grep -q '^mxl_audio_mixer_virtual_output_routed{slot="1",output="pgm",label="PGM"} 1$' || fail "metric virtual_output_routed"
+api PUT /api/v1/virtual-outputs/3 '{"source": {"input": 1, "format": "stereo"}}' >/dev/null
 pass "bad sources refused, a deleted strip leaves silence, metrics"
 
-# A restart keeps the flow ids and the sources.
+# A restart with other outputs: PGM (keyed) moved to slot 2 keeps its flow id
+# and its source; Clean is mono now; output 3 is gone, its source kept, silent.
 rc=0
 stop_mixer || rc=$?
 [[ $rc == 143 ]] || fail "exit code $rc"
-start_mixer NMOS_SEED=it-vouts MIXER_OUTPUTS="$OUTPUTS"
-[[ "$(json "$WEB/api/v1/virtual-outputs/1" "d['mxl_flow_id']")" == "$PGM" ]] || fail "PGM changed its flow id"
-[[ "$(json "$WEB/api/v1/virtual-outputs/1" "d['source']['monitor']")" == cr ]] || fail "PGM lost its source"
+start_mixer NMOS_SEED=it-vouts MIXER_OUTPUTS='[{"label": "Clean", "format": "mono"}, {"key": "pgm", "label": "PGM", "format": "5.1"}]'
+[[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['slot']")" == 2 ]] || fail "PGM is not slot 2"
+[[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['mxl_flow_id']")" == "$PGM" ]] || fail "PGM changed its flow id"
+[[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['source']['monitor']")" == cr ]] || fail "PGM lost its source"
+CLEAN=$(json "$WEB/api/v1/virtual-outputs/1" "d['mxl_flow_id']")
+[[ "$(python3 -c "import json; print(json.load(open('$OWN/$CLEAN.mxl-flow/flow_def.json'))['channel_count'])")" == 1 ]] || fail "Clean is not mono"
+[[ "$(json "$WEB/api/v1/mix" "[r['output'] for r in d['virtual_outputs']]")" == "['pgm', '3']" ]] || fail "the source of output 3 was not kept"
 wait_until 5 "input 1 running again" is_state 1 running
-pass "a restart keeps the ids, the sources and the input route"
+pass "a restart with other outputs: keyed PGM keeps its flow id and source, Clean mono, output 3's source kept"
 
-# D4: a logic route block puts input 1 straight on Clean while its soft key is
+# Deleting the monitor silences PGM.
+curl -fsS -X DELETE "$WEB/api/v1/monitors/cr"
+[[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['source']")" == None ]] || fail "the deleted monitor still feeds PGM"
+pass "a deleted monitor leaves silence"
+
+# D4: a logic route block puts input 1 straight on PGM (by its key) while its soft key is
 # held, and clears it when released; a source chosen meanwhile by hand stays.
-api POST /api/v1/logic '{"id": "route", "name": "Route", "blocks": [{"id": "key", "type": "button"}, {"id": "r", "type": "set-route", "input": 1, "output": 2}], "wires": [{"from_block": "key", "from_port": "out", "to_block": "r", "to_port": "in"}]}' >/dev/null
-routed() { [[ "$(json "$WEB/api/v1/virtual-outputs/2" "d['source']")" == "$1" ]]; }
+api POST /api/v1/logic '{"id": "route", "name": "Route", "blocks": [{"id": "key", "type": "button"}, {"id": "r", "type": "set-route", "input": 1, "output": "pgm"}], "wires": [{"from_block": "key", "from_port": "out", "to_block": "r", "to_port": "in"}]}' >/dev/null
+routed() { [[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['source']")" == "$1" ]]; }
 api PUT /api/v1/logic/route/buttons/key '{"pressed": true}' >/dev/null
-wait_until 5 "Clean from input 1" routed "{'input': 1}"
+wait_until 5 "PGM from input 1" routed "{'input': 1}"
 api PUT /api/v1/logic/route/buttons/key '{"pressed": false}' >/dev/null
-wait_until 5 "Clean cleared" routed None
+wait_until 5 "PGM cleared" routed None
 api PUT /api/v1/logic/route/buttons/key '{"pressed": true}' >/dev/null
-wait_until 5 "Clean from input 1 again" routed "{'input': 1}"
-api PUT /api/v1/virtual-outputs/2 '{"source": {"monitor": "cr"}}' >/dev/null
+wait_until 5 "PGM from input 1 again" routed "{'input': 1}"
+api PUT /api/v1/virtual-outputs/pgm '{"source": {"signal": "main"}}' >/dev/null
 api PUT /api/v1/logic/route/buttons/key '{"pressed": false}' >/dev/null
 sleep 0.5
-routed "{'monitor': 'cr'}" || fail "the route block cleared a source chosen by hand"
+[[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "(d['source'] or {}).get('signal')")" == main ]] || fail "the route block cleared a source chosen by hand"
 curl -fsS -X DELETE "$WEB/api/v1/logic/route"
-pass "logic route block: input 1 on Clean while held, cleared on release, a hand-chosen source stays"
+pass "logic route block: input 1 on PGM (key) while held, cleared on release, a hand-chosen source stays"
 
 rc=0
 stop_mixer || rc=$?

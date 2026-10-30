@@ -88,6 +88,8 @@ pub enum StereoMode {
 
 /// Longest position of the surround panner, ± degrees.
 pub const MAX_AZIMUTH_DEG: f64 = 180.0;
+/// Highest position of the surround panner (straight up), degrees.
+pub const MAX_ELEVATION_DEG: f64 = 90.0;
 /// The surround panner's LFE level at or below this is off.
 pub const LFE_OFF_DB: f64 = -100.0;
 
@@ -289,14 +291,19 @@ pub enum ProcKind {
         #[serde(default)]
         output: StereoMode,
     },
-    /// Surround panner (D5) of a mono or stereo strip into `layout` (5.1 or
-    /// 7.1): it replaces the strip's stereo panner, so its post-pan tap (and every
-    /// send from there) has `layout`'s channels. Position (0° front centre,
-    /// negative left, ±180° behind), spread over all speakers, centre divergence
-    /// into L and R, and the LFE send.
+    /// Surround panner (D5) of a mono or stereo strip into `layout` (5.1, 7.1,
+    /// 5.1.4 or 7.1.4): it replaces the strip's stereo panner, so its post-pan
+    /// tap (and every send from there) has `layout`'s channels. Position (0°
+    /// front centre, negative left, ±180° behind), height (0° in the bed, 90° in
+    /// the top layer; height layouts only, A10), spread over all speakers,
+    /// centre divergence into L and R, and the LFE send.
     SurroundPan {
         layout: super::format::Format,
         azimuth_deg: f64,
+        /// Left out at 0, so a show without height loads in 1.4.3
+        /// (`deny_unknown_fields`).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        elevation_deg: f64,
         #[serde(default)]
         spread_pct: f64,
         #[serde(default)]
@@ -304,11 +311,43 @@ pub enum ProcKind {
         #[serde(default = "lfe_off")]
         lfe_db: f64,
     },
+    /// Leveler (B3), for buses (streams): rides the gain slowly so the short-term
+    /// loudness (BS.1770 K-weighting, 3 s) meets `target_lufs`, at most
+    /// `max_gain_db` up and `max_cut_db` down, moving at most `speed_db_per_s`.
+    /// Below `gate_lufs` (pauses, silence) it holds the gain. With `limiter`, a
+    /// 1 ms look-ahead peak limiter at `ceiling_db` follows as a safety stage.
+    /// Inspired by the idea of master_me; an own implementation, no code taken.
+    Leveler {
+        target_lufs: f64,
+        max_gain_db: f64,
+        max_cut_db: f64,
+        speed_db_per_s: f64,
+        gate_lufs: f64,
+        #[serde(default = "yes")]
+        limiter: bool,
+        #[serde(default = "leveler_ceiling")]
+        ceiling_db: f64,
+    },
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn lfe_off() -> f64 {
     LFE_OFF_DB
 }
+
+fn yes() -> bool {
+    true
+}
+
+fn leveler_ceiling() -> f64 {
+    -1.0
+}
+
+/// Look-ahead of the leveler's safety limiter, in samples (1 ms).
+pub const LEVELER_LOOKAHEAD: usize = 48;
 
 /// One node of a chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -372,6 +411,7 @@ impl ProcKind {
             Self::Auto {} => "auto",
             Self::Width { .. } => "width",
             Self::SurroundPan { .. } => "surround-pan",
+            Self::Leveler { .. } => "leveler",
         }
     }
 
@@ -411,6 +451,16 @@ impl ProcKind {
             | Self::SurroundPan { .. } => Category::Other,
             _ => Category::Dynamics,
         }
+    }
+
+    /// Bands whose gain reduction is metered one by one (multiband, dynamic EQ).
+    pub fn metered_bands(&self) -> usize {
+        match self {
+            Self::Multiband { bands, .. } => bands.len(),
+            Self::DynamicEq { bands } => bands.len(),
+            _ => 0,
+        }
+        .min(MAX_BANDS)
     }
 
     pub fn key(&self) -> Option<&Key> {
@@ -621,14 +671,22 @@ impl ProcKind {
             Self::SurroundPan {
                 layout,
                 azimuth_deg,
+                elevation_deg,
                 spread_pct,
                 divergence_pct,
                 lfe_db,
             } => {
                 use super::format::Format;
-                if !matches!(layout, Format::Surround51 | Format::Surround71) {
-                    return Err("a surround panner's layout is 5.1 or 7.1".into());
+                if !matches!(
+                    layout,
+                    Format::Surround51
+                        | Format::Surround71
+                        | Format::Surround514
+                        | Format::Surround714
+                ) {
+                    return Err("a surround panner's layout is 5.1, 7.1, 5.1.4 or 7.1.4".into());
                 }
+                range("elevation_deg", *elevation_deg, 0.0, MAX_ELEVATION_DEG)?;
                 range(
                     "azimuth_deg",
                     *azimuth_deg,
@@ -638,6 +696,22 @@ impl ProcKind {
                 range("spread_pct", *spread_pct, 0.0, 100.0)?;
                 range("divergence_pct", *divergence_pct, 0.0, 100.0)?;
                 range("lfe_db", *lfe_db, LFE_OFF_DB, 10.0)?;
+            }
+            Self::Leveler {
+                target_lufs,
+                max_gain_db,
+                max_cut_db,
+                speed_db_per_s,
+                gate_lufs,
+                ceiling_db,
+                ..
+            } => {
+                range("target_lufs", *target_lufs, -40.0, -5.0)?;
+                range("max_gain_db", *max_gain_db, 0.0, 30.0)?;
+                range("max_cut_db", *max_cut_db, 0.0, 30.0)?;
+                range("speed_db_per_s", *speed_db_per_s, 0.1, 20.0)?;
+                range("gate_lufs", *gate_lufs, -90.0, -10.0)?;
+                range("ceiling_db", *ceiling_db, -20.0, 0.0)?;
             }
         }
         Ok(())
@@ -667,6 +741,7 @@ impl ProcKind {
     pub fn latency(&self) -> usize {
         match self {
             Self::Limiter { lookahead_ms, .. } => (lookahead_ms * 48.0).round() as usize,
+            Self::Leveler { limiter: true, .. } => LEVELER_LOOKAHEAD,
             _ => 0,
         }
     }
@@ -782,6 +857,22 @@ impl ProcKind {
                 lfe_gain_db,
                 ..
             } => vec![*crossover_hz, *lfe_gain_db],
+            Self::Leveler {
+                target_lufs,
+                max_gain_db,
+                max_cut_db,
+                speed_db_per_s,
+                gate_lufs,
+                ceiling_db,
+                ..
+            } => vec![
+                *target_lufs,
+                *max_gain_db,
+                *max_cut_db,
+                *speed_db_per_s,
+                *gate_lufs,
+                *ceiling_db,
+            ],
             // Matrix nodes: the compiler computes their matrix.
             Self::Delay { .. } | Self::Auto {} | Self::Width { .. } | Self::SurroundPan { .. } => {
                 Vec::new()
@@ -834,6 +925,7 @@ impl ProcKind {
             Self::BassManagement { lfe, .. } => lfe.hash(&mut h),
             Self::Width { input, output, .. } => (input, output).hash(&mut h),
             Self::SurroundPan { layout, .. } => layout.hash(&mut h),
+            Self::Leveler { limiter, .. } => limiter.hash(&mut h),
             Self::Expander { .. } | Self::Gate { .. } | Self::Auto {} => {}
         }
         h.finish()

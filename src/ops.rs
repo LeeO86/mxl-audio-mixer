@@ -398,7 +398,9 @@ async fn patch_input(
         Ok(config) => {
             let _ = app.node.insert_receiver(crate::nmos::receiver(&config));
             // C2: strips of this input still named after its old alias take the new one.
-            if config.label != old {
+            // (Not when it is cleared: the strips keep their names.)
+            let default = crate::inputs::InputConfig::default_for(i).label;
+            if config.label != old && config.label != default {
                 let renamed = crate::api::apply(&app, 0, |m| {
                     m.inherit_input_label(config.input, &old, &config.label);
                     Ok(())
@@ -593,16 +595,17 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "virtual_output_routed",
         "gauge",
-        "Per virtual output (MIXER_OUTPUT_FLOWS): 1 when a source feeds it, 0 while it is silent.",
+        "Per virtual output (MIXER_OUTPUT_FLOWS; output: its key or slot): 1 when a source feeds it, 0 while it is silent.",
         control
             .virtual_outputs
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                let routed = control.mix.virtual_source(i + 1).is_some();
+                let routed = control.mix.virtual_source(&v.id).is_some();
                 format!(
-                    "{{slot=\"{}\",label=\"{}\"}} {}",
+                    "{{slot=\"{}\",output=\"{}\",label=\"{}\"}} {}",
                     i + 1,
+                    v.id,
                     v.label.replace('\\', "\\\\").replace('"', "\\\""),
                     u8::from(routed)
                 )

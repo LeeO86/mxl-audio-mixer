@@ -335,8 +335,8 @@ try {
   await until("the route block dropped", async () => (await graphOf(routeG.id)).blocks.some((b) => b.type === "set-route" && b.input === null && b.output === null));
   await until("the route block marked", async () => (await graphOf(routeG.id)).warnings?.some((w) => w.block === "set-route-1"));
   await page.getByLabel("set-route-1 input", { exact: true }).selectOption("1");
-  await page.getByLabel("set-route-1 output", { exact: true }).selectOption("2");
-  await until("input and output chosen", async () => (await graphOf(routeG.id)).blocks.some((b) => b.id === "set-route-1" && b.input === 1 && b.output === 2));
+  await page.getByLabel("set-route-1 output", { exact: true }).selectOption("2"); // Clean: no key, its id is the slot
+  await until("input and output chosen", async () => (await graphOf(routeG.id)).blocks.some((b) => b.id === "set-route-1" && b.input === 1 && b.output === "2"));
   await until("the block names them", async () => (await node("set-route-1").innerText()).includes("Route: in 1 → Clean"));
   await page.screenshot({ path: `${out}/amx15-d4-route.png` });
   pass("route input → output: dropped unset, input and virtual output chosen in the list");

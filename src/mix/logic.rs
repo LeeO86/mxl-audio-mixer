@@ -304,14 +304,15 @@ pub enum BlockKind {
     SetPublish {
         signal: String,
     },
-    /// While `in` is on, virtual output `output` (a slot, from 1) takes input
-    /// `input` (from 1) straight through; when it turns off, the output is
-    /// cleared if it still has that input (D248). `null`: not chosen yet.
+    /// While `in` is on, virtual output `output` (its id: the `MIXER_OUTPUTS`
+    /// key, else the slot number as text) takes input `input` (from 1)
+    /// straight through; when it turns off, the output is cleared if it still
+    /// has that input (D248). `null`: not chosen yet.
     SetRoute {
         #[serde(default)]
         input: Option<u32>,
         #[serde(default)]
-        output: Option<u32>,
+        output: Option<String>,
     },
     /// Monitor `monitor` listens to `source` when `in` fires.
     SetMonitor {
@@ -912,11 +913,11 @@ pub fn warnings(mix: &Mix, blocks: &[Block]) -> Vec<Issue> {
         _ => None,
     };
     let route = |k: &BlockKind| match k {
-        BlockKind::SetRoute { output, .. } => *output,
+        BlockKind::SetRoute { output, .. } => output.clone(),
         _ => None,
     };
     let mut uses: BTreeMap<u16, usize> = BTreeMap::new();
-    let mut routes: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut routes: BTreeMap<String, usize> = BTreeMap::new();
     for b in mix.logic_blocks() {
         if let Some(i) = tsl(&b.kind) {
             *uses.entry(i).or_default() += 1;
@@ -1190,7 +1191,7 @@ fn check_level(
             output: Some(o), ..
         } = &b.kind
         {
-            if !routed.insert(*o) {
+            if !routed.insert(o.as_str()) {
                 out.push(at.issue(
                     Some(&b.id),
                     None,
@@ -1457,10 +1458,11 @@ fn check_block(mix: &Mix, kind: &BlockKind, in_macro: bool) -> BlockCheck {
         } => {
             if !(1..=1024).contains(input) {
                 Err((None, "input must be 1 to 1024".into()))
-            } else if !(1..=crate::config::MAX_VIRTUAL_OUTPUTS as u32).contains(output) {
+            } else if output.is_empty() || output.len() > 32 {
+                // A virtual output's id, as the mix stores its source.
                 Err((
                     None,
-                    format!("output must be 1 to {}", crate::config::MAX_VIRTUAL_OUTPUTS),
+                    "output must be a virtual output id (1 to 32 characters)".into(),
                 ))
             } else {
                 Ok(())

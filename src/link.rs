@@ -459,6 +459,7 @@ pub fn ensure_return(
             signal: id.clone(),
             format: None,
             commit_samples: None,
+            tap: None,
         });
     }
     Ok(id)
@@ -556,6 +557,7 @@ fn ensure_send(mix: &mut Mix, from: &str, to: &str, tap: Tap) {
         mute: false,
         phase: false,
         block_delay: false,
+        pan: None,
     });
 }
 
@@ -585,6 +587,7 @@ fn set_send(mix: &mut Mix, from: &str, to: &str, db: Db, mute: bool) -> Result<(
         mute,
         phase: false,
         block_delay: false,
+        pan: None,
     });
     Ok(())
 }

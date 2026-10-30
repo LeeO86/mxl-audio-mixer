@@ -33,6 +33,11 @@ use crate::ops::App;
 pub const TICK: Duration = Duration::from_secs(2);
 /// A lookup that found no name is tried again after this.
 pub const RETRY: Duration = Duration::from_secs(30);
+/// A name found is looked up again after this (a renamed sender).
+pub const REFRESH: Duration = Duration::from_secs(60);
+/// The first and the longest wait after the Query API did not answer.
+pub const BACKOFF_MIN: Duration = Duration::from_secs(5);
+pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 pub fn routes() -> Router<App> {
     Router::new()
@@ -78,34 +83,71 @@ fn flow_label(domain: &FsPath, flow: Uuid) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The label of sender `id` from the Query API at `query`.
-async fn sender_label(query: &str, id: Uuid) -> Option<String> {
+/// The label of sender `id` from the Query API at `query`: `Ok(None)` when it
+/// answers without one (404, no label), `Err` when it does not answer.
+async fn sender_label(query: &str, id: Uuid) -> Result<Option<String>, ()> {
     let url = format!("{query}/x-nmos/query/v1.3/senders/{id}");
-    let v: Value = client()?
-        .get(url)
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    v["label"]
+    let resp = client().ok_or(())?.get(url).send().await.map_err(|_| ())?;
+    if resp.status().is_server_error() {
+        return Err(());
+    }
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let v: Value = resp.json().await.map_err(|_| ())?;
+    Ok(v["label"]
         .as_str()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// What a lookup was for: the sender and the flow.
 type Key = (Option<Uuid>, Option<Uuid>);
 
+/// When each input is looked up again, and the Query API's backoff.
+#[derive(Default)]
+struct Schedule {
+    /// Per input: the key looked up, when to look again, the sender label found.
+    inputs: HashMap<usize, (Key, Instant, Option<String>)>,
+    /// The Query API is left alone until then; the backoff that set it.
+    query_down: Option<(Instant, Duration)>,
+}
+
+impl Schedule {
+    fn due(&self, input: usize, key: Key, now: Instant) -> bool {
+        match self.inputs.get(&input) {
+            Some((k, at, _)) if *k == key => now >= *at,
+            _ => true,
+        }
+    }
+
+    fn query_up(&self, now: Instant) -> bool {
+        self.query_down.is_none_or(|(until, _)| now >= until)
+    }
+
+    /// The Query API did not answer: wait twice as long as last time.
+    fn query_failed(&mut self, now: Instant) -> Duration {
+        let wait = self
+            .query_down
+            .map_or(BACKOFF_MIN, |(_, b)| (b * 2).min(BACKOFF_MAX));
+        self.query_down = Some((now + wait, wait));
+        wait
+    }
+
+    /// The sender label of the same key from before, if any.
+    fn kept(&self, input: usize, key: Key) -> Option<String> {
+        self.inputs
+            .get(&input)
+            .filter(|(k, _, _)| *k == key)
+            .and_then(|(_, _, l)| l.clone())
+    }
+}
+
 /// Keep every input's [`Connected`] up to date until `stop`.
 pub async fn resolve_task(app: App, mut stop: tokio::sync::watch::Receiver<bool>) {
     let query = app.node.settings().query.clone();
-    // Per input: what was looked up, and when (a miss is tried again).
-    let mut done: HashMap<usize, (Key, Option<Instant>)> = HashMap::new();
+    let mut schedule = Schedule::default();
     let mut tick = tokio::time::interval(TICK);
     loop {
         tokio::select! {
@@ -120,18 +162,32 @@ pub async fn resolve_task(app: App, mut stop: tokio::sync::watch::Receiver<bool>
                     .and_then(|a| a.peer_id)
             });
             let key = (sender, route.as_ref().map(|r| r.flow));
-            let retry = match done.get(&i) {
-                Some((k, None)) if *k == key => false,
-                Some((k, Some(at))) if *k == key => at.elapsed() >= RETRY,
-                _ => true,
-            };
-            if !retry {
+            let now = Instant::now();
+            if !schedule.due(i, key, now) {
                 continue;
             }
-            let mut label = None;
+            // The sender label, and when to look again.
+            let (mut found, mut next) = (None, RETRY);
             if let (Some(q), Some(id)) = (&query, sender) {
-                label = sender_label(q, id).await;
+                if schedule.query_up(now) {
+                    match sender_label(q, id).await {
+                        Ok(label) => {
+                            schedule.query_down = None;
+                            if label.is_some() {
+                                (found, next) = (label, REFRESH);
+                            }
+                        }
+                        Err(()) => {
+                            next = schedule.query_failed(Instant::now());
+                            found = schedule.kept(i, key);
+                        }
+                    }
+                } else {
+                    next = schedule.query_down.map_or(RETRY, |(until, _)| until - now);
+                    found = schedule.kept(i, key);
+                }
             }
+            let mut label = found.clone();
             if label.is_none() {
                 if let Some(r) = &route {
                     let (dir, flow) = (r.domain.clone(), r.flow);
@@ -139,10 +195,17 @@ pub async fn resolve_task(app: App, mut stop: tokio::sync::watch::Receiver<bool>
                         .await
                         .ok()
                         .flatten();
+                    if label.is_some() && sender.is_none() {
+                        next = REFRESH;
+                    }
                 }
             }
-            let missed = route.is_some() && label.is_none();
-            done.insert(i, (key, missed.then(Instant::now)));
+            if route.is_none() {
+                next = REFRESH;
+            }
+            schedule
+                .inputs
+                .insert(i, (key, Instant::now() + next, found));
             app.control().inputs.set_connected(
                 i,
                 Connected {
@@ -324,10 +387,36 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
         assert_eq!(
-            sender_label(&base, id).await.as_deref(),
-            Some("SDI 4 audio")
+            sender_label(&base, id).await,
+            Ok(Some("SDI 4 audio".to_string()))
         );
-        assert_eq!(sender_label(&base, Uuid::new_v4()).await, None);
+        assert_eq!(sender_label(&base, Uuid::new_v4()).await, Ok(None));
+        // Nobody listening: an error (backoff), not "no name".
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gone = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        assert_eq!(sender_label(&gone, id).await, Err(()));
+    }
+
+    #[test]
+    fn lookups_back_off_and_come_again() {
+        let mut s = Schedule::default();
+        let t = Instant::now();
+        let key = (Some(Uuid::new_v4()), Some(Uuid::new_v4()));
+        assert!(s.due(0, key, t), "a new input");
+        s.inputs.insert(0, (key, t + REFRESH, Some("Cam 1".into())));
+        assert!(!s.due(0, key, t + Duration::from_secs(10)));
+        assert!(s.due(0, key, t + REFRESH), "looked up again (renames)");
+        assert!(s.due(0, (None, key.1), t), "another sender");
+        // The Query API is down: 5, 10, 20, 40, 60, 60 s, for every input.
+        assert!(s.query_up(t));
+        let waits: Vec<u64> = (0..6).map(|_| s.query_failed(t).as_secs()).collect();
+        assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+        assert!(!s.query_up(t + Duration::from_secs(59)));
+        assert!(s.query_up(t + Duration::from_secs(60)));
+        // Meanwhile the input keeps the label it had for the same key.
+        assert_eq!(s.kept(0, key).as_deref(), Some("Cam 1"));
+        assert_eq!(s.kept(0, (None, key.1)), None);
     }
 
     #[test]

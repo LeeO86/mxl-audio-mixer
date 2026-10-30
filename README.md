@@ -43,7 +43,16 @@ once with numbered names; the first new one is selected. A stereo or wider strip
 input patch is linked by default: choose the first channel and the others follow
 in order on the same input (untick "Link" to choose each). Wider strips have one
 polarity button that opens a toggle per channel and shows how many are inverted.
-"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile), **Processing**
+"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile. The name has the
+strip's width; the format, the gear and the ⋮ menu share the row below it. A click
+on the fader value types a level (`0`, `-20`, `-inf`; Enter applies, Escape keeps
+it). The sends show their levels; a click opens Routing. A muted strip's meter still
+shows its level, grey. Strips of 8 or more channels are wider, with narrow meter
+bars. A mono or stereo strip with a surround panner shows a top view of its layout
+with the source: drag on it to move the source (left/right, front/rear); on 5.1.4
+and 7.1.4 a height slider lifts it into the top layer. One that sends to a surround
+bus without a panner offers "+ Surround pan". "MIDI" connects control surfaces, see
+[MIDI control](#midi-control)), **Processing**
 (the chain of a strip or bus as tiles of one size in a grid, in chain order: drag
 node types in from the palette, which stays in view, drag a tile by its header to
 reorder (the wheel scrolls meanwhile, Escape cancels), a click on the header opens
@@ -51,14 +60,20 @@ or closes it, bypass, delete; ◀ ▶ or the `[` and `]` keys step to the previo
 next strip or bus; EQ curve with band handles (a double-click resets a band;
 high- and low-pass bands with their slope), one band's controls at a time, filter,
 dynamics transfer curves with the live level, de-esser listen, keys, the surround
-panner's position pad; the signal's format, changed after a confirming second
+panner's position pad (spread: a bubble around the dot grows and drifts to the centre; the dot keeps its position and height); every
+band's gain reduction of a multiband or dynamic EQ; copy and paste of units (a
+unit's ⧉ puts it on the browser's clipboard; the clipboard bar pastes all or one,
+a unit's ⇩ takes the copied unit of its type); the signal flow below the chain
+(drag nodes to reorder, drag sends, the direct or bus out and keys to another tap);
+the signal's format, changed after a confirming second
 press, with the nodes it would bypass named first and a flag on every node that
 cannot run on the format; a bus's own down-mix), **Routing** (the send matrix,
 sources in rows, destination buses in columns: a click on an empty cell marks it
 yellow, a second click on it within 3 s sends at 0 dB; a send's tap (only those
-its source has), gain, mute, phase and block delay; the virtual outputs with a
-source list each; publishing outputs, a strip as its direct out, and copying a
-flow id), **Graph**
+its source has), gain, mute, phase and block delay; a send from a mono or stereo
+source into a 5.1 or bigger bus has a surround panner of its own; the virtual
+outputs with a source list each; publishing outputs, a strip as its direct out,
+and copying a flow id), **Graph**
 (the routing as a graph, read-write: inputs (alias and what is connected),
 strips, buses, monitors and outputs (virtual and published, the same way) with
 their patches, sends, mix-minus, monitor sources and output sources; draw from a
@@ -126,6 +141,37 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 The strip widget has PFL. The talkback
 widget's browser microphone needs an HTTPS page and a frame with
 `allow="microphone"`.
+
+## MIDI control
+
+The console's **MIDI** button connects MIDI control surfaces in the browser (Web
+MIDI): nothing runs on the server, the browser makes the same API calls as the
+console, so every desk position can have its own surface. Web MIDI needs a secure
+page: https (the platform serves the mixer behind its HTTPS proxy) or `localhost`;
+on plain `http://<host>:8190` the dialog says why it cannot connect. In a frame the
+frame needs `allow="midi"`. Chrome and Edge have Web MIDI; Firefox asks for a site
+permission first; Safari has none. The display of a Mackie Control needs the SysEx
+permission (asked for; without it the rest works).
+
+Each input port gets a mode, remembered in the browser by its name, and an output
+for the feedback (by default the port of the same name):
+
+- **Mackie Control**: 8 strips from the bank (the console's strips, then its
+  buses): pitch-bend faders on the console's fader law with motor feedback (a
+  touched fader is not moved), mute, solo (PFL), select, the V-pot pans (2 % per
+  tick; push: centre) and its ring shows the pan, bank and channel buttons move the
+  bank (also in the dialog), the master fader runs a chosen bus (default the first),
+  the display shows names and levels. **Mackie Control extender**: the next 8 strips.
+- **Generic (MIDI learn)**: "Learn…", then click a fader, mute, PFL, AFL or pan on
+  the console (it is picked, not changed) and move a control (CC, note or pitch
+  bend) on the device. A button toggles on its press (tick "latching" in the list
+  for a button that sends on and off itself); a fader, knob or pitch bend sets the
+  value. The value goes back to the control (LED, motor fader). The
+  mappings are kept in the browser; Export and Import move them as a JSON file
+  (`{"format": "mxl-audio-mixer-midi", "version": 1, "mappings": [{"device",
+  "control": {"type": "cc" | "note" | "pb", "channel": 0–15, "number"}, "target":
+  {"signal", "param": "fader" | "mute" | "pfl" | "afl" | "pan"}, "latch": true?}]}`).
+  A bad entry, in a file or in the browser's storage, is dropped with a warning.
 
 ## Tally and audio-follows-video
 
@@ -352,7 +398,7 @@ token.
 | `MIXER_LOG_LEVEL` | info | Log level: error, warn, info, debug, trace. |
 | `MIXER_INPUT_FLOWS` | 16 | Number of MXL audio inputs (NMOS receivers), 1–256. Every distinct flow read takes an MXL instance, i.e. an inotify instance: `fs.inotify.max_user_instances` (often 128 per uid, shared with every MXL process of that uid) must leave room for them. |
 | `MIXER_OUTPUT_FLOWS` | length of MIXER_OUTPUTS, else 0 | Number of virtual outputs, 0–64: fixed MXL flows and NMOS senders (`out-vout:1` …) the designer can wire; the operator picks what feeds each. 0: only the published outputs. Each takes one of the 128 output slots. |
-| `MIXER_OUTPUTS` | [] | JSON array, one entry per virtual output: `{"label": "PGM", "format": "5.1"}`; both optional ("Output <n>", stereo). The format of a flow never changes while it runs. In `MIXER_CONFIG_FILE` also as a JSON array. |
+| `MIXER_OUTPUTS` | [] | JSON array, one entry per virtual output: `{"key": "pgm", "label": "PGM", "format": "5.1"}`; all optional (key: the slot number; "Output <n>"; stereo). `key` (`a-z`, `0-9`, `-`, 1–32, not only digits, unique) names the output's ids and its source in the mix, so reordering the list keeps both. The format of a flow never changes while it runs. In `MIXER_CONFIG_FILE` also as a JSON array. |
 | `MIXER_BLOCK_SAMPLES` | 96 | DSP block size in samples at 48 kHz: 48, 96, 144 or 240. |
 | `MIXER_READ_OFFSET` | 2 | Read offset in ms: every input is read at t_out − (offset + its extra delay). |
 | `MIXER_OUTPUT_COMMIT_SAMPLES` | one block | Samples per MXL commit of an output (a multiple of the block size). |
@@ -458,26 +504,39 @@ an id gets `strip-<n>` or `bus-<n>`.
   Keys and block-delay sends are not compensated. Each output reports its
   `processing_latency_ms` and `latency_ms` (read offset + one block + processing).
 - **Output:** a bus (post-fader) or a strip (its direct out: post-fader, before
-  the pan) published as an `audio/float32` MXL flow in the own domain and an NMOS
+  the pan; or at another `tap`) published as an `audio/float32` MXL flow in the own domain and an NMOS
   Source, Flow and Sender (label = its name, group hint `<name>:Audio`).
   `format` (default: the signal's) maps it to another layout; `commit_samples`
   (default `MIXER_OUTPUT_COMMIT_SAMPLES`) is a multiple of the block size. The MXL
   flow id is UUIDv5 of `NMOS_SEED` and the signal id, so it survives restarts. At
   most 128 outputs.
 - **Virtual output** (`MIXER_OUTPUT_FLOWS`, `MIXER_OUTPUTS`): a fixed output the
-  designer wires, there from the start whatever the mix: signal `vout:<n>`, an MXL
-  flow in the own domain (id UUIDv5 of `"<NMOS_SEED>/output/vout:<n>/mxl-flow"`)
-  and an NMOS Source, Flow and Sender keyed `out-vout:<n>` (sender id UUIDv5 of
-  `"sender:out-vout:<n>"` in the node id's namespace; label the configured one,
-  group hint `<label>:Audio`). The mix's `virtual_outputs` say what feeds each:
-  `[{"slot": n, "source": …}]` with a source `{"signal": "<strip or bus>",
+  designer wires, there from the start whatever the mix. Its id is its `key`, else
+  its slot number: signal `vout:<id>`, an MXL flow in the own domain (id UUIDv5 of
+  `"<NMOS_SEED>/output/vout:<id>/mxl-flow"`) and an NMOS Source, Flow and Sender
+  keyed `out-vout:<id>` (sender id UUIDv5 of `"sender:out-vout:<id>"` in the node
+  id's namespace; label the configured one, group hint `<label>:Audio`). They
+  take their output slots first; the published outputs and monitors share the
+  other `128 − MIXER_OUTPUT_FLOWS`. The mix's `virtual_outputs` say what feeds
+  each: `[{"output": "<id>", "source": …}]` with a source `{"signal": "<strip or bus>",
   "tap"?: <tap>}` (a strip's direct out, a bus; default post-fader), `{"monitor":
-  "<id>"}` (a control-room monitor's output) or `{"input": n, "format"?: …}` (an
+  "<id>", "feed"?: "clean" | "speaker"}` (a control-room monitor: `clean`, the
+  default, is its selected source in its format and down-mix, without solo,
+  listen-back, talkback dim, checks, level, dim, mute, bass management and delay;
+  `speaker` is exactly what its speakers get) or `{"input": n, "format"?: …}` (an
   input straight through, no strip; `format` says what it carries, default the
   output's, channel for channel). The source is mapped to the output's format by
   the width mapping below; without one the flow is written with silence. A deleted
-  signal or monitor leaves its virtual outputs silent. Left out of the show while
-  empty.
+  signal or monitor leaves its virtual outputs silent; linking or unlinking
+  strips moves it (and a published output) to the first new strip. A source
+  has exactly one of `signal` (with `tap`), `monitor` (with `feed`) or `input`
+  (with `format`). Left out of the show while empty. Sources of outputs this host
+  does not have are kept, silent. Restoring a show-history version from before
+  the sources clears them. The flows are made again at every start (the writer
+  deletes them at a stop) with the configured format; after an unclean stop a
+  slot whose format changed fails until its old flow is gone (as a published
+  output). An IS-05 `master_enable: false` on their senders is accepted but
+  writes on, as for published outputs.
 - **Formats** (§4.1), channel order as SMPTE ST 2110-30: mono `M`; stereo `L R`;
   `3.0` `L R C`; `5.1` `L R C LFE Ls Rs`; `7.1` `L R C LFE Lss Rss Lrs Rrs`;
   `5.1.4` = 5.1 + `Ltf Rtf Ltr Rtr`; `7.1.4` = 7.1 + the same heights.
@@ -744,11 +803,12 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `de-esser` | `mode` `split-band` (reduces the band above `freq_hz`) \| `wide-band` (reduces everything), `freq_hz` 2000–12000, `threshold_db`, `range_db`, `attack_ms`, `release_ms`, `listen` (output the band) |
 | `ducker` | `key` `{signal, tap}`, `threshold_db`, `depth_db`, `attack_ms`, `hold_ms`, `release_ms` |
 | `multiband` | `crossovers_hz` (2–4, rising; Linkwitz-Riley 24 dB/oct, sum flat), `bands` (one more: `{threshold_db, ratio, attack_ms, release_ms, makeup_db}`) |
+| `leveler` | for buses and streams (inspired by the idea of master_me; own code): `target_lufs` −40 … −5, `max_gain_db` 0–30, `max_cut_db` 0–30, `speed_db_per_s` 0.1–20, `gate_lufs` −90 … −10, `limiter` (default true), `ceiling_db` −20 … 0 (default −1). Rides the gain so the short-term loudness (BS.1770, 3 s, measured in the node every 100 ms) meets the target; a 100 ms segment below the gate (a pause) is left out and holds the gain; the optional safety limiter has 1 ms look-ahead (the node's latency, compensated). Switching `limiter` rebuilds the node: its gain starts again at 0 dB |
 | `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
 | `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
 | `width` | M/S / width, stereo only: `width_pct` 0–200 (0 mono, 100 unchanged, 200 double side), `input` and `output` `lr` \| `ms` (M = (L + R) / 2, S = (L − R) / 2; L = M + S, R = M − S); a gain matrix that ramps per sample, bypass ramps to the identity |
-| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off; the LFE send is full band, no low-pass); constant power. A stereo strip aimed behind has L and R mirrored (L at the right rear). It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
+| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1` \| `5.1.4` \| `7.1.4`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `elevation_deg` 0–90 (default 0; 5.1.4 and 7.1.4 only: the bed keeps cos² of the power, the top layer at ±45° and ±135° sin², panned there at the same azimuth), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off; the LFE send is full band, no low-pass); constant power. A stereo strip aimed behind has L and R mirrored (L at the right rear). It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
 ±24 dB, a chain at most 32 nodes. A node that cannot run on its signal's format
@@ -765,7 +825,9 @@ peak. The measurement runs from when it is switched on; it can be stopped, reset
 started again. It continues over changes of the mix; blocks the DSP thread missed
 count as silence.
 
-`GET /api/v1/meters` gives, per strip and bus (post-fader) and channel: sample peak
+`GET /api/v1/meters` gives, per strip (after its fader, before its mute: a muted
+strip still reads its level, also in `true_peak_dbtp{signal}`; logic Level and
+Above blocks read a muted strip as silent) and bus (its output) and channel: sample peak
 (since the last 40 ms update), peak hold (until cleared), true peak (4×
 oversampling), RMS (300 ms) and the PPM readings (IEC 60268-10 Type I: 5 ms
 integration, 20 dB in 1.7 s; Type II: 10 ms, 24 dB in 2.8 s; a steady 1 kHz tone
@@ -817,7 +879,7 @@ those publish last tick's value.
   node parameter the DSP smooths, e.g. `threshold_db` or `bands/1/gain_db`, or
   `bypass`; clamped to its range, ramped), `set-pfl`, `set-talk`, `set-publish`,
   `set-monitor` (a monitor's source), `set-route` (while on, virtual output
-  `output` takes input `input` straight through; off clears it if it still has
+  `output` (its id: key or slot number) takes input `input` straight through; off clears it if it still has
   that input; both `null` until chosen), `loudness-control` (start, stop, reset),
   `recall` (a snapshot), `webhook` (POST `{"graph", "block", "value"}`), `tsl-out`
   (TSL UMD 5.0 to `TSL_OUT_TARGET`: left lamp red, right lamp green, a label; the
@@ -897,16 +959,16 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET`, `POST /api/v1/buses` | list, create (`format` required) |
 | `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format` (as strips), `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `subgroup`, `downmix` (`null`: the mix's), `ramp_ms`; GET adds `chain_warnings`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
-| `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms` |
+| `GET`, `PUT`, `DELETE /api/v1/sends/<from>/<to>` | create or change: `tap`, `gain_db`, `mute`, `phase`, `ramp_ms`, `pan` (`{azimuth_deg, spread_pct, divergence_pct, lfe_db}`, as `surround-pan`; a mono or stereo source into a 5.1, 7.1, 5.1.4 or 7.1.4 bus is panned in the send, a post-pan send then reads the strip before its panner; ignored otherwise; `null` removes it; refused on a send with `block_delay`) |
 | `GET /api/v1/outputs`, `GET /api/v1/outputs/<signal>` | published outputs: format, channels, commit size, MXL flow id, NMOS sender id, blocks, commits, errors, commit lag |
-| `PUT`, `DELETE /api/v1/outputs/<signal>` | publish a bus or a strip (its direct out) (`{"format": …, "commit_samples": …}`, both optional) or unpublish |
+| `PUT`, `DELETE /api/v1/outputs/<signal>` | publish a bus or a strip (its direct out) (`{"format": …, "commit_samples": …, "tap": …}`, all optional; `tap`: where it is taken, default post-fader) or unpublish |
 | `GET /api/v1/taps` | the taps each strip and bus offers (for sends, keys, the analyser): `{"<signal>": ["input", …, {"after": "<node>"}]}` |
 | `GET`, `POST /api/v1/{strips,buses}/<id>/chain` | the chain; add a node (its JSON, `id` optional, `position` optional) |
 | `GET`, `PATCH`, `DELETE /api/v1/{strips,buses}/<id>/chain/<node>` | a node; change it with a JSON merge patch (RFC 7396) plus `ramp_ms` |
 | `POST /api/v1/{strips,buses}/<id>/chain/<node>/move` | `{"position": n}` |
 | `GET /api/v1/loudness` | per measured signal: `momentary_lufs`, `short_term_lufs`, `integrated_lufs`, `range_lu`, `max_true_peak_dbtp`, `running`, `in_tolerance` |
 | `POST /api/v1/loudness/<id>/{start,stop,reset}` | control the integration |
-| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms), `ppm_type1_dbfs`, `ppm_type2_dbfs`; `correlation` (two or more channels); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs` |
+| `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms), `ppm_type1_dbfs`, `ppm_type2_dbfs`; `correlation` (two or more channels); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs`, `band_reduction_db` (multiband, dynamic EQ: per band), `leveler_gain_db` (leveler) |
 | `POST /api/v1/meters/clear`, `POST /api/v1/meters/<id>/clear` | clear every peak hold, or one signal's |
 | `GET`, `PUT`, `DELETE /api/v1/analysis` | the analyser: `{"signal", "tap"}` (tap default `post-fader`); GET gives `target` and `values` (`bands_hz`, `spectrum_db`, `correlation`, `xy`) |
 | `GET`, `POST /api/v1/snapshots` | list; take one (`{"id"?, "name"?}`) |
@@ -948,11 +1010,11 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `POST /api/v1/talkback/browser`, `DELETE …/browser/<id>` | `{"client"}`: this browser's microphone is on (repeat within 30 s); answers `{"id", "path", "whip_url", "whip_port"}` |
 | `GET`, `PUT`, `DELETE /api/v1/listen-back` | `{"destination"}` (its return) or `{"source"}` |
 | `GET /api/v1/tally` | the TSL settings, packets, every tally index's lamps (screen, display, LH, RH, label, age) and the strips that follow one (on air, preview, AFV open) |
-| `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens; `sender_id` (from the IS-05 activation) and `connected_label`: the name of what is connected (the IS-04 sender label from the Query API, else the MXL flow's label; looked up off the control path every 2 s) |
-| `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}`; `label` is the input's alias: strips that read only this input and still have the old alias as name take the new one |
+| `GET /api/v1/inputs`, `GET /api/v1/inputs/<n>` | state (`unrouted`, `waiting`, `running`, `stalled`), flow, channels, delays, arrival lag, late/missing samples, re-opens; `sender_id` (from the IS-05 activation) and `connected_label`: the name of what is connected (the IS-04 sender label from the Query API v1.3, else the MXL flow's label; looked up off the control path when the route changes and every minute; a Query API that does not answer is retried with a backoff of 5 s to 1 min, meanwhile the last sender label stays) |
+| `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}`; `label` is the input's alias (`""`: back to "Input n"): strips that read only this input and still have the old alias as name take a new one |
 | `PUT /api/v1/inputs/<n>/route` | `{"flow_id", "domain_id", "sender_id"?}` or `{"flow_id": null}`: routes (or disconnects) the input through its own IS-05 receiver |
 | `GET /api/v1/flows` | the audio flows in the visible MXL domains: `domain_id`, `domain_label`, `own`, `flow_id`, `label`, `channels` |
-| `GET /api/v1/virtual-outputs`, `GET /api/v1/virtual-outputs/<n>` | the virtual outputs: `slot`, `signal`, `label`, `format`, `source`, `nmos_sender_id`, `mxl_flow_id`, `running`, `errors`, `commit_lag_ms` (also in `GET /api/v1/status`) |
+| `GET /api/v1/virtual-outputs`, `GET /api/v1/virtual-outputs/<n>` | `<n>`: the slot number or the key. The virtual outputs: `slot`, `id`, `key`, `signal`, `label`, `format`, `source`, `nmos_sender_id`, `mxl_flow_id`, `running`, `errors`, `commit_lag_ms` (also in `GET /api/v1/status`) |
 | `PUT /api/v1/virtual-outputs/<n>`, `DELETE …/<n>` | `{"source": <source> \| null}`: what feeds it (above); DELETE: silence. 404 for a slot above `MIXER_OUTPUT_FLOWS`, 400 for a source that does not exist |
 | `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |
 | `/x-nmos/…` on `NMOS_PORT` | IS-04 v1.3, IS-05 v1.2, BCP-007-03 ([mxl-nmos](https://github.com/LeeO86/mxl-nmos) v0.1.1) |
@@ -982,7 +1044,7 @@ their answers at once.
 the control engine did not get), `signals`,
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}` (virtual outputs as `vout:<n>`),
-`virtual_output_routed{slot,label}` (1 with a source, 0 silent), `loudness_lufs{signal,window}` (window
+`virtual_output_routed{slot,output,label}` (`output`: key or slot; 1 with a source, 0 silent), `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,
 `timing_trusted`, `tally_packets_total`, `vad_active{signal}`, `preview_state{path}` (0 idle, 1
 connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,
@@ -1027,7 +1089,8 @@ validation markers, macros, dry run; the console's strip handling,
 `web/tests/console.mjs`: several strips at once, rename, the linked patch, polarity
 of a 5.1 strip, "Send to…" and "Add source…", a subgroup, delete, the divider;
 the graph and routing of 1.5.0, `web/tests/graph.mjs`: virtual outputs fed from
-the routing list and by wires from a strip, an input and a monitor, a send's pan
+the routing list and by wires from a strip, an input and a monitor (its clean or
+speaker feed), a send's pan
 and down-mix, an input's alias and flow, the view over a tab switch, double-click
 to the processing and the control room),
 `tests/integration/vouts.sh` (virtual outputs: stable flow and sender ids, silent

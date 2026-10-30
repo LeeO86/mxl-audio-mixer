@@ -304,6 +304,10 @@ async fn run(mut config: Config) -> ExitCode {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let mut meter_tick = tokio::time::interval(METER_TICK);
+        // A late tick must not be followed by back-to-back ones: the peaks
+        // since the last read would be empty (−inf on wide signals, false
+        // logic edges).
+        meter_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut auto_tick = tokio::time::interval(mxl_audio_mixer::auto::TICK);
         auto_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let lock = || ticking.lock().unwrap_or_else(|e| e.into_inner());

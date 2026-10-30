@@ -7,6 +7,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import AutomationPanel from "./AutomationPanel.vue";
 import AutomixPanel from "./AutomixPanel.vue";
 import GroupsPanel from "./GroupsPanel.vue";
+import MidiPanel from "./MidiPanel.vue";
 import OperationsPanel from "./OperationsPanel.vue";
 import RemoteDesk from "./RemoteDesk.vue";
 import Segmented from "./Segmented.vue";
@@ -15,6 +16,7 @@ import VcaStrip from "./VcaStrip.vue";
 import { SCALES } from "../dsp.js";
 import { api } from "../api.js";
 import { numbered } from "../console.js";
+import { midi, stopLearn, targetText } from "../midi.js";
 import { act, buses, live, muteGroups, patchMuteGroup, select, spill, store, stored, strips, vcaOf, vcaSignals, vcas } from "../store.js";
 
 const emit = defineEmits(["open"]);
@@ -139,6 +141,7 @@ const editingGroups = ref(false);
 const operating = ref(false);
 const automating = ref(false);
 const automixing = ref(false);
+const midiOpen = ref(false);
 </script>
 
 <template>
@@ -168,6 +171,7 @@ const automixing = ref(false);
       <button class="btn secondary" :aria-pressed="operating" title="group, N-1, link, mix-minus" @click="operating = !operating">Operations</button>
       <button class="btn secondary" :aria-pressed="automixing" title="gain-sharing auto-mixes" @click="automixing = !automixing">Auto-mix</button>
       <button class="btn secondary" :aria-pressed="automating" title="auto-level, ducking, voice detection" @click="automating = !automating">Auto</button>
+      <button class="btn secondary" :aria-pressed="midiOpen" :class="{ on: midi.state === 'ready' }" title="MIDI control surfaces: Mackie Control, MIDI learn" @click="midiOpen = !midiOpen">MIDI</button>
     </div>
   </div>
   <div v-if="muteGroups.length" class="toolbar mutegroups">
@@ -188,6 +192,17 @@ const automixing = ref(false);
   <OperationsPanel v-if="operating" @close="operating = false" />
   <AutomationPanel v-if="automating" @close="automating = false" />
   <AutomixPanel v-if="automixing" @close="automixing = false" />
+  <MidiPanel v-if="midiOpen" @close="midiOpen = false" />
+  <div v-if="midi.learning" class="banner info midilearn" data-midi-learn>
+    <span>
+      MIDI learn:
+      <template v-if="midi.target"><strong>{{ targetText(midi.target) }}</strong> picked; now move a control on the MIDI device.</template>
+      <template v-else>click a fader, mute, PFL, AFL or pan, then move a control on the MIDI device.</template>
+      <template v-if="midi.learnt"> Learnt: {{ midi.learnt }}.</template>
+    </span>
+    <span class="spacer"></span>
+    <button class="btn small" @click="stopLearn">Done</button>
+  </div>
   <div v-if="spilled" class="banner info spillbanner">
     Spill: VCA <strong>{{ spilled.name }}</strong>, {{ shown.length }} members
     <button class="btn small secondary" @click="spill.vca = null">Show all</button>

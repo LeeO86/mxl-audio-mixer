@@ -284,7 +284,7 @@ async fn delete_monitor(State(app): State<App>, Path(id): Path<String>) -> Respo
                 return Err(not_found(format!("monitor {id} does not exist")));
             }
             mix.virtual_outputs.retain(|r| {
-                !matches!(&r.source, crate::mix::model::OutputSource::Monitor { monitor } if *monitor == id)
+                !matches!(&r.source, crate::mix::model::OutputSource::Monitor { monitor, .. } if *monitor == id)
             });
             Ok(())
         })

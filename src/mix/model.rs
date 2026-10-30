@@ -358,6 +358,47 @@ pub struct Send {
     /// routing loop close through this send (§4.4).
     #[serde(default)]
     pub block_delay: bool,
+    /// The send's own surround panner (B6): a mono or stereo source into a
+    /// bus of 5.1 or more is panned here instead of by the strip's panner (a
+    /// post-pan send then reads the strip before its panner). Ignored for other
+    /// sources and buses. Left out of the JSON while unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<SendPan>,
+}
+
+/// A send's surround position (B6), as the surround panner node's (D5): 0°
+/// front centre, negative left, ±180° behind; spread over all speakers, centre
+/// divergence into L and R, the LFE send.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendPan {
+    pub azimuth_deg: f64,
+    #[serde(default)]
+    pub spread_pct: f64,
+    #[serde(default)]
+    pub divergence_pct: f64,
+    #[serde(default = "lfe_off")]
+    pub lfe_db: f64,
+}
+
+fn lfe_off() -> f64 {
+    super::chain::LFE_OFF_DB
+}
+
+impl SendPan {
+    pub fn validate(&self) -> Result<(), String> {
+        let ok = |what: &str, v: f64, lo: f64, hi: f64| {
+            if v.is_finite() && (lo..=hi).contains(&v) {
+                Ok(())
+            } else {
+                Err(format!("pan {what} must be {lo} to {hi}, not {v}"))
+            }
+        };
+        ok("azimuth_deg", self.azimuth_deg, -180.0, 180.0)?;
+        ok("spread_pct", self.spread_pct, 0.0, 100.0)?;
+        ok("divergence_pct", self.divergence_pct, 0.0, 100.0)?;
+        ok("lfe_db", self.lfe_db, super::chain::LFE_OFF_DB, 10.0)
+    }
 }
 
 /// A signal published as an MXL flow and an NMOS sender (§4.3).
@@ -371,11 +412,24 @@ pub struct Output {
     /// Samples per MXL commit; `null`: `MIXER_OUTPUT_COMMIT_SAMPLES`.
     #[serde(default)]
     pub commit_samples: Option<u32>,
+    /// Where the output is taken (B4: a strip's direct out, a bus out); left
+    /// out: post-fader. Left out of the JSON while unset (a 1.4 show loads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap: Option<Tap>,
 }
 
-/// What feeds a virtual output (C7).
+impl Output {
+    /// The tap the output reads: its own, or post-fader.
+    pub fn tap(&self) -> Tap {
+        self.tap.clone().unwrap_or(Tap::PostFader)
+    }
+}
+
+/// What feeds a virtual output (C7). In JSON exactly one of `signal`,
+/// `monitor` or `input`, with `tap` only beside `signal` and `format` only
+/// beside `input`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, try_from = "RawSource")]
 pub enum OutputSource {
     /// A strip (its direct out) or a bus at `tap` (default: post-fader).
     Signal {
@@ -383,8 +437,13 @@ pub enum OutputSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tap: Option<Tap>,
     },
-    /// A monitor of the control room (its output, after its level).
-    Monitor { monitor: String },
+    /// A monitor of the control room: its `clean` feed (default) or its
+    /// `speaker` feed.
+    Monitor {
+        monitor: String,
+        #[serde(default, skip_serializing_if = "MonitorFeed::is_clean")]
+        feed: MonitorFeed,
+    },
     /// An input straight through, no strip. `format`: what the input carries
     /// (default: the output's format, channel for channel); another format is
     /// up- or down-mixed like a send.
@@ -395,11 +454,67 @@ pub enum OutputSource {
     },
 }
 
-/// The source of virtual output `slot` (from 1). A slot without one is silent.
+/// What a virtual output takes from a monitor (C6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MonitorFeed {
+    /// The monitor's selected source in its format and down-mix: no solo,
+    /// listen-back, talkback dim, check, level, dim, mute, bass management or
+    /// delay.
+    #[default]
+    Clean,
+    /// Exactly what the speakers get.
+    Speaker,
+}
+
+impl MonitorFeed {
+    pub fn is_clean(&self) -> bool {
+        *self == Self::Clean
+    }
+}
+
+/// Every field a source may have, checked by [`OutputSource`]'s `TryFrom`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSource {
+    signal: Option<String>,
+    tap: Option<Tap>,
+    monitor: Option<String>,
+    feed: Option<MonitorFeed>,
+    input: Option<usize>,
+    format: Option<Format>,
+}
+
+impl TryFrom<RawSource> for OutputSource {
+    type Error = String;
+
+    fn try_from(r: RawSource) -> Result<Self, String> {
+        let no_feed = r.feed.is_none();
+        match (r.signal, r.monitor, r.input) {
+            (Some(signal), None, None) if r.format.is_none() && no_feed => {
+                Ok(Self::Signal { signal, tap: r.tap })
+            }
+            (None, Some(monitor), None) if r.tap.is_none() && r.format.is_none() => {
+                Ok(Self::Monitor {
+                    monitor,
+                    feed: r.feed.unwrap_or_default(),
+                })
+            }
+            (None, None, Some(input)) if r.tap.is_none() && no_feed => Ok(Self::Input {
+                input,
+                format: r.format,
+            }),
+            _ => Err("a source has exactly one of signal (with tap), monitor (with feed) or input (with format)".into()),
+        }
+    }
+}
+
+/// The source of virtual output `output`: its configured `key`, else its slot
+/// number (from 1) as text. An output without a route is silent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualRoute {
-    pub slot: usize,
+    pub output: String,
     pub source: OutputSource,
 }
 
@@ -557,6 +672,26 @@ impl Mix {
             (Kind::Strip, Tap::PostPan, Format::Mono) => Format::Stereo,
             _ => format,
         })
+    }
+
+    /// What a send's own panner (B6) pans: the source's span tap (a strip's
+    /// post-pan read before its stereo panner) and its format, mono or stereo,
+    /// with the bus's surround bed (5.1 or 7.1); `None` when the send has no
+    /// panner or it does not apply (a wider source, a bus narrower than 5.1, a
+    /// strip with its own surround panner at post-pan).
+    pub fn send_pan(&self, send: &Send) -> Option<(SendPan, Tap, Format, Format)> {
+        let pan = send.pan?;
+        let bed = match self.bus(&send.to)?.format {
+            Format::Surround51 | Format::Surround514 => Format::Surround51,
+            Format::Surround71 | Format::Surround714 => Format::Surround71,
+            _ => return None,
+        };
+        let tap = match (self.strip(&send.from), &send.tap) {
+            (Some(s), Tap::PostPan) if s.surround_layout().is_none() => Tap::PostFader,
+            _ => send.tap.clone(),
+        };
+        let from = self.tap_format(&send.from, &tap)?;
+        matches!(from, Format::Mono | Format::Stereo).then_some((pan, tap, from, bed))
     }
 
     /// The laws for what arrives at bus `to` (its down-mix override, D2).
@@ -752,6 +887,10 @@ impl Mix {
             if !pairs.insert((send.from.as_str(), send.to.as_str())) {
                 return Err(format!("send {} → {} exists twice", send.from, send.to));
             }
+            if let Some(pan) = &send.pan {
+                pan.validate()
+                    .map_err(|e| format!("send {} → {}: {e}", send.from, send.to))?;
+            }
         }
         for (id, chain) in self.chains() {
             super::chain::validate(chain).map_err(|e| format!("{id}: {e}"))?;
@@ -789,6 +928,10 @@ impl Mix {
             if !published.insert(o.signal.as_str()) {
                 return Err(format!("signal {} is published twice", o.signal));
             }
+            if let Some(tap) = &o.tap {
+                self.check_tap(&o.signal, tap)
+                    .map_err(|e| format!("output {}: {e}", o.signal))?;
+            }
             if let Some(c) = o.commit_samples {
                 if c == 0 || c % block != 0 || c > 48_000 {
                     return Err(format!(
@@ -802,23 +945,19 @@ impl Mix {
         Ok(())
     }
 
-    /// The virtual outputs' sources (C7): one per slot, each naming what exists.
-    /// Slots above `MIXER_OUTPUT_FLOWS` are kept (another host may have them)
+    /// The virtual outputs' sources (C7): one per output, each naming what
+    /// exists. Outputs this host does not have (another `MIXER_OUTPUTS`) are kept
     /// and stay silent.
     fn validate_virtual_outputs(&self, inputs: usize) -> Result<(), String> {
-        let mut slots = BTreeSet::new();
+        let mut outputs = BTreeSet::new();
         for r in &self.virtual_outputs {
-            if r.slot == 0 || r.slot > crate::config::MAX_VIRTUAL_OUTPUTS {
-                return Err(format!(
-                    "virtual output {}: the slot is 1 to {}",
-                    r.slot,
-                    crate::config::MAX_VIRTUAL_OUTPUTS
-                ));
+            if r.output.is_empty() || r.output.len() > 32 {
+                return Err(format!("virtual output {:?}: 1 to 32 characters", r.output));
             }
-            if !slots.insert(r.slot) {
-                return Err(format!("virtual output {} has two sources", r.slot));
+            if !outputs.insert(r.output.as_str()) {
+                return Err(format!("virtual output {} has two sources", r.output));
             }
-            let at = |e: String| format!("virtual output {}: {e}", r.slot);
+            let at = |e: String| format!("virtual output {}: {e}", r.output);
             match &r.source {
                 OutputSource::Signal { signal, tap } => {
                     if self.kind(signal).is_none() {
@@ -828,7 +967,7 @@ impl Mix {
                         self.check_tap(signal, t).map_err(at)?;
                     }
                 }
-                OutputSource::Monitor { monitor } => {
+                OutputSource::Monitor { monitor, .. } => {
                     if !self.control_room.monitors.iter().any(|m| &m.id == monitor) {
                         return Err(at(format!("monitor {monitor} does not exist")));
                     }
@@ -859,21 +998,24 @@ impl Mix {
         }
     }
 
-    /// The source of virtual output `slot`, if it has one.
-    pub fn virtual_source(&self, slot: usize) -> Option<&OutputSource> {
+    /// The source of virtual output `output` (its key, else its slot number as
+    /// text), if it has one.
+    pub fn virtual_source(&self, output: &str) -> Option<&OutputSource> {
         self.virtual_outputs
             .iter()
-            .find(|r| r.slot == slot)
+            .find(|r| r.output == output)
             .map(|r| &r.source)
     }
 
-    /// Set (or with `None` clear) the source of virtual output `slot`; the
+    /// Set (or with `None` clear) the source of virtual output `output`; the
     /// caller validates the mix after (the logic's route action, D4, too).
-    pub fn set_virtual_source(&mut self, slot: usize, source: Option<OutputSource>) {
-        self.virtual_outputs.retain(|r| r.slot != slot);
+    pub fn set_virtual_source(&mut self, output: &str, source: Option<OutputSource>) {
+        self.virtual_outputs.retain(|r| r.output != output);
         if let Some(source) = source {
-            self.virtual_outputs.push(VirtualRoute { slot, source });
-            self.virtual_outputs.sort_by_key(|r| r.slot);
+            self.virtual_outputs.push(VirtualRoute {
+                output: output.to_string(),
+                source,
+            });
         }
     }
 
@@ -1246,6 +1388,7 @@ pub(crate) mod tests {
             mute: false,
             phase: false,
             block_delay: false,
+            pan: None,
         }
     }
 
@@ -1313,6 +1456,7 @@ pub(crate) mod tests {
             signal: "main".into(),
             format: None,
             commit_samples: Some(100),
+            tap: None,
         });
         assert!(bad.validate(4, 96).unwrap_err().contains("multiple"));
         let mut bad = mix.clone();
@@ -1320,6 +1464,7 @@ pub(crate) mod tests {
             signal: "nope".into(),
             format: None,
             commit_samples: None,
+            tap: None,
         });
         assert!(bad.validate(4, 96).unwrap_err().contains("does not exist"));
         // A strip is published as its post-fader direct out.
@@ -1328,6 +1473,7 @@ pub(crate) mod tests {
             signal: "vox".into(),
             format: None,
             commit_samples: None,
+            tap: None,
         });
         assert_eq!(direct.validate(4, 96), Ok(()));
     }
@@ -1547,5 +1693,51 @@ pub(crate) mod tests {
         assert_eq!(mix.all_sends(), all);
         let json = serde_json::to_value(&mix.buses[1]).unwrap();
         assert!(json.get("subgroup").is_none(), "not written while off");
+    }
+
+    /// A 1.4.x show's mix loads; written back it has no 1.5 fields (no `pan`,
+    /// no output `tap`), so 1.4 can still read it. A 1.5 mix with a leveler,
+    /// a send pan and an output tap goes through JSON unchanged.
+    #[test]
+    fn shows_of_1_4_and_1_5_round_trip() {
+        let old = r#"{
+            "strips": [{"id": "vox", "name": "Vox", "format": "mono", "patch": [{"input": 1, "channel": 1}],
+                "trim_db": 0, "polarity": [false], "fader_db": 0, "mute": false, "pan": 0, "width": 1,
+                "chain": [{"id": "comp", "type": "compressor", "threshold_db": -20, "ratio": 3, "knee_db": 6,
+                    "attack_ms": 10, "release_ms": 150, "makeup_db": 0, "detector": "rms"}]}],
+            "buses": [{"id": "main", "name": "Main", "format": "5.1", "fader_db": 0, "mute": false, "chain": []}],
+            "sends": [{"from": "vox", "to": "main", "tap": "post-pan", "gain_db": 0, "mute": false, "phase": false}],
+            "outputs": [{"signal": "main", "format": null, "commit_samples": null}]
+        }"#;
+        let mix: Mix = serde_json::from_str(old).unwrap();
+        assert_eq!(mix.validate(2, 96), Ok(()));
+        let back = serde_json::to_value(&mix).unwrap();
+        assert!(back["sends"][0].get("pan").is_none());
+        assert!(back["outputs"][0].get("tap").is_none());
+        assert_eq!(serde_json::from_value::<Mix>(back).unwrap(), mix);
+
+        let mut new = mix.clone();
+        new.buses[0].chain = serde_json::from_str(
+            r#"[{"id": "lev", "type": "leveler", "target_lufs": -23, "max_gain_db": 9, "max_cut_db": 9, "speed_db_per_s": 1, "gate_lufs": -50}]"#,
+        )
+        .unwrap();
+        match &new.buses[0].chain[0].kind {
+            super::super::chain::ProcKind::Leveler {
+                limiter,
+                ceiling_db,
+                ..
+            } => assert!(*limiter && *ceiling_db == -1.0),
+            _ => unreachable!(),
+        }
+        new.sends[0].pan = Some(SendPan {
+            azimuth_deg: -110.0,
+            spread_pct: 20.0,
+            divergence_pct: 0.0,
+            lfe_db: super::super::chain::LFE_OFF_DB,
+        });
+        new.outputs[0].tap = Some(Tap::PreFader);
+        assert_eq!(new.validate(2, 96), Ok(()));
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<Mix>(&json).unwrap(), new);
     }
 }

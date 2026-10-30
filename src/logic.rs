@@ -196,7 +196,7 @@ pub enum Act {
     /// still has it (off).
     Route {
         input: u32,
-        output: u32,
+        output: String,
         on: bool,
     },
     Monitor {
@@ -787,7 +787,7 @@ impl Run {
                 output: Some(output),
             } => follow_bool(s, &|on| Act::Route {
                 input: *input,
-                output: *output,
+                output: output.clone(),
                 on,
             }),
             BlockKind::SetPublish { signal } => follow_bool(s, &|on| Act::Publish {

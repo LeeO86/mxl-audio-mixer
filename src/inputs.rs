@@ -827,10 +827,15 @@ impl Inputs {
         let delay_max = self.delay_max;
         let slot = self.slots.get_mut(index).ok_or("no such input")?;
         if let Some(label) = label {
-            if label.trim().is_empty() || label.len() > 64 {
-                return Err("label must have 1 to 64 characters".into());
+            if label.len() > 64 {
+                return Err("label must have at most 64 characters".into());
             }
-            slot.config.label = label;
+            // An empty alias is the default name again (C2).
+            slot.config.label = if label.trim().is_empty() {
+                InputConfig::default_for(index).label
+            } else {
+                label
+            };
         }
         if let Some(delay) = extra_delay {
             if let ExtraDelay::Ms(value) = delay {

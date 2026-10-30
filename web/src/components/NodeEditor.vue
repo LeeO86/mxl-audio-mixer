@@ -26,6 +26,15 @@ const shown = computed(() => Math.max(0, Math.min(active.value, (props.node.band
 const others = computed(() => signals.value.filter((s) => s.id !== props.signal));
 const visible = computed(() => spec.value.fields.filter((f) => !f.when || f.when(props.node)));
 const EQ = new Set(["eq", "dynamic-eq", "filter"]);
+// Every band's gain reduction (multiband, dynamic EQ), whatever band is open (B2).
+// The leveler's gain as a bar from the middle (± 30 dB full scale).
+const levStyle = computed(() => {
+  const g = Math.max(-30, Math.min(30, meter.value?.leveler_gain_db || 0));
+  const w = (Math.abs(g) / 30) * 50;
+  return { left: `${g < 0 ? 50 - w : 50}%`, width: `${w}%` };
+});
+const fmtGain = (g) => (g === undefined || g === null ? "–" : `${g > 0 ? "+" : ""}${g.toFixed(1)} dB`);
+const bandGr = computed(() => (["multiband", "dynamic-eq"].includes(props.node.type) ? props.node.bands.map((_, i) => meter.value?.band_reduction_db?.[i] || 0) : []));
 const DYN = new Set(["compressor", "limiter", "expander", "gate"]);
 
 function setBand(i, key, value) {
@@ -88,8 +97,13 @@ function toggleOptional(field, on) {
         <span class="num">{{ (meter?.gain_reduction_db || 0).toFixed(1) }} dB</span>
       </div>
     </div>
-    <div v-else-if="meter && !['eq', 'filter', 'delay', 'width', 'surround-pan'].includes(node.type)" class="grbar">
-      <span class="muted small">Gain reduction</span>
+    <div v-if="node.type === 'leveler'" class="grbar levgain" title="The leveler's gain now (+ up, − down)">
+      <span class="muted small">Leveler gain</span>
+      <span class="lev"><span :style="levStyle"></span></span>
+      <span class="num">{{ fmtGain(meter?.leveler_gain_db) }}</span>
+    </div>
+    <div v-if="meter && !DYN.has(node.type) && !['eq', 'filter', 'delay', 'width', 'surround-pan'].includes(node.type) && (node.type !== 'leveler' || node.limiter)" class="grbar">
+      <span class="muted small">{{ node.type === "leveler" ? "Limiter" : "Gain reduction" }}</span>
       <span class="gr"><span :style="{ width: `${Math.min(100, (meter.gain_reduction_db / 20) * 100)}%` }"></span></span>
       <span class="num">{{ meter.gain_reduction_db.toFixed(1) }} dB</span>
     </div>
@@ -130,6 +144,13 @@ function toggleOptional(field, on) {
     </div>
 
     <div v-if="node.type === 'eq' || node.type === 'dynamic-eq'" class="bands">
+      <div v-if="bandGr.length" class="bandgr" role="group" aria-label="Gain reduction per band">
+        <button v-for="(g, i) in bandGr" :key="i" type="button" class="bgr" :class="{ active: i === shown }" :title="`Band ${i + 1}: ${g.toFixed(1)} dB gain reduction`" @click="active = i">
+          <span class="bgrbar"><span :style="{ height: `${Math.min(100, (g / 20) * 100)}%` }"></span></span>
+          <span class="num">{{ g.toFixed(1) }}</span>
+          <span class="muted small">{{ i + 1 }}</span>
+        </button>
+      </div>
       <div class="bandtabs" role="group" aria-label="Bands">
         <button v-for="(b, i) in node.bands" :key="i" class="btn small" :class="i === shown ? '' : 'secondary'" :aria-pressed="i === shown" :aria-label="`Band ${i + 1}`" @click="active = i">{{ i + 1 }}</button>
         <button v-if="node.bands.length < 8" class="btn small secondary" aria-label="Add a band" @click="addBand">+ Band</button>
@@ -171,6 +192,13 @@ function toggleOptional(field, on) {
         <Pot v-for="(c, i) in node.crossovers_hz" :key="`x${i}`" :label="`Crossover ${i + 1}`" unit="Hz" :value="c" :min="20" :max="20000" :def="c" :fine="0.02" :digits="0" log @change="(v) => setCrossover(i, v)" />
       </div>
       <div class="bands">
+        <div v-if="bandGr.length" class="bandgr" role="group" aria-label="Gain reduction per band">
+          <button v-for="(g, i) in bandGr" :key="i" type="button" class="bgr" :class="{ active: i === shown }" :title="`Band ${i + 1}: ${g.toFixed(1)} dB gain reduction`" @click="active = i">
+            <span class="bgrbar"><span :style="{ height: `${Math.min(100, (g / 20) * 100)}%` }"></span></span>
+            <span class="num">{{ g.toFixed(1) }}</span>
+            <span class="muted small">{{ i + 1 }}</span>
+          </button>
+        </div>
         <div class="bandtabs" role="group" aria-label="Bands">
           <button v-for="(b, i) in node.bands" :key="i" class="btn small" :class="i === shown ? '' : 'secondary'" :aria-pressed="i === shown" :aria-label="`Band ${i + 1}`" @click="active = i">{{ i + 1 }}</button>
         </div>
@@ -190,3 +218,69 @@ function toggleOptional(field, on) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.lev {
+  position: relative;
+  display: inline-block;
+  width: 120px;
+  height: 8px;
+  background: var(--panel2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.lev::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--muted);
+}
+.lev > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+}
+.bandgr {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.3rem 0 0.4rem;
+}
+.bgr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  min-width: 2.4rem;
+}
+.bgr.active {
+  border-color: var(--accent);
+}
+.bgrbar {
+  position: relative;
+  width: 8px;
+  height: 48px;
+  background: var(--panel2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.bgrbar > span {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: var(--warn, #e0a030);
+}
+.bgr .num {
+  font-size: 0.75rem;
+}
+</style>

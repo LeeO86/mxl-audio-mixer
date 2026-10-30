@@ -44,7 +44,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MIXER_LOG_LEVEL", default: "info", description: "Log level: error, warn, info, debug, trace." },
     Setting { name: "MIXER_INPUT_FLOWS", default: "16", description: "Number of MXL audio inputs (NMOS receivers), 1–256." },
     Setting { name: "MIXER_OUTPUT_FLOWS", default: "length of MIXER_OUTPUTS, else 0", description: "Number of virtual outputs, 0–64: fixed MXL flows and NMOS senders (out-vout:1 …) the designer can wire; the operator picks what feeds each. 0: only the published outputs." },
-    Setting { name: "MIXER_OUTPUTS", default: "[]", description: "JSON array, one entry per virtual output: {\"label\": \"PGM\", \"format\": \"5.1\"}; both optional (\"Output <n>\", stereo). The format of a flow never changes while it runs." },
+    Setting { name: "MIXER_OUTPUTS", default: "[]", description: "JSON array, one entry per virtual output: {\"key\": \"pgm\", \"label\": \"PGM\", \"format\": \"5.1\"}; all optional (key: the slot number; \"Output <n>\"; stereo). The key names its ids and its source in the mix. The format of a flow never changes while it runs." },
     Setting { name: "MIXER_BLOCK_SAMPLES", default: "96", description: "DSP block size in samples at 48 kHz: 48, 96, 144 or 240." },
     Setting { name: "MIXER_READ_OFFSET", default: "2", description: "Read offset in ms: every input is read at t_out − (offset + its extra delay)." },
     Setting { name: "MIXER_OUTPUT_COMMIT_SAMPLES", default: "one block", description: "Samples per MXL commit of an output (a multiple of the block size)." },
@@ -251,10 +251,18 @@ pub const MAX_VIRTUAL_OUTPUTS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualOutput {
+    /// Optional stable key (`a-z`, `0-9`, `-`, 1–32, not only digits): names
+    /// the output in its ids and in the mix instead of its slot number, so a
+    /// reordered `MIXER_OUTPUTS` keeps flows and sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     #[serde(default)]
     pub label: String,
     #[serde(default = "stereo")]
     pub format: crate::mix::Format,
+    /// The key, else the slot number: the output's id (`vout:<id>`).
+    #[serde(skip)]
+    pub id: String,
 }
 
 fn stereo() -> crate::mix::Format {
@@ -321,15 +329,36 @@ impl Parser<'_> {
             ));
         }
         list.resize_with(count, || VirtualOutput {
+            key: None,
             label: String::new(),
             format: stereo(),
+            id: String::new(),
         });
+        let mut ids = std::collections::BTreeSet::new();
         for (i, v) in list.iter_mut().enumerate() {
             if v.label.trim().is_empty() {
                 v.label = format!("Output {}", i + 1);
             }
             if v.label.len() > 64 {
                 return err(format!("MIXER_OUTPUTS: label {} is longer than 64", i + 1));
+            }
+            v.id = match &v.key {
+                Some(k) => {
+                    let ok = (1..=32).contains(&k.len())
+                        && k.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                        && !k.chars().all(|c| c.is_ascii_digit());
+                    if !ok {
+                        return err(format!(
+                            "MIXER_OUTPUTS: key {k:?} must be 1–32 of a-z, 0-9, - and not only digits"
+                        ));
+                    }
+                    k.clone()
+                }
+                None => (i + 1).to_string(),
+            };
+            if !ids.insert(v.id.clone()) {
+                return err(format!("MIXER_OUTPUTS: key {} is used twice", v.id));
             }
         }
         Ok(list)
@@ -1176,7 +1205,20 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(c.virtual_outputs.len(), 3);
+        assert_eq!(c.virtual_outputs[2].id, "3");
+        let c = load_vars(&[("MIXER_OUTPUTS", r#"[{"key": "pgm"}, {}]"#)]).unwrap();
+        assert_eq!(
+            (
+                c.virtual_outputs[0].id.as_str(),
+                c.virtual_outputs[1].id.as_str()
+            ),
+            ("pgm", "2")
+        );
         for bad in [
+            vec![("MIXER_OUTPUTS", r#"[{"key": "12"}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"key": "PGM"}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"key": "2"}, {}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"key": "a"}, {"key": "a"}]"#)],
             vec![("MIXER_OUTPUT_FLOWS", "65")],
             vec![("MIXER_OUTPUTS", r#"[{"format": "9.1"}]"#)],
             vec![("MIXER_OUTPUTS", r#"[{"name": "x"}]"#)],
