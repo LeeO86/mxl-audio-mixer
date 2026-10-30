@@ -621,7 +621,7 @@ impl Control {
                     && !g.dry_run
                     && matches!(
                         mix.logic_block_at(&g.id, b),
-                        Some(crate::mix::logic::BlockKind::TslOut { index: i }) if i == index
+                        Some(crate::mix::logic::BlockKind::TslOut { index: Some(i) }) if i == index
                     )
             })
         });

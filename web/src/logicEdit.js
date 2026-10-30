@@ -100,12 +100,13 @@ export function freshId(type, taken) {
   for (let n = 1; ; n++) if (!taken.has(`${type}-${n}`)) return `${type}-${n}`;
 }
 
-/** The clip with new ids that do not clash with `g`, moved by `offset`; its wires follow the new ids. */
+/** The clip moved by `offset`; a block whose id `g` has already gets a new one (D245: the others keep
+ * theirs, so `POST …/trigger/<block>` still finds a copied trigger), and its wires follow. */
 export function pasted(g, clip, offset) {
   const taken = new Set(g.blocks.map((b) => b.id));
   const rename = {};
   const blocks = clip.blocks.map((b) => {
-    const id = freshId(b.type, taken);
+    const id = taken.has(b.id) ? freshId(b.type, taken) : b.id;
     taken.add(id);
     rename[b.id] = id;
     return { ...clone(b), id, x: Math.round((b.x || 0) + offset), y: Math.round((b.y || 0) + offset) };

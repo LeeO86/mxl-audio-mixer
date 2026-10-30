@@ -161,9 +161,13 @@ pub enum BlockKind {
     Pfl {
         signal: String,
     },
-    /// The signal's fader, dB.
+    /// The signal's fader, dB. Where it feeds an on/off input (boolean or
+    /// event) it is on while the fader is at `threshold_db` or above (1.5.0;
+    /// a show without it: 0 dB).
     Fader {
         signal: String,
+        #[serde(default)]
+        threshold_db: f64,
     },
     /// The signal's voice detection.
     Vad {
@@ -319,9 +323,10 @@ pub enum BlockKind {
         url: String,
     },
     /// TSL UMD 5.0 display `index` on `TSL_OUT_TARGET`: `left` lamp (red),
-    /// `right` lamp (green), `label`.
+    /// `right` lamp (green), `label`. No index (`null`) is not chosen yet.
     TslOut {
-        index: u16,
+        #[serde(default)]
+        index: Option<u16>,
     },
     /// A log line and an event on the events socket when `in` fires: `message`,
     /// then `value` if wired.
@@ -627,12 +632,15 @@ impl BlockKind {
     }
 
     /// A target the block needs (a signal, VCA, snapshot, monitor, talkback
-    /// mic or destination, a node or parameter) is not chosen yet (`""`). Such
+    /// mic or destination, a node or parameter, a webhook's URL, a TSL out's
+    /// index) is not chosen yet (`""`, the index `null`). Such
     /// a block validates, never acts, reads off, 0 or the floor, and is listed
     /// in the graph's `warnings` (D164).
     pub fn target_unset(&self) -> bool {
         match self {
             Self::Recall { snapshot } => snapshot.is_empty(),
+            Self::Webhook { url } => url.is_empty(),
+            Self::TslOut { index } => index.is_none(),
             Self::SetTalk { mic, destination } => mic.is_empty() || destination.is_empty(),
             Self::SetMonitor { monitor, .. } => monitor.is_empty(),
             Self::SetParam {
@@ -650,7 +658,7 @@ impl BlockKind {
         match self {
             Self::Mute { signal }
             | Self::Pfl { signal }
-            | Self::Fader { signal }
+            | Self::Fader { signal, .. }
             | Self::Vad { signal }
             | Self::Level { signal }
             | Self::Above { signal, .. }
@@ -672,7 +680,7 @@ impl BlockKind {
         match self {
             Self::Mute { signal }
             | Self::Pfl { signal }
-            | Self::Fader { signal }
+            | Self::Fader { signal, .. }
             | Self::Vad { signal }
             | Self::Level { signal }
             | Self::Above { signal, .. }
@@ -881,19 +889,36 @@ impl Context {
     }
 }
 
-/// Blocks whose target is not chosen yet ([`BlockKind::target_unset`]): not
-/// errors, but markers for the UI ("choose a target").
-pub fn warnings(blocks: &[Block]) -> Vec<Issue> {
+/// Not errors, but markers for the UI: blocks whose target is not chosen yet
+/// ([`BlockKind::target_unset`], "choose a target"), and `tsl-out` blocks whose
+/// index another `tsl-out` of the show (any graph or macro) uses too: they
+/// would write one display (D247).
+pub fn warnings(mix: &Mix, blocks: &[Block]) -> Vec<Issue> {
+    let tsl = |k: &BlockKind| match k {
+        BlockKind::TslOut { index } => *index,
+        _ => None,
+    };
+    let mut uses: BTreeMap<u16, usize> = BTreeMap::new();
+    for i in mix.logic_blocks().filter_map(|b| tsl(&b.kind)) {
+        *uses.entry(i).or_default() += 1;
+    }
+    let issue = |b: &Block, message: String| Issue {
+        graph: None,
+        macro_id: None,
+        block: Some(b.id.clone()),
+        port: None,
+        wire: None,
+        message,
+    };
     blocks
         .iter()
-        .filter(|b| b.kind.target_unset())
-        .map(|b| Issue {
-            graph: None,
-            macro_id: None,
-            block: Some(b.id.clone()),
-            port: None,
-            wire: None,
-            message: "choose a target".into(),
+        .filter_map(|b| {
+            if b.kind.target_unset() {
+                return Some(issue(b, "choose a target".into()));
+            }
+            let i = tsl(&b.kind)?;
+            (uses.get(&i).copied().unwrap_or(0) > 1)
+                .then(|| issue(b, format!("TSL index {i} is used by another tsl-out too")))
         })
         .collect()
 }
@@ -1236,6 +1261,24 @@ type BlockCheck = Result<(), (Option<&'static str>, String)>;
 /// A block's parameters against the mix; the error may name a port.
 fn check_block(mix: &Mix, kind: &BlockKind, in_macro: bool) -> BlockCheck {
     let plain = |r: Result<(), String>| r.map_err(|e| (None, e));
+    // Thresholds are checked also while the signal is not chosen yet.
+    match kind {
+        BlockKind::Fader { threshold_db, .. } => plain(range(
+            "threshold_db",
+            *threshold_db,
+            -120.0,
+            super::model::MAX_FADER_DB,
+        ))?,
+        BlockKind::Above {
+            threshold_db,
+            hysteresis_db,
+            ..
+        } => {
+            plain(range("threshold_db", *threshold_db, -120.0, 20.0))?;
+            plain(range("hysteresis_db", *hysteresis_db, 0.0, 60.0))?;
+        }
+        _ => {}
+    }
     if kind.target_unset() {
         // Not chosen yet: valid, inert, listed in `warnings` (D164).
         return Ok(());
@@ -1281,14 +1324,6 @@ fn check_block(mix: &Mix, kind: &BlockKind, in_macro: bool) -> BlockCheck {
             } else {
                 Ok(())
             }
-        }
-        BlockKind::Above {
-            threshold_db,
-            hysteresis_db,
-            ..
-        } => {
-            plain(range("threshold_db", *threshold_db, -120.0, 20.0))?;
-            plain(range("hysteresis_db", *hysteresis_db, 0.0, 60.0))
         }
         BlockKind::Recall { snapshot } => plain(check_id("snapshot", snapshot)),
         BlockKind::NmosReceiver { input } if !(1..=1024).contains(input) => {
@@ -1371,7 +1406,7 @@ fn check_block(mix: &Mix, kind: &BlockKind, in_macro: bool) -> BlockCheck {
                 _ => Ok(()),
             }
         }
-        BlockKind::TslOut { index } if *index > 65534 => {
+        BlockKind::TslOut { index: Some(index) } if *index > 65534 => {
             Err((None, "index must be 0 to 65534".into()))
         }
         BlockKind::Log { message } => plain(text("message", message)),
@@ -1860,6 +1895,37 @@ pub(crate) mod tests {
             signal: "nope".into()
         }));
         assert!(bad(BlockKind::Timer { ms: -1.0 }));
+        // A webhook dropped from the palette has no URL yet: valid and inert (D164).
+        let hook = BlockKind::Webhook { url: String::new() };
+        assert!(hook.target_unset());
+        assert!(!bad(hook));
+        assert!(bad(BlockKind::Webhook {
+            url: "ftp://x".into()
+        }));
+        assert!(bad(BlockKind::Fader {
+            signal: "vox".into(),
+            threshold_db: 16.0,
+        }));
+        assert!(bad(BlockKind::Fader {
+            signal: "vox".into(),
+            threshold_db: f64::NAN,
+        }));
+        assert!(bad(BlockKind::Fader {
+            signal: String::new(),
+            threshold_db: 1e6,
+        }));
+        // A TSL out dropped from the palette has no index yet: valid, inert;
+        // a show of 1.4 has one.
+        let tsl = BlockKind::TslOut { index: None };
+        assert!(tsl.target_unset());
+        assert!(!bad(tsl));
+        let old: BlockKind =
+            serde_json::from_value(serde_json::json!({"type": "tsl-out", "index": 3})).unwrap();
+        assert_eq!(old, BlockKind::TslOut { index: Some(3) });
+        assert!(!bad(BlockKind::Fader {
+            signal: "vox".into(),
+            threshold_db: -20.0,
+        }));
         assert!(bad(BlockKind::Above {
             signal: "vox".into(),
             threshold_db: 40.0,
@@ -1908,7 +1974,7 @@ pub(crate) mod tests {
             monitor: "nope".into(),
             source: None
         }));
-        assert!(bad(BlockKind::TslOut { index: 65535 }));
+        assert!(bad(BlockKind::TslOut { index: Some(65535) }));
         assert!(bad(BlockKind::Macro {
             macro_id: "nope".into()
         }));
