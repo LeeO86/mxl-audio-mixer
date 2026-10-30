@@ -61,6 +61,11 @@ api PUT /api/v1/virtual-outputs/2 '{"source": {"signal": "vox"}}' >/dev/null
 sleep 0.2
 probe 1 1:1:0.70710677 2:1:0.70710677
 pass "Clean from the vox direct out (mono into stereo, −3 dB)"
+api PATCH /api/v1/strips/vox '{"mute": true}' >/dev/null
+sleep 0.5
+probe 1 1:1:0 2:1:0
+api PATCH /api/v1/strips/vox '{"mute": false}' >/dev/null
+pass "a muted strip's direct out is silent"
 api PUT /api/v1/virtual-outputs/2 '{"source": {"input": 1}}' >/dev/null
 sleep 0.2
 probe 1 1:1:1 2:2:1

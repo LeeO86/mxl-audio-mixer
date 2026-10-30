@@ -152,14 +152,29 @@ impl Mix {
         effects: &BTreeMap<String, Effect>,
         grouped: &BTreeSet<String>,
     ) -> f32 {
-        let e = effects.get(id).copied().unwrap_or(Effect {
-            offset_db: 0.0,
-            muted: false,
-        });
-        if mute || (e.muted && !self.mute_safe(id)) || grouped.contains(id) {
+        if self.silenced(id, mute, effects, grouped) {
             return 0.0;
         }
-        Db((fader.0 + e.offset_db).min(MAX_FADER_DB)).gain() as f32
+        self.fader_level(id, fader, effects)
+    }
+
+    /// A signal's fader and its VCAs' offsets as a gain, without the mutes.
+    pub fn fader_level(&self, id: &str, fader: Db, effects: &BTreeMap<String, Effect>) -> f32 {
+        let offset = effects.get(id).map_or(0.0, |e| e.offset_db);
+        Db((fader.0 + offset).min(MAX_FADER_DB)).gain() as f32
+    }
+
+    /// Whether a signal is muted: by its own mute, a muted VCA (unless it is
+    /// mute-safe) or an active mute group.
+    pub fn silenced(
+        &self,
+        id: &str,
+        mute: bool,
+        effects: &BTreeMap<String, Effect>,
+        grouped: &BTreeSet<String>,
+    ) -> bool {
+        let vca_muted = effects.get(id).is_some_and(|e| e.muted);
+        mute || (vca_muted && !self.mute_safe(id)) || grouped.contains(id)
     }
 
     fn mute_safe(&self, id: &str) -> bool {

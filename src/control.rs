@@ -16,7 +16,7 @@ use crate::inputs::Inputs;
 use crate::loudness::LoudnessMeters;
 use crate::meters::Meters;
 use crate::mix::compile::{Compiler, LayoutNode};
-use crate::mix::model::{Kind, Mix, Patch, Strip, Tap};
+use crate::mix::model::{Kind, Mix, Patch, Strip};
 use crate::outputs::{OutputSpec, Outputs};
 
 /// Time between fading out the nodes a change removes or rewires and the swap:
@@ -95,6 +95,8 @@ pub struct Control {
     procs: HashMap<NodeId, LayoutNode>,
     /// Processing latency of each signal's post-fader point, in samples.
     pub latency: HashMap<String, usize>,
+    /// Processing latency of each published signal at its output's tap.
+    pub output_latency: HashMap<String, usize>,
     /// Counts changes of the mix; clients reload it when it moves.
     pub revision: u64,
     structure: Option<u64>,
@@ -185,6 +187,7 @@ impl Control {
             layout: HashMap::new(),
             procs: HashMap::new(),
             latency: HashMap::new(),
+            output_latency: HashMap::new(),
             revision: 0,
             structure: None,
             pending: None,
@@ -284,7 +287,8 @@ impl Control {
         for b in self.mix.logic_blocks() {
             let key = match &b.kind {
                 BlockKind::Level { signal } | BlockKind::Above { signal, .. } => {
-                    if let Some(db) = self.meters.peak_dbfs(signal) {
+                    if let Some(db) = logic_level(&self.mix, signal, self.meters.peak_dbfs(signal))
+                    {
                         level_db.insert(signal.clone(), db);
                     }
                     continue;
@@ -516,6 +520,7 @@ impl Control {
                             signal,
                             format: None,
                             commit_samples: None,
+                            tap: None,
                         });
                     }
                 }
@@ -630,7 +635,7 @@ impl Control {
                     && !g.dry_run
                     && matches!(
                         mix.logic_block_at(&g.id, b),
-                        Some(crate::mix::logic::BlockKind::TslOut { index: i }) if i == index
+                        Some(crate::mix::logic::BlockKind::TslOut { index: Some(i) }) if i == index
                     )
             })
         });
@@ -810,7 +815,7 @@ impl Control {
             let (name, _) = mix.signal(&o.signal)?;
             let format = match o.format {
                 Some(f) => f,
-                None => mix.tap_format(&o.signal, &Tap::PostFader)?,
+                None => mix.tap_format(&o.signal, &o.tap())?,
             };
             Some(OutputSpec {
                 signal: o.signal.clone(),
@@ -1301,6 +1306,7 @@ impl Control {
         self.layout = compiled.nodes;
         self.procs = compiled.procs;
         self.latency = compiled.latency;
+        self.output_latency = compiled.output_latency;
         self.structure = Some(compiled.structure);
         self.mix = next;
         self.save()?;
@@ -1366,7 +1372,13 @@ impl Control {
     pub fn output_status(&self) -> Vec<crate::outputs::OutputStatus> {
         let mut status = self.outputs.status(&self.engine, &self.node);
         for o in &mut status {
-            let processing = self.latency.get(&o.signal).copied().unwrap_or(0) as f64 / 48.0;
+            let processing = self
+                .output_latency
+                .get(&o.signal)
+                .or_else(|| self.latency.get(&o.signal))
+                .copied()
+                .unwrap_or(0) as f64
+                / 48.0;
             o.processing_latency_ms = processing;
             o.latency_ms = f64::from(self.read_offset + self.block) / 48.0 + processing;
         }
@@ -1490,8 +1502,61 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
+/// The level a logic Level or Above block reads: the signal's peak, but the
+/// floor for a silenced strip (its mute, a muted VCA, a mute group). A strip's
+/// meter reads before its mute (A3); the logic still hears a muted strip as
+/// silent, as before 1.5.0.
+fn logic_level(mix: &crate::mix::model::Mix, signal: &str, peak: Option<f64>) -> Option<f64> {
+    let silenced = mix
+        .strip(signal)
+        .is_some_and(|s| mix.silenced(signal, s.mute, &mix.vca_effects(), &mix.group_muted()));
+    if silenced {
+        Some(crate::logic::FLOOR_DB)
+    } else {
+        peak
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logic_hears_a_silenced_strip_as_silent() {
+        use super::logic_level;
+        use crate::mix::format::Format;
+        use crate::mix::model::{Mix, Strip};
+        use crate::mix::vca::{MuteGroup, Vca};
+        let floor = crate::logic::FLOOR_DB;
+        let mut m = Mix::default();
+        m.strips.push(Strip::new("vox", Format::Mono));
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(-20.0));
+        assert_eq!(logic_level(&m, "vox", None), None);
+        m.strips[0].mute = true;
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(floor));
+        m.strips[0].mute = false;
+        m.vcas.push(Vca {
+            id: "talent".into(),
+            name: "Talent".into(),
+            fader_db: crate::mix::model::Db(0.0),
+            mute: true,
+            members: vec!["vox".into()],
+            colour: None,
+            recall_safe: false,
+        });
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(floor));
+        m.vcas[0].mute = false;
+        m.mute_groups.push(MuteGroup {
+            id: "g".into(),
+            name: "G".into(),
+            active: true,
+            members: vec!["vox".into()],
+        });
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(floor));
+        m.strips[0].mute_safe = true;
+        assert_eq!(logic_level(&m, "vox", Some(-20.0)), Some(-20.0));
+        // A bus's meter is after its mute already.
+        assert_eq!(logic_level(&m, "main", Some(-30.0)), Some(-30.0));
+    }
+
     #[test]
     fn webhook_urls_are_logged_without_secrets() {
         use super::redact_url;

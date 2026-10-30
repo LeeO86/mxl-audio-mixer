@@ -98,6 +98,21 @@ try {
   await page.locator("[data-send-edit] [data-strip-pan]").waitFor();
   await page.screenshot({ path: `${out}/graph-c1-pan.png` });
   pass("Graph: the c1 → main send shows the strip's pan");
+  // Into a 5.1 bus: the send's own surround pan (Send.pan, B6), set from the pad in the graph.
+  await send("POST", "/api/v1/buses", { id: "c1sur", name: "C1 surround", format: "5.1" });
+  await send("PUT", "/api/v1/sends/c1/c1sur", {});
+  await until("c1 → c1sur edge", async () => (await page.locator('.vue-flow__edge[data-id="send:c1:c1sur"]').count()) === 1);
+  await edgeClick("send:c1:c1sur");
+  const pad = page.locator("[data-send-edit] [data-send-pan] svg").first();
+  await pad.waitFor();
+  const box = await pad.boundingBox();
+  await page.mouse.click(box.x + box.width * 0.85, box.y + box.height * 0.5);
+  const panned = await until("the send has its own pan", async () => (await api("/api/v1/sends/c1/c1sur")).pan);
+  if (!(panned.azimuth_deg > 30)) throw new Error(`pan azimuth ${panned.azimuth_deg}`);
+  await page.locator("[data-send-pan]").getByRole("button", { name: "Use the strip's panner" }).click();
+  await until("the send pan removed", async () => !(await api("/api/v1/sends/c1/c1sur")).pan);
+  await page.screenshot({ path: `${out}/graph-c1-sendpan.png` });
+  pass(`Graph: c1 → 5.1 bus panned in the send (azimuth ${panned.azimuth_deg.toFixed(0)}°), then back to the strip's panner`);
   const buses = (await api("/api/v1/mix")).buses.map((b) => b.id);
   if (buses.includes("surround")) {
     await send("PUT", "/api/v1/sends/surround/main", {}).catch(() => {});

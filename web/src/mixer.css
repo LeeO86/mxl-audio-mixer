@@ -66,6 +66,9 @@ main.full { max-width: none; }
 .vtrack .mark.zero { color: var(--text); font-weight: 700; }
 .vtrack .cap { position: absolute; left: 50%; width: 30px; height: 16px; margin-left: -6px; transform: translateY(50%); background: linear-gradient(var(--panel2), var(--chip)); border: 1px solid var(--muted); border-top: 3px solid var(--cap); border-radius: 3px; box-shadow: 0 1px 3px rgba(0, 0, 0, .4); cursor: grab; }
 .vvalue { font-size: .74rem; }
+button.vvalue { background: none; border: 0; color: var(--text); padding: 0 .2rem; border-radius: 4px; cursor: text; font-family: inherit; }
+button.vvalue:hover { background: var(--chip); }
+.vvalue.vtype { width: 100%; padding: 0 .1rem; text-align: center; }
 
 /* meters */
 .meter { display: flex; flex-direction: column; align-items: center; gap: .2rem; }
@@ -80,6 +83,18 @@ main.full { max-width: none; }
 .meter .hold { position: absolute; left: 0; right: 0; height: 2px; background: var(--text); transform: translateY(1px); z-index: 2; }
 .meter .marks { position: relative; width: 26px; font-size: .56rem; color: var(--muted); }
 .meter .marks span { position: absolute; left: 2px; transform: translateY(50%); white-space: nowrap; }
+/* Above 3 channels (A9): narrower bars, the channel labels below them (written downwards), each under its
+   bar; the strip's meter only tells whether there is signal (A2). A muted signal's level is grey (A3). */
+.meter.wide .bars { gap: 1px; }
+.meter.wide .bar { width: 5px; }
+.meter.wide .rms { left: 1px; right: 1px; }
+.meter .chlabels { display: flex; gap: 1px; font-size: .5rem; line-height: 1; color: var(--muted); }
+.meter .chlabels span { width: 5px; writing-mode: vertical-rl; white-space: nowrap; display: flex; justify-content: center; }
+.meter .chlabels.marked::after { content: ""; width: 26px; }
+.meter.muted .lvl, .meter.muted .lvl.warn, .meter.muted .lvl.bad { background: var(--muted); }
+.strip .meter.wide .bar { width: 3px; }
+.strip .meter .chlabels { display: none; }
+.strip.wide { flex: 0 0 124px; width: 124px; }
 .holdval { background: var(--chip); border: 0; border-radius: 3px; color: var(--text); font-size: .64rem; padding: .05rem .25rem; cursor: pointer; font-family: inherit; min-width: 2.4rem; }
 .holdval.over { background: var(--bad); color: #fff; }
 .addform { margin-bottom: .9rem; }
@@ -160,6 +175,8 @@ body.dragging-node, body.dragging-node * { user-select: none; cursor: grabbing !
 .bridge .mcol { display: flex; flex-direction: column; align-items: center; gap: .25rem; background: var(--panel); border: 1px solid var(--border); border-top: 4px solid var(--colour, var(--border)); border-radius: 6px; padding: .4rem; min-width: 70px; }
 .bridge .mcol .meter .bars { min-height: 260px; }
 .bridge .mcol .meter .bar { width: 9px; }
+.bridge .mcol .meter.wide .bars { min-height: 234px; }
+.bridge .mcol .meter.wide .bar, .bridge .mcol .meter.wide .chlabels span { width: 7px; }
 .bridge .mname { font-size: .76rem; font-weight: 700; max-width: 90px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bridge .corr { width: 100%; height: 8px; background: linear-gradient(to right, var(--bad), var(--warn) 45%, var(--ok) 55%, var(--ok)); border-radius: 3px; position: relative; }
 .bridge .corr span { position: absolute; top: -2px; width: 3px; height: 12px; background: var(--text); transform: translateX(-1px); }
@@ -205,6 +222,7 @@ body.dragging-node, body.dragging-node * { user-select: none; cursor: grabbing !
 .strip.compact .vfader { flex: 0 0 56px; }
 .btn-grid.two { grid-template-columns: repeat(2, 1fr); }
 .strip.compact .vtrack { min-height: 120px; }
+.strip.compact.wide { flex: 0 0 124px; width: 124px; }
 .strip.compact .meter .bars { min-height: 100px; }
 .grlist { display: flex; flex-direction: column; gap: 2px; min-height: 1.2rem; }
 .grlist .node { display: flex; align-items: center; gap: .25rem; font-size: .64rem; }
@@ -373,6 +391,7 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .lparams select { width: auto; max-width: 14rem; }
 .lparams .elsewhere { outline: 2px solid var(--warn); outline-offset: 1px; }
 .lparams { display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
+.lhigh { color: var(--ok); font-weight: 600; }
 .vue-flow__controls { box-shadow: none; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .vue-flow__controls-button { background: var(--panel2); border-bottom: 1px solid var(--border); }
 .vue-flow__controls-button:hover { background: var(--border); }
@@ -413,11 +432,17 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .feedtoggle { display: inline-flex; gap: .2rem; margin-left: .4rem; vertical-align: middle; }
 
 /* ---- console 1.4.0: name, menu, linked patch, phase, subgroup sends, divider, dialogs (C1-C12) ---- */
-.shead { position: relative; display: flex; align-items: flex-start; gap: 2px; }
-.shead .sname { flex: 1; min-width: 0; overflow: hidden; }
-.shead .sname .fmt { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.shead .sname .nm { max-width: 64px; }
-.strip.compact .shead .sname .nm { max-width: 92px; }
+/* The name has the strip's full width; the format, its flags, the gear and the menu share the row below (A4). */
+.shead { display: flex; flex-direction: column; gap: 0; }
+.shead .sname { min-width: 0; overflow: hidden; }
+.shead .sname .nm { max-width: 100%; }
+.sfmt { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; padding-left: .15rem; }
+.sfmt .fmt { flex: 1; min-width: 0; font-size: .66rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sfmt .safe { color: var(--warn); font-weight: 700; }
+.sfmt .afv { font-weight: 700; color: var(--muted); }
+.sfmt .afv.open { color: var(--ok); }
+.sfmt .sub { color: var(--accent); font-weight: 700; }
+.sfmt .sicon { padding: 0 .15rem; }
 .nmedit { flex: 1; min-width: 0; padding: .15rem .25rem; font-size: .8rem; font-weight: 700; }
 .sicons { display: flex; flex: 0 0 auto; }
 .sicon { background: none; border: 0; color: var(--muted); cursor: pointer; padding: .1rem .15rem; font-size: .8rem; line-height: 1.1; border-radius: 4px; font-family: inherit; }
@@ -440,6 +465,11 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .sgsend .num { color: var(--text); display: inline-flex; align-items: center; gap: 2px; }
 .sgsend svg { width: 9px; height: 9px; fill: currentColor; }
 .sgsend.off .num { color: var(--muted); text-decoration: line-through; }
+.sendval { display: flex; justify-content: space-between; gap: .2rem; width: 100%; background: none; border: 0; border-radius: 4px; color: var(--muted); font-size: .66rem; padding: .05rem .1rem; cursor: pointer; font-family: inherit; }
+.sendval:hover { background: var(--chip); }
+.sendval span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sendval .num { color: var(--text); }
+.sendval.off .num { color: var(--muted); text-decoration: line-through; }
 .console .masters { display: flex; gap: .8rem; overflow-x: auto; flex: 0 1 auto; min-width: 0; padding-bottom: .4rem; }
 .console .masters .busesec { border-left: 0; padding-left: 0; overflow: visible; padding-bottom: 0; }
 .console .masters .vcasec { flex: 0 0 auto; }
@@ -464,4 +494,18 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .amtile .amfields label { margin: 0; display: flex; align-items: center; gap: .3rem; font-size: .72rem; }
 .amtile .amfields input:not([type="checkbox"]) { width: 4rem; padding: .1rem .3rem; }
 .amtile .amhint { margin-top: auto; }
-.minipot.surroundpan .num { color: var(--muted); font-style: italic; }
+/* The strip's surround panner (A8, A10): where it pans, seen from above; drag to move it. */
+.spanmini { display: flex; flex-direction: column; gap: .1rem; color: var(--muted); font-size: .66rem; }
+.spanmini .mp-head { display: flex; justify-content: space-between; gap: .2rem; }
+.spanmini .mp-head .num { color: var(--text); }
+.sendval.addpan { border: 1px dashed var(--border); }
+
+/* MIDI (A7): the console's toolbar button while connected; learn mode marks what can be learnt and the
+   control picked. */
+.btn.secondary.on { box-shadow: inset 0 -3px 0 var(--ok); }
+.midipanel h4 { margin: .9rem 0 .3rem; }
+.midipanel .row { align-items: center; gap: .4rem; flex-wrap: wrap; margin: .3rem 0; }
+.midipanel table { width: 100%; }
+.midilearn { position: sticky; top: 0; z-index: 15; }
+body.midi-learning [data-signal] [data-learn] { outline: 1px dashed var(--accent); outline-offset: 1px; cursor: crosshair; }
+body.midi-learning [data-signal] [data-learn].midi-target { outline: 2px solid var(--accent); }

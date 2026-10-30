@@ -257,6 +257,9 @@ rates other than 48 kHz, recording.
   published signal is an NMOS sender (Source + Flow + Sender), group hint by signal
   name. Publishing/unpublishing at runtime creates/removes the sender; IDs derive from
   `NMOS_SEED` + stable signal ID, so they survive restarts (G3).
+- A strip is published as its direct out, a bus as its bus out: post-fader, or at any
+  tap of the signal (`outputs[].tap`, set in the flow view of the processing view,
+  §12.2); its reported processing latency is the tap's.
 - Outputs are written into the mixer's own domain (G2) on the TAI timeline.
   - **Commit size is separate from the DSP block size:** `MIXER_OUTPUT_COMMIT_SAMPLES`
     (default = one block; per output overridable, e.g. 240 or 480).
@@ -313,6 +316,12 @@ rates other than 48 kHz, recording.
 - **Matrix:** any signal → any summing point at a gain (−∞…+10 dB), with mute and
   phase; pre/post tap selectable per send (tap points: input, pre-EQ, post-EQ,
   pre-dynamics, post-dynamics, pre-fader, post-fader, post-pan, or after any node).
+- **Per-send surround panning:** a send from a mono or stereo source into a 5.1, 7.1,
+  5.1.4 or 7.1.4 bus can have its own surround panner (`pan`: position, spread,
+  divergence, LFE, as the surround panner node; the heights of 5.1.4/7.1.4 get none).
+  It replaces the strip's stereo panner for that send (a post-pan send then reads the
+  strip before its panner); for other sources and buses it is ignored. A send with a
+  block delay cannot have one (the API refuses it).
 - **Width mapping:** mono→stereo (pan law selectable: −3 dB default, −4.5, −6, 0),
   stereo→mono (sum −3 dB or −6 dB), up/down-mix for 5.1/7.1. The down-mix is
   adjustable (ITU-R BS.775 style: centre, surround and LFE levels, normalisation):
@@ -335,23 +344,45 @@ across multichannel signals, parameter smoothing.
 
 | Category | Nodes |
 | --- | --- |
-| Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (mono/stereo into 5.1/7.1: position, spread, divergence, LFE), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
+| Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (mono/stereo into 5.1/7.1/5.1.4/7.1.4: position, height on 5.1.4/7.1.4, spread, divergence, LFE), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
 | EQ | parametric EQ (up to 8 bands: bell, shelf, notch, high-pass, low-pass), high-pass/low-pass (12–48 dB/oct), **dynamic EQ** (per-band threshold/ratio/attack/release) |
 | Dynamics | compressor (feed-forward, soft knee, sidechain with filter), limiter (look-ahead, true-peak option), expander, gate (with hysteresis, hold), **de-esser** (split-band and wide-band modes, frequency 2–12 kHz, threshold, range, listen/sidechain monitor), ducker (keyed by any signal or by VAD), multiband dynamics (3–5 bands, linear-phase crossover option) |
-| Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs |
+| Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs, **leveler** for buses and streams (below) |
 | Utility | oscillator/tone (sine, pink/white noise, sweep, EBU stereo ident), block delay (feedback), meter tap |
 
 - Filter design: biquads/state-variable filters with coefficient smoothing; designs
   documented with references; verified against reference responses (§14).
 - Compressor/limiter/de-esser: documented detector types (peak/RMS), ballistics,
-  and gain-reduction metering exposed to the UI.
+  and gain-reduction metering exposed to the UI. Multiband and dynamic EQ also
+  report the gain reduction of every band.
+- Surround panner spread: each speaker's power is (1 − spread) × the point source's
+  plus spread × an equal share; the UI draws it as a translucent bubble around the
+  source dot that grows and drifts towards the centre, at 100 % over every speaker.
+  The dot stays where it is panned (its distance from the centre is its height).
+- **Leveler** (inspired by the idea of master_me, an own implementation, no code
+  taken from it): the short-term loudness (BS.1770 K-weighting and channel weights,
+  100 ms segments, the last 3 s) is measured in the node, gated per segment: a
+  segment below `gate_lufs` (a pause) is left out and holds the gain. After a segment
+  above the gate, the gain it heads for is `target_lufs` minus the loudness of the
+  window's segments above the gate (at least 4), within `max_gain_db` up and
+  `max_cut_db` down; the gain moves there at most `speed_db_per_s` (linear ramps per
+  block). A non-finite sample restarts the measurement. Switching `limiter` on or off
+  rebuilds the node, so its gain starts again at 0 dB. The
+  optional safety stage is a 1 ms look-ahead peak limiter at `ceiling_db` (50 ms
+  release; 48 samples of latency, delay-compensated like a limiter). The UI shows the leveler's gain and the limiter's
+  reduction. Cost per 96-sample block (release build, one core of the lab host):
+  stereo 1.3 µs, with the limiter 3.7 µs; 5.1 3.5 µs, with the limiter 7.2 µs.
 
 ---
 
 ## 7. Metering and measurement
 
 - Per signal: sample peak, **true peak** (ITU-R BS.1770 oversampling), RMS, PPM
-  (selectable scales: EBU, Nordic, BBC, DIN), gain reduction per dynamics node.
+  (selectable scales: EBU, Nordic, BBC, DIN), gain reduction per dynamics node (per
+  band for multiband and dynamic EQ: `band_reduction_db`), a leveler's gain
+  (`leveler_gain_db`). A
+  strip's meter reads after its fader and before its mute, so a muted strip still
+  shows its level (drawn grey); a bus's reads its output.
 - **Loudness** per configurable signal (outputs, buses, any monitor point):
   momentary, short-term, integrated, Loudness Range, max true peak, per ITU-R BS.1770
   and EBU R 128 (target −23 LUFS, tolerances configurable); start/stop/reset of
@@ -483,7 +514,8 @@ The control room is a dedicated part of the engine and UI, not just another bus.
 - A **logic graph** of blocks (rectangles) with typed ports, connected by cables drawn
   in the UI. Signal types: boolean, number, level (dB), event (trigger), string.
 - Blocks:
-  - **Inputs/triggers:** UI button (soft key), fader position, mute/PFL state, meter
+  - **Inputs/triggers:** UI button (soft key), fader position (with the position from
+    which it is "high" where it feeds an on/off input), mute/PFL state, meter
     level (with threshold and hysteresis), loudness value, VAD outputs, tally (TSL 5.0
     input), timer/clock (TAI-based), schedule (time of day), NMOS connection state,
     remote-link state, webhook/HTTP endpoint.
@@ -509,7 +541,9 @@ The control room is a dedicated part of the engine and UI, not just another bus.
 
 - Canvas with drag-and-drop blocks from a palette, cables by dragging between ports,
   zoom/pan, grouping into sub-graphs (macros) with exposed ports, copy/paste,
-  undo/redo, validation markers on invalid wiring.
+  copy of a whole graph into a new or an existing graph, undo/redo, validation
+  markers on invalid wiring. Every block, actions too, lands where it is dropped;
+  a target not chosen yet (also a webhook's URL) is chosen in the list.
 
 ---
 
@@ -552,19 +586,38 @@ new ones:
   mute, PFL/AFL, VCA assignment, meter, name/colour. Strip layers/banks; custom
   layouts (user-defined strip order and pages); group/bus/VCA/master sections.
 - Touch-friendly, works on tablets; multiple simultaneous clients stay in sync.
+- 1.5.0 (A1–A10): the browser tab's title names the tab ("Console – <label> – MXL
+  Audio Mixer"). The name has the strip's width; format, gear and menu share the row
+  below. A click on the fader value types a level. Sends show as values (changed in
+  Routing). Strips of 8 or more channels are wider; meters above 3 channels have
+  narrower bars with channel labels below (not in a strip, where the meter only tells
+  whether there is signal). A strip with a surround panner shows a top view of its
+  layout with the source (drag it: left/right, front/rear) and, on 5.1.4/7.1.4, its
+  height; one sending to a surround bus offers to add one.
 
 ### 12.2 Processing chain editor
 
 - Select any signal → its chain is shown; drag processing nodes from a palette into
   the chain ("I want an EQ here"), reorder by drag, bypass, detail editors for each
   node (EQ curve with handles, compressor transfer curve, de-esser with listen).
+- Copy and paste of units: a unit's copy button puts it on the clipboard (this
+  browser); on any chain the clipboard bar pastes all of it or one unit (appended), and
+  a unit's paste button takes the last copied unit of its type (its parameters; id and
+  place stay).
+- Flow view below the chain: the signal flow (input, trim, nodes, fader, pan, out) with
+  its endpoints where they are taken: sends (bus outs), the published output (direct
+  out of a strip, bus out of a bus), keys other nodes take from it (sidechain out), and
+  on a keyed node where its key comes from (sidechain in). Dragging a node moves it;
+  dragging an endpoint sets its tap. They are the mix's sends, `outputs[].tap` and
+  chain keys, so the graph view shows the same.
 
 ### 12.3 Other views
 
-Control room (§10), routing matrix (grid of sources × destinations; the virtual
-outputs' sources), graph view (§5; 1.5.0: a send's pan and down-mix, virtual outputs
-fed by a wire, an input's alias and flow, double-click to a strip's processing or the
-control room, the view kept over a tab switch),
+Control room (§10), routing matrix (grid of sources × destinations; a send from a mono
+or stereo source into a 5.1 or bigger bus shows a surround panner for that send, §5;
+the virtual outputs' sources), graph view (§5; 1.5.0: a send's pan and down-mix,
+virtual outputs fed by a wire, an input's alias and flow, double-click to a strip's
+processing or the control room, the view kept over a tab switch),
 logic editor (§11), snapshots, loudness and metering bridge, NMOS (receivers, senders,
 input patch), remote link (§13), settings (G1, G10).
 
@@ -574,6 +627,12 @@ input patch), remote link (§13), settings (G1, G10).
   drive the mixer. Hardware surfaces (e.g. MIDI/HUI, Ember+, OSC) are not implemented
   in v1, but the parameter addressing scheme (stable IDs for every parameter) MUST make
   such mappings possible later; document it.
+- MIDI (1.5.0, A7) runs in the browser (Web MIDI; a secure page: https or localhost)
+  through the same API calls as the console: Mackie Control (banks of 8 strips, motor
+  faders, mute, solo, select, V-pot pan, bank/channel, master, the display; an
+  extender for the next 8) and generic MIDI learn (a CC, note or pitch bend on a
+  fader, mute, PFL, AFL or pan), with feedback to the device. Mappings are kept per
+  browser and exported/imported as JSON.
 
 ### 12.5 Snapshots and show files
 

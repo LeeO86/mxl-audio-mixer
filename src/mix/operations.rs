@@ -69,6 +69,7 @@ fn send(from: &str, to: &str, tap: Tap) -> Send {
         mute: false,
         phase: false,
         block_delay: false,
+        pan: None,
     }
 }
 
@@ -308,8 +309,11 @@ fn replace_refs(mix: &mut Mix, old: &[String], new: &[String]) {
     {
         mix.outputs.retain(|x| !old.contains(&x.signal));
         if !mix.outputs.iter().any(|x| x.signal == n) {
+            // A tap after another strip's node becomes the default.
+            let tap = o.tap.clone().filter(|t| mix.check_tap(&n, t).is_ok());
             mix.outputs.push(super::model::Output {
                 signal: n.clone(),
+                tap,
                 ..o
             });
         }
@@ -667,6 +671,7 @@ mod tests {
             signal: "guest".into(),
             format: None,
             commit_samples: Some(96),
+            tap: None,
         });
         m.set_virtual_source(
             "1",

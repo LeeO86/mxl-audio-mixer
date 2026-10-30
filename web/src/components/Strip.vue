@@ -12,10 +12,11 @@ import MiniCurve from "./MiniCurve.vue";
 import MiniPot from "./MiniPot.vue";
 import FormatSelect from "./FormatSelect.vue";
 import Modal from "./Modal.vue";
+import SurroundPad from "./SurroundPad.vue";
 import VFader from "./VFader.vue";
 import { api, dbValue, fmtPan, fmtSigned } from "../api.js";
 import { channelLabels, isLinked, linkedPatch } from "../console.js";
-import { DYNAMICS } from "../nodes.js";
+import { DYNAMICS, HEIGHT_LAYOUTS, NODE_TYPES } from "../nodes.js";
 import {
   act,
   addSend,
@@ -26,6 +27,7 @@ import {
   isBus,
   isSubgroup,
   live,
+  patchNode,
   patchSend,
   patchSignal,
   select,
@@ -63,8 +65,24 @@ const latency = computed(() => live.latency[s.value.id] || 0);
 const tally = computed(() => tallyOf(s.value.id));
 const myVcas = computed(() => vcasAbove(s.value.id));
 const otherMute = computed(() => (vcaMuted(s.value.id) ? "VCA" : groupMuted(s.value) ? "group" : ""));
-// An active surround panner (agent B's `surround-pan` node) replaces the strip's own pan.
+// An active surround panner (the `surround-pan` node) replaces the strip's own pan: the strip shows where
+// it pans (A8) and moves it (front/rear, left/right; height on 5.1.4 and 7.1.4, A10).
 const surroundPan = computed(() => s.value.chain.find((n) => n.type === "surround-pan" && !n.bypass) || null);
+const fmtAz = (a) => {
+  const v = Math.round(a || 0);
+  return v === 0 ? "front" : Math.abs(v) === 180 ? "rear" : `${v < 0 ? "L" : "R"} ${Math.abs(v)}°`;
+};
+// Without one, a mono or stereo strip that sends to a surround bus offers one into the widest such bus.
+const PAN_LAYOUTS = ["7.1.4", "5.1.4", "7.1", "5.1"];
+const surroundTarget = computed(() => {
+  if (props.bus || props.compact || s.value.chain.some((n) => n.type === "surround-pan")) return "";
+  const formats = new Set(mySends.value.map((x) => signalOf(x.to)?.format));
+  return PAN_LAYOUTS.find((f) => formats.has(f)) || "";
+});
+async function addSurroundPan() {
+  const body = { ...NODE_TYPES["surround-pan"].make(), layout: surroundTarget.value };
+  await act(() => api.post(`${signalPath(s.value.id)}/chain`, body), `${s.value.name} pans into ${body.layout} now; its post-pan sends carry ${body.layout}.`);
+}
 const dynamics = computed(() => s.value.chain.filter((n) => DYNAMICS.has(n.type)));
 const vad = computed(() => live.vad[s.value.id] || null);
 const auto = computed(() => autoGain(s.value.id));
@@ -244,7 +262,8 @@ const sendDb = (x) => {
   const v = dbValue(x.gain_db);
   return Number.isFinite(v) ? Math.max(-60, v) : -60;
 };
-const setSend = (x, v) => patchSend(x.from, x.to, { gain_db: v <= -60 ? "-inf" : v });
+// The sends show their level only (A6): the Routing tab changes them.
+const toRouting = () => (location.hash = "routing");
 const toggleSendMute = (x) => patchSend(x.from, x.to, { mute: !x.mute });
 const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
 </script>
@@ -252,7 +271,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
 <template>
   <section
     class="strip"
-    :class="{ bus, compact, selected: selected && !compact, muted: s.mute || !!otherMute, onair: tally?.on_air, preview: tally?.preview && !tally?.on_air }"
+    :class="{ bus, compact, wide: channels >= 8, selected: selected && !compact, muted: s.mute || !!otherMute, onair: tally?.on_air, preview: tally?.preview && !tally?.on_air }"
     :style="{ '--colour': colour || 'var(--border)' }"
     :data-signal="s.id"
   >
@@ -270,26 +289,28 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       />
       <button v-else class="sname" :title="compact ? `${s.name} (${s.id})` : `${s.name} (${s.id}); click to rename`" @click="startRename">
         <span class="nm">{{ s.name }}</span>
+      </button>
+      <div class="sfmt">
         <span class="fmt"
           >{{ s.format }}<span v-if="bus && s.subgroup" class="sub" title="subgroup: its sends are post-fader at 0 dB"> SUB</span><span v-if="bus && s.minus" class="minus" :title="`mix-minus: ${busName(s.minus.of)} without ${s.minus.without.map((w) => signalOf(w)?.name || w).join(', ')}`"> −{{ busName(s.minus.of) }}</span><span v-if="s.recall_safe" class="safe" title="recall-safe"> S</span
           ><span v-if="tally?.afv" class="afv" :class="{ open: tally.afv_open }" :title="`audio follows video: tally ${tally.index}, ${tally.afv_open ? 'open' : 'closed'}`"> AFV</span
           ><span v-if="vad" class="vad" :class="{ on: vad.active }" :title="`voice activity: ${vad.active ? 'speech' : 'no speech'}, probability ${vad.probability.toFixed(2)}`" :data-vad="vad.active ? 'speech' : 'quiet'"> ●</span></span
         >
-      </button>
-      <div v-if="!compact" ref="menuEl" class="sicons">
-        <button class="sicon gear" :aria-label="`${s.name} processing`" title="open its processing" @click="open">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L4.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" /></svg>
-        </button>
-        <button class="sicon" :aria-label="`${s.name} menu`" :aria-expanded="menu" title="routing, delete" @click="menu = !menu">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg>
-        </button>
-        <div v-if="menu" class="smenu" role="menu">
-          <button role="menuitem" @click="choose('processing')">Processing…</button>
-          <button role="menuitem" @click="choose('format')">Format…</button>
-          <button role="menuitem" @click="choose('send-to')">Send to…</button>
-          <button v-if="bus" role="menuitem" @click="choose('add-source')">Add source…</button>
-          <button v-if="bus" role="menuitem" @click="choose('subgroup')">{{ s.subgroup ? "Plain bus…" : "Subgroup…" }}</button>
-          <button role="menuitem" class="danger" @click="choose('delete')">Delete…</button>
+        <div v-if="!compact" ref="menuEl" class="sicons">
+          <button class="sicon gear" :aria-label="`${s.name} processing`" title="open its processing" @click="open">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L4.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" /></svg>
+          </button>
+          <button class="sicon" :aria-label="`${s.name} menu`" :aria-expanded="menu" title="routing, delete" @click="menu = !menu">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg>
+          </button>
+          <div v-if="menu" class="smenu" role="menu">
+            <button role="menuitem" @click="choose('processing')">Processing…</button>
+            <button role="menuitem" @click="choose('format')">Format…</button>
+            <button role="menuitem" @click="choose('send-to')">Send to…</button>
+            <button v-if="bus" role="menuitem" @click="choose('add-source')">Add source…</button>
+            <button v-if="bus" role="menuitem" @click="choose('subgroup')">{{ s.subgroup ? "Plain bus…" : "Subgroup…" }}</button>
+            <button role="menuitem" class="danger" @click="choose('delete')">Delete…</button>
+          </div>
         </div>
       </div>
     </div>
@@ -388,24 +409,31 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
             >0.0 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h1v11H6V10zm2 0h6V7a3 3 0 0 0-6 0z" /></svg></span
           >
         </button>
-        <MiniPot v-else :label="busName(x.to)" :value="sendDb(x)" :min="-60" :max="10" :step="0.5" :def="0" :format="fmtSend" :title="`send to ${busName(x.to)}`" :class="{ off: x.mute }" @change="(v) => setSend(x, v)" />
+        <button v-else class="sendval" :class="{ off: x.mute }" :data-send="x.to" :title="`send to ${busName(x.to)}: ${fmtSend(sendDb(x))} dB, ${x.tap}${x.mute ? ', off' : ''}; change it in Routing`" @click="toRouting">
+          <span>{{ busName(x.to) }}</span><span class="num">{{ fmtSend(sendDb(x)) }}</span>
+        </button>
       </template>
     </div>
 
     <template v-if="!bus && (s.format === 'mono' || s.format === 'stereo')">
-      <div v-if="surroundPan" class="minipot surroundpan" :title="`the surround panner ${surroundPan.id} pans this strip; ${s.format === 'stereo' ? 'balance' : 'pan'} has no effect`">
-        <span class="mp-head"><span>{{ s.format === "stereo" ? "Bal" : "Pan" }}</span><span class="num">surround</span></span>
+      <div v-if="surroundPan" class="spanmini" :data-surround="surroundPan.id">
+        <span class="mp-head" :title="`surround panner ${surroundPan.id} into ${surroundPan.layout}: drag on the picture to move it`"><span>{{ surroundPan.layout }}</span><span class="num">{{ fmtAz(surroundPan.azimuth_deg) }}</span></span>
+        <SurroundPad :node="surroundPan" :size="76" mini @change="(b) => patchNode(s.id, surroundPan.id, b)" />
+        <MiniPot v-if="HEIGHT_LAYOUTS.has(surroundPan.layout)" label="Height" :value="surroundPan.elevation_deg || 0" :min="0" :max="90" :step="1" :def="0" :format="(v) => `${Math.round(v)}°`" @change="(v) => patchNode(s.id, surroundPan.id, { elevation_deg: v })" />
       </div>
-      <MiniPot v-else :label="s.format === 'stereo' ? 'Bal' : 'Pan'" :value="s.pan" :min="-1" :max="1" :step="0.01" :def="0" :format="fmtPan" @change="(v) => patchSignal(s.id, { pan: v })" />
+      <button v-else-if="surroundTarget" class="sendval addpan" :title="`add a surround panner into ${surroundTarget} (after the fader; it sends to a ${surroundTarget} bus): pan front/rear${HEIGHT_LAYOUTS.has(surroundTarget) ? ' and height' : ''} into the surround buses`" @click="addSurroundPan">
+        <span>+ Surround pan</span>
+      </button>
+      <MiniPot v-if="!surroundPan" data-learn="pan" :label="s.format === 'stereo' ? 'Bal' : 'Pan'" :value="s.pan" :min="-1" :max="1" :step="0.01" :def="0" :format="fmtPan" @change="(v) => patchSignal(s.id, { pan: v })" />
       <MiniPot v-if="s.format === 'stereo'" label="Width" :value="s.width" :min="0" :max="2" :step="0.01" :def="1" :format="(v) => `${Math.round(v * 100)}%`" @change="(v) => patchSignal(s.id, { width: v })" />
     </template>
     </div>
 
     <div class="solo">
-      <button class="btn small" :class="soloed[s.id] === 'pfl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'pfl'" :aria-label="`PFL ${s.name}`" title="pre-fader listen" @click="toggleSolo(s.id, 'pfl')">PFL</button>
-      <button v-if="!compact" class="btn small" :class="soloed[s.id] === 'afl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'afl'" :aria-label="`AFL ${s.name}`" title="after-fader listen" @click="toggleSolo(s.id, 'afl')">AFL</button>
+      <button data-learn="pfl" class="btn small" :class="soloed[s.id] === 'pfl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'pfl'" :aria-label="`PFL ${s.name}`" title="pre-fader listen" @click="toggleSolo(s.id, 'pfl')">PFL</button>
+      <button v-if="!compact" data-learn="afl" class="btn small" :class="soloed[s.id] === 'afl' ? 'pfl' : 'secondary'" :aria-pressed="soloed[s.id] === 'afl'" :aria-label="`AFL ${s.name}`" title="after-fader listen" @click="toggleSolo(s.id, 'afl')">AFL</button>
     </div>
-    <button class="btn mute" :class="[s.mute ? 'danger' : 'secondary', { othermute: !s.mute && otherMute }]" :aria-pressed="s.mute" :title="otherMute ? `muted by a ${otherMute === 'VCA' ? 'VCA' : 'mute group'}` : ''" @click="patchSignal(s.id, { mute: !s.mute })">Mute</button>
+    <button data-learn="mute" class="btn mute" :class="[s.mute ? 'danger' : 'secondary', { othermute: !s.mute && otherMute }]" :aria-pressed="s.mute" :title="otherMute ? `muted by a ${otherMute === 'VCA' ? 'VCA' : 'mute group'}` : ''" @click="patchSignal(s.id, { mute: !s.mute })">Mute</button>
     <div v-if="auto !== undefined" class="autogain small" :title="autoTitle" :data-auto="Number.isFinite(auto) ? auto.toFixed(1) : '-inf'">
       <span class="gr"><span :style="{ width: `${Math.min(100, (-Math.max(auto, -30) / 30) * 100)}%` }"></span></span>
       <span>{{ Number.isFinite(auto) ? fmtSigned(auto) : "−∞" }}</span>
@@ -415,8 +443,8 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
     </div>
 
     <div class="faderrow">
-      <VFader :value="s.fader_db" :label="`${s.name} fader`" :colour="colour" @change="(v) => patchSignal(s.id, { fader_db: v })" />
-      <Meter :signal="s.id" :values="meters" :channels="channels" :scale="scale" :alignment="alignment" :marks="false" />
+      <VFader data-learn="fader" :value="s.fader_db" :label="`${s.name} fader`" :colour="colour" @change="(v) => patchSignal(s.id, { fader_db: v })" />
+      <Meter :signal="s.id" :values="meters" :channels="channels" :labels="labels" :scale="scale" :alignment="alignment" :marks="false" :muted="s.mute || !!otherMute" />
     </div>
     <div v-if="!compact" class="sfoot muted small" :title="`processing latency of ${s.name} at its post-fader point`">{{ latency ? `${latency.toFixed(2)} ms` : " " }}</div>
 

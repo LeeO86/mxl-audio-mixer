@@ -130,6 +130,21 @@ export const NODE_TYPES = {
     }),
     fields: [],
   },
+  leveler: {
+    label: "Leveler",
+    group: "Dynamics",
+    help: "For buses and streams: rides the gain slowly so the short-term loudness meets the target (within max gain and max cut, at the speed); holds below the gate; an optional 1 ms safety limiter after it. Inspired by the idea of master_me.",
+    make: () => ({ type: "leveler", target_lufs: -23, max_gain_db: 9, max_cut_db: 9, speed_db_per_s: 1, gate_lufs: -50, limiter: true, ceiling_db: -1 }),
+    fields: [
+      { key: "target_lufs", label: "Target", min: -40, max: -5, def: -23, fine: 0.1, unit: "LUFS" },
+      { key: "max_gain_db", label: "Max gain", min: 0, max: 30, def: 9, fine: 0.5, unit: "dB" },
+      { key: "max_cut_db", label: "Max cut", min: 0, max: 30, def: 9, fine: 0.5, unit: "dB" },
+      { key: "speed_db_per_s", label: "Speed", min: 0.1, max: 20, def: 1, fine: 0.05, digits: 1, unit: "dB/s", log: true },
+      { key: "gate_lufs", label: "Gate", min: -90, max: -10, def: -50, fine: 0.5, unit: "LUFS" },
+      { key: "limiter", label: "Safety limiter", bool: true },
+      { key: "ceiling_db", label: "Ceiling", min: -20, max: 0, def: -1, fine: 0.1, unit: "dB", when: (n) => n.limiter },
+    ],
+  },
   width: {
     label: "M/S / Width",
     group: "Spatial",
@@ -144,11 +159,12 @@ export const NODE_TYPES = {
   "surround-pan": {
     label: "Surround panner",
     group: "Spatial",
-    help: "A mono or stereo strip into 5.1 or 7.1: replaces the stereo panner (after the fader), so its post-pan sends feed surround buses.",
-    make: () => ({ type: "surround-pan", layout: "5.1", azimuth_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 }),
+    help: "A mono or stereo strip into 5.1, 7.1, 5.1.4 or 7.1.4: replaces the stereo panner (after the fader), so its post-pan sends feed surround buses. Height lifts it into the top speakers (5.1.4, 7.1.4).",
+    make: () => ({ type: "surround-pan", layout: "5.1", azimuth_deg: 0, elevation_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 }),
     fields: [
-      { key: "layout", label: "Layout", options: [["5.1", "5.1"], ["7.1", "7.1"]] },
+      { key: "layout", label: "Layout", options: [["5.1", "5.1"], ["7.1", "7.1"], ["5.1.4", "5.1.4"], ["7.1.4", "7.1.4"]] },
       { key: "azimuth_deg", label: "Position", min: -180, max: 180, def: 0, fine: 0.5, digits: 0, unit: "°" },
+      { key: "elevation_deg", label: "Height", min: 0, max: 90, def: 0, fine: 0.5, digits: 0, unit: "° (90: top)", when: (n) => HEIGHT_LAYOUTS.has(n.layout) },
       { key: "spread_pct", label: "Spread", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "%" },
       { key: "divergence_pct", label: "Divergence", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "% (C into L/R)" },
       { key: "lfe_db", label: "LFE", min: -100, max: 10, def: -100, fine: 0.5, unit: "dB (−100: off)" },
@@ -194,6 +210,9 @@ export const BAND_TYPES = [
   ["low-pass", "Low-pass"],
 ];
 
+/** Surround panner layouts with a top layer (A10): its height control shows. */
+export const HEIGHT_LAYOUTS = new Set(["5.1.4", "7.1.4"]);
+
 /** EQ band types with a slope instead of gain and Q (high- and low-pass, D4). */
 export const PASS_BANDS = new Set(["high-pass", "low-pass"]);
 export const SLOPES = [12, 24, 36, 48];
@@ -229,5 +248,5 @@ export const TAPS = [
 export const tapLabel = (tap) => (typeof tap === "object" && tap ? `after ${tap.after}` : TAPS.find((t) => t[0] === tap)?.[1] || tap);
 
 /** Nodes whose gain reduction is metered. */
-export const DYNAMICS = new Set(["compressor", "limiter", "expander", "gate", "de-esser", "ducker", "multiband", "dynamic-eq"]);
+export const DYNAMICS = new Set(["compressor", "limiter", "expander", "gate", "de-esser", "ducker", "multiband", "dynamic-eq", "leveler"]);
 export const EQ_LIKE = new Set(["eq", "filter", "dynamic-eq"]);
