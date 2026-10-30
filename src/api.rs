@@ -218,6 +218,7 @@ pub async fn apply_held(
         let mut control = app.control();
         let mut next = control.mix.clone();
         change(&mut next)?;
+        control.check_labels(&next).map_err(bad)?;
         control.stage(next, ramp).map_err(bad)?
     };
     match staged {
