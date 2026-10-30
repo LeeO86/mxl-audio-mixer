@@ -346,6 +346,9 @@ struct Plan {
     /// Per block and input: a value reaches it. An input wired to a macro's
     /// exposed input that is itself unwired outside is not driven (D159).
     driven: Vec<Vec<bool>>,
+    /// Per block and input: the fader block that feeds it, also through
+    /// macro ports (its on/off goes to an on/off input, D244).
+    fader: Vec<Vec<Option<usize>>>,
     /// The blocks that do not remember, in order.
     order: Vec<usize>,
     /// The blocks that remember.
@@ -372,21 +375,30 @@ impl Plan {
         // Follow pass-throughs (macro-in, macro-out) back to a real source.
         let is_pass =
             |k: &BlockKind| matches!(k, BlockKind::MacroIn { .. } | BlockKind::MacroOut { .. });
-        let source_driven = |mut src: usize| loop {
+        let source = |mut src: usize| loop {
             if !is_pass(&flat.blocks[src].kind) {
-                return true;
+                return Some(src);
             }
-            match inputs[src][0] {
-                Some(next) => src = next,
-                None => return false,
-            }
+            src = inputs[src][0]?;
         };
         let driven = inputs
             .iter()
-            .map(|ins| ins.iter().map(|s| s.is_some_and(source_driven)).collect())
+            .map(|ins| ins.iter().map(|s| s.and_then(source).is_some()).collect())
+            .collect();
+        let fader = inputs
+            .iter()
+            .map(|ins| {
+                ins.iter()
+                    .map(|s| {
+                        s.and_then(source)
+                            .filter(|&f| matches!(flat.blocks[f].kind, BlockKind::Fader { .. }))
+                    })
+                    .collect()
+            })
             .collect();
         Ok(Self {
             driven,
+            fader,
             order: order
                 .into_iter()
                 .filter(|i| !flat.blocks[*i].kind.remembers())
@@ -489,12 +501,22 @@ impl Run {
         })
     }
 
-    /// Input `k` of block `i`, converted to the input's type.
+    /// Input `k` of block `i`, converted to the input's type. A fader feeding
+    /// an on/off input (directly or through macro ports) is on from its
+    /// threshold (D244), not from 0.5.
     fn read(&mut self, i: usize, k: usize) -> Value {
         let want = self.plan.blocks[i].ports.inputs[k].ty;
         match self.plan.inputs[i][k] {
             None => Value::default_of(want),
-            Some(src) => convert(&self.outs[src], want, &mut self.states[i].conv[k]),
+            Some(src) => {
+                let on_off = matches!(want, PortType::Boolean | PortType::Event);
+                if let Some(f) = self.plan.fader[i][k].filter(|_| on_off) {
+                    let high = Value::Bool(self.states[f].held);
+                    convert(&high, want, &mut self.states[i].conv[k])
+                } else {
+                    convert(&self.outs[src], want, &mut self.states[i].conv[k])
+                }
+            }
         }
     }
 
@@ -563,7 +585,16 @@ impl Run {
             BlockKind::Trigger => Value::Event(triggered.contains(id)),
             BlockKind::Mute { signal } => b(muted(r.mix, signal)),
             BlockKind::Pfl { signal } => b(r.pfl.contains(signal)),
-            BlockKind::Fader { signal } => Value::Num(fader(r.mix, signal)),
+            BlockKind::Fader {
+                signal,
+                threshold_db,
+            } => {
+                let db = fader(r.mix, signal);
+                // On/off for the inputs it feeds (read): a missing or unset
+                // signal is off.
+                self.states[i].held = db.is_some_and(|db| db >= *threshold_db);
+                Value::Num(db.unwrap_or(0.0))
+            }
             BlockKind::Vad { signal } => b(r.speech.get(signal).copied().unwrap_or(false)),
             BlockKind::Level { signal } => Value::Num(level(signal)),
             BlockKind::Above {
@@ -688,6 +719,10 @@ impl Run {
             .last_run
             .is_none_or(|t| tick >= t + min_ticks(kind));
         if let BlockKind::TslOut { index } = kind {
+            // No index chosen yet: it never acts (D164).
+            let Some(index) = index else {
+                return Value::Bool(false);
+            };
             if !(0..3).any(|k| self.wired(i, k)) {
                 return Value::Bool(false);
             }
@@ -1205,11 +1240,10 @@ fn muted(mix: &Mix, signal: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn fader(mix: &Mix, signal: &str) -> f64 {
+fn fader(mix: &Mix, signal: &str) -> Option<f64> {
     mix.strip(signal)
         .map(|s| s.fader_db.0)
         .or_else(|| mix.bus(signal).map(|b| b.fader_db.0))
-        .unwrap_or(0.0)
 }
 
 /// Clamp a fader a logic graph asked for: at most `MAX_FADER_DB` (also +∞),

@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## Unreleased — 1.5.0
 
+- D1: a fader position block has a threshold (`threshold_db`, −120 to +15 dB, default 0 dB; the "High at" column left of Value): where it feeds an on/off input (also through macro ports) it is on from that position (before: from 0.5 dB); without a signal it is off.
+- Upgrade: a fader feeding an on/off input is now on from 0 dB (was +0.5 dB); check live graphs with faders at 0 dB.
+- D2: "Copy logic to" copies all blocks and cables of a graph into a new graph (dry run) or into an existing graph (below its blocks, one undo step there). Copy and paste rename only the block ids that clash (before: every pasted block got a new id).
+- D3: HTTP webhook and TSL tally out drop onto the canvas like every block (they asked first, away from the drop, and were never made); a webhook's URL may be empty (inert, amber) until typed in the list, a TSL out starts without an index (`null`, inert, amber). Two `tsl-out` blocks of the show on one index are marked with a warning (not refused).
+- Fixed: a memory leak of about 16 kB/s per Silero VAD (test-all: OOM at the 1 GiB limit about every 2.75 h, since 1.3.0). `ort` 2.0.0-rc.14 leaks an `OrtTypeInfo` (about 290 bytes) for every output tensor it creates itself, two per inference (31 per second per detector). The two outputs are now preallocated once and reused. `tests/silero_memory.rs` checks that 3750 inferences keep no heap (2.2 MB before).
 - Fixed: a loudness measurement kept every 100 ms block and short-term value until it was reset (about 160 B/s per meter, and integrated loudness and LRA recomputed over the whole list at every meter tick). Both are now histograms of 0.1 LU bins (count, power and loudness sum per bin) with the same gates (absolute −70 LUFS, relative −10 LU and −20 LU, LRA 10th–95th percentile): constant memory and time. Against the old lists: tone and steps identical, noise and speech-like sequences within 0.003 LU (integrated) and 0.042 LU (LRA). `tests/loudness_memory.rs` checks 2 h of segments keep no heap (2 MB before).
 
 ## 1.4.3 (2026-10-24)
