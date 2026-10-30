@@ -43,6 +43,8 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MIXER_STATE_DIR", default: "/config", description: "Directory of everything the mixer writes itself (show file, connections); must be writable, else exit 78." },
     Setting { name: "MIXER_LOG_LEVEL", default: "info", description: "Log level: error, warn, info, debug, trace." },
     Setting { name: "MIXER_INPUT_FLOWS", default: "16", description: "Number of MXL audio inputs (NMOS receivers), 1–256." },
+    Setting { name: "MIXER_OUTPUT_FLOWS", default: "length of MIXER_OUTPUTS, else 0", description: "Number of virtual outputs, 0–64: fixed MXL flows and NMOS senders (out-vout:1 …) the designer can wire; the operator picks what feeds each. 0: only the published outputs." },
+    Setting { name: "MIXER_OUTPUTS", default: "[]", description: "JSON array, one entry per virtual output: {\"key\": \"pgm\", \"label\": \"PGM\", \"format\": \"5.1\"}; all optional (key: the slot number; \"Output <n>\"; stereo). The key names its ids and its source in the mix. The format of a flow never changes while it runs." },
     Setting { name: "MIXER_BLOCK_SAMPLES", default: "96", description: "DSP block size in samples at 48 kHz: 48, 96, 144 or 240." },
     Setting { name: "MIXER_READ_OFFSET", default: "2", description: "Read offset in ms: every input is read at t_out − (offset + its extra delay)." },
     Setting { name: "MIXER_OUTPUT_COMMIT_SAMPLES", default: "one block", description: "Samples per MXL commit of an output (a multiple of the block size)." },
@@ -134,6 +136,8 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub log_level: String,
     pub input_flows: usize,
+    /// The virtual outputs (`MIXER_OUTPUT_FLOWS`, `MIXER_OUTPUTS`), slot 1 first.
+    pub virtual_outputs: Vec<VirtualOutput>,
     pub block_samples: u32,
     pub read_offset_samples: u32,
     pub output_commit_samples: u32,
@@ -225,6 +229,7 @@ fn read_file(path: &str) -> Result<HashMap<String, String>, ConfigError> {
             serde_json::Value::Number(n) => n.to_string(),
             serde_json::Value::Bool(b) => b.to_string(),
             serde_json::Value::Object(_) if key == "NMOS_TAGS" => value.to_string(),
+            serde_json::Value::Array(_) if key == "MIXER_OUTPUTS" => value.to_string(),
             _ => {
                 return err(format!(
                     "{key} in MIXER_CONFIG_FILE must be a string, number or boolean"
@@ -237,6 +242,31 @@ fn read_file(path: &str) -> Result<HashMap<String, String>, ConfigError> {
         out.insert(key.clone(), text);
     }
     Ok(out)
+}
+
+/// Most virtual outputs (`MIXER_OUTPUT_FLOWS`).
+pub const MAX_VIRTUAL_OUTPUTS: usize = 64;
+
+/// A virtual output (C7): a fixed MXL flow and NMOS sender, slot `n` from 1.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualOutput {
+    /// Optional stable key (`a-z`, `0-9`, `-`, 1–32, not only digits): names
+    /// the output in its ids and in the mix instead of its slot number, so a
+    /// reordered `MIXER_OUTPUTS` keeps flows and sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default = "stereo")]
+    pub format: crate::mix::Format,
+    /// The key, else the slot number: the output's id (`vout:<id>`).
+    #[serde(skip)]
+    pub id: String,
+}
+
+fn stereo() -> crate::mix::Format {
+    crate::mix::Format::Stereo
 }
 
 struct Parser<'a> {
@@ -277,6 +307,61 @@ impl Parser<'_> {
             return err(format!("{name} must be from {min} to {max}, got {value}"));
         }
         T::try_from(value).map_err(|_| ConfigError(format!("{name} is out of range")))
+    }
+
+    /// `MIXER_OUTPUTS` and `MIXER_OUTPUT_FLOWS`: an entry per slot, the missing
+    /// ones (and empty labels) with their defaults.
+    fn virtual_outputs(&self) -> Result<Vec<VirtualOutput>, ConfigError> {
+        let mut list: Vec<VirtualOutput> = match self.get("MIXER_OUTPUTS") {
+            None => Vec::new(),
+            Some((raw, _)) => serde_json::from_str(&raw).map_err(|e| {
+                ConfigError(format!(
+                    "MIXER_OUTPUTS must be a JSON array of {{\"label\", \"format\"}}: {e}"
+                ))
+            })?,
+        };
+        let max = MAX_VIRTUAL_OUTPUTS as i64;
+        let count: usize = self.int("MIXER_OUTPUT_FLOWS", list.len() as i64, 0, max)?;
+        if list.len() > count {
+            return err(format!(
+                "MIXER_OUTPUTS has {} entries but MIXER_OUTPUT_FLOWS is {count}",
+                list.len()
+            ));
+        }
+        list.resize_with(count, || VirtualOutput {
+            key: None,
+            label: String::new(),
+            format: stereo(),
+            id: String::new(),
+        });
+        let mut ids = std::collections::BTreeSet::new();
+        for (i, v) in list.iter_mut().enumerate() {
+            if v.label.trim().is_empty() {
+                v.label = format!("Output {}", i + 1);
+            }
+            if v.label.len() > 64 {
+                return err(format!("MIXER_OUTPUTS: label {} is longer than 64", i + 1));
+            }
+            v.id = match &v.key {
+                Some(k) => {
+                    let ok = (1..=32).contains(&k.len())
+                        && k.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                        && !k.chars().all(|c| c.is_ascii_digit());
+                    if !ok {
+                        return err(format!(
+                            "MIXER_OUTPUTS: key {k:?} must be 1–32 of a-z, 0-9, - and not only digits"
+                        ));
+                    }
+                    k.clone()
+                }
+                None => (i + 1).to_string(),
+            };
+            if !ids.insert(v.id.clone()) {
+                return err(format!("MIXER_OUTPUTS: key {} is used twice", v.id));
+            }
+        }
+        Ok(list)
     }
 
     fn float(&self, name: &str, default: f64, min: f64, max: f64) -> Result<f64, ConfigError> {
@@ -422,6 +507,7 @@ impl Parser<'_> {
             ));
         }
         let input_flows: usize = self.int("MIXER_INPUT_FLOWS", 16, 1, 256)?;
+        let virtual_outputs = self.virtual_outputs()?;
         let block_samples: u32 = self.int("MIXER_BLOCK_SAMPLES", 96, 1, 240)?;
         if !ALLOWED_BLOCKS.contains(&block_samples) {
             return err(format!(
@@ -619,6 +705,7 @@ impl Parser<'_> {
             state_dir,
             log_level,
             input_flows,
+            virtual_outputs,
             block_samples,
             read_offset_samples,
             output_commit_samples,
@@ -698,6 +785,8 @@ impl Config {
             "MIXER_STATE_DIR" => self.state_dir.display().to_string(),
             "MIXER_LOG_LEVEL" => self.log_level.clone(),
             "MIXER_INPUT_FLOWS" => self.input_flows.to_string(),
+            "MIXER_OUTPUT_FLOWS" => self.virtual_outputs.len().to_string(),
+            "MIXER_OUTPUTS" => serde_json::to_string(&self.virtual_outputs).unwrap_or_default(),
             "MIXER_BLOCK_SAMPLES" => self.block_samples.to_string(),
             "MIXER_READ_OFFSET" => format!(
                 "{}",
@@ -1093,6 +1182,50 @@ mod tests {
         assert_eq!(origin("WEB_PORT"), Origin::Environment);
         assert_eq!(origin("MIXER_INPUT_FLOWS"), Origin::File);
         assert_eq!(origin("MIXER_BLOCK_SAMPLES"), Origin::Default);
+    }
+
+    #[test]
+    fn virtual_outputs() {
+        assert!(load_vars(&[]).unwrap().virtual_outputs.is_empty());
+        let c = load_vars(&[("MIXER_OUTPUT_FLOWS", "2")]).unwrap();
+        assert_eq!(c.virtual_outputs[1].label, "Output 2");
+        assert_eq!(c.virtual_outputs[1].format, crate::mix::Format::Stereo);
+        let c = load_vars(&[(
+            "MIXER_OUTPUTS",
+            r#"[{"label": "PGM", "format": "5.1"}, {"format": "mono"}]"#,
+        )])
+        .unwrap();
+        assert_eq!(c.virtual_outputs.len(), 2);
+        assert_eq!(c.virtual_outputs[0].label, "PGM");
+        assert_eq!(c.virtual_outputs[0].format, crate::mix::Format::Surround51);
+        assert_eq!(c.virtual_outputs[1].label, "Output 2");
+        let c = load_vars(&[
+            ("MIXER_OUTPUTS", r#"[{"label": "PGM"}]"#),
+            ("MIXER_OUTPUT_FLOWS", "3"),
+        ])
+        .unwrap();
+        assert_eq!(c.virtual_outputs.len(), 3);
+        assert_eq!(c.virtual_outputs[2].id, "3");
+        let c = load_vars(&[("MIXER_OUTPUTS", r#"[{"key": "pgm"}, {}]"#)]).unwrap();
+        assert_eq!(
+            (
+                c.virtual_outputs[0].id.as_str(),
+                c.virtual_outputs[1].id.as_str()
+            ),
+            ("pgm", "2")
+        );
+        for bad in [
+            vec![("MIXER_OUTPUTS", r#"[{"key": "12"}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"key": "PGM"}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"key": "2"}, {}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"key": "a"}, {"key": "a"}]"#)],
+            vec![("MIXER_OUTPUT_FLOWS", "65")],
+            vec![("MIXER_OUTPUTS", r#"[{"format": "9.1"}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"name": "x"}]"#)],
+            vec![("MIXER_OUTPUTS", "[{}, {}]"), ("MIXER_OUTPUT_FLOWS", "1")],
+        ] {
+            assert!(load_vars(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

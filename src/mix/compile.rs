@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 
 use super::chain::{Category, Proc, ProcKind};
 use super::format::{pan_gains, stereo_matrix, width_matrix, Format};
-use super::model::{Db, Kind, Mix, Patch, Tap};
+use super::model::{Db, Kind, Mix, MonitorFeed, OutputSource, Patch, Tap};
 use super::room::{channel_gains, check_matrix, Monitor, SoloKind, Source};
 use super::talkback::{destination_gains, dims_control_room, MicInfo, Talking};
 use crate::engine::plan::{NodeId, Plan, PlanBuilder, Processor, Span, Step};
@@ -75,6 +75,15 @@ pub struct Compiler {
     /// What the monitors that follow solo play instead of their source
     /// (listen-back, runtime).
     pub listen_back: Option<Source>,
+    /// The id (key or slot number) and format of each virtual output (C7),
+    /// slot 1 first; its output slot is `outputs[vout_key(id)]`.
+    pub vouts: Vec<(String, Format)>,
+}
+
+/// The output key of virtual output `id` (its key, else its slot number): its
+/// published signal, NMOS key `out-vout:<id>` (a colon: no signal id has one).
+pub fn vout_key(id: &str) -> String {
+    format!("vout:{id}")
 }
 
 /// A talkback mic with where the engine reads it (input index, channel).
@@ -509,6 +518,35 @@ impl Build<'_> {
     }
 }
 
+/// A control-room source (a signal at its default tap, or an input as
+/// stereo, as a monitor reads it): its buffer, format, name and chain hash.
+fn room_source(
+    c: &mut Build,
+    mix: &Mix,
+    taps: &HashMap<String, Taps>,
+    source: &Source,
+) -> Option<(Span, Format, String, u64)> {
+    match source {
+        Source::Signal(id) => {
+            let tap = mix.default_tap(id);
+            let (t, from) = (taps.get(id)?, mix.tap_format(id, &tap)?);
+            Some((t.get(&tap).0, from, id.clone(), t.chain))
+        }
+        Source::Input(i) => {
+            let pin = c.b.buffers(2);
+            for ch in 0..2 {
+                let dst = c.b.buffer(pin, ch);
+                c.b.step(Step::Patch {
+                    input: (*i - 1) as u32,
+                    channel: ch as u32,
+                    dst,
+                });
+            }
+            Some((pin, Format::Stereo, format!("input {i}"), 0))
+        }
+    }
+}
+
 fn chain_hash(chain: &[Proc]) -> u64 {
     hash(
         chain
@@ -543,6 +581,8 @@ impl Compiler {
         let mut taps: HashMap<String, Taps> = HashMap::new();
         let mut meters = Vec::new();
         let mut latency = HashMap::new();
+        // Each control-room monitor's output and format, for the virtual outputs.
+        let mut monitor_out: HashMap<String, (Span, Format)> = HashMap::new();
 
         // Talkback mics: one mono buffer each, metered as `talkback:<id>`.
         let mics = c.compiler.mic_sources(mix);
@@ -1229,6 +1269,9 @@ impl Compiler {
                     slot: slot as u32,
                 });
             }
+            if j < control_room_monitors {
+                monitor_out.insert(m.id.clone(), (cur, m.format));
+            }
         }
 
         let mut output_latency = HashMap::new();
@@ -1265,6 +1308,109 @@ impl Compiler {
                 dst: out,
                 coefficients,
             });
+            c.b.step(Step::Output {
+                src: out,
+                slot: slot as u32,
+            });
+        }
+
+        // Virtual outputs (C7): their source through the width rules, else silence,
+        // so the flow keeps running for its readers.
+        for (n, to) in c.compiler.vouts.clone() {
+            let Some(&slot) = outputs.get(&vout_key(&n)) else {
+                continue;
+            };
+            let out = c.b.buffers(to.channels());
+            c.b.step(Step::Clear { dst: out });
+            let source: Option<(Span, Format, String, u64)> = match mix.virtual_source(&n) {
+                Some(OutputSource::Signal { signal, tap }) => {
+                    let tap = tap.clone().unwrap_or(Tap::PostFader);
+                    match (taps.get(signal), mix.tap_format(signal, &tap)) {
+                        (Some(t), Some(from)) => {
+                            Some((t.get(&tap).0, from, format!("{signal}/{tap:?}"), t.chain))
+                        }
+                        _ => None,
+                    }
+                }
+                Some(OutputSource::Monitor {
+                    monitor,
+                    feed: MonitorFeed::Speaker,
+                }) => monitor_out
+                    .get(monitor)
+                    .map(|(span, f)| (*span, *f, format!("monitor:{monitor}"), 0)),
+                // The clean feed: the monitor's own source in its format and
+                // down-mix, before everything the control room does to it.
+                Some(OutputSource::Monitor {
+                    monitor,
+                    feed: MonitorFeed::Clean,
+                }) => {
+                    let m = mix.control_room.monitors.iter().find(|m| &m.id == monitor);
+                    let src = m.and_then(|m| {
+                        Some((m, room_source(&mut c, mix, &taps, m.source.as_ref()?)?))
+                    });
+                    src.map(|(m, (span, from, name, chain))| {
+                        let laws = laws.with_downmix(m.downmix);
+                        let w = width_matrix(from, m.format, laws);
+                        let coefficients = c.b.coefficients(&w);
+                        let dst = c.b.buffers(m.format.channels());
+                        c.b.step(Step::Clear { dst });
+                        let node = c.node(
+                            format!("vout/{n}/clean"),
+                            (
+                                &name,
+                                format_name(from),
+                                format_name(m.format),
+                                matrix_hash(&w),
+                                chain,
+                            ),
+                            vec![1.0],
+                        );
+                        c.b.step(Step::Send {
+                            node,
+                            src: span,
+                            dst,
+                            coefficients,
+                        });
+                        (dst, m.format, format!("clean:{monitor}:{name}"), chain)
+                    })
+                }
+                Some(OutputSource::Input { input, format }) => {
+                    let from = format.unwrap_or(to);
+                    let pin = c.b.buffers(from.channels());
+                    for ch in 0..from.channels() {
+                        let dst = c.b.buffer(pin, ch);
+                        c.b.step(Step::Patch {
+                            input: (*input - 1) as u32,
+                            channel: ch as u32,
+                            dst,
+                        });
+                    }
+                    Some((pin, from, format!("input:{input}"), 0))
+                }
+                None => None,
+            };
+            if let Some((src, from, name, chain)) = source {
+                let w = width_matrix(from, to, laws);
+                let coefficients = c.b.coefficients(&w);
+                let node = c.node(
+                    format!("vout/{n}"),
+                    (
+                        name,
+                        format_name(from),
+                        format_name(to),
+                        slot,
+                        matrix_hash(&w),
+                        chain,
+                    ),
+                    vec![1.0],
+                );
+                c.b.step(Step::Send {
+                    node,
+                    src,
+                    dst: out,
+                    coefficients,
+                });
+            }
             c.b.step(Step::Output {
                 src: out,
                 slot: slot as u32,
@@ -1453,6 +1599,258 @@ mod tests {
         assert_eq!(c.meters.len(), 3);
         let kinds: Vec<&str> = c.plan.steps.iter().map(|s| s.kind()).collect();
         assert_eq!(kinds.iter().filter(|k| **k == "send").count(), 3);
+    }
+
+    #[test]
+    fn virtual_outputs_take_their_source_or_stay_silent() {
+        let mut compiler = Compiler {
+            vouts: [
+                Format::Surround51,
+                Format::Stereo,
+                Format::Stereo,
+                Format::Mono,
+                Format::Stereo,
+                Format::Stereo,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| ((i + 1).to_string(), f))
+            .collect(),
+            ..Default::default()
+        };
+        let mut m = mix();
+        // 1: the main bus (stereo) up-mixed into 5.1; 2: nothing; 3: input 2
+        // straight through; 4: the vox strip's direct out.
+        m.set_virtual_source(
+            "1",
+            Some(OutputSource::Signal {
+                signal: "main".into(),
+                tap: None,
+            }),
+        );
+        m.set_virtual_source(
+            "3",
+            Some(OutputSource::Input {
+                input: 2,
+                format: None,
+            }),
+        );
+        m.set_virtual_source(
+            "4",
+            Some(OutputSource::Signal {
+                signal: "vox".into(),
+                tap: Some(Tap::PreFader),
+            }),
+        );
+        // 5: a control-room monitor listening to the music strip.
+        let mut monitor: Monitor = serde_json::from_value(serde_json::json!({
+            "id": "cr", "name": "CR", "kind": "speakers", "format": "stereo"
+        }))
+        .unwrap();
+        monitor.source = Some(Source::Signal("music".into()));
+        m.control_room.monitors.push(monitor);
+        m.set_virtual_source(
+            "5",
+            Some(OutputSource::Monitor {
+                monitor: "cr".into(),
+                feed: MonitorFeed::Speaker,
+            }),
+        );
+        // 6: input 1 said to carry mono, into stereo: −3 dB on both sides.
+        m.set_virtual_source(
+            "6",
+            Some(OutputSource::Input {
+                input: 1,
+                format: Some(Format::Mono),
+            }),
+        );
+        m.validate(2, 48).unwrap();
+        let slots = HashMap::from([
+            (vout_key("6"), 6),
+            (vout_key("5"), 5),
+            ("main".to_string(), 0),
+            (vout_key("1"), 1),
+            (vout_key("2"), 2),
+            (vout_key("3"), 3),
+            (vout_key("4"), 4),
+        ]);
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 1);
+        let main = &out.0[&0];
+        let surround = &out.0[&1];
+        assert_eq!(surround.len(), 6);
+        assert_eq!(surround[0][0], main[0][0], "L to L");
+        assert_eq!(surround[1][0], main[1][0], "R to R");
+        assert_eq!(surround[2][0], 0.0, "no centre from stereo");
+        // A slot without a source is written, silent.
+        assert_eq!(out.0[&2].len(), 2);
+        assert!(out.0[&2].iter().all(|ch| ch.iter().all(|v| *v == 0.0)));
+        assert_eq!(out.0[&3][0][0], 0.1);
+        assert_eq!(out.0[&3][1][0], 0.2);
+        assert_eq!(out.0[&4][0][0], 0.5, "pre-fader direct out");
+        assert!(out.0[&5][1][0] > 0.0, "the monitor's output");
+        let h = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((out.0[&6][0][0] - h).abs() < 1e-6 && (out.0[&6][1][0] - h).abs() < 1e-6);
+        // A source that is gone leaves the slot silent, never an error.
+        m.remove_signal("main");
+        assert!(m.virtual_source("1").is_none());
+        // Bad sources are refused.
+        let mut bad = mix();
+        bad.set_virtual_source(
+            "1",
+            Some(OutputSource::Monitor {
+                monitor: "x".into(),
+                feed: MonitorFeed::Clean,
+            }),
+        );
+        assert!(bad.validate(2, 48).is_err());
+        let mut bad = mix();
+        bad.set_virtual_source(
+            "1",
+            Some(OutputSource::Input {
+                input: 3,
+                format: None,
+            }),
+        );
+        assert!(bad.validate(2, 48).is_err());
+    }
+
+    #[test]
+    fn a_muted_strips_direct_out_is_silent_in_a_virtual_output() {
+        let mut compiler = Compiler {
+            vouts: vec![("1".into(), Format::Mono), ("2".into(), Format::Mono)],
+            ..Default::default()
+        };
+        let mut m = mix();
+        m.strips[0].mute = true;
+        m.set_virtual_source(
+            "1",
+            Some(OutputSource::Signal {
+                signal: "vox".into(),
+                tap: None,
+            }),
+        );
+        m.set_virtual_source(
+            "2",
+            Some(OutputSource::Signal {
+                signal: "vox".into(),
+                tap: Some(Tap::PreFader),
+            }),
+        );
+        m.validate(2, 48).unwrap();
+        let slots = HashMap::from([(vout_key("1"), 1), (vout_key("2"), 2)]);
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 2);
+        assert!(
+            out.0[&1][0].iter().all(|v| *v == 0.0),
+            "post-fader of a muted strip"
+        );
+        assert_eq!(out.0[&2][0][60], 0.5, "pre-fader still plays");
+    }
+
+    #[test]
+    fn a_monitors_clean_feed_ignores_solo_its_speaker_feed_follows() {
+        let mut compiler = Compiler {
+            vouts: vec![
+                ("clean".into(), Format::Stereo),
+                ("speaker".into(), Format::Stereo),
+            ],
+            ..Default::default()
+        };
+        let mut m = mix();
+        let mut monitor: Monitor = serde_json::from_value(serde_json::json!({
+            "id": "cr", "name": "CR", "kind": "speakers", "format": "stereo",
+            "follows_solo": true, "level_db": -10
+        }))
+        .unwrap();
+        monitor.source = Some(Source::Signal("music".into()));
+        m.control_room.monitors.push(monitor);
+        for (id, feed) in [
+            ("clean", MonitorFeed::Clean),
+            ("speaker", MonitorFeed::Speaker),
+        ] {
+            m.set_virtual_source(
+                id,
+                Some(OutputSource::Monitor {
+                    monitor: "cr".into(),
+                    feed,
+                }),
+            );
+        }
+        m.validate(2, 48).unwrap();
+        let slots = HashMap::from([(vout_key("clean"), 1), (vout_key("speaker"), 2)]);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let heard = |compiler: &mut Compiler| {
+            let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+            let out = run(&mut c, &inputs, 1);
+            (out.0[&1][0][0], out.0[&1][1][0], out.0[&2][0][0])
+        };
+        let (l, r, speaker) = heard(&mut compiler);
+        // Clean: the music strip as it is, without the monitor's −10 dB level.
+        assert!((l - 0.1).abs() < 1e-6 && (r - 0.2).abs() < 1e-6, "{l} {r}");
+        assert!(speaker < l, "the speaker feed has the level: {speaker}");
+        // A PFL of vox: the speaker feed plays it, the clean feed does not change.
+        compiler.solo.insert("vox".into(), SoloKind::Pfl);
+        let (l2, r2, speaker2) = heard(&mut compiler);
+        assert_eq!((l2, r2), (l, r));
+        assert_ne!(speaker2, speaker);
+    }
+
+    #[test]
+    fn strips_inherit_their_inputs_alias() {
+        let mut m = mix();
+        m.strips[0].name = "Input 1".into();
+        m.strips[1].name = "Input 1".into(); // reads input 2: stays
+        m.inherit_input_label(1, "Input 1", "Host");
+        assert_eq!(m.strips[0].name, "Host");
+        assert_eq!(m.strips[1].name, "Input 1");
+        // A strip renamed by hand keeps its name.
+        m.strips[0].name = "Anchor".into();
+        m.inherit_input_label(1, "Host", "Guest");
+        assert_eq!(m.strips[0].name, "Anchor");
+    }
+
+    #[test]
+    fn virtual_output_sources_round_trip_in_json() {
+        for text in [
+            r#"{"output":"1","source":{"signal":"main"}}"#,
+            r#"{"output":"pgm","source":{"signal":"vox","tap":"pre-fader"}}"#,
+            r#"{"output":"3","source":{"monitor":"cr"}}"#,
+            r#"{"output":"5","source":{"monitor":"cr","feed":"speaker"}}"#,
+            r#"{"output":"4","source":{"input":2,"format":"mono"}}"#,
+        ] {
+            let r: crate::mix::model::VirtualRoute = serde_json::from_str(text).unwrap();
+            assert_eq!(serde_json::to_string(&r).unwrap(), text);
+        }
+        // Mixed or unknown fields are refused.
+        for bad in [
+            r#"{"signal":"main","monitor":"cr"}"#,
+            r#"{"monitor":"cr","tap":"pre-fader"}"#,
+            r#"{"signal":"main","format":"mono"}"#,
+            r#"{"signal":"main","gain":1}"#,
+            r#"{"input":1,"feed":"clean"}"#,
+            r#"{"monitor":"cr","feed":"loud"}"#,
+            r#"{}"#,
+        ] {
+            assert!(serde_json::from_str::<OutputSource>(bad).is_err(), "{bad}");
+        }
+        // An old mix has none, and an empty list is left out (rollback to 1.4).
+        let m: Mix = serde_json::from_str("{}").unwrap();
+        assert!(m.virtual_outputs.is_empty());
+        assert!(!serde_json::to_string(&m)
+            .unwrap()
+            .contains("virtual_outputs"));
     }
 
     #[test]

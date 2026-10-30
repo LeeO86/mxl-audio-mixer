@@ -128,6 +128,8 @@ pub struct Control {
     block: u32,
     read_offset: u32,
     input_count: usize,
+    /// The virtual outputs (C7), slot 1 first.
+    pub virtual_outputs: Vec<crate::config::VirtualOutput>,
     default_commit: u32,
     mix_path: PathBuf,
     pub history: crate::history::History,
@@ -161,6 +163,12 @@ impl Control {
         node: mxl_nmos::Node,
         config: &Config,
     ) -> Self {
+        let mut compiler = Compiler::with_talk_base(config.input_flows);
+        compiler.vouts = config
+            .virtual_outputs
+            .iter()
+            .map(|v| (v.id.clone(), v.format))
+            .collect();
         Self {
             engine,
             inputs,
@@ -169,7 +177,7 @@ impl Control {
             loudness: LoudnessMeters::default(),
             mix: Mix::default(),
             node,
-            compiler: Compiler::with_talk_base(config.input_flows),
+            compiler,
             analyser: crate::analysis::Analyser::new(config.block_samples as usize),
             tally: crate::tally::Tally::default(),
             streams: crate::preview::Streams::new(config),
@@ -195,6 +203,7 @@ impl Control {
             block: config.block_samples,
             read_offset: config.read_offset_samples,
             input_count: config.input_flows,
+            virtual_outputs: config.virtual_outputs.clone(),
             default_commit: config.output_commit_samples,
             mix_path: config.state_dir.join("mix.json"),
             history: crate::history::History::new(&config.state_dir),
@@ -793,35 +802,40 @@ impl Control {
         self.analyser.set_target(target);
     }
 
+    /// Every output to publish: the virtual outputs first, so they take their
+    /// slots before the published ones at a start (D267).
     fn specs(&self, mix: &Mix) -> Vec<OutputSpec> {
-        mix.outputs
-            .iter()
-            .filter_map(|o| {
-                let (name, _) = mix.signal(&o.signal)?;
-                let format = match o.format {
-                    Some(f) => f,
-                    None => mix.tap_format(&o.signal, &o.tap())?,
-                };
-                Some(OutputSpec {
-                    signal: o.signal.clone(),
-                    name: name.to_string(),
-                    format,
-                    commit: o.commit_samples.unwrap_or(self.default_commit),
-                })
+        let virtual_outputs = self.virtual_outputs.iter().map(|v| OutputSpec {
+            signal: crate::mix::compile::vout_key(&v.id),
+            name: v.label.clone(),
+            format: v.format,
+            commit: self.default_commit,
+        });
+        let published = mix.outputs.iter().filter_map(|o| {
+            let (name, _) = mix.signal(&o.signal)?;
+            let format = match o.format {
+                Some(f) => f,
+                None => mix.tap_format(&o.signal, &o.tap())?,
+            };
+            Some(OutputSpec {
+                signal: o.signal.clone(),
+                name: name.to_string(),
+                format,
+                commit: o.commit_samples.unwrap_or(self.default_commit),
             })
-            .chain(
-                mix.control_room
-                    .monitors
-                    .iter()
-                    .filter(|m| m.publish)
-                    .map(|m| OutputSpec {
-                        signal: m.key(),
-                        name: format!("Monitor {}", m.name),
-                        format: m.format,
-                        commit: self.default_commit,
-                    }),
-            )
-            .collect()
+        });
+        let monitors = mix
+            .control_room
+            .monitors
+            .iter()
+            .filter(|m| m.publish)
+            .map(|m| OutputSpec {
+                signal: m.key(),
+                name: format!("Monitor {}", m.name),
+                format: m.format,
+                commit: self.default_commit,
+            });
+        virtual_outputs.chain(published).chain(monitors).collect()
     }
 
     /// Solo `signal` (PFL or AFL), or end its solo; interlock replaces the others.
@@ -1119,6 +1133,22 @@ impl Control {
         // keep what is heard (C12, D186).
         next.lock_subgroup_sends();
         next.validate_except_logic(self.input_count, self.block)?;
+        // The virtual outputs hold their slots: the published outputs and
+        // monitors share the rest (D267).
+        let free = crate::engine::MAX_OUTPUTS - self.virtual_outputs.len();
+        let published = next.outputs.len()
+            + next
+                .control_room
+                .monitors
+                .iter()
+                .filter(|m| m.publish)
+                .count();
+        if published > free {
+            return Err(format!(
+                "at most {free} published outputs and monitors (MIXER_OUTPUT_FLOWS takes {})",
+                self.virtual_outputs.len()
+            ));
+        }
         self.check_logic(&next)?;
         self.compiler.afv = self.afv_targets(&next);
         self.compiler.auto = self.auto.compile_gains(&next);
@@ -1232,6 +1262,13 @@ impl Control {
         let errors = self.outputs.sync(&mut self.engine, &self.node, &specs);
         let slots = self.outputs.slots();
         next.outputs.retain(|o| slots.contains_key(&o.signal));
+        // A monitor whose output could not be published is not shown as
+        // published (its error is in `errors`).
+        for m in &mut next.control_room.monitors {
+            if m.publish && !slots.contains_key(&m.key()) {
+                m.publish = false;
+            }
+        }
         self.loudness.sync(&mut self.engine, &next);
         let started = Instant::now();
         let mut compiled = self.compiler.compile(

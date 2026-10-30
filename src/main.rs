@@ -436,6 +436,10 @@ async fn run(mut config: Config) -> ExitCode {
             stop_rx.clone(),
         ))
     });
+    tokio::spawn(mxl_audio_mixer::sources::resolve_task(
+        app_for_preview.clone(),
+        stop_rx.clone(),
+    ));
     tokio::spawn(preview_task(app_for_preview, stop_rx.clone()));
     node.start_registration();
     tracing::info!(

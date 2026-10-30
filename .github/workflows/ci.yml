@@ -162,6 +162,11 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/mxl/lib
           IT_OUT: ${{ runner.temp }}/it
+      - name: tests/integration/vouts.sh (virtual outputs, input routing)
+        run: tests/integration/vouts.sh
+        env:
+          LD_LIBRARY_PATH: /opt/mxl/lib
+          IT_OUT: ${{ runner.temp }}/it
       - name: tests/integration/ui.sh (headless Chrome)
         run: tests/integration/ui.sh
         env:

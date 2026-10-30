@@ -1,7 +1,8 @@
 <script setup>
 // NMOS (§3, §12.3): the node, the inputs (one IS-05 receiver each: routing state, flow, arrival lag,
 // delay) and the published outputs (one IS-05 sender each). Routing is done by a controller through
-// IS-05; here inputs get a label and their extra delay.
+// IS-05 (or in the Graph); here inputs get a label (their alias) and their extra delay. Under the label:
+// the name of what is connected (the IS-04 sender label, else the MXL flow's, C2).
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import Pill from "./Pill.vue";
 import { api, shortId } from "../api.js";
@@ -110,6 +111,7 @@ const confirm = (i) => act(() => api.post(`/api/v1/inputs/${i.input}/delay/confi
             <strong>{{ i.input }}</strong>
             <input v-if="editing === i.input" v-model="form.label" aria-label="Label" style="width: 10rem" />
             <span v-else class="muted small"> {{ i.label }}</span>
+            <div v-if="i.connected_label" class="muted small" :title="i.sender_id ? `sender ${i.sender_id}` : 'the MXL flow\'s label'">⇠ {{ i.connected_label }}</div>
           </td>
           <td><Pill :text="i.state" :kind="STATE_KIND[i.state] || 'neutral'" /></td>
           <td><code v-if="i.flow" :title="`${i.flow} in ${i.domain}`">{{ shortId(i.flow) }}</code><span v-else class="muted">–</span></td>

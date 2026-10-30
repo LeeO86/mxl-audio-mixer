@@ -4,8 +4,9 @@
 # (§11.3): web/tests/logic.mjs, then the console's strip handling (1.4.0):
 # web/tests/console.mjs, and the format, down-mix and spatial nodes of 1.4.0:
 # web/tests/spatial.mjs, then the console of 1.5.0 (web/tests/console15.mjs) and
-# its MIDI control with a fake Web MIDI (web/tests/midi.mjs), and the processing items
-# of 1.5.0 (B1–B6): web/tests/dsp15.mjs. Needs `npm ci` in web/
+# its MIDI control with a fake Web MIDI (web/tests/midi.mjs), the processing items
+# of 1.5.0 (B1–B6): web/tests/dsp15.mjs, and the graph and routing of 1.5.0
+# (virtual outputs): web/tests/graph.mjs. Needs `npm ci` in web/
 # and Chrome (CHROME, default /usr/bin/google-chrome). Screenshots: $IT_OUT/ui/.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -15,7 +16,7 @@ DOMAIN=99999999-9999-4999-8999-999999999999
 start_tone "$WORK/mxl/tones" "$FLOW" --domain-id "$DOMAIN" --channels 2
 wait_until 10 "tone flow" test -d "$WORK/mxl/tones/$FLOW.mxl-flow"
 TSL_UDP=${TSL_TEST_UDP:-8930}
-start_mixer NMOS_SEED=it-ui TSL_ENABLE=true TSL_UDP_PORT="$TSL_UDP" TSL_TCP_PORT=$((TSL_UDP + 1))
+start_mixer NMOS_SEED=it-ui MIXER_OUTPUTS='[{"label": "PGM", "format": "5.1"}, {"label": "Clean"}]' TSL_ENABLE=true TSL_UDP_PORT="$TSL_UDP" TSL_TCP_PORT=$((TSL_UDP + 1))
 route 1 "$DOMAIN" "$FLOW"
 wait_until 5 "input 1 running" is_state 1 running
 
@@ -35,6 +36,7 @@ node "$ROOT/web/tests/spatial.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/spatia
 node "$ROOT/web/tests/console15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console15.mjs"
 node "$ROOT/web/tests/midi.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/midi.mjs"
 node "$ROOT/web/tests/dsp15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/dsp15.mjs"
+node "$ROOT/web/tests/graph.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/graph.mjs"
 
 rc=0
 stop_mixer || rc=$?

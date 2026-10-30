@@ -28,11 +28,13 @@ pub mod preview;
 pub mod preview_api;
 pub mod room_api;
 pub mod show_api;
+pub mod sources;
 pub mod state;
 pub mod talkback_api;
 pub mod tally;
 #[cfg(test)]
 pub(crate) mod test_alloc;
 pub mod timing;
+pub mod vout_api;
 pub mod wav;
 pub mod widgets;

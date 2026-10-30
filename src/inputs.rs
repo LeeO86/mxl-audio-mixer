@@ -381,6 +381,17 @@ struct Slot {
     /// An automatic change waiting for confirmation.
     proposed: Option<u32>,
     hold: DelayHold,
+    /// What is connected (C2), from [`crate::sources`].
+    connected: Connected,
+}
+
+/// What an input is connected to (C2): the IS-05 sender id and the name of the
+/// source (the IS-04 sender label from the Query API, else the MXL flow's
+/// label).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Connected {
+    pub sender_id: Option<Uuid>,
+    pub label: Option<String>,
 }
 
 /// An input's status for the API, the UI and the metrics.
@@ -392,6 +403,11 @@ pub struct InputStatus {
     pub state: State,
     pub flow: Option<Uuid>,
     pub domain: Option<String>,
+    /// The connected sender (IS-05 `sender_id`), if the controller gave one.
+    pub sender_id: Option<Uuid>,
+    /// The name of what is connected (C2): the IS-04 sender label, else the MXL
+    /// flow label; `null` while unrouted or unknown. `label` is the alias.
+    pub connected_label: Option<String>,
     pub channels: u32,
     pub extra_delay: ExtraDelay,
     pub extra_delay_ms: f64,
@@ -467,6 +483,7 @@ impl Inputs {
                 delay: 0,
                 proposed: None,
                 hold: DelayHold::new(config.block_samples),
+                connected: Connected::default(),
             })
             .collect();
         let mut inputs = Self {
@@ -810,10 +827,15 @@ impl Inputs {
         let delay_max = self.delay_max;
         let slot = self.slots.get_mut(index).ok_or("no such input")?;
         if let Some(label) = label {
-            if label.trim().is_empty() || label.len() > 64 {
-                return Err("label must have 1 to 64 characters".into());
+            if label.len() > 64 {
+                return Err("label must have at most 64 characters".into());
             }
-            slot.config.label = label;
+            // An empty alias is the default name again (C2).
+            slot.config.label = if label.trim().is_empty() {
+                InputConfig::default_for(index).label
+            } else {
+                label
+            };
         }
         if let Some(delay) = extra_delay {
             if let ExtraDelay::Ms(value) = delay {
@@ -890,6 +912,8 @@ impl Inputs {
                     state: s.state,
                     flow: s.route.as_ref().map(|r| r.flow),
                     domain: s.route.as_ref().map(|r| r.domain.display().to_string()),
+                    sender_id: s.route.as_ref().and(s.connected.sender_id),
+                    connected_label: s.route.as_ref().and(s.connected.label.clone()),
                     channels: if s.state == State::Unrouted {
                         0
                     } else {
@@ -908,6 +932,18 @@ impl Inputs {
                 }
             })
             .collect()
+    }
+
+    /// Every input's route (index from 0).
+    pub fn routes(&self) -> Vec<Option<Route>> {
+        self.slots.iter().map(|s| s.route.clone()).collect()
+    }
+
+    /// Set what input `index` (from 0) is connected to (C2).
+    pub fn set_connected(&mut self, index: usize, connected: Connected) {
+        if let Some(s) = self.slots.get_mut(index) {
+            s.connected = connected;
+        }
     }
 
     /// Whether input `index` (from 0) runs and has at least `channels` channels.
