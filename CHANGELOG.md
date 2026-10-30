@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 1.5.0
+## 1.5.0 (2026-10-30)
 
 - C7: NMOS labels are unique: `MIXER_OUTPUTS` labels used twice stop the start; a publish or rename that gives a published output or monitor a virtual output's label, or two the same label, is refused (400); a clash an old mix already has is a WARN at the start and `label_clashes` in the status.
 - C7: virtual outputs: `MIXER_OUTPUT_FLOWS` / `MIXER_OUTPUTS` fixed MXL flows and NMOS senders (`out-vout:<n>`, stable ids) the designer wires; the operator picks a bus, a direct out, a monitor or an input straight through; silent without a source; `/api/v1/virtual-outputs`, metric `virtual_output_routed`.
@@ -11,7 +11,7 @@
 - C3: an input's MXL flow is chosen in the graph (`GET /api/v1/flows`, `PUT /api/v1/inputs/<n>/route` through the own IS-05 receiver).
 - C4: double-click in the graph opens a strip's or bus's processing, a monitor's control room.
 - C5: the graph keeps zoom, pan and its open panel over a tab switch.
-- Downgrade: 1.4.x refuses a mix with virtual output sources (`virtual_outputs`): it moves `mix.json` to `mix.json.bad` and starts empty. Before going back, silence every virtual output (`DELETE /api/v1/virtual-outputs/<n>`); their routing is lost, and the 1.4 mixer has no virtual outputs (the designer's wiring to them goes dead).
+- Downgrade: 1.4.x refuses a mix with virtual output sources (`virtual_outputs`): it moves `mix.json` to `mix.json.bad` and starts empty. Before going back, silence every virtual output (`DELETE /api/v1/virtual-outputs/<n>`); their routing is lost, and the 1.4 mixer has no virtual outputs (the designer's wiring to them goes dead). The same for a logic `set-route` block (unknown variant), a TSL out without an index (`null`) and a webhook with an empty URL (both refused by 1.4.x validation): delete them or give them an index and URL first. A fader block's `threshold_db` is silently dropped by 1.4.x: its trigger goes back to the +0.5 dB rule.
 - D1: a fader position block has a threshold (`threshold_db`, −120 to +15 dB, default 0 dB; the "High at" column left of Value): where it feeds an on/off input (also through macro ports) it is on from that position (before: from 0.5 dB); without a signal it is off.
 - Upgrade: a fader feeding an on/off input is now on from 0 dB (was +0.5 dB); check live graphs with faders at 0 dB.
 - D2: "Copy logic to" copies all blocks and cables of a graph into a new graph (dry run) or into an existing graph (below its blocks, one undo step there). Copy and paste rename only the block ids that clash (before: every pasted block got a new id).
