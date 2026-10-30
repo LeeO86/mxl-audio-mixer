@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::config::SAMPLE_RATE;
 use crate::engine::plan::{MeterBank, NodeMeter};
+use crate::mix::chain::MAX_BANDS;
 use crate::mix::model::Db;
 
 /// Meter update period (§7: about 25 Hz).
@@ -41,6 +42,13 @@ pub struct NodeValues {
     pub gain_reduction_db: f64,
     pub in_peak_dbfs: Db,
     pub out_peak_dbfs: Db,
+    /// Per band (multiband, dynamic EQ): the gain reduction (dB, ≥ 0), in band
+    /// order; left out for other nodes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub band_reduction_db: Vec<f64>,
+    /// A leveler's gain (dB, + up, − down); left out for other nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leveler_gain_db: Option<f64>,
 }
 
 /// One signal's meter values per channel, in dBFS (true peak in dBTP).
@@ -67,8 +75,9 @@ pub struct Meters {
     channels: Vec<Channel>,
     holds: BTreeMap<String, Vec<f32>>,
     node_bank: Arc<[NodeMeter]>,
-    nodes: Vec<(String, String, usize)>,
+    nodes: Vec<(String, String, usize, usize)>,
     node_values: Vec<(f32, f32, f32)>,
+    node_bands: Vec<[f32; MAX_BANDS]>,
 }
 
 impl Default for Meters {
@@ -81,6 +90,7 @@ impl Default for Meters {
             node_bank: Arc::new([]),
             nodes: Vec::new(),
             node_values: Vec::new(),
+            node_bands: Vec::new(),
         }
     }
 }
@@ -111,9 +121,15 @@ impl Meters {
         self.signals = signals;
     }
 
-    /// Follow a new plan's node meters; `nodes` is `(signal, node id, slot)`.
-    pub fn set_nodes(&mut self, bank: Arc<[NodeMeter]>, nodes: Vec<(String, String, usize)>) {
+    /// Follow a new plan's node meters; `nodes` is `(signal, node id, slot,
+    /// metered bands)`.
+    pub fn set_nodes(
+        &mut self,
+        bank: Arc<[NodeMeter]>,
+        nodes: Vec<(String, String, usize, usize)>,
+    ) {
         self.node_values = vec![(0.0, 0.0, 0.0); bank.len()];
+        self.node_bands = vec![[0.0; MAX_BANDS]; bank.len()];
         self.node_bank = bank;
         self.nodes = nodes;
     }
@@ -202,6 +218,11 @@ impl Meters {
                 f32::from_bits(m.out_peak.swap(0, Ordering::Relaxed)),
             );
         }
+        for (v, m) in self.node_bands.iter_mut().zip(self.node_bank.iter()) {
+            for (b, a) in v.iter_mut().zip(m.bands.iter()) {
+                *b = f32::from_bits(a.swap(0, Ordering::Relaxed));
+            }
+        }
         for (signal, first, n) in &self.signals {
             if let Some(hold) = self.holds.get_mut(signal) {
                 let peaks = &self.channels[*first as usize..*first as usize + n];
@@ -258,15 +279,27 @@ impl Meters {
                         nodes: self
                             .nodes
                             .iter()
-                            .filter(|(s, _, _)| s == signal)
-                            .filter_map(|(_, node, slot)| {
+                            .filter(|(s, _, _, _)| s == signal)
+                            .filter_map(|(_, node, slot, bands)| {
                                 let (gr, i, o) = *self.node_values.get(*slot)?;
+                                let per_band = self.node_bands.get(*slot)?;
+                                let level = self
+                                    .node_bank
+                                    .get(*slot)
+                                    .map(|m| f32::from_bits(m.level.load(Ordering::Relaxed)));
                                 Some((
                                     node.clone(),
                                     NodeValues {
                                         gain_reduction_db: f64::from(gr),
                                         in_peak_dbfs: dbfs(f64::from(i)),
                                         out_peak_dbfs: dbfs(f64::from(o)),
+                                        band_reduction_db: per_band[..*bands]
+                                            .iter()
+                                            .map(|g| f64::from(*g))
+                                            .collect(),
+                                        leveler_gain_db: level
+                                            .filter(|g| g.is_finite())
+                                            .map(|g| (f64::from(g) * 10.0).round() / 10.0),
                                     },
                                 ))
                             })
@@ -356,5 +389,35 @@ mod tests {
             meters.tick();
         }
         assert_eq!(meters.values()["st"].correlation, None);
+    }
+
+    #[test]
+    fn band_reductions_and_the_leveler_gain() {
+        let bank = Arc::new(MeterBank::new(1));
+        let nodes: Arc<[NodeMeter]> = (0..2).map(|_| NodeMeter::default()).collect();
+        let mut meters = Meters::default();
+        meters.set_plan(bank, vec![("bus".into(), 0, 1)]);
+        meters.set_nodes(
+            nodes.clone(),
+            vec![
+                ("bus".into(), "mb".into(), 0, 3),
+                ("bus".into(), "lev".into(), 1, 0),
+            ],
+        );
+        nodes[0].bands[1].store(4.5f32.to_bits(), Ordering::Relaxed);
+        nodes[1]
+            .level
+            .store((-2.25f32).to_bits(), Ordering::Relaxed);
+        meters.tick();
+        let v = &meters.values()["bus"].nodes;
+        assert_eq!(v["mb"].band_reduction_db, vec![0.0, 4.5, 0.0]);
+        assert_eq!(v["mb"].leveler_gain_db, None);
+        assert!(v["lev"].band_reduction_db.is_empty());
+        assert_eq!(v["lev"].leveler_gain_db, Some(-2.3));
+        // Taken: the band values start again; the gain stays as the leveler left it.
+        meters.tick();
+        let v = &meters.values()["bus"].nodes;
+        assert_eq!(v["mb"].band_reduction_db, vec![0.0; 3]);
+        assert_eq!(v["lev"].leveler_gain_db, Some(-2.3));
     }
 }

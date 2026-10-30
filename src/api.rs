@@ -718,6 +718,9 @@ struct SendBody {
     mute: Option<bool>,
     block_delay: Option<bool>,
     phase: Option<bool>,
+    /// The send's own surround panner (B6); `null` removes it.
+    #[serde(default, deserialize_with = "present")]
+    pan: Option<Option<crate::mix::model::SendPan>>,
     ramp_ms: Option<f64>,
 }
 
@@ -762,6 +765,7 @@ async fn put_send(
                     mute: false,
                     phase: false,
                     block_delay: false,
+                    pan: None,
                 });
             }
             let s = m
@@ -783,6 +787,14 @@ async fn put_send(
             }
             if let Some(v) = b.block_delay {
                 s.block_delay = v;
+            }
+            if let Some(v) = b.pan {
+                s.pan = v;
+            }
+            if s.pan.is_some() && s.block_delay {
+                return Err(bad(format!(
+                    "send {from} → {to}: a send with a block delay cannot have its own pan (remove pan or block_delay)"
+                )));
             }
             Ok(())
         })
@@ -833,9 +845,12 @@ struct OutputBody {
     format: Option<Format>,
     #[serde(default)]
     commit_samples: Option<u32>,
+    /// Where it is taken (a direct out, B4); left out: post-fader.
+    #[serde(default)]
+    tap: Option<crate::mix::model::Tap>,
 }
 
-/// Publish a signal (or change its layout or commit size).
+/// Publish a signal (or change its layout, commit size or tap).
 async fn put_output(
     State(app): State<App>,
     Path(signal): Path<String>,
@@ -856,6 +871,7 @@ async fn put_output(
                 signal: signal.clone(),
                 format: b.format,
                 commit_samples: b.commit_samples,
+                tap: b.tap.filter(|t| *t != crate::mix::model::Tap::PostFader),
             });
             Ok(())
         })

@@ -2,8 +2,10 @@
 // The surround panner's position (D5), seen from above: the speakers of its layout on a circle (front at
 // the top), the source where it sits; click or drag on the pad to move it around (left/right and
 // front/rear). The height layouts (5.1.4, 7.1.4) draw their top speakers on an inner ring; the source moves
-// towards it as its height goes up (A10). Spread shows as a ring around the source, divergence as the
-// share drawn towards L and R.
+// towards it as its height goes up (A10): the dot's distance from the centre is its height. Spread (B5)
+// is a translucent bubble around the dot: as spread opens it grows and drifts from the dot towards the
+// centre (the dot itself stays where it is panned); at 100 % it is centred and covers every speaker, as
+// the panner then feeds all of them alike. Divergence shows as the share drawn towards L and R.
 //
 // Reusable (A8, the strip's miniature; a per-send panner can use it too): `node` is any object with
 // `layout`, `azimuth_deg` and optionally `elevation_deg`, `spread_pct`; `size` in px; `mini` drops the
@@ -38,7 +40,10 @@ const speakers = computed(() => layout.value.bed.map(([label, a]) => ({ label, a
 const tops = computed(() => layout.value.top.map(([label, a]) => ({ label, a, xy: at(a, RT) })));
 const height = computed(() => (tops.value.length ? Math.min(90, Math.max(0, props.node.elevation_deg || 0)) : 0));
 const source = computed(() => at(props.node.azimuth_deg || 0, R - ((R - RT) * height.value) / 90));
-const spreadR = computed(() => 7 + ((props.node.spread_pct || 0) / 100) * 40);
+const spread = computed(() => Math.max(0, Math.min(1, (props.node.spread_pct || 0) / 100)));
+// The spread bubble: from the dot towards the centre, from a dot's size to the whole speaker ring.
+const bubble = computed(() => [source.value[0] + (C - source.value[0]) * spread.value, source.value[1] + (C - source.value[1]) * spread.value]);
+const bubbleR = computed(() => 7 + spread.value * R);
 const label = computed(() => `surround position ${props.node.azimuth_deg || 0}°${tops.value.length ? `, height ${height.value}°` : ""}`);
 
 const svg = ref(null);
@@ -76,7 +81,7 @@ function up() {
       <rect :x="s.xy[0] - 4" :y="s.xy[1] - 4" width="8" height="8" rx="4" />
       <text v-if="!mini" :x="at(s.a, RT - 12)[0]" :y="at(s.a, RT - 12)[1] + 3" text-anchor="middle">{{ s.label }}</text>
     </g>
-    <circle :cx="source[0]" :cy="source[1]" :r="spreadR" class="spread" />
+    <circle :cx="bubble[0]" :cy="bubble[1]" :r="bubbleR" class="spread" data-bubble />
     <circle :cx="source[0]" :cy="source[1]" :r="mini ? 9 : 6" class="source" />
   </svg>
 </template>
@@ -117,7 +122,9 @@ function up() {
 .spread {
   fill: var(--accent);
   fill-opacity: 0.15;
-  stroke: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.4;
+  pointer-events: none;
 }
 .source {
   fill: var(--accent);

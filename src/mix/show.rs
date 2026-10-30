@@ -501,6 +501,7 @@ mod tests {
                 mute: false,
                 phase: false,
                 block_delay: false,
+                pan: None,
             });
         }
         m

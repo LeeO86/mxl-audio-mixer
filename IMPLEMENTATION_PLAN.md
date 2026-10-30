@@ -2371,3 +2371,40 @@ tests (`panner_lifts_into_the_height_layer`, `surround_panner_lifts_into_a_heigh
 | D256 | MIDI runs in the browser only (Web MIDI), through the console's own calls (A7): no server change, every client can have its own surface. Per input port (by name, kept in the browser): off, Mackie Control, Mackie Control extender (the next 8 strips), generic (MIDI learn), and the output for feedback (default the port of the same name). Mackie Control: banks of 8 over the strips then the buses, pitch-bend faders on the console's fader law, touch holds the motor, mute, solo (PFL), select, V-pot pan (2 % per tick, push: centre), bank/channel buttons, the master fader on a chosen bus (default the first), names and levels on the display (SysEx, when the browser grants it). Generic: CC, note or pitch bend on a strip's or bus's fader, mute, PFL, AFL or pan; a button toggles on its press (the release does nothing), or, marked "latching" in the mapping list, follows its value (127 on, 0 off; a note on while held); continuous controls set the value; feedback as the same message. A control the operator moved gets no feedback for 0.4 s, then the latest value. Mappings are per browser (`localStorage`) with export and import as JSON (`format: mxl-audio-mixer-midi`, `version: 1`), not in the show. A mapping (imported or from the browser's storage) is checked one by one: control type, channel 0–15 and number 0–127 as integers, a target signal and parameter; a bad one is dropped with a warning (a file with none valid is refused). | Decided with the maintainer: both Mackie Control and MIDI learn, mappings per browser. A surface belongs to a desk position, not to the show; the browser is where the device is plugged in. |
 | D257 | Web MIDI needs a secure page (https or localhost) and, in a frame, `allow="midi"`. The platform serves the mixer behind its HTTPS proxy, so it works there; over plain http (the lab's `http://<host>:8190`) the MIDI dialog says why it cannot connect. A browser without Web MIDI (Safari; Firefox until its site permission is given) is told so. | The browser decides; the dialog says what to change. |
 | D258 | The meter tick (`METER_TICK`) delays missed ticks (`MissedTickBehavior::Delay`, like the auto tick) instead of bursting them. | A late tick followed at once by another read the peaks of a few samples, mostly none: wide signals showed −∞ now and then (seen in the lab on 6 and more channels) and a logic Above block could see a false falling edge. |
+
+## 1.5.0: processing view and DSP (B1–B6)
+
+From the operators' feedback (Confluence "Feedback MXL Audio-Mixer", scope of
+2026-10-29, part B): copy and paste of units, every band's gain reduction, a leveler
+for buses, a flow view with endpoints, the spread of the surround panner, a
+surround panner per send.
+
+#### What exists
+
+- `src/mix/chain.rs`: node type `leveler` (`LEVELER_LOOKAHEAD`),
+  `ProcKind::metered_bands`.
+- `src/engine/proc.rs`: `Kind::Leveler` (K-weighting, 100 ms segments, 3 s window,
+  gain ramp, `lookahead_limit` shared with the limiter); `NodeMeter.bands` (per band,
+  multiband and dynamic EQ) and `NodeMeter.level` (the leveler's gain); `leveler_cost`
+  measures it.
+- `src/meters.rs`: `band_reduction_db`, `leveler_gain_db` in the node values.
+- `src/mix/model.rs`: `Output.tap`, `Send.pan` (`SendPan`), `Mix::send_pan`.
+- `src/mix/compile.rs`: an output reads its tap; a send with a pan applying is a
+  ramped matrix (`sendpan/<from>/<to>`) into the bus's surround bed (5.1 or 7.1; the heights get nothing), then the send's width map into the bus (heights none).
+- UI: `clipboard.js` and the clipboard bar in `ChainTab.vue`, the band bars and the
+  leveler's gain in `NodeEditor.vue`, `FlowView.vue`, the bubble in `SurroundPad.vue`,
+  `sendpan.js` and the send panner in `RoutingTab.vue`.
+- Tests: unit tests in `proc.rs` (leveler, per-band meters), `meters.rs`,
+  `compile.rs` (direct out at a tap, send pan); `web/tests/dsp15.mjs` in
+  `tests/integration/ui.sh`.
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D273 | The clipboard is per browser (localStorage, all its tabs), a list of units; "Paste all" appends them all, a chip appends one, a unit's paste takes the last copied unit of its type as a merge patch (fields it lacks set to null), keeping the target's id and place. | "The user chooses what goes where" (B1) without a server-side clipboard; units are plain chain JSON, the server validates as for any new node. |
+| D274 | Per-band gain reduction is a fixed array of 8 atomics in `NodeMeter` (`MAX_BANDS`), written per block by the processor, taken (swapped) by the meter tick like the node's total. | Inside the existing meter path; nothing allocated on the DSP thread (B2). |
+| D275 | The leveler measures in the node (K-weighting, 100 ms segments, the last 3 s) instead of reading the control side's loudness meter. The gate is per segment (BS.1770's absolute gate): a segment below `gate_lufs` is left out and holds the gain; after one above it, the gain heads for `target − loudness of the window's segments above the gate` (at least 4) within the limits, at most `speed_db_per_s`. A non-finite block resets the measurement; the safety limiter is the limiter's look-ahead gain at 1 ms. Inspired by the idea of master_me (GPL-3); no code was copied or translated. | Real-time and self-contained: no control-side round trip, no allocation (B3). The gate keeps pauses from being pulled up. |
+| D276 | Endpoints in the flow view are the mix's own objects: sends (bus outs), the published output (`outputs[].tap`: a strip's direct out, a bus's bus out, default post-fader) and chain keys (sidechain in/out). A drop on gap k sets `{after: node k−1}`, the end of the chain `pre-fader`, the start `pre-eq`/`pre-dynamics` when one starts there. | No second model for the same points: the Graph view reads the same mix (B4). `Output.tap` is left out of the JSON while unset, so a 1.4 show loads and a 1.5 show without taps loads in 1.4. |
+| D277 | Spread keeps its matrix (power = (1 − spread) × point + spread × equal share); the pad draws the bubble at the position moved towards the centre by the spread, radius growing to the speaker ring at 100 %. | It is what the DSP does: the image moves to the middle and widens (B5). |
+| D278 | A send's `pan` applies when its source is mono or stereo at the send's tap (post-pan of a strip without a surround panner counts as the strip's own format, read before the strip's panner) and the bus is 5.1, 7.1, 5.1.4 or 7.1.4 (the bed; heights get nothing); it is a ramped matrix node, so moving it changes values only. | Panning "fixed in the processing" per send (B6), smooth while dragging; the same field serves the Graph view's wire editing (C1). |

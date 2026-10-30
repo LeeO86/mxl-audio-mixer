@@ -69,6 +69,7 @@ fn send(from: &str, to: &str, tap: Tap) -> Send {
         mute: false,
         phase: false,
         block_delay: false,
+        pan: None,
     }
 }
 

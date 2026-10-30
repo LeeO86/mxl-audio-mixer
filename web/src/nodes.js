@@ -130,6 +130,21 @@ export const NODE_TYPES = {
     }),
     fields: [],
   },
+  leveler: {
+    label: "Leveler",
+    group: "Dynamics",
+    help: "For buses and streams: rides the gain slowly so the short-term loudness meets the target (within max gain and max cut, at the speed); holds below the gate; an optional 1 ms safety limiter after it. Inspired by the idea of master_me.",
+    make: () => ({ type: "leveler", target_lufs: -23, max_gain_db: 9, max_cut_db: 9, speed_db_per_s: 1, gate_lufs: -50, limiter: true, ceiling_db: -1 }),
+    fields: [
+      { key: "target_lufs", label: "Target", min: -40, max: -5, def: -23, fine: 0.1, unit: "LUFS" },
+      { key: "max_gain_db", label: "Max gain", min: 0, max: 30, def: 9, fine: 0.5, unit: "dB" },
+      { key: "max_cut_db", label: "Max cut", min: 0, max: 30, def: 9, fine: 0.5, unit: "dB" },
+      { key: "speed_db_per_s", label: "Speed", min: 0.1, max: 20, def: 1, fine: 0.05, digits: 1, unit: "dB/s", log: true },
+      { key: "gate_lufs", label: "Gate", min: -90, max: -10, def: -50, fine: 0.5, unit: "LUFS" },
+      { key: "limiter", label: "Safety limiter", bool: true },
+      { key: "ceiling_db", label: "Ceiling", min: -20, max: 0, def: -1, fine: 0.1, unit: "dB", when: (n) => n.limiter },
+    ],
+  },
   width: {
     label: "M/S / Width",
     group: "Spatial",
@@ -233,5 +248,5 @@ export const TAPS = [
 export const tapLabel = (tap) => (typeof tap === "object" && tap ? `after ${tap.after}` : TAPS.find((t) => t[0] === tap)?.[1] || tap);
 
 /** Nodes whose gain reduction is metered. */
-export const DYNAMICS = new Set(["compressor", "limiter", "expander", "gate", "de-esser", "ducker", "multiband", "dynamic-eq"]);
+export const DYNAMICS = new Set(["compressor", "limiter", "expander", "gate", "de-esser", "ducker", "multiband", "dynamic-eq", "leveler"]);
 export const EQ_LIKE = new Set(["eq", "filter", "dynamic-eq"]);

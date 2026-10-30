@@ -311,6 +311,23 @@ pub enum ProcKind {
         #[serde(default = "lfe_off")]
         lfe_db: f64,
     },
+    /// Leveler (B3), for buses (streams): rides the gain slowly so the short-term
+    /// loudness (BS.1770 K-weighting, 3 s) meets `target_lufs`, at most
+    /// `max_gain_db` up and `max_cut_db` down, moving at most `speed_db_per_s`.
+    /// Below `gate_lufs` (pauses, silence) it holds the gain. With `limiter`, a
+    /// 1 ms look-ahead peak limiter at `ceiling_db` follows as a safety stage.
+    /// Inspired by the idea of master_me; an own implementation, no code taken.
+    Leveler {
+        target_lufs: f64,
+        max_gain_db: f64,
+        max_cut_db: f64,
+        speed_db_per_s: f64,
+        gate_lufs: f64,
+        #[serde(default = "yes")]
+        limiter: bool,
+        #[serde(default = "leveler_ceiling")]
+        ceiling_db: f64,
+    },
 }
 
 fn is_zero(v: &f64) -> bool {
@@ -320,6 +337,17 @@ fn is_zero(v: &f64) -> bool {
 fn lfe_off() -> f64 {
     LFE_OFF_DB
 }
+
+fn yes() -> bool {
+    true
+}
+
+fn leveler_ceiling() -> f64 {
+    -1.0
+}
+
+/// Look-ahead of the leveler's safety limiter, in samples (1 ms).
+pub const LEVELER_LOOKAHEAD: usize = 48;
 
 /// One node of a chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -383,6 +411,7 @@ impl ProcKind {
             Self::Auto {} => "auto",
             Self::Width { .. } => "width",
             Self::SurroundPan { .. } => "surround-pan",
+            Self::Leveler { .. } => "leveler",
         }
     }
 
@@ -422,6 +451,16 @@ impl ProcKind {
             | Self::SurroundPan { .. } => Category::Other,
             _ => Category::Dynamics,
         }
+    }
+
+    /// Bands whose gain reduction is metered one by one (multiband, dynamic EQ).
+    pub fn metered_bands(&self) -> usize {
+        match self {
+            Self::Multiband { bands, .. } => bands.len(),
+            Self::DynamicEq { bands } => bands.len(),
+            _ => 0,
+        }
+        .min(MAX_BANDS)
     }
 
     pub fn key(&self) -> Option<&Key> {
@@ -658,6 +697,22 @@ impl ProcKind {
                 range("divergence_pct", *divergence_pct, 0.0, 100.0)?;
                 range("lfe_db", *lfe_db, LFE_OFF_DB, 10.0)?;
             }
+            Self::Leveler {
+                target_lufs,
+                max_gain_db,
+                max_cut_db,
+                speed_db_per_s,
+                gate_lufs,
+                ceiling_db,
+                ..
+            } => {
+                range("target_lufs", *target_lufs, -40.0, -5.0)?;
+                range("max_gain_db", *max_gain_db, 0.0, 30.0)?;
+                range("max_cut_db", *max_cut_db, 0.0, 30.0)?;
+                range("speed_db_per_s", *speed_db_per_s, 0.1, 20.0)?;
+                range("gate_lufs", *gate_lufs, -90.0, -10.0)?;
+                range("ceiling_db", *ceiling_db, -20.0, 0.0)?;
+            }
         }
         Ok(())
     }
@@ -686,6 +741,7 @@ impl ProcKind {
     pub fn latency(&self) -> usize {
         match self {
             Self::Limiter { lookahead_ms, .. } => (lookahead_ms * 48.0).round() as usize,
+            Self::Leveler { limiter: true, .. } => LEVELER_LOOKAHEAD,
             _ => 0,
         }
     }
@@ -801,6 +857,22 @@ impl ProcKind {
                 lfe_gain_db,
                 ..
             } => vec![*crossover_hz, *lfe_gain_db],
+            Self::Leveler {
+                target_lufs,
+                max_gain_db,
+                max_cut_db,
+                speed_db_per_s,
+                gate_lufs,
+                ceiling_db,
+                ..
+            } => vec![
+                *target_lufs,
+                *max_gain_db,
+                *max_cut_db,
+                *speed_db_per_s,
+                *gate_lufs,
+                *ceiling_db,
+            ],
             // Matrix nodes: the compiler computes their matrix.
             Self::Delay { .. } | Self::Auto {} | Self::Width { .. } | Self::SurroundPan { .. } => {
                 Vec::new()
@@ -853,6 +925,7 @@ impl ProcKind {
             Self::BassManagement { lfe, .. } => lfe.hash(&mut h),
             Self::Width { input, output, .. } => (input, output).hash(&mut h),
             Self::SurroundPan { layout, .. } => layout.hash(&mut h),
+            Self::Leveler { limiter, .. } => limiter.hash(&mut h),
             Self::Expander { .. } | Self::Gate { .. } | Self::Auto {} => {}
         }
         h.finish()

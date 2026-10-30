@@ -22,6 +22,13 @@
 - Faster gain steps on the DSP thread: a gain reads only its channel's ramp values instead of copying the whole node per channel (lab plan of 40 strips and 5 buses, 96 samples: 1.4.3 22.6 µs, this branch before 25.1 µs, now 22.9 µs per block).
 - Downgrade: a show is read by 1.4.3 unless a surround panner has a height (`elevation_deg` above 0, written only then) or a 5.1.4/7.1.4 layout; set those back to 0 and 5.1/7.1 before a rollback.
 - Fixed: a loudness measurement kept every 100 ms block and short-term value until it was reset (about 160 B/s per meter, and integrated loudness and LRA recomputed over the whole list at every meter tick). Both are now histograms of 0.1 LU bins (count, power and loudness sum per bin) with the same gates (absolute −70 LUFS, relative −10 LU and −20 LU, LRA 10th–95th percentile): constant memory and time. Against the old lists: tone and steps identical, noise and speech-like sequences within 0.003 LU (integrated) and 0.042 LU (LRA). `tests/loudness_memory.rs` checks 2 h of segments keep no heap (2 MB before).
+- B1: copy and paste of processing units: copy on a unit, on any chain "Paste all", one unit, or onto a unit of the same type (its parameters).
+- B2: multiband and dynamic EQ show the gain reduction of every band at all times (`band_reduction_db` in the node meters).
+- B3: new `leveler` node for buses and streams (inspired by the idea of master_me, own code): slow gain riding to a short-term loudness target, gate, max gain/cut, speed, optional 1 ms safety limiter.
+- B4: flow view below the processing chain: reorder nodes, move sends, the direct/bus out and keys to another tap by drag; outputs take a `tap`.
+- B5: surround panner spread drawn as a translucent bubble around the source that grows and drifts to the centre, at 100 % over every speaker; the dot stays at the panned position (its distance from the centre is the height, A10).
+- B6: per-send surround panner (`pan` on a send) for a mono or stereo source into a 5.1 or bigger bus, edited in the Routing tab's send editor.
+- **Downgrade:** a show that uses a send's `pan`, an output's `tap` or a `leveler` node cannot be loaded by 1.4.x (unknown fields there): a rollback to 1.4.3 keeps the file as `mix.json.bad` and starts with an empty mix unless those are removed first.
 
 ## 1.4.3 (2026-10-24)
 

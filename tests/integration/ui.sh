@@ -4,7 +4,8 @@
 # (§11.3): web/tests/logic.mjs, then the console's strip handling (1.4.0):
 # web/tests/console.mjs, and the format, down-mix and spatial nodes of 1.4.0:
 # web/tests/spatial.mjs, then the console of 1.5.0 (web/tests/console15.mjs) and
-# its MIDI control with a fake Web MIDI (web/tests/midi.mjs). Needs `npm ci` in web/
+# its MIDI control with a fake Web MIDI (web/tests/midi.mjs), and the processing items
+# of 1.5.0 (B1–B6): web/tests/dsp15.mjs. Needs `npm ci` in web/
 # and Chrome (CHROME, default /usr/bin/google-chrome). Screenshots: $IT_OUT/ui/.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -33,6 +34,7 @@ node "$ROOT/web/tests/console.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/consol
 node "$ROOT/web/tests/spatial.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/spatial.mjs"
 node "$ROOT/web/tests/console15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console15.mjs"
 node "$ROOT/web/tests/midi.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/midi.mjs"
+node "$ROOT/web/tests/dsp15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/dsp15.mjs"
 
 rc=0
 stop_mixer || rc=$?
