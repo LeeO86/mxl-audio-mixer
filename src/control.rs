@@ -825,11 +825,22 @@ impl Control {
         output_specs(&self.virtual_outputs, self.default_commit, mix)
     }
 
-    /// Refuse a mix whose published outputs or monitors take an NMOS label
-    /// (the strip, bus or monitor name) that a virtual output or another
-    /// published one already has: the designer routes by label.
+    /// Refuse a change that adds an NMOS label clash (the strip, bus or
+    /// monitor name of a published one equal to a virtual output's label or
+    /// another published one's): the designer routes by label. Clashes the
+    /// current mix already has (an old `mix.json`) do not block other changes.
     pub fn check_labels(&self, next: &Mix) -> Result<(), String> {
-        check_labels(&self.virtual_outputs, next)
+        match new_label_clash(&self.virtual_outputs, &self.mix, next) {
+            Some(c) => Err(format!("{c}; rename one")),
+            None => Ok(()),
+        }
+    }
+
+    /// The NMOS label clashes of the current mix (status, log at load).
+    pub fn current_label_clashes(&self) -> Vec<String> {
+        label_clashes(&self.virtual_outputs, &self.mix)
+            .into_iter()
+            .collect()
     }
 
     /// Solo `signal` (PFL or AFL), or end its solo; interlock replaces the others.
@@ -1571,55 +1582,102 @@ fn output_specs(
     virtual_outputs.chain(published).chain(monitors).collect()
 }
 
-/// Every NMOS sender label is used once (compared trimmed, case-sensitive).
-fn check_labels(virtual_outputs: &[crate::config::VirtualOutput], mix: &Mix) -> Result<(), String> {
+/// A clash `next` has that `now` has not.
+fn new_label_clash(
+    virtual_outputs: &[crate::config::VirtualOutput],
+    now: &Mix,
+    next: &Mix,
+) -> Option<String> {
+    let old = label_clashes(virtual_outputs, now);
+    label_clashes(virtual_outputs, next)
+        .into_iter()
+        .find(|c| !old.contains(c))
+}
+
+/// Every NMOS label used more than once (compared trimmed, case-sensitive),
+/// as "NMOS label \"X\" of <signal> is already used by <signal>".
+fn label_clashes(
+    virtual_outputs: &[crate::config::VirtualOutput],
+    mix: &Mix,
+) -> std::collections::BTreeSet<String> {
     let mut seen = std::collections::BTreeMap::new();
+    let mut clashes = std::collections::BTreeSet::new();
     for s in output_specs(virtual_outputs, 0, mix) {
         let label = s.name.trim().to_string();
-        if let Some(other) = seen.insert(label.clone(), s.signal.clone()) {
-            return Err(format!(
-                "NMOS label {label:?} of {} is already used by {other}; rename one",
+        if let Some(other) = seen.get(&label) {
+            clashes.insert(format!(
+                "NMOS label {label:?} of {} is already used by {other}",
                 s.signal
             ));
+        } else {
+            seen.insert(label, s.signal);
         }
     }
-    Ok(())
+    clashes
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn published_labels_must_not_clash() {
-        use super::check_labels;
+        use super::label_clashes;
         use crate::config::VirtualOutput;
         use crate::mix::model::{Mix, Strip};
         use crate::mix::Format;
-        let vout = VirtualOutput {
+        let vout = [VirtualOutput {
             key: None,
             label: "PGM".into(),
             format: Format::Stereo,
             id: "1".into(),
-        };
+        }];
         let mut m = Mix::default();
         m.strips.push(Strip::new("a", Format::Mono));
         m.strips.push(Strip::new("b", Format::Mono));
         m.strips[0].name = "PGM ".into();
         m.strips[1].name = "PGM".into();
-        let outputs = serde_json::from_value(serde_json::json!([{"signal": "a"}])).unwrap();
-        m.outputs = outputs;
+        m.outputs = serde_json::from_value(serde_json::json!([{"signal": "a"}])).unwrap();
         // A published strip named like a virtual output.
-        let e = check_labels(std::slice::from_ref(&vout), &m).unwrap_err();
-        assert!(e.contains("\"PGM\""), "{e}");
+        let c = label_clashes(&vout, &m);
+        assert!(c.iter().next().unwrap().contains("\"PGM\""), "{c:?}");
         // Not published: fine.
         let mut quiet = m.clone();
         quiet.outputs.clear();
-        assert!(check_labels(std::slice::from_ref(&vout), &quiet).is_ok());
+        assert!(label_clashes(&vout, &quiet).is_empty());
         // Two published strips with the same name.
         m.outputs =
             serde_json::from_value(serde_json::json!([{"signal": "a"}, {"signal": "b"}])).unwrap();
-        assert!(check_labels(&[], &m).is_err());
+        assert_eq!(label_clashes(&[], &m).len(), 1);
         m.strips[1].name = "pgm".into();
-        assert!(check_labels(&[], &m).is_ok());
+        assert!(label_clashes(&[], &m).is_empty());
+    }
+
+    #[test]
+    fn only_new_label_clashes_are_refused() {
+        use super::new_label_clash;
+        use crate::mix::model::{Mix, Strip};
+        use crate::mix::Format;
+        let mut old = Mix::default();
+        for (id, name) in [("a", "X"), ("b", "X"), ("c", "Y")] {
+            let mut s = Strip::new(id, Format::Mono);
+            s.name = name.into();
+            old.strips.push(s);
+        }
+        old.outputs =
+            serde_json::from_value(serde_json::json!([{"signal": "a"}, {"signal": "b"}])).unwrap();
+        // An unrelated change passes despite the old clash.
+        let mut next = old.clone();
+        next.strips[2].fader_db = crate::mix::model::Db(-10.0);
+        assert!(new_label_clash(&[], &old, &next).is_none());
+        // A new clash is refused.
+        next.strips[2].name = "X".into();
+        next.outputs
+            .push(serde_json::from_value(serde_json::json!({"signal": "c"})).unwrap());
+        assert!(new_label_clash(&[], &old, &next).is_some());
+        // Renaming one side clears the old clash.
+        let mut fixed = old.clone();
+        fixed.strips[1].name = "Z".into();
+        assert!(new_label_clash(&[], &old, &fixed).is_none());
+        assert!(super::label_clashes(&[], &fixed).is_empty());
     }
 
     #[test]

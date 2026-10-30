@@ -294,6 +294,9 @@ async fn run(mut config: Config) -> ExitCode {
             Err(e) => tracing::error!("saving the mix: {e}"),
         }
     }
+    for c in control.current_label_clashes() {
+        tracing::warn!("{c}: the designer cannot tell them apart; rename one");
+    }
     if let Some(target) = config.tsl_out_target.clone() {
         let (tx, rx) = tokio::sync::watch::channel(Default::default());
         control.tsl_out = Some(tx);

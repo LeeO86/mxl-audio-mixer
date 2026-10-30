@@ -554,7 +554,10 @@ an id gets `strip-<n>` or `bus-<n>`.
   defaults "Output <n>"), else the mixer does not start. A change of the mix
   that would publish an output or monitor under a virtual output's label, or
   two under one label (published outputs are labelled with the strip or bus
-  name, monitors "Monitor <name>"), is refused (400), also by a rename.
+  name, monitors "Monitor <name>"), is refused (400), also by a rename. A
+  clash an older saved mix already has does not block other changes: it is
+  logged (WARN) at the start and listed in `label_clashes` of
+  `GET /api/v1/status` until one side is renamed.
   Channels per format: mono 1, stereo 2, 3.0 3, 5.1 6, 7.1 8, 5.1.4 10,
   7.1.4 12. The list is fixed at the start (environment or
   `MIXER_CONFIG_FILE`, which is only read, never written); changing it needs a
