@@ -29,6 +29,8 @@ pass "input 1 shows what is connected: Test tone"
 [[ "$(json "$WEB/api/v1/virtual-outputs" "len(d)")" == 3 ]] || fail "three virtual outputs"
 [[ "$(json "$WEB/api/v1/virtual-outputs/3" "d['label'] + ' ' + d['format']")" == "Output 3 mono" ]] || fail "defaults of slot 3"
 [[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['slot']")" == 1 ]] || fail "PGM by its key"
+# A keyed virtual output is not listed as a published one (the graph and routing tabs filter on it).
+[[ "$(json "$WEB/api/v1/status" "sorted((o['signal'], o['virtual_output']) for o in d['outputs'] if o['signal'].startswith('vout:'))")" == "[('vout:2', 2), ('vout:3', 3), ('vout:pgm', 1)]" ]] || fail "virtual_output of the virtual outputs in the status"
 OWN=$(json "$WEB/api/v1/status" "d['mxl']['output_domain_dir']")
 PGM=$(json "$WEB/api/v1/virtual-outputs/1" "d['mxl_flow_id']")
 CLEAN=$(json "$WEB/api/v1/virtual-outputs/2" "d['mxl_flow_id']")
@@ -114,7 +116,9 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: applicati
 api PUT /api/v1/virtual-outputs/2 '{"source": {"signal": "vox"}}' >/dev/null
 curl -fsS -X DELETE "$WEB/api/v1/strips/vox"
 [[ "$(json "$WEB/api/v1/virtual-outputs/2" "d['source']")" == None ]] || fail "the deleted strip still feeds Clean"
-curl -fsS "$WEB/metrics" | grep -q '^mxl_audio_mixer_virtual_output_routed{slot="1",output="pgm",label="PGM"} 1$' || fail "metric virtual_output_routed"
+# Read once: `curl | grep -q` fails under pipefail when grep stops before curl is done.
+metrics=$(curl -fsS "$WEB/metrics")
+grep -q '^mxl_audio_mixer_virtual_output_routed{slot="1",output="pgm",label="PGM"} 1$' <<<"$metrics" || fail "metric virtual_output_routed"
 api PUT /api/v1/virtual-outputs/3 '{"source": {"input": 1, "format": "stereo"}}' >/dev/null
 pass "bad sources refused, a deleted strip leaves silence, metrics"
 

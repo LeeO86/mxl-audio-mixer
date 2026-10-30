@@ -1549,11 +1549,12 @@ fn output_specs(
     default_commit: u32,
     mix: &Mix,
 ) -> Vec<OutputSpec> {
-    let virtual_outputs = virtual_outputs.iter().map(|v| OutputSpec {
+    let virtual_outputs = virtual_outputs.iter().enumerate().map(|(i, v)| OutputSpec {
         signal: crate::mix::compile::vout_key(&v.id),
         name: v.label.clone(),
         format: v.format,
         commit: default_commit,
+        virtual_slot: Some(i + 1),
     });
     let published = mix.outputs.iter().filter_map(|o| {
         let (name, _) = mix.signal(&o.signal)?;
@@ -1566,6 +1567,7 @@ fn output_specs(
             name: name.to_string(),
             format,
             commit: o.commit_samples.unwrap_or(default_commit),
+            virtual_slot: None,
         })
     });
     let monitors = mix
@@ -1578,6 +1580,7 @@ fn output_specs(
             name: format!("Monitor {}", m.name),
             format: m.format,
             commit: default_commit,
+            virtual_slot: None,
         });
     virtual_outputs.chain(published).chain(monitors).collect()
 }

@@ -29,6 +29,8 @@ pub struct OutputSpec {
     pub name: String,
     pub format: Format,
     pub commit: u32,
+    /// The slot (1 …) of a virtual output (C7, signal `vout:<key or slot>`); `None`: published.
+    pub virtual_slot: Option<usize>,
 }
 
 struct Published {
@@ -47,7 +49,7 @@ pub struct OutputStatus {
     pub commit_samples: u32,
     pub mxl_flow_id: Uuid,
     pub nmos_sender_id: Uuid,
-    /// The slot of a virtual output (C7, signal `vout:<n>`); `null`: published.
+    /// The slot of a virtual output (C7, signal `vout:<key or slot>`); `null`: published.
     pub virtual_output: Option<usize>,
     pub blocks: u64,
     pub commits: u64,
@@ -64,14 +66,10 @@ pub fn nmos_key(signal: &str) -> String {
     format!("out-{signal}")
 }
 
-/// The slot of virtual output signal `vout:<n>`.
-pub fn virtual_slot(signal: &str) -> Option<usize> {
-    signal.strip_prefix("vout:")?.parse().ok()
-}
-
 /// The flow (`mxl`) or NMOS description of an output.
-fn describe(signal: &str, mxl: bool) -> String {
-    match (virtual_slot(signal), mxl) {
+fn describe(spec: &OutputSpec, mxl: bool) -> String {
+    let signal = &spec.signal;
+    match (spec.virtual_slot, mxl) {
         (Some(n), _) => format!("mxl-audio-mixer virtual output {n}"),
         (None, true) => format!("mxl-audio-mixer output {signal}"),
         (None, false) => format!("MXL audio output {signal}"),
@@ -167,7 +165,7 @@ impl Outputs {
             "source_id": node.resource_id(ResourceType::Source, &key).to_string(),
             "device_id": node.resource_id(ResourceType::Device, DEVICE_KEY).to_string(),
             "label": spec.name,
-            "description": describe(&spec.signal, true),
+            "description": describe(spec, true),
             "format": "urn:x-nmos:format:audio",
             "tags": {"urn:x-nmos:tag:grouphint/v1.0": [mxl_nmos::group_hint(&spec.name, "Audio")]},
             "version": "0:0",
@@ -222,7 +220,7 @@ impl Outputs {
                 symbol: Format::symbol(l).map(str::to_string),
             })
             .collect();
-        let description = describe(&spec.signal, false);
+        let description = describe(spec, false);
         let mut source = Source::audio(&key, DEVICE_KEY, channels);
         source.label = spec.name.clone();
         source.description = description.clone();
@@ -299,7 +297,7 @@ impl Outputs {
                     mxl_flow_id: p.flow,
                     nmos_sender_id: node
                         .resource_id(ResourceType::Sender, &nmos_key(&p.spec.signal)),
-                    virtual_output: virtual_slot(&p.spec.signal),
+                    virtual_output: p.spec.virtual_slot,
                     blocks: c.blocks.load(Relaxed),
                     commits: c.commits.load(Relaxed),
                     errors: c.errors.load(Relaxed),
