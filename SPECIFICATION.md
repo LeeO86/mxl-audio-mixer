@@ -640,6 +640,10 @@ input patch), remote link (§13), settings (G1, G10).
   control room). **Snapshots** = parameter states within a show, with recall filters
   (per channel/section/parameter class) and safes, crossfade time for faders.
 - Auto-save, versioned history, export/import (G10).
+- Saved state of a newer version (a rollback) loads without what this version does
+  not know: unknown fields and entries of unknown types are dropped and reported
+  (`load_warnings` in the status, a UI banner), the original file is kept
+  (`mix.json.newer`). The API stays strict (D279).
 
 ### 12.6 Widgets for operator screens
 

@@ -258,9 +258,20 @@ async fn run(mut config: Config) -> ExitCode {
     // The mix of the last run, with its published outputs, before the IS-05
     // connections (of their senders) are restored.
     let mix_path = config.state_dir.join("mix.json");
-    let saved_mix = control::load_mix(&mix_path);
+    let (saved_mix, dropped) = control::load_mix(&mix_path);
     let staged = match control.stage(saved_mix, 0) {
-        Ok(s) => s,
+        Ok(s) => {
+            if !dropped.is_empty() {
+                let kept = control::keep_newer(&mix_path)
+                    .map_or_else(|e| format!("not kept: {e}"), |p| p.display().to_string());
+                tracing::warn!(
+                    "the saved mix came from a newer version; loaded without what this version does not know (original: {kept}); dropped: {}",
+                    dropped.join(", ")
+                );
+                control.load_warnings = dropped;
+            }
+            s
+        }
         Err(e) => {
             let bad = mix_path.with_extension("json.bad");
             tracing::error!(

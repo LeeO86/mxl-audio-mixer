@@ -298,21 +298,29 @@ async fn delete_version(State(app): State<App>, Path(id): Path<String>) -> Respo
 /// Load a version as the show. The show before it is kept as a version first.
 async fn restore(State(app): State<App>, Path(id): Path<String>) -> Response {
     run(async {
-        let mix = {
+        let (mix, dropped) = {
             let control = app.control();
-            let mix = control.history.get(&id).map_err(not_found)?;
+            let (mix, dropped) = control.history.load(&id).map_err(not_found)?;
             control
                 .history
                 .record(&control.mix, None)
                 .map_err(internal)?;
-            mix
+            (mix, dropped)
         };
         let errors = apply(&app, crate::engine::FADE_SAMPLES, |m| {
             *m = mix;
             Ok(())
         })
         .await?;
-        Ok(Json(with_errors(json!({"restored": id}), errors)).into_response())
+        let mut out = json!({"restored": id});
+        if !dropped.is_empty() {
+            tracing::warn!(
+                "show history version {id} came from a newer version; dropped: {}",
+                dropped.join(", ")
+            );
+            out["dropped"] = json!(dropped);
+        }
+        Ok(Json(with_errors(out, errors)).into_response())
     })
     .await
 }

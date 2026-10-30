@@ -71,6 +71,9 @@ const load = computed(() => live.status?.dsp?.load_ratio ?? null);
 const missingInputs = computed(() => (live.status?.inputs || []).filter((i) => i.state !== "running" && i.state !== "unrouted").length);
 const outputErrors = computed(() => (live.status?.outputs || []).reduce((n, o) => n + (o.errors || 0), 0));
 const masterLost = computed(() => live.status?.link?.role === "slave" && live.status?.link?.seen && !live.status?.link?.up);
+// What loading the saved show dropped because a newer version wrote it (D279); dismissed per page load.
+const loadWarnings = computed(() => live.status?.load_warnings || []);
+const loadDismissed = ref(false);
 const takeoverDenied = computed(() => masterLost.value && settingValue("MIXER_LINK_TAKEOVER") === "deny");
 
 onMounted(() => {
@@ -106,6 +109,11 @@ onUnmounted(() => {
   <div v-else-if="live.everConnected && !live.connected" class="banner warn">Live updates lost. Reconnecting; values refresh every 2 s meanwhile.</div>
   <div v-if="ready && !ready.timing_trusted" class="banner bad">Timing is not trusted: the kernel TAI offset is not set. Blocks may be scheduled on the wrong clock.</div>
   <div v-if="masterLost" class="banner warn">Master lost. The far-side mix is held.<template v-if="takeoverDenied"> Local changes are refused until the master is back.</template></div>
+  <div v-if="loadWarnings.length && !loadDismissed" class="banner warn load-warnings">
+    The saved show came from a newer version; dropped: {{ loadWarnings.join(", ") }}
+    <span class="spacer"></span>
+    <button class="btn small secondary" @click="loadDismissed = true">Dismiss</button>
+  </div>
   <div v-if="live.actionError" class="banner bad">
     {{ live.actionError }}
     <span class="spacer"></span>

@@ -106,13 +106,23 @@ impl History {
         }
     }
 
-    fn read(&self, id: &str) -> Result<File, String> {
+    /// A version, with what was dropped from its mix: one a newer version
+    /// kept loads without what this one does not know (D279).
+    fn read(&self, id: &str) -> Result<(File, Vec<String>), String> {
         if !valid_id(id) {
             return Err(format!("version {id} does not exist"));
         }
         let path = self.dir.join(format!("{id}.json"));
         let bytes = std::fs::read(&path).map_err(|_| format!("version {id} does not exist"))?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+        let err = |e: String| format!("{}: {e}", path.display());
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| err(e.to_string()))?;
+        let (mix, dropped) = crate::mix::tolerant::mix(v["mix"].take()).map_err(err)?;
+        // Every field of a mix has a default; the parsed one goes in below.
+        v["mix"] = serde_json::json!({});
+        let mut file: File = serde_json::from_value(v).map_err(|e| err(e.to_string()))?;
+        file.mix = mix;
+        Ok((file, dropped))
     }
 
     /// Every version, newest first.
@@ -124,7 +134,7 @@ impl History {
             .filter_map(|e| {
                 let name = e.file_name().into_string().ok()?;
                 let id = name.strip_suffix(".json")?;
-                let f = self.read(id).ok()?;
+                let (f, _) = self.read(id).ok()?;
                 Some(Entry {
                     id: id.to_string(),
                     time_ms: f.time_ms,
@@ -140,7 +150,12 @@ impl History {
     }
 
     pub fn get(&self, id: &str) -> Result<Mix, String> {
-        self.read(id).map(|f| f.mix)
+        self.load(id).map(|(mix, _)| mix)
+    }
+
+    /// A version's mix and what was dropped from it (D279).
+    pub fn load(&self, id: &str) -> Result<(Mix, Vec<String>), String> {
+        self.read(id).map(|(f, dropped)| (f.mix, dropped))
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
@@ -212,6 +227,29 @@ mod tests {
         assert!(h.get("../mix").is_err());
         h.delete(&named).unwrap();
         assert!(h.get(&named).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_version_of_a_newer_mixer_loads_without_what_is_unknown() {
+        let dir = std::env::temp_dir().join(format!("mixer-history-newer-{}", now_ms()));
+        let h = History::new(&dir);
+        let mut mix = Mix::default();
+        mix.strips.push(crate::mix::model::Strip::new(
+            "vox",
+            crate::mix::Format::Mono,
+        ));
+        let id = h.record(&mix, Some("v".into())).unwrap();
+        let path = dir.join("history").join(format!("{id}.json"));
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["mix"]["strips"][0]["chain"] = serde_json::json!([{"id": "x", "type": "future"}]);
+        std::fs::write(&path, v.to_string()).unwrap();
+        assert_eq!(
+            h.load(&id).unwrap(),
+            (mix, vec!["strips[0].chain[0]".to_string()])
+        );
+        assert_eq!(h.list().len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
