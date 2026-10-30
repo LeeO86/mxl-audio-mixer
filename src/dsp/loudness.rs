@@ -12,6 +12,12 @@
 //!
 //! The 10 ms step lets the maximum of momentary loudness be found within 10 ms
 //! (EBU Tech 3341 cases 13 and 14).
+//!
+//! The blocks and short-term values are kept in histograms of 0.1 LU bins above
+//! the absolute gate ([`Histogram`]), with their count, power sum and loudness
+//! sum per bin: constant memory and time, however long a measurement runs. Only
+//! the bin holding a relative gate is decided as a whole (by its mean), and the
+//! range's percentiles take the mean of their bin.
 
 use crate::dsp::biquad::{Coefficients, State};
 
@@ -156,9 +162,108 @@ pub struct Loudness {
     recent: std::collections::VecDeque<f64>,
     last: Option<u64>,
     pub running: bool,
-    blocks: Vec<f64>,
-    short_terms: Vec<f64>,
+    blocks: Histogram,
+    short_terms: Histogram,
     pub max_true_peak: f32,
+}
+
+/// Bins of [`BIN_LU`] from the absolute gate (−70 LUFS) up to +30 LUFS; louder
+/// values share the top bin.
+const BIN_LU: f64 = 0.1;
+const BINS: usize = 1000;
+const ABSOLUTE_GATE: f64 = -70.0;
+
+/// The values above the absolute gate: per bin their count, power sum and
+/// loudness sum.
+#[derive(Debug, Clone)]
+struct Histogram {
+    count: Box<[u64]>,
+    power: Box<[f64]>,
+    lufs: Box<[f64]>,
+    n: u64,
+    total: f64,
+}
+
+impl Default for Histogram {
+    fn default() -> Self {
+        Self {
+            count: vec![0; BINS].into(),
+            power: vec![0.0; BINS].into(),
+            lufs: vec![0.0; BINS].into(),
+            n: 0,
+            total: 0.0,
+        }
+    }
+}
+
+impl Histogram {
+    fn push(&mut self, p: f64) {
+        let l = lufs(p);
+        if l <= ABSOLUTE_GATE {
+            return;
+        }
+        let bin = (((l - ABSOLUTE_GATE) / BIN_LU) as usize).min(BINS - 1);
+        self.count[bin] += 1;
+        self.power[bin] += p;
+        self.lufs[bin] += l;
+        self.n += 1;
+        self.total += p;
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The bins above the relative gate `offset` LU under the mean power of
+    /// everything above the absolute gate: (bin, count); a bin counts when its
+    /// mean loudness is above the gate.
+    fn gated(&self, offset: f64) -> impl Iterator<Item = (usize, u64)> + '_ {
+        let gate = if self.n == 0 {
+            f64::INFINITY
+        } else {
+            lufs(self.total / self.n as f64) + offset
+        };
+        (0..BINS)
+            .filter(move |&b| self.count[b] > 0 && self.lufs[b] / self.count[b] as f64 > gate)
+            .map(|b| (b, self.count[b]))
+    }
+
+    /// Gated integrated loudness (BS.1770-4: relative gate −10 LU).
+    fn integrated(&self) -> f64 {
+        let (n, p) = self
+            .gated(-10.0)
+            .fold((0, 0.0), |(n, p), (b, c)| (n + c, p + self.power[b]));
+        if n == 0 {
+            return f64::NEG_INFINITY;
+        }
+        lufs(p / n as f64)
+    }
+
+    /// Loudness range (EBU Tech 3342: relative gate −20 LU, 95th minus 10th
+    /// percentile, interpolated between ranks).
+    fn range(&self) -> f64 {
+        let n: u64 = self.gated(-20.0).map(|(_, c)| c).sum();
+        if n < 2 {
+            return 0.0;
+        }
+        // The value of rank `k` (0-based): the mean loudness of its bin.
+        let at = |k: u64| {
+            let mut seen = 0;
+            for (b, c) in self.gated(-20.0) {
+                seen += c;
+                if k < seen {
+                    return self.lufs[b] / c as f64;
+                }
+            }
+            f64::NAN
+        };
+        let pct = |q: f64| {
+            let pos = q * (n - 1) as f64;
+            let (lo, hi) = (pos.floor() as u64, pos.ceil() as u64);
+            at(lo) + (at(hi) - at(lo)) * (pos - lo as f64)
+        };
+        pct(0.95) - pct(0.10)
+    }
 }
 
 /// The values of a measurement, in LUFS (LRA in LU, true peak in dBTP).
@@ -237,52 +342,10 @@ impl Loudness {
         Values {
             momentary: lufs(self.mean(MOMENTARY)),
             short_term: lufs(self.mean(SHORT_TERM)),
-            integrated: integrated(&self.blocks),
-            range: range(&self.short_terms),
+            integrated: self.blocks.integrated(),
+            range: self.short_terms.range(),
         }
     }
-}
-
-/// Gated integrated loudness of 400 ms block powers.
-pub fn integrated(blocks: &[f64]) -> f64 {
-    let abs: Vec<f64> = blocks
-        .iter()
-        .copied()
-        .filter(|p| lufs(*p) > -70.0)
-        .collect();
-    if abs.is_empty() {
-        return f64::NEG_INFINITY;
-    }
-    let gate = lufs(abs.iter().sum::<f64>() / abs.len() as f64) - 10.0;
-    let rel: Vec<f64> = abs.into_iter().filter(|p| lufs(*p) > gate).collect();
-    if rel.is_empty() {
-        return f64::NEG_INFINITY;
-    }
-    lufs(rel.iter().sum::<f64>() / rel.len() as f64)
-}
-
-/// Loudness range (EBU Tech 3342) of short-term powers.
-pub fn range(short_terms: &[f64]) -> f64 {
-    let abs: Vec<f64> = short_terms
-        .iter()
-        .copied()
-        .filter(|p| lufs(*p) > -70.0)
-        .collect();
-    if abs.is_empty() {
-        return 0.0;
-    }
-    let gate = lufs(abs.iter().sum::<f64>() / abs.len() as f64) - 20.0;
-    let mut rel: Vec<f64> = abs.into_iter().map(lufs).filter(|l| *l > gate).collect();
-    if rel.len() < 2 {
-        return 0.0;
-    }
-    rel.sort_by(f64::total_cmp);
-    let pct = |q: f64| {
-        let pos = q * (rel.len() - 1) as f64;
-        let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
-        rel[lo] + (rel[hi] - rel[lo]) * (pos - lo as f64)
-    };
-    pct(0.95) - pct(0.10)
 }
 
 /// The power of `lufs`, for tests and targets.
@@ -294,6 +357,49 @@ pub fn lufs_power(l: f64) -> f64 {
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    // The list-based gating of 1.4.3 and before, the reference.
+    /// Gated integrated loudness of 400 ms block powers.
+    fn integrated(blocks: &[f64]) -> f64 {
+        let abs: Vec<f64> = blocks
+            .iter()
+            .copied()
+            .filter(|p| lufs(*p) > -70.0)
+            .collect();
+        if abs.is_empty() {
+            return f64::NEG_INFINITY;
+        }
+        let gate = lufs(abs.iter().sum::<f64>() / abs.len() as f64) - 10.0;
+        let rel: Vec<f64> = abs.into_iter().filter(|p| lufs(*p) > gate).collect();
+        if rel.is_empty() {
+            return f64::NEG_INFINITY;
+        }
+        lufs(rel.iter().sum::<f64>() / rel.len() as f64)
+    }
+
+    /// Loudness range (EBU Tech 3342) of short-term powers.
+    fn range(short_terms: &[f64]) -> f64 {
+        let abs: Vec<f64> = short_terms
+            .iter()
+            .copied()
+            .filter(|p| lufs(*p) > -70.0)
+            .collect();
+        if abs.is_empty() {
+            return 0.0;
+        }
+        let gate = lufs(abs.iter().sum::<f64>() / abs.len() as f64) - 20.0;
+        let mut rel: Vec<f64> = abs.into_iter().map(lufs).filter(|l| *l > gate).collect();
+        if rel.len() < 2 {
+            return 0.0;
+        }
+        rel.sort_by(f64::total_cmp);
+        let pct = |q: f64| {
+            let pos = q * (rel.len() - 1) as f64;
+            let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+            rel[lo] + (rel[hi] - rel[lo]) * (pos - lo as f64)
+        };
+        pct(0.95) - pct(0.10)
+    }
 
     /// Feed `signal` (per channel) through a segment meter in 96-sample blocks,
     /// starting at sample index 0, into a measurement.
@@ -443,6 +549,153 @@ mod tests {
             assert!(
                 close(v.range, lra, 1.0),
                 "LRA {} not {lra}: {steps_:?}",
+                v.range
+            );
+        }
+    }
+
+    /// A deterministic generator: uniform in [0, 1).
+    fn uniform(seed: &mut u64) -> f64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*seed >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// The histogram against the list-based reference, on block (or short-term)
+    /// loudness sequences: the largest differences of I and LRA.
+    fn compare(levels: &[f64]) -> (f64, f64) {
+        let powers: Vec<f64> = levels.iter().map(|l| power(*l)).collect();
+        let mut h = Histogram::default();
+        for p in &powers {
+            h.push(*p);
+        }
+        let d = |a: f64, b: f64| if a == b { 0.0 } else { (a - b).abs() };
+        (
+            d(h.integrated(), integrated(&powers)),
+            d(h.range(), range(&powers)),
+        )
+    }
+
+    #[test]
+    fn histogram_gating_matches_the_lists() {
+        let mut seed = 7;
+        let mut cases: Vec<(&str, Vec<f64>)> = vec![
+            ("tone", vec![-23.0; 600]),
+            (
+                "steps",
+                [-36.0, -23.0, -36.0, -72.0, -20.0, -26.0]
+                    .iter()
+                    .flat_map(|l| std::iter::repeat_n(*l, 200))
+                    .collect(),
+            ),
+            ("silence", vec![-120.0; 100]),
+            ("one value", vec![-30.0]),
+        ];
+        cases.push((
+            "uniform −80…0",
+            (0..20_000)
+                .map(|_| -80.0 + 80.0 * uniform(&mut seed))
+                .collect(),
+        ));
+        cases.push((
+            "speech-like",
+            (0..36_000)
+                .map(|_| {
+                    // About normal (sum of 4 uniforms) around −24 LUFS, σ ≈ 6 LU, with pauses.
+                    let n: f64 = (0..4).map(|_| uniform(&mut seed)).sum::<f64>() - 2.0;
+                    if uniform(&mut seed) < 0.2 {
+                        -90.0
+                    } else {
+                        -24.0 + 10.4 * n
+                    }
+                })
+                .collect(),
+        ));
+        cases.push((
+            "ramp",
+            (0..10_000)
+                .map(|k| -60.0 + 50.0 * k as f64 / 10_000.0)
+                .collect(),
+        ));
+        for (what, levels) in &cases {
+            let (di, dr) = compare(levels);
+            eprintln!("{what}: I differs by {di:.4}, LRA by {dr:.4}");
+            assert!(
+                di <= 0.05 && dr <= 0.05,
+                "{what}: I differs by {di}, LRA by {dr}"
+            );
+        }
+    }
+
+    /// Signals through the whole pipeline, against the lists of the same blocks
+    /// and short-term values.
+    #[test]
+    fn signals_match_the_lists() {
+        let mut seed = 3;
+        let noise: Vec<f32> = (0..48_000 * 40)
+            .map(|k| {
+                // Pink-ish enough: white noise whose level changes every second.
+                let level = 0.05 + 0.2 * ((k / 48_000) % 7) as f64 / 7.0;
+                (level * (uniform(&mut seed) - 0.5)) as f32
+            })
+            .collect();
+        for (what, signal) in [
+            ("tone", steps(2, &[(30.0, -23.0)])),
+            (
+                "steps",
+                steps(
+                    2,
+                    &[(10.0, -36.0), (20.0, -23.0), (10.0, -50.0), (10.0, -18.0)],
+                ),
+            ),
+            ("noise", vec![noise.clone(), noise]),
+        ] {
+            let l = measure(&signal, &["L", "R"]);
+            // The reference lists, from the same segment powers.
+            let (mut meter, mut rx) = SegmentMeter::new(2);
+            let w = weights(&["L", "R"]);
+            let mut recent: Vec<f64> = Vec::new();
+            let (mut blocks, mut shorts) = (Vec::new(), Vec::new());
+            let mut start = 0;
+            while start + 96 <= signal[0].len() {
+                for (c, ch) in signal.iter().enumerate() {
+                    meter.feed(start as u64, c, &ch[start..start + 96]);
+                }
+                while let Ok(s) = rx.pop() {
+                    recent.push(
+                        w.iter()
+                            .zip(s.energy.iter())
+                            .map(|(g, e)| g * e / SEGMENT as f64)
+                            .sum(),
+                    );
+                    if (s.index + 1).is_multiple_of(STEP as u64) {
+                        let mean =
+                            |n: usize| recent[recent.len() - n..].iter().sum::<f64>() / n as f64;
+                        if recent.len() >= MOMENTARY {
+                            blocks.push(mean(MOMENTARY));
+                        }
+                        if recent.len() >= SHORT_TERM {
+                            shorts.push(mean(SHORT_TERM));
+                        }
+                    }
+                }
+                start += 96;
+            }
+            let v = l.values();
+            let (i, r) = (integrated(&blocks), range(&shorts));
+            eprintln!(
+                "{what}: I {:.4} / {i:.4}, LRA {:.4} / {r:.4}",
+                v.integrated, v.range
+            );
+            assert!(
+                (v.integrated - i).abs() <= 0.05,
+                "{what}: I {} vs {i}",
+                v.integrated
+            );
+            assert!(
+                (v.range - r).abs() <= 0.05,
+                "{what}: LRA {} vs {r}",
                 v.range
             );
         }

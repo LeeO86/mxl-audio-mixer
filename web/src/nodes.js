@@ -159,11 +159,12 @@ export const NODE_TYPES = {
   "surround-pan": {
     label: "Surround panner",
     group: "Spatial",
-    help: "A mono or stereo strip into 5.1 or 7.1: replaces the stereo panner (after the fader), so its post-pan sends feed surround buses.",
-    make: () => ({ type: "surround-pan", layout: "5.1", azimuth_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 }),
+    help: "A mono or stereo strip into 5.1, 7.1, 5.1.4 or 7.1.4: replaces the stereo panner (after the fader), so its post-pan sends feed surround buses. Height lifts it into the top speakers (5.1.4, 7.1.4).",
+    make: () => ({ type: "surround-pan", layout: "5.1", azimuth_deg: 0, elevation_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 }),
     fields: [
-      { key: "layout", label: "Layout", options: [["5.1", "5.1"], ["7.1", "7.1"]] },
+      { key: "layout", label: "Layout", options: [["5.1", "5.1"], ["7.1", "7.1"], ["5.1.4", "5.1.4"], ["7.1.4", "7.1.4"]] },
       { key: "azimuth_deg", label: "Position", min: -180, max: 180, def: 0, fine: 0.5, digits: 0, unit: "°" },
+      { key: "elevation_deg", label: "Height", min: 0, max: 90, def: 0, fine: 0.5, digits: 0, unit: "° (90: top)", when: (n) => HEIGHT_LAYOUTS.has(n.layout) },
       { key: "spread_pct", label: "Spread", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "%" },
       { key: "divergence_pct", label: "Divergence", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "% (C into L/R)" },
       { key: "lfe_db", label: "LFE", min: -100, max: 10, def: -100, fine: 0.5, unit: "dB (−100: off)" },
@@ -208,6 +209,9 @@ export const BAND_TYPES = [
   ["high-pass", "High-pass"],
   ["low-pass", "Low-pass"],
 ];
+
+/** Surround panner layouts with a top layer (A10): its height control shows. */
+export const HEIGHT_LAYOUTS = new Set(["5.1.4", "7.1.4"]);
 
 /** EQ band types with a slope instead of gain and Q (high- and low-pass, D4). */
 export const PASS_BANDS = new Set(["high-pass", "low-pass"]);

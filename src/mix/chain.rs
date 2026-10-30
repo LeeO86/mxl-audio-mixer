@@ -88,6 +88,8 @@ pub enum StereoMode {
 
 /// Longest position of the surround panner, ± degrees.
 pub const MAX_AZIMUTH_DEG: f64 = 180.0;
+/// Highest position of the surround panner (straight up), degrees.
+pub const MAX_ELEVATION_DEG: f64 = 90.0;
 /// The surround panner's LFE level at or below this is off.
 pub const LFE_OFF_DB: f64 = -100.0;
 
@@ -289,14 +291,19 @@ pub enum ProcKind {
         #[serde(default)]
         output: StereoMode,
     },
-    /// Surround panner (D5) of a mono or stereo strip into `layout` (5.1 or
-    /// 7.1): it replaces the strip's stereo panner, so its post-pan tap (and every
-    /// send from there) has `layout`'s channels. Position (0° front centre,
-    /// negative left, ±180° behind), spread over all speakers, centre divergence
-    /// into L and R, and the LFE send.
+    /// Surround panner (D5) of a mono or stereo strip into `layout` (5.1, 7.1,
+    /// 5.1.4 or 7.1.4): it replaces the strip's stereo panner, so its post-pan
+    /// tap (and every send from there) has `layout`'s channels. Position (0°
+    /// front centre, negative left, ±180° behind), height (0° in the bed, 90° in
+    /// the top layer; height layouts only, A10), spread over all speakers,
+    /// centre divergence into L and R, and the LFE send.
     SurroundPan {
         layout: super::format::Format,
         azimuth_deg: f64,
+        /// Left out at 0, so a show without height loads in 1.4.3
+        /// (`deny_unknown_fields`).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        elevation_deg: f64,
         #[serde(default)]
         spread_pct: f64,
         #[serde(default)]
@@ -321,6 +328,10 @@ pub enum ProcKind {
         #[serde(default = "leveler_ceiling")]
         ceiling_db: f64,
     },
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn lfe_off() -> f64 {
@@ -660,14 +671,22 @@ impl ProcKind {
             Self::SurroundPan {
                 layout,
                 azimuth_deg,
+                elevation_deg,
                 spread_pct,
                 divergence_pct,
                 lfe_db,
             } => {
                 use super::format::Format;
-                if !matches!(layout, Format::Surround51 | Format::Surround71) {
-                    return Err("a surround panner's layout is 5.1 or 7.1".into());
+                if !matches!(
+                    layout,
+                    Format::Surround51
+                        | Format::Surround71
+                        | Format::Surround514
+                        | Format::Surround714
+                ) {
+                    return Err("a surround panner's layout is 5.1, 7.1, 5.1.4 or 7.1.4".into());
                 }
+                range("elevation_deg", *elevation_deg, 0.0, MAX_ELEVATION_DEG)?;
                 range(
                     "azimuth_deg",
                     *azimuth_deg,

@@ -97,9 +97,10 @@ try {
     return f !== -2 && (f === "-inf" || f < -2) ? f : null;
   });
   pass(`fader: arrow keys to −2 dB, then dragged to ${dragged} dB; the second client follows`);
-  await page.locator('[data-signal="vox"] .sends input[type="range"]').first().fill("-6");
-  await until("send vox → main at −6 dB", async () => (await api("/api/v1/sends/vox/main")).gain_db === -6);
-  pass("send level from the strip");
+  // The strip shows its send levels (A6); they change in Routing.
+  await api("/api/v1/sends/vox/main", { method: "PUT", headers: JSON_HEADERS, body: JSON.stringify({ gain_db: -6 }) });
+  await page.locator('[data-signal="vox"] .sendval[data-send="main"] .num', { hasText: "−6.0" }).waitFor({ timeout: 3000 });
+  pass("send level on the strip");
   await page.screenshot({ path: `${out}/console.png` });
 
   // Processing: open vox, add an EQ from the palette, drag its band handle up.

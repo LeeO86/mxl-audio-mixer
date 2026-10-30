@@ -2,11 +2,31 @@
 
 ## Unreleased — 1.5.0
 
+- D1: a fader position block has a threshold (`threshold_db`, −120 to +15 dB, default 0 dB; the "High at" column left of Value): where it feeds an on/off input (also through macro ports) it is on from that position (before: from 0.5 dB); without a signal it is off.
+- Upgrade: a fader feeding an on/off input is now on from 0 dB (was +0.5 dB); check live graphs with faders at 0 dB.
+- D2: "Copy logic to" copies all blocks and cables of a graph into a new graph (dry run) or into an existing graph (below its blocks, one undo step there). Copy and paste rename only the block ids that clash (before: every pasted block got a new id).
+- D3: HTTP webhook and TSL tally out drop onto the canvas like every block (they asked first, away from the drop, and were never made); a webhook's URL may be empty (inert, amber) until typed in the list, a TSL out starts without an index (`null`, inert, amber). Two `tsl-out` blocks of the show on one index are marked with a warning (not refused).
+- Fixed: a memory leak of about 16 kB/s per Silero VAD (test-all: OOM at the 1 GiB limit about every 2.75 h, since 1.3.0). `ort` 2.0.0-rc.14 leaks an `OrtTypeInfo` (about 290 bytes) for every output tensor it creates itself, two per inference (31 per second per detector). The two outputs are now preallocated once and reused. `tests/silero_memory.rs` checks that 3750 inferences keep no heap (2.2 MB before).
+- A1: the browser tab's title names the tab and the node ("Console – <label> – MXL Audio Mixer").
+- A2: strips of 7.1 and wider are wider (124 px) and their meter bars narrower, so the fader stays usable; the strip meter only shows whether there is signal.
+- A3: a muted strip's meter still shows its level (it now reads after the fader and before the mute), grey instead of green.
+- A4: the gear and ⋮ sit in the format row ("mono ⚙ ⋮"); the name has the strip's full width.
+- A5: a click on the fader value types a level (0, -20, -inf), Enter applies, Escape keeps it.
+- A6: the strip shows its send levels only (no send faders); a click opens Routing.
+- A7: MIDI control from the browser (Web MIDI, https or localhost): Mackie Control (banks of 8, motor faders, mute, solo, select, V-pot pan, master, display; extender) and generic MIDI learn (fader, mute, PFL, AFL, pan; kept per browser, export/import JSON).
+- A8: a strip with a surround panner shows where it pans (speaker ring with the source) and moves it by drag; a mono or stereo strip sending to a surround bus offers "+ Surround pan".
+- A9: meters above 3 channels have narrower bars with the channel labels (L R C LFE …) below, a little less tall.
+- A10: the surround panner pans into 5.1.4 and 7.1.4 too, with a height (`elevation_deg` 0–90: bed to top layer); front/rear on the strip's picture, height on the strip. A plan node holds up to 24 values (a stereo strip into 7.1.4).
+- A3 behaviour change for the platform: the metric `mxl_audio_mixer_true_peak_dbtp{signal}` and `GET /api/v1/meters` (also the far side's meters over the remote link) read a muted strip's level now, not silence. Logic Level and Above blocks still read a muted strip (its mute, a muted VCA, a mute group) as silent.
+- Fixed: the meter tick no longer runs back-to-back after a late tick (missed ticks are delayed); the second read found the peaks empty, so wide signals flickered to −∞ and logic level blocks saw false edges.
+- Faster gain steps on the DSP thread: a gain reads only its channel's ramp values instead of copying the whole node per channel (lab plan of 40 strips and 5 buses, 96 samples: 1.4.3 22.6 µs, this branch before 25.1 µs, now 22.9 µs per block).
+- Downgrade: a show is read by 1.4.3 unless a surround panner has a height (`elevation_deg` above 0, written only then) or a 5.1.4/7.1.4 layout; set those back to 0 and 5.1/7.1 before a rollback.
+- Fixed: a loudness measurement kept every 100 ms block and short-term value until it was reset (about 160 B/s per meter, and integrated loudness and LRA recomputed over the whole list at every meter tick). Both are now histograms of 0.1 LU bins (count, power and loudness sum per bin) with the same gates (absolute −70 LUFS, relative −10 LU and −20 LU, LRA 10th–95th percentile): constant memory and time. Against the old lists: tone and steps identical, noise and speech-like sequences within 0.003 LU (integrated) and 0.042 LU (LRA). `tests/loudness_memory.rs` checks 2 h of segments keep no heap (2 MB before).
 - B1: copy and paste of processing units: copy on a unit, on any chain "Paste all", one unit, or onto a unit of the same type (its parameters).
 - B2: multiband and dynamic EQ show the gain reduction of every band at all times (`band_reduction_db` in the node meters).
 - B3: new `leveler` node for buses and streams (inspired by the idea of master_me, own code): slow gain riding to a short-term loudness target, gate, max gain/cut, speed, optional 1 ms safety limiter.
 - B4: flow view below the processing chain: reorder nodes, move sends, the direct/bus out and keys to another tap by drag; outputs take a `tap`.
-- B5: surround panner spread drawn as a bubble that moves to the centre and grows, at 100 % over every speaker.
+- B5: surround panner spread drawn as a translucent bubble around the source that grows and drifts to the centre, at 100 % over every speaker; the dot stays at the panned position (its distance from the centre is the height, A10).
 - B6: per-send surround panner (`pan` on a send) for a mono or stereo source into a 5.1 or bigger bus, edited in the Routing tab's send editor.
 - **Downgrade:** a show that uses a send's `pan`, an output's `tap` or a `leveler` node cannot be loaded by 1.4.x (unknown fields there): a rollback to 1.4.3 keeps the file as `mix.json.bad` and starts with an empty mix unless those are removed first.
 

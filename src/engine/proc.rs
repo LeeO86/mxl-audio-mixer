@@ -1605,7 +1605,7 @@ mod tests {
         matrix("width (2 × 2)", 2, width, false);
         use crate::mix::format::Format;
         let pan = |layout, inputs| {
-            crate::mix::spatial::surround_pan(layout, inputs, 40.0, 20.0, 30.0, -10.0)
+            crate::mix::spatial::surround_pan(layout, inputs, 40.0, 20.0, 30.0, -10.0, 0.0)
         };
         matrix(
             "surround pan mono → 5.1",
@@ -1617,6 +1617,12 @@ mod tests {
             "surround pan stereo → 7.1",
             2,
             pan(Format::Surround71, 2),
+            false,
+        );
+        matrix(
+            "surround pan stereo → 7.1.4",
+            2,
+            pan(Format::Surround714, 2),
             false,
         );
         let laws = crate::mix::format::Laws::default();

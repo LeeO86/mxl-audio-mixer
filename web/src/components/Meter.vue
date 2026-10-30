@@ -1,6 +1,8 @@
 <script setup>
 // A signal's meter (§7): one bar per channel on the chosen scale (dBFS sample peak, true peak, or a PPM
 // scale), the peak hold (click the readout to clear it), and the RMS as an inner bar on the dBFS scales.
+// Above 3 channels the bars are narrower and the channel labels (L R C LFE …) stand below them (A9). A
+// muted signal's level shows grey (A3).
 import { computed } from "vue";
 import { SCALES, scaleFraction, scaleLevel } from "../dsp.js";
 import { api, dbValue, fmtDb } from "../api.js";
@@ -13,10 +15,14 @@ const props = defineProps({
   scale: { type: String, default: "dbfs" },
   alignment: { type: Number, default: -18 },
   marks: { type: Boolean, default: true },
+  labels: { type: Array, default: () => [] }, // the channel labels, below the bars above 3 channels
+  muted: { type: Boolean, default: false },
 });
 
 const s = computed(() => SCALES[props.scale] || SCALES.dbfs);
 const chans = computed(() => Array.from({ length: props.channels }, (_, c) => c));
+const wide = computed(() => props.channels > 3);
+const label = (c) => props.labels[c] || String(c + 1);
 const level = (c) => scaleLevel(props.scale, props.values, c, props.alignment);
 const height = (c) => `${scaleFraction(props.scale, level(c)) * 100}%`;
 const digital = computed(() => !s.value.rel);
@@ -44,9 +50,9 @@ function clear() {
 </script>
 
 <template>
-  <div class="meter" :title="`${s.label}; peak hold ${fmtDb(maxHold)} dBFS (click to clear)`">
+  <div class="meter" :class="{ wide, muted }" :title="`${s.label}; peak hold ${fmtDb(maxHold)} dBFS (click to clear)${muted ? '; muted' : ''}`">
     <div class="bars">
-      <div v-for="c in chans" :key="c" class="bar">
+      <div v-for="c in chans" :key="c" class="bar" :title="wide ? label(c) : undefined">
         <span v-if="digital" class="rms" :style="{ height: rms(c) }"></span>
         <span class="lvl" :class="zone(c)" :style="{ height: height(c) }"></span>
         <span class="hold" :style="{ bottom: holdPos(c) }"></span>
@@ -54,6 +60,9 @@ function clear() {
       <div v-if="marks" class="marks">
         <span v-for="[d, t] in s.marks" :key="t" :style="{ bottom: markPos(d) }">{{ t }}</span>
       </div>
+    </div>
+    <div v-if="wide && labels.length" class="chlabels" :class="{ marked: marks }" aria-hidden="true">
+      <span v-for="c in chans" :key="c">{{ label(c) }}</span>
     </div>
     <button class="holdval num" :class="{ over: maxHold > -1 }" :aria-label="`Clear the peak hold of ${signal}`" @click="clear">{{ fmtDb(maxHold) }}</button>
   </div>

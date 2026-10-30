@@ -43,7 +43,16 @@ once with numbered names; the first new one is selected. A stereo or wider strip
 input patch is linked by default: choose the first channel and the others follow
 in order on the same input (untick "Link" to choose each). Wider strips have one
 polarity button that opens a toggle per channel and shows how many are inverted.
-"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile), **Processing**
+"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile. The name has the
+strip's width; the format, the gear and the ⋮ menu share the row below it. A click
+on the fader value types a level (`0`, `-20`, `-inf`; Enter applies, Escape keeps
+it). The sends show their levels; a click opens Routing. A muted strip's meter still
+shows its level, grey. Strips of 8 or more channels are wider, with narrow meter
+bars. A mono or stereo strip with a surround panner shows a top view of its layout
+with the source: drag on it to move the source (left/right, front/rear); on 5.1.4
+and 7.1.4 a height slider lifts it into the top layer. One that sends to a surround
+bus without a panner offers "+ Surround pan". "MIDI" connects control surfaces, see
+[MIDI control](#midi-control)), **Processing**
 (the chain of a strip or bus as tiles of one size in a grid, in chain order: drag
 node types in from the palette, which stays in view, drag a tile by its header to
 reorder (the wheel scrolls meanwhile, Escape cancels), a click on the header opens
@@ -51,7 +60,7 @@ or closes it, bypass, delete; ◀ ▶ or the `[` and `]` keys step to the previo
 next strip or bus; EQ curve with band handles (a double-click resets a band;
 high- and low-pass bands with their slope), one band's controls at a time, filter,
 dynamics transfer curves with the live level, de-esser listen, keys, the surround
-panner's position pad (spread: the bubble moves to the centre and grows); every
+panner's position pad (spread: a bubble around the dot grows and drifts to the centre; the dot keeps its position and height); every
 band's gain reduction of a multiband or dynamic EQ; copy and paste of units (a
 unit's ⧉ puts it on the browser's clipboard; the clipboard bar pastes all or one,
 a unit's ⇩ takes the copied unit of its type); the signal flow below the chain
@@ -73,16 +82,20 @@ graphs, §11: drag blocks in from the palette or click them; draw cables between
 ports, coloured by type (boolean, number, level, event, text), where an input that
 cannot take the cable is dimmed while drawing; zoom, pan and a minimap; select
 several blocks (Ctrl-click, Shift-drag), copy and paste them with their cables
-(Ctrl+C, Ctrl+V, also into another graph), Delete; undo and redo (Ctrl+Z,
+(Ctrl+C, Ctrl+V, also into another graph), "Copy logic to" a new graph (dry run) or
+into another graph, Delete; undo and redo (Ctrl+Z,
 Ctrl+Shift+Z) of every edit; group blocks into a macro with the ports you choose,
 open it (double-click, a breadcrumb back) and ungroup it; a refused edit shows the
 server's reasons as red markers on the blocks, ports and the dashed cable; every
 block shows its live value; soft keys, triggers, dry run and the list of the last
-actions; the list under the canvas edits every parameter, and a click on a block's
+actions; the list under the canvas edits every parameter (a fader position's
+threshold in the "High at" column, left of Value), and a click on a block's
 row selects it in the graph. A new graph starts in
 dry run, and the toolbar shows LIVE, DRY RUN or OFF; undo never changes that. A
 new block gets no target by itself (amber until one is chosen: an action without
-one never acts, an input without one reads off, 0 or the floor). In a live graph,
+one never acts, an input without one reads off, 0 or the floor; a webhook without
+a URL, a `tsl-out` without an index too; two `tsl-out` blocks of the show on one
+index are marked amber, as they would write one display). In a live graph,
 paste, group, ungroup, undo and redo ask first when they make actions or blocks
 that remember: those actions act at once, and re-made blocks start empty),
 **Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
@@ -120,6 +133,37 @@ is 400, an unknown widget 404, another method than GET 405. The page posts
 The strip widget has PFL. The talkback
 widget's browser microphone needs an HTTPS page and a frame with
 `allow="microphone"`.
+
+## MIDI control
+
+The console's **MIDI** button connects MIDI control surfaces in the browser (Web
+MIDI): nothing runs on the server, the browser makes the same API calls as the
+console, so every desk position can have its own surface. Web MIDI needs a secure
+page: https (the platform serves the mixer behind its HTTPS proxy) or `localhost`;
+on plain `http://<host>:8190` the dialog says why it cannot connect. In a frame the
+frame needs `allow="midi"`. Chrome and Edge have Web MIDI; Firefox asks for a site
+permission first; Safari has none. The display of a Mackie Control needs the SysEx
+permission (asked for; without it the rest works).
+
+Each input port gets a mode, remembered in the browser by its name, and an output
+for the feedback (by default the port of the same name):
+
+- **Mackie Control**: 8 strips from the bank (the console's strips, then its
+  buses): pitch-bend faders on the console's fader law with motor feedback (a
+  touched fader is not moved), mute, solo (PFL), select, the V-pot pans (2 % per
+  tick; push: centre) and its ring shows the pan, bank and channel buttons move the
+  bank (also in the dialog), the master fader runs a chosen bus (default the first),
+  the display shows names and levels. **Mackie Control extender**: the next 8 strips.
+- **Generic (MIDI learn)**: "Learn…", then click a fader, mute, PFL, AFL or pan on
+  the console (it is picked, not changed) and move a control (CC, note or pitch
+  bend) on the device. A button toggles on its press (tick "latching" in the list
+  for a button that sends on and off itself); a fader, knob or pitch bend sets the
+  value. The value goes back to the control (LED, motor fader). The
+  mappings are kept in the browser; Export and Import move them as a JSON file
+  (`{"format": "mxl-audio-mixer-midi", "version": 1, "mappings": [{"device",
+  "control": {"type": "cc" | "note" | "pb", "channel": 0–15, "number"}, "target":
+  {"signal", "param": "fader" | "mute" | "pfl" | "afl" | "pan"}, "latch": true?}]}`).
+  A bad entry, in a file or in the browser's storage, is dropped with a warning.
 
 ## Tally and audio-follows-video
 
@@ -727,7 +771,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
 | `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
 | `width` | M/S / width, stereo only: `width_pct` 0–200 (0 mono, 100 unchanged, 200 double side), `input` and `output` `lr` \| `ms` (M = (L + R) / 2, S = (L − R) / 2; L = M + S, R = M − S); a gain matrix that ramps per sample, bypass ramps to the identity |
-| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off; the LFE send is full band, no low-pass); constant power. A stereo strip aimed behind has L and R mirrored (L at the right rear). It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
+| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1` \| `5.1.4` \| `7.1.4`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `elevation_deg` 0–90 (default 0; 5.1.4 and 7.1.4 only: the bed keeps cos² of the power, the top layer at ±45° and ±135° sin², panned there at the same azimuth), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off; the LFE send is full band, no low-pass); constant power. A stereo strip aimed behind has L and R mirrored (L at the right rear). It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
 ±24 dB, a chain at most 32 nodes. A node that cannot run on its signal's format
@@ -744,7 +788,9 @@ peak. The measurement runs from when it is switched on; it can be stopped, reset
 started again. It continues over changes of the mix; blocks the DSP thread missed
 count as silence.
 
-`GET /api/v1/meters` gives, per strip and bus (post-fader) and channel: sample peak
+`GET /api/v1/meters` gives, per strip (after its fader, before its mute: a muted
+strip still reads its level, also in `true_peak_dbtp{signal}`; logic Level and
+Above blocks read a muted strip as silent) and bus (its output) and channel: sample peak
 (since the last 40 ms update), peak hold (until cleared), true peak (4×
 oversampling), RMS (300 ms) and the PPM readings (IEC 60268-10 Type I: 5 ms
 integration, 20 dB in 1.7 s; Type II: 10 ms, 24 dB in 2.8 s; a steady 1 kHz tone
@@ -771,7 +817,8 @@ with `dry_run` it computes and lists its actions without running them.
 
 **Ports are typed:** `boolean`, `number`, `level` (dB), `event` (true for one
 tick) and `string`. An input converts what it receives: booleans, numbers and
-levels into each other (on is ≥ 0.5, true is 1); a value into an event fires when
+levels into each other (on is ≥ 0.5, true is 1; a `fader` block, also through
+macro ports, is on from its `threshold_db` instead); a value into an event fires when
 it turns on (not on the first tick); an event into a value is on for its tick;
 anything but an event into a string (numbers with up to two decimals). A string
 feeds only a string and an event never feeds a string. An input takes one wire;
@@ -781,7 +828,8 @@ those publish last tick's value.
 
 **Blocks** (`GET /api/v1/logic-blocks` lists each with its parameters and ports):
 - inputs: `const`, `text`, `button` (a soft key), `trigger` (fired by `POST
-  /api/v1/logic/<graph>/trigger/<block>`), `mute`, `pfl`, `fader`, `vad`, `level`,
+  /api/v1/logic/<graph>/trigger/<block>`), `mute`, `pfl`, `fader` (the position in
+  dB; into an on/off input it is on from `threshold_db`, default 0 dB), `vad`, `level`,
   `above` (a peak level with hysteresis), `loudness` (momentary, short-term,
   integrated, range or true peak), `tally` (on air), `schedule` (UTC time of
   day), `nmos-receiver` and `nmos-sender` (active), `link` (a remote-link peer is
@@ -795,7 +843,8 @@ those publish last tick's value.
   `bypass`; clamped to its range, ramped), `set-pfl`, `set-talk`, `set-publish`,
   `set-monitor` (a monitor's source), `loudness-control` (start, stop, reset),
   `recall` (a snapshot), `webhook` (POST `{"graph", "block", "value"}`), `tsl-out`
-  (TSL UMD 5.0 to `TSL_OUT_TARGET`: left lamp red, right lamp green, a label; on
+  (TSL UMD 5.0 to `TSL_OUT_TARGET`: left lamp red, right lamp green, a label; the
+  `index` is `null` until chosen; on
   every change and every second), `log` (a log line and a `logic` message on the
   events WebSocket).
 

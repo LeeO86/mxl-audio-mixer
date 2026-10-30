@@ -214,6 +214,9 @@ struct Taps {
     pre_fader: (Span, usize),
     post: Span,
     pan: Span,
+    /// Where the meter reads: a strip's after its fader and before its mute
+    /// (A3), a bus's its output.
+    meter: Span,
     /// Hash of the chain's structure: a change rewires the signal's outputs.
     chain: u64,
 }
@@ -652,21 +655,24 @@ impl Compiler {
                         && !soloed_signals.is_empty()
                         && !soloed_signals.contains_key(&s.id)
                         && !s.solo_safe;
+                    // The fader, audio-follows-video, then the mute as a gain of
+                    // its own: the strip's meter reads before the mute, so a muted
+                    // strip still shows its level (A3).
                     let fader = if sip_muted {
                         0.0
                     } else {
-                        mix.fader_gain(&s.id, s.fader_db, s.mute, &vca_effects, &grouped)
+                        mix.fader_level(&s.id, s.fader_db, &vca_effects)
                     };
                     let node = c.node(
                         format!("strip/{}/fader", s.id),
                         (format_name(s.format), chain_sig),
                         vec![fader; n],
                     );
-                    let mut post = c.b.buffers(n);
+                    let mut level = c.b.buffers(n);
                     c.b.step(Step::Gain {
                         node,
                         src: pre.0,
-                        dst: post,
+                        dst: level,
                     });
                     if s.afv.is_some_and(|a| a.enabled) {
                         let g = c.compiler.afv.get(&s.id).copied().unwrap_or(0.0);
@@ -678,17 +684,34 @@ impl Compiler {
                         let after = c.b.buffers(n);
                         c.b.step(Step::Gain {
                             node,
-                            src: post,
+                            src: level,
                             dst: after,
                         });
-                        post = after;
+                        level = after;
                     }
+                    let open = if mix.silenced(&s.id, s.mute, &vca_effects, &grouped) {
+                        0.0
+                    } else {
+                        1.0
+                    };
+                    let node = c.node(
+                        format!("strip/{}/mute", s.id),
+                        (format_name(s.format), chain_sig),
+                        vec![open; n],
+                    );
+                    let post = c.b.buffers(n);
+                    c.b.step(Step::Gain {
+                        node,
+                        src: level,
+                        dst: post,
+                    });
                     // The panner: mono and stereo strips to stereo, or a surround
                     // panner's matrix into its layout (D5).
                     let surround = s.chain.iter().find_map(|p| match &p.kind {
                         ProcKind::SurroundPan {
                             layout,
                             azimuth_deg,
+                            elevation_deg,
                             spread_pct,
                             divergence_pct,
                             lfe_db,
@@ -701,6 +724,7 @@ impl Compiler {
                                 *spread_pct,
                                 *divergence_pct,
                                 *lfe_db,
+                                *elevation_deg,
                             ),
                         )),
                         _ => None,
@@ -750,6 +774,7 @@ impl Compiler {
                         pre_fader: pre,
                         post,
                         pan,
+                        meter: level,
                         chain: chain_sig,
                     }
                 }
@@ -826,9 +851,10 @@ impl Compiler {
                                 p.spread_pct,
                                 p.divergence_pct,
                                 p.lfe_db,
+                                0.0,
                             );
-                            // Into the bed (at most 8 × 2 values a node); the send
-                            // maps the bed into 5.1.4 / 7.1.4 (heights none).
+                            // Into the bed; the send maps the bed into 5.1.4 /
+                            // 7.1.4 (a send pan has no height: the heights get none).
                             let node = c.node(
                                 format!("sendpan/{}/{}", send.from, send.to),
                                 (format_name(f), format_name(bed)),
@@ -949,6 +975,7 @@ impl Compiler {
                         pre_fader: pre,
                         post,
                         pan: post,
+                        meter: post,
                         chain: chain_sig,
                     }
                 }
@@ -957,7 +984,7 @@ impl Compiler {
             let (_, format) = mix.signal(id).expect("signal exists");
             let n = format.channels();
             let slot = c.b.meter(n);
-            c.b.step(Step::Meter { src: t.post, slot });
+            c.b.step(Step::Meter { src: t.meter, slot });
             meters.push((id.clone(), slot, n));
             if let Some(&slot) = loudness.get(id) {
                 c.b.step(Step::Loudness {
@@ -1673,6 +1700,186 @@ mod tests {
         assert!((safe - vca).abs() < 1e-6, "mute-safe");
     }
 
+    /// The plan's cost per 96-sample block: 32 mono and 8 stereo strips into
+    /// a stereo main and 4 aux buses (`cargo test --release plan_cost --
+    /// --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn plan_cost() {
+        let mut m = Mix::default();
+        for i in 0..40 {
+            let f = if i < 32 { Format::Mono } else { Format::Stereo };
+            m.strips.push(strip(&format!("s{i}"), f, 1 + i % 2));
+        }
+        m.buses.push(bus("main", Format::Stereo));
+        for a in 0..4 {
+            m.buses.push(bus(&format!("aux{a}"), Format::Mono));
+        }
+        for i in 0..40 {
+            m.sends.push(send(&format!("s{i}"), "main", Tap::PostPan));
+            for a in 0..4 {
+                m.sends
+                    .push(send(&format!("s{i}"), &format!("aux{a}"), Tap::PreFader));
+            }
+        }
+        m.outputs.push(Output {
+            signal: "main".into(),
+            format: None,
+            commit_samples: None,
+            tap: None,
+        });
+        let mut compiler = Compiler::default();
+        let mut c = compile(&mut compiler, &m, 96);
+        let inputs = Inputs(vec![
+            vec![vec![0.1; 96]],
+            vec![vec![0.1; 96], vec![0.2; 96]],
+        ]);
+        let mut out = Outputs::default();
+        let blocks = 20_000;
+        for k in 0..1000 {
+            c.plan.process((k * 96) as u64, &inputs, &mut out);
+            out.0.clear();
+        }
+        let start = std::time::Instant::now();
+        for k in 0..blocks {
+            c.plan.process((k * 96) as u64, &inputs, &mut out);
+            out.0.clear();
+        }
+        let us = start.elapsed().as_secs_f64() * 1e6 / blocks as f64;
+        println!("plan: {us:.1} µs per 96-sample block");
+    }
+
+    #[test]
+    fn a_muted_strip_meters_its_level_and_is_silent() {
+        #[derive(Default)]
+        struct Seen(Outputs, HashMap<usize, f32>);
+        impl OutputSink for Seen {
+            fn write(&mut self, slot: usize, channel: usize, channels: usize, samples: &[f32]) {
+                self.0.write(slot, channel, channels, samples);
+            }
+            fn meter(&mut self, _: u32, slot: usize, chans: &[&[f32]]) {
+                self.1.insert(slot, chans[0][0]);
+            }
+        }
+        let mut compiler = Compiler::default();
+        let mut m = mix();
+        m.strips[0].fader_db = Db(-6.0206);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let mut play = |m: &Mix| {
+            let mut c = compile(&mut compiler, m, 48);
+            let mut seen = Seen::default();
+            c.plan.process(0, &inputs, &mut seen);
+            let slot = c.meters.iter().find(|(id, ..)| id == "vox").unwrap().1 as usize;
+            (seen.1[&slot], seen.0 .0[&3][0][0], c.structure)
+        };
+        let (metered, open, structure) = play(&m);
+        assert!((metered - 0.25).abs() < 1e-4, "{metered}");
+        m.strips[0].mute = true;
+        let (muted_meter, muted, s) = play(&m);
+        // The meter still reads the fader's level; the mix has the strip no more.
+        assert!((muted_meter - 0.25).abs() < 1e-4, "{muted_meter}");
+        assert!((open - muted - 0.25 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
+        assert_eq!(s, structure, "a mute is a value change");
+    }
+
+    /// The mute node (A3): a pre-fader send and the meter keep the strip, its
+    /// direct out and the mix lose it, for its own mute, a muted VCA and a mute
+    /// group alike; muting ramps without a step.
+    #[test]
+    fn the_mute_node_silences_after_the_fader_only() {
+        #[derive(Default)]
+        struct Seen(Outputs, HashMap<usize, f32>);
+        impl OutputSink for Seen {
+            fn write(&mut self, slot: usize, channel: usize, channels: usize, samples: &[f32]) {
+                self.0.write(slot, channel, channels, samples);
+            }
+            fn meter(&mut self, _: u32, slot: usize, chans: &[&[f32]]) {
+                self.1.insert(slot, chans[0][0]);
+            }
+        }
+        let mut base = mix();
+        base.buses.push(bus("aux", Format::Mono));
+        base.sends.push(send("vox", "aux", Tap::PreFader));
+        for signal in ["aux", "vox"] {
+            base.outputs.push(Output {
+                signal: signal.into(),
+                format: None,
+                commit_samples: None,
+                tap: None,
+            });
+        }
+        let slots = HashMap::from([
+            ("main".to_string(), 3),
+            ("aux".to_string(), 4),
+            ("vox".to_string(), 5),
+        ]);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 96]],
+            vec![vec![0.1; 96], vec![0.2; 96]],
+        ]);
+        let mut compiler = Compiler::default();
+        let mut play = |m: &Mix| {
+            assert_eq!(m.validate(2, 96), Ok(()));
+            let mut c = compiler.compile(m, 96, 0, &slots, &HashMap::new());
+            let mut seen = Seen::default();
+            c.plan.process(0, &inputs, &mut seen);
+            let slot = c.meters.iter().find(|(id, ..)| id == "vox").unwrap().1 as usize;
+            let o = &seen.0 .0;
+            (seen.1[&slot], o[&3][0][0], o[&4][0][0], o[&5][0][0])
+        };
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        let (meter, main, aux, direct) = play(&base);
+        assert!(
+            close(meter, 0.5)
+                && close(main, 0.5 * h + 0.1)
+                && close(aux, 0.5)
+                && close(direct, 0.5)
+        );
+        let mut own = base.clone();
+        own.strips[0].mute = true;
+        let mut vca = base.clone();
+        vca.vcas.push(crate::mix::vca::Vca {
+            id: "talent".into(),
+            name: "Talent".into(),
+            fader_db: Db(0.0),
+            mute: true,
+            members: vec!["vox".into()],
+            colour: None,
+            recall_safe: false,
+        });
+        let mut group = base.clone();
+        group.mute_groups.push(crate::mix::vca::MuteGroup {
+            id: "g".into(),
+            name: "G".into(),
+            active: true,
+            members: vec!["vox".into()],
+        });
+        for (what, m) in [("mute", own), ("VCA", vca), ("group", group)] {
+            let (meter, main, aux, direct) = play(&m);
+            assert!(close(meter, 0.5), "{what}: meter {meter}");
+            assert!(close(main, 0.1), "{what}: main {main}");
+            assert!(close(aux, 0.5), "{what}: pre-fader send {aux}");
+            assert!(close(direct, 0.0), "{what}: direct out {direct}");
+        }
+        // Muting ramps: over 48 samples from the level to nothing, no step.
+        let mut c = compiler.compile(&base, 96, 0, &slots, &HashMap::new());
+        let id = compiler.node_id("strip/vox/mute").expect("mute node");
+        assert!(c.plan.set_param(id, &[0.0], 48));
+        let mut out = Outputs::default();
+        c.plan.process(0, &inputs, &mut out);
+        let l = &out.0[&3][0];
+        let most = l
+            .windows(2)
+            .map(|w| (w[0] - w[1]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(most <= 0.5 * h / 48.0 * 1.01, "a step of {most}");
+        assert!(close(l[47], 0.1) && close(l[95], 0.1) && l[0] > 0.1 + 0.4 * h);
+    }
+
     #[test]
     fn afv_adds_a_gain_after_the_fader() {
         let mut compiler = Compiler::default();
@@ -2383,6 +2590,104 @@ mod tests {
             .contains("one surround panner"));
     }
 
+    #[test]
+    fn surround_panner_lifts_into_a_height_bus() {
+        let mut m = Mix::default();
+        m.strips.push(strip("fx", Format::Mono, 1));
+        m.strips[0].chain = serde_json::from_str(
+            r#"[{"id": "p", "type": "surround-pan", "layout": "7.1.4", "azimuth_deg": -45, "elevation_deg": 90}]"#,
+        )
+        .unwrap();
+        // A stereo one: 24 values, the widest matrix node.
+        m.strips.push(strip("amb", Format::Stereo, 2));
+        m.strips[1].chain = serde_json::from_str(
+            r#"[{"id": "p", "type": "surround-pan", "layout": "7.1.4", "azimuth_deg": 0, "elevation_deg": 45}]"#,
+        )
+        .unwrap();
+        m.buses.push(bus("imm", Format::Surround714));
+        m.sends.push(send("fx", "imm", Tap::PostPan));
+        m.sends.push(send("amb", "imm", Tap::PostPan));
+        m.outputs.push(Output {
+            signal: "imm".into(),
+            format: None,
+            commit_samples: None,
+            tap: None,
+        });
+        assert_eq!(m.validate(3, 48), Ok(()));
+        assert_eq!(m.tap_format("fx", &Tap::PostPan), Some(Format::Surround714));
+        let slots = HashMap::from([("imm".to_string(), 0)]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let silent = vec![vec![0.0; 48], vec![0.0; 48]];
+        let out = run(
+            &mut c,
+            &Inputs(vec![vec![vec![0.5; 48]], silent.clone()]),
+            1,
+        );
+        // Up at −45°: Ltf (channel 9 of 12) alone.
+        let imm = &out.0[&0];
+        for (ch, v) in imm.iter().enumerate() {
+            let expected = if ch == 8 { 0.5 } else { 0.0 };
+            assert!((v[0] - expected).abs() < 1e-6, "{ch}: {}", v[0]);
+        }
+        // The stereo strip at 0°, 45° up: L (at −30°) half its power on the L
+        // speaker, half in the top layer.
+        let out = run(
+            &mut c,
+            &Inputs(vec![
+                vec![vec![0.0; 48]],
+                vec![vec![0.4; 48], vec![0.0; 48]],
+            ]),
+            1,
+        );
+        let imm = &out.0[&0];
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((imm[0][0] - 0.4 * h).abs() < 1e-6);
+        let top: f32 = imm[8..].iter().map(|ch| ch[0] * ch[0]).sum();
+        assert!((top - 0.08).abs() < 1e-6, "{top}");
+        // At 0° the height is not written: 1.4.3 (deny_unknown_fields) reads
+        // the panner as before; a lifted one carries it.
+        let flat = serde_json::to_value(&m.strips[1].chain[0]).unwrap();
+        let mut lifted = m.strips[1].chain[0].clone();
+        if let ProcKind::SurroundPan { elevation_deg, .. } = &mut lifted.kind {
+            *elevation_deg = 0.0;
+        }
+        let at_zero = serde_json::to_value(&lifted).unwrap();
+        assert!(flat.get("elevation_deg").is_some());
+        assert!(at_zero.get("elevation_deg").is_none(), "{at_zero}");
+        let mut keys: Vec<_> = at_zero.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        let v143 = [
+            "azimuth_deg",
+            "divergence_pct",
+            "id",
+            "layout",
+            "lfe_db",
+            "spread_pct",
+            "type",
+        ];
+        assert!(
+            keys.iter()
+                .all(|k| v143.contains(&k.as_str()) || k == "bypass"),
+            "{keys:?}"
+        );
+        // Old shows without a height load at 0°; above 90° is refused.
+        let old: crate::mix::chain::Proc = serde_json::from_str(
+            r#"{"id": "p", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 0}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old.kind,
+            ProcKind::SurroundPan { elevation_deg, .. } if elevation_deg == 0.0
+        ));
+        let mut high = m;
+        high.strips[0].chain[0] = serde_json::from_str(
+            r#"{"id": "p", "type": "surround-pan", "layout": "5.1.4", "azimuth_deg": 0, "elevation_deg": 95}"#,
+        )
+        .unwrap();
+        assert!(high.validate(3, 48).unwrap_err().contains("elevation_deg"));
+    }
+
     /// The new nodes and the down-mix (D1–D5) as one plan.
     #[test]
     fn a_send_pans_a_mono_strip_into_a_surround_bus() {
@@ -2437,6 +2742,14 @@ mod tests {
         m.sends[0].pan.as_mut().unwrap().azimuth_deg = -30.0;
         let c2 = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
         assert_eq!(c2.structure, before);
+        // The send reads the strip after its mute: muted, nothing arrives.
+        m.strips[0].mute = true;
+        let mut c3 = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c3, &inputs, 2);
+        assert!(out.0[&0]
+            .iter()
+            .all(|ch| ch[48..].iter().all(|x| x.abs() < 1e-6)));
+        m.strips[0].mute = false;
         // Out of range is refused.
         m.sends[0].pan.as_mut().unwrap().spread_pct = 120.0;
         assert!(m.validate(2, 48).unwrap_err().contains("spread_pct"));
@@ -2553,7 +2866,7 @@ mod tests {
         let eq = compiler.node_id("proc/film/eq").unwrap();
         // (Computed on the control side, as the compiler does.)
         let moved =
-            super::super::spatial::surround_pan(Format::Surround51, 1, -100.0, 0.0, 0.0, 0.0);
+            super::super::spatial::surround_pan(Format::Surround51, 1, -100.0, 0.0, 0.0, 0.0, 0.0);
         let before = crate::test_alloc::allocations();
         for k in 0..200u64 {
             if k == 50 {

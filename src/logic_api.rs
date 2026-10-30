@@ -80,18 +80,19 @@ fn json_graph(app: &App, g: &Graph) -> Value {
     let mut j = json!(g);
     j["revision"] = json!(revision(g));
     j["ports"] = block_ports(&g.blocks, &c.mix.logic_macros);
-    j["warnings"] = json!(warnings(&g.blocks));
+    j["warnings"] = json!(warnings(&c.mix, &g.blocks));
     j["values"] = c.logic.values(&g.id).unwrap_or(Value::Null);
     j["buttons"] = json!(c.logic.pressed(&g.id));
     j["actions"] = json!(c.logic.recent(&g.id));
     j
 }
 
-fn json_macro(macros: &[Macro], m: &Macro) -> Value {
+fn json_macro(mix: &Mix, m: &Macro) -> Value {
+    let macros = &mix.logic_macros;
     let mut j = json!(m);
     j["revision"] = json!(revision(m));
     j["ports"] = block_ports(&m.blocks, macros);
-    j["warnings"] = json!(warnings(&m.blocks));
+    j["warnings"] = json!(warnings(mix, &m.blocks));
     j["exposed"] = json!(BlockKind::Macro {
         macro_id: m.id.clone()
     }
@@ -108,7 +109,7 @@ fn macro_value(app: &App, id: &str) -> Value {
     let c = app.control();
     c.mix
         .logic_macro(id)
-        .map(|m| json_macro(&c.mix.logic_macros, m))
+        .map(|m| json_macro(&c.mix, m))
         .unwrap_or(Value::Null)
 }
 
@@ -419,9 +420,12 @@ async fn trigger(State(app): State<App>, Path((id, block)): Path<(String, String
 
 async fn macros(State(app): State<App>) -> Json<Value> {
     let c = app.control();
-    let all = &c.mix.logic_macros;
     Json(Value::Array(
-        all.iter().map(|m| json_macro(all, m)).collect(),
+        c.mix
+            .logic_macros
+            .iter()
+            .map(|m| json_macro(&c.mix, m))
+            .collect(),
     ))
 }
 
@@ -741,6 +745,10 @@ pub fn catalog_json() -> Value {
     let num = |name: &str, min: f64, max: f64, default: Option<f64>| json!({"name": name, "kind": "number", "min": min, "max": max, "default": default});
     let int = |name: &str, min: f64, max: f64| json!({"name": name, "kind": "integer", "min": min, "max": max});
     let options = |name: &str, opts: &[&str], default: &str| json!({"name": name, "kind": "enum", "options": opts, "default": default});
+    let blank = |mut p: Value| {
+        p["blank"] = json!(true);
+        p
+    };
     let ramp = || num("ramp_ms", 0.0, MAX_RAMP_MS, Some(DEFAULT_RAMP_MS));
     let ms = || num("ms", 0.0, MAX_MS, None);
     let s = || "x".to_string();
@@ -783,9 +791,20 @@ pub fn catalog_json() -> Value {
             vec![p("signal", "signal-or-vca")],
         ),
         (
-            BlockKind::Fader { signal: s() },
+            BlockKind::Fader {
+                signal: s(),
+                threshold_db: 0.0,
+            },
             "Fader position",
-            vec![p("signal", "signal")],
+            vec![
+                p("signal", "signal"),
+                num(
+                    "threshold_db",
+                    -120.0,
+                    crate::mix::model::MAX_FADER_DB,
+                    Some(0.0),
+                ),
+            ],
         ),
         (
             BlockKind::Vad { signal: s() },
@@ -1007,9 +1026,10 @@ pub fn catalog_json() -> Value {
             vec![p("url", "url")],
         ),
         (
-            BlockKind::TslOut { index: 0 },
+            BlockKind::TslOut { index: None },
             "TSL tally out",
-            vec![int("index", 0.0, 65534.0)],
+            // Starts without an index (`null`, chosen in the list; D247).
+            vec![blank(int("index", 0.0, 65534.0))],
         ),
         (
             BlockKind::Log { message: s() },
