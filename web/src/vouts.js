@@ -1,6 +1,8 @@
 // Virtual outputs (C7): fixed MXL flows and NMOS senders the designer wires (MIXER_OUTPUT_FLOWS); the
 // operator picks what feeds each. A source is { signal, tap? } (a strip's direct out or a bus),
-// { monitor } (a control-room monitor) or { input, format? } (an input straight through).
+// { monitor, feed? } (a control-room monitor: "clean", its selected source before the control room's
+// solo, talkback, checks and level, the default; or "speaker", what its speakers get) or { input, format? }
+// (an input straight through).
 import { computed } from "vue";
 import { api } from "./api.js";
 import { act, buses, inputName, isBus, live, room, signalOf, strips } from "./store.js";
@@ -15,7 +17,7 @@ export function sourceLabel(src) {
     const what = isBus(src.signal) ? "bus" : "direct out";
     return `${s?.name || src.signal} (${what}${src.tap && src.tap !== "post-fader" ? `, ${typeof src.tap === "object" ? `after ${src.tap.after}` : src.tap}` : ""})`;
   }
-  if ("monitor" in src) return `${room.value.monitors.find((m) => m.id === src.monitor)?.name || src.monitor} (monitor)`;
+  if ("monitor" in src) return `${room.value.monitors.find((m) => m.id === src.monitor)?.name || src.monitor} (monitor, ${src.feed === "speaker" ? "speaker" : "clean"})`;
   const i = (live.status?.inputs || []).find((x) => x.input === src.input);
   return `${i ? inputName(i) : `Input ${src.input}`} (input ${src.input}${src.format ? `, as ${src.format}` : ""})`;
 }
@@ -30,6 +32,9 @@ export const sourceChoices = computed(() => {
   for (const i of live.status?.inputs || []) add({ input: i.input });
   return out;
 });
+
+/** A monitor source's feed toggle: the same monitor, the other feed. */
+export const setVoutFeed = (v, feed) => setVoutSource(v.slot, { monitor: v.source.monitor, ...(feed === "speaker" ? { feed } : {}) });
 
 /** Feed virtual output `slot` from `source` (null: silence). */
 export const setVoutSource = (slot, source) => act(() => api.put(`/api/v1/virtual-outputs/${slot}`, { source }));

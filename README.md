@@ -470,14 +470,17 @@ an id gets `strip-<n>` or `bus-<n>`.
   other `128 − MIXER_OUTPUT_FLOWS`. The mix's `virtual_outputs` say what feeds
   each: `[{"output": "<id>", "source": …}]` with a source `{"signal": "<strip or bus>",
   "tap"?: <tap>}` (a strip's direct out, a bus; default post-fader), `{"monitor":
-  "<id>"}` (a control-room monitor's output) or `{"input": n, "format"?: …}` (an
+  "<id>", "feed"?: "clean" | "speaker"}` (a control-room monitor: `clean`, the
+  default, is its selected source in its format and down-mix, without solo,
+  listen-back, talkback dim, checks, level, dim, mute, bass management and delay;
+  `speaker` is exactly what its speakers get) or `{"input": n, "format"?: …}` (an
   input straight through, no strip; `format` says what it carries, default the
   output's, channel for channel). The source is mapped to the output's format by
   the width mapping below; without one the flow is written with silence. A deleted
   signal or monitor leaves its virtual outputs silent; linking or unlinking
   strips moves it (and a published output) to the first new strip. A source
-  has exactly one of `signal` (with `tap`), `monitor` or `input` (with
-  `format`). Left out of the show while empty. Sources of outputs this host
+  has exactly one of `signal` (with `tap`), `monitor` (with `feed`) or `input`
+  (with `format`). Left out of the show while empty. Sources of outputs this host
   does not have are kept, silent. Restoring a show-history version from before
   the sources clears them. The flows are made again at every start (the writer
   deletes them at a stop) with the configured format; after an unclean stop a
@@ -1028,7 +1031,8 @@ validation markers, macros, dry run; the console's strip handling,
 `web/tests/console.mjs`: several strips at once, rename, the linked patch, polarity
 of a 5.1 strip, "Send to…" and "Add source…", a subgroup, delete, the divider;
 the graph and routing of 1.5.0, `web/tests/graph.mjs`: virtual outputs fed from
-the routing list and by wires from a strip, an input and a monitor, a send's pan
+the routing list and by wires from a strip, an input and a monitor (its clean or
+speaker feed), a send's pan
 and down-mix, an input's alias and flow, the view over a tab switch, double-click
 to the processing and the control room),
 `tests/integration/vouts.sh` (virtual outputs: stable flow and sender ids, silent

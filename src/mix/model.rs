@@ -385,8 +385,13 @@ pub enum OutputSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tap: Option<Tap>,
     },
-    /// A monitor of the control room (its output, after its level).
-    Monitor { monitor: String },
+    /// A monitor of the control room: its `clean` feed (default) or its
+    /// `speaker` feed.
+    Monitor {
+        monitor: String,
+        #[serde(default, skip_serializing_if = "MonitorFeed::is_clean")]
+        feed: MonitorFeed,
+    },
     /// An input straight through, no strip. `format`: what the input carries
     /// (default: the output's format, channel for channel); another format is
     /// up- or down-mixed like a send.
@@ -397,6 +402,25 @@ pub enum OutputSource {
     },
 }
 
+/// What a virtual output takes from a monitor (C6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MonitorFeed {
+    /// The monitor's selected source in its format and down-mix: no solo,
+    /// listen-back, talkback dim, check, level, dim, mute, bass management or
+    /// delay.
+    #[default]
+    Clean,
+    /// Exactly what the speakers get.
+    Speaker,
+}
+
+impl MonitorFeed {
+    pub fn is_clean(&self) -> bool {
+        *self == Self::Clean
+    }
+}
+
 /// Every field a source may have, checked by [`OutputSource`]'s `TryFrom`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -404,6 +428,7 @@ struct RawSource {
     signal: Option<String>,
     tap: Option<Tap>,
     monitor: Option<String>,
+    feed: Option<MonitorFeed>,
     input: Option<usize>,
     format: Option<Format>,
 }
@@ -412,21 +437,22 @@ impl TryFrom<RawSource> for OutputSource {
     type Error = String;
 
     fn try_from(r: RawSource) -> Result<Self, String> {
+        let no_feed = r.feed.is_none();
         match (r.signal, r.monitor, r.input) {
-            (Some(signal), None, None) if r.format.is_none() => {
+            (Some(signal), None, None) if r.format.is_none() && no_feed => {
                 Ok(Self::Signal { signal, tap: r.tap })
             }
             (None, Some(monitor), None) if r.tap.is_none() && r.format.is_none() => {
-                Ok(Self::Monitor { monitor })
+                Ok(Self::Monitor {
+                    monitor,
+                    feed: r.feed.unwrap_or_default(),
+                })
             }
-            (None, None, Some(input)) if r.tap.is_none() => Ok(Self::Input {
+            (None, None, Some(input)) if r.tap.is_none() && no_feed => Ok(Self::Input {
                 input,
                 format: r.format,
             }),
-            _ => Err(
-                "a source has exactly one of signal (with tap), monitor or input (with format)"
-                    .into(),
-            ),
+            _ => Err("a source has exactly one of signal (with tap), monitor (with feed) or input (with format)".into()),
         }
     }
 }
@@ -861,7 +887,7 @@ impl Mix {
                         self.check_tap(signal, t).map_err(at)?;
                     }
                 }
-                OutputSource::Monitor { monitor } => {
+                OutputSource::Monitor { monitor, .. } => {
                     if !self.control_room.monitors.iter().any(|m| &m.id == monitor) {
                         return Err(at(format!("monitor {monitor} does not exist")));
                     }

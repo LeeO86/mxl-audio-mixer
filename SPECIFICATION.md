@@ -272,7 +272,10 @@ rates other than 48 kHz, recording.
   the receivers: each an MXL flow and an NMOS sender (key `out-vout:<key or slot>`) from
   the start, with ids from `NMOS_SEED` and the key (else the slot), so the production's designer can wire them before the
   operator does anything. The mix says what feeds each (`virtual_outputs`): a strip's
-  direct out or a bus at a tap, a control-room monitor, or an input straight through
+  direct out or a bus at a tap, a control-room monitor (its clean feed: the selected
+  source in the monitor's format and down-mix, before solo, listen-back, talkback dim,
+  checks, level and bass management; or its speaker feed, exactly what the speakers
+  get), or an input straight through
   (no strip). A source of another format goes through the width mapping (down-mix,
   §4.1); the flow's format never changes. Without a source the flow carries silence.
   The published outputs (Publish in the UI) stay for ad-hoc feeds; both are shown the

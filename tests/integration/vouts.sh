@@ -70,10 +70,34 @@ api PUT /api/v1/virtual-outputs/1 '{"source": {"signal": "main"}}' >/dev/null
 sleep 0.2
 probe 1 1:1:0.70710677 2:1:0.70710677 3:1:0 4:1:0 5:1:0 6:1:0
 pass "PGM (5.1) from the stereo main bus: L, R; the rest silent"
-api POST /api/v1/monitors '{"id": "cr", "name": "CR", "kind": "speakers", "format": "stereo", "source": {"signal": "main"}}' >/dev/null
+api POST /api/v1/monitors '{"id": "cr", "name": "CR", "kind": "speakers", "format": "stereo", "source": {"signal": "main"}, "follows_solo": true, "level_db": -6.0206}' >/dev/null
 api PUT /api/v1/virtual-outputs/1 '{"source": {"monitor": "cr"}}' >/dev/null
 [[ "$(json "$WEB/api/v1/virtual-outputs/1" "d['source']['monitor']")" == cr ]] || fail "monitor source"
 pass "PGM from the control-room monitor"
+
+# The monitor's two feeds (C6), with a PFL pressed: clean stays the main bus,
+# speaker has the monitor's level and follows the solo.
+OUT_FLOW=$CLEAN
+api PUT /api/v1/virtual-outputs/2 '{"source": {"monitor": "cr"}}' >/dev/null
+sleep 0.5
+probe 1 1:1:0.70710677 2:1:0.70710677
+api PUT /api/v1/virtual-outputs/2 '{"source": {"monitor": "cr", "feed": "speaker"}}' >/dev/null
+sleep 0.5
+probe 1 1:1:0.35355338 2:1:0.35355338
+api POST /api/v1/strips '{"id": "spot", "format": "mono", "patch": [{"input": 1, "channel": 2}]}' >/dev/null
+api PUT /api/v1/solo/spot '{"kind": "pfl"}' >/dev/null
+sleep 0.5
+out=$("$PROBE_BIN" --domain "$OWN" --flow "$CLEAN" --seconds 1 --expect 1:1:0.35355338)
+python3 - "$out" <<'EOF2' || fail "the speaker feed did not follow the PFL: $out"
+import json, sys
+assert json.loads(sys.argv[1])["checks"][0]["max_error"] > 1e-3
+EOF2
+api PUT /api/v1/virtual-outputs/2 '{"source": {"monitor": "cr"}}' >/dev/null
+sleep 0.5
+probe 1 1:1:0.70710677 2:1:0.70710677
+curl -fsS -X DELETE "$WEB/api/v1/solo" >/dev/null
+curl -fsS -X DELETE "$WEB/api/v1/strips/spot"
+pass "monitor feeds: clean is the main bus under a PFL, speaker has the level and follows the PFL"
 
 # Bad sources are refused; a deleted signal silences its outputs.
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' "$WEB/api/v1/virtual-outputs/2" -d '{"source": {"signal": "nope"}}')

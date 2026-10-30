@@ -20,7 +20,7 @@ import { DEFAULT_DOWNMIX, FORMATS, channelsOf, tapLabel } from "../nodes.js";
 import { loadTaps, tapOptions } from "../taps.js";
 import { api, dbValue, fmtDb } from "../api.js";
 import { act, buses, inputName, isBus, isSubgroup, live, patchSend, patchSignal, select, sendOf, signalOf, store, stored, strips } from "../store.js";
-import { setVoutSource, sourceLabel, vouts } from "../vouts.js";
+import { setVoutFeed, setVoutSource, sourceLabel, vouts } from "../vouts.js";
 
 const emit = defineEmits(["open"]);
 const { applyNodeChanges, applyEdgeChanges, fitView } = useVueFlow();
@@ -403,6 +403,11 @@ function setVoutInputFormat(f) {
           <option v-for="[v, l] in voutTapChoices" :key="v" :value="v">{{ l }}</option>
         </select>
       </div>
+      <div v-if="editedVout.source && 'monitor' in editedVout.source" class="row" role="group" aria-label="Monitor feed">
+        <label>Feed</label>
+        <button v-for="f in ['clean', 'speaker']" :key="f" class="btn small" :class="(editedVout.source.feed || 'clean') === f ? '' : 'secondary'" :aria-pressed="(editedVout.source.feed || 'clean') === f" @click="setVoutFeed(editedVout, f)">{{ f === "clean" ? "Clean" : "Speaker" }}</button>
+      </div>
+      <p v-if="editedVout.source && 'monitor' in editedVout.source" class="note">Clean: the monitor's source, before solo, talkback, checks and level. Speaker: exactly what its speakers get.</p>
       <div v-if="editedVout.source && 'input' in editedVout.source" class="row">
         <label>Input is</label>
         <select :value="editedVout.source.format || ''" aria-label="Input format" @change="setVoutInputFormat($event.target.value)">

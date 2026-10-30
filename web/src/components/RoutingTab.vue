@@ -12,7 +12,7 @@ import { tapLabel } from "../nodes.js";
 import { loadTaps, tapOptions } from "../taps.js";
 import { api, copyText, dbValue, fmtDb } from "../api.js";
 import { act, buses, isBus, isSubgroup, live, patchSend, sendOf, sends, signalOf, signals } from "../store.js";
-import { setVoutSource, sourceChoices, sourceLabel, vouts } from "../vouts.js";
+import { setVoutFeed, setVoutSource, sourceChoices, sourceLabel, vouts } from "../vouts.js";
 
 const editing = ref(null); // { from, to }
 const current = computed(() => (editing.value ? sendOf(editing.value.from, editing.value.to) : null));
@@ -168,6 +168,9 @@ async function copyFlow(o) {
               <option value="">– silence –</option>
               <option v-for="[k, , l] in sourceChoices" :key="k" :value="k">{{ l }}</option>
             </select>
+            <span v-if="v.source && 'monitor' in v.source" class="feedtoggle" role="group" :aria-label="`Feed of ${v.label}`">
+              <button v-for="f in ['clean', 'speaker']" :key="f" class="btn small" :class="(v.source.feed || 'clean') === f ? '' : 'secondary'" :aria-pressed="(v.source.feed || 'clean') === f" :title="f === 'clean' ? 'the monitor\'s source, before solo, talkback, checks and level' : 'exactly what its speakers get'" @click="setVoutFeed(v, f)">{{ f === "clean" ? "Clean" : "Speaker" }}</button>
+            </span>
           </td>
           <td><Pill :text="!v.running ? 'not running' : v.errors ? `${v.errors} errors` : v.source ? 'on' : 'silent'" :kind="!v.running || v.errors ? 'bad' : v.source ? 'ok' : 'neutral'" /></td>
           <td class="num">{{ v.commit_lag_ms == null ? "–" : v.commit_lag_ms.toFixed(3) }}</td>
