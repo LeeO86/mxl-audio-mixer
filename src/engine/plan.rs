@@ -239,6 +239,13 @@ pub struct Plan {
     /// `(new processor, old processor)`: state carried over from the previous plan.
     pub proc_carry: Vec<(u32, u32)>,
     pub node_meters: Arc<[NodeMeter]>,
+    /// Per output slot: the engine inputs whose samples reach it (sorted). The
+    /// DSP thread labels the slot's samples with the read time of the latest of
+    /// them, so an output keeps its inputs' MXL timestamps (1.5.1).
+    pub output_sources: Vec<Vec<u16>>,
+    /// Per output slot: the processing latency (look-ahead) of its path in
+    /// samples, taken off the output's index as well.
+    pub output_latency: Vec<u32>,
 }
 
 /// Builds a plan on the control side.
@@ -267,6 +274,8 @@ impl PlanBuilder {
                 proc_lookup: Vec::new(),
                 proc_carry: Vec::new(),
                 node_meters: Arc::new([]),
+                output_sources: Vec::new(),
+                output_latency: Vec::new(),
             },
             buffers: 0,
             meters: 0,
@@ -349,6 +358,90 @@ impl PlanBuilder {
         self.plan.steps.push(step);
     }
 
+    /// The processing latency (look-ahead) of output slot `slot`'s path, in samples.
+    pub fn output_latency(&mut self, slot: usize, samples: usize) {
+        if self.plan.output_latency.len() <= slot {
+            self.plan.output_latency.resize(slot + 1, 0);
+        }
+        self.plan.output_latency[slot] = samples as u32;
+    }
+
+    /// Which inputs reach each output slot: the steps run on sets of inputs
+    /// instead of samples. A send adds its source's inputs (also at gain 0, so a
+    /// mute does not move an output's time); keys are left out (they shape the
+    /// gain, they are not heard). Holds (block-delay feedback) carry their
+    /// inputs to the next pass until nothing changes.
+    fn output_sources(&self) -> Vec<Vec<u16>> {
+        type Set = std::collections::BTreeSet<u16>;
+        let plan = &self.plan;
+        let mut bufs: Vec<Set> = vec![Set::new(); self.buffers as usize];
+        let mut holds: Vec<Set> = vec![Set::new(); plan.procs.len()];
+        let mut outs: Vec<Set> = Vec::new();
+        // Holds only grow: a pass that adds nothing to them is the last one.
+        let mut held = 0;
+        let ids = |span: Span| plan.indices[span.range()].iter().map(|&b| b as usize);
+        let union = |bufs: &[Set], span: Span| -> Set {
+            ids(span).flat_map(|b| bufs[b].iter().copied()).collect()
+        };
+        for _ in 0..=plan.procs.len() {
+            outs.clear();
+            for step in &plan.steps {
+                match *step {
+                    Step::Patch { input, dst, .. } => {
+                        bufs[dst as usize] = Set::from([input as u16]);
+                    }
+                    Step::Gain { src, dst, .. }
+                    | Step::Matrix { src, dst, .. }
+                    | Step::Process { src, dst, .. } => {
+                        let set = union(&bufs, src);
+                        for d in ids(dst) {
+                            bufs[d] = set.clone();
+                        }
+                    }
+                    Step::Clear { dst } => {
+                        for d in ids(dst) {
+                            bufs[d].clear();
+                        }
+                    }
+                    Step::Send { src, dst, .. } => {
+                        let set = union(&bufs, src);
+                        for d in ids(dst) {
+                            bufs[d].extend(set.iter().copied());
+                        }
+                    }
+                    Step::HoldOut { proc, dst } => {
+                        for d in ids(dst) {
+                            bufs[d] = holds[proc as usize].clone();
+                        }
+                    }
+                    Step::HoldIn { proc, src } => {
+                        let set = union(&bufs, src);
+                        holds[proc as usize].extend(set);
+                    }
+                    Step::Output { src, slot } => {
+                        let slot = slot as usize;
+                        if outs.len() <= slot {
+                            outs.resize(slot + 1, Set::new());
+                        }
+                        let set = union(&bufs, src);
+                        outs[slot].extend(set);
+                    }
+                    Step::Meter { .. }
+                    | Step::Loudness { .. }
+                    | Step::Analyse { .. }
+                    | Step::Stream { .. }
+                    | Step::Vad { .. } => {}
+                }
+            }
+            let now: usize = holds.iter().map(Set::len).sum();
+            if now == held {
+                break;
+            }
+            held = now;
+        }
+        outs.into_iter().map(|s| s.into_iter().collect()).collect()
+    }
+
     pub fn finish(mut self) -> Plan {
         static GENERATIONS: AtomicU32 = AtomicU32::new(1);
         self.plan.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
@@ -373,6 +466,7 @@ impl PlanBuilder {
         self.plan.node_meters = (0..self.node_meters)
             .map(|_| NodeMeter::default())
             .collect();
+        self.plan.output_sources = self.output_sources();
         self.plan
     }
 }
@@ -772,6 +866,63 @@ mod tests {
         });
         b.step(Step::Output { src: pan, slot: 0 });
         b.finish()
+    }
+
+    /// 1.5.1: the inputs reaching each output slot. Sends add, a gain or a
+    /// clear replaces, a key is not heard, a hold carries to the next block.
+    #[test]
+    fn output_sources_follow_the_signal() {
+        let mut b = PlanBuilder::new(8);
+        let a = b.buffers(1);
+        let c = b.buffers(1);
+        let k = b.buffers(1);
+        for (input, span) in [(0u32, a), (5, c), (7, k)] {
+            let dst = b.buffer(span, 0);
+            b.step(Step::Patch {
+                input,
+                channel: 0,
+                dst,
+            });
+        }
+        let bus = b.buffers(1);
+        b.step(Step::Clear { dst: bus });
+        let w = b.coefficients(&[1.0]);
+        for (id, src) in [(1, a), (2, c)] {
+            let node = b.node(id, &[0.0], 0);
+            b.step(Step::Send {
+                node,
+                src,
+                dst: bus,
+                coefficients: w,
+            });
+        }
+        let proc = b.processor(Processor::hold_block(3, 1, 8));
+        let keyed = b.buffers(1);
+        let comp = b.processor(Processor::hold_block(4, 1, 8));
+        b.step(Step::Process {
+            proc: comp,
+            src: a,
+            dst: keyed,
+            key: k,
+        });
+        let back = b.buffers(1);
+        b.step(Step::HoldOut { proc, dst: back });
+        b.step(Step::Output { src: bus, slot: 0 });
+        b.step(Step::Output {
+            src: keyed,
+            slot: 1,
+        });
+        b.step(Step::Output { src: back, slot: 3 });
+        b.step(Step::HoldIn { proc, src: c });
+        let plan = b.finish();
+        assert_eq!(
+            plan.output_sources[0],
+            vec![0, 5],
+            "both sends, also at gain 0"
+        );
+        assert_eq!(plan.output_sources[1], vec![0], "the key is not heard");
+        assert!(plan.output_sources[2].is_empty());
+        assert_eq!(plan.output_sources[3], vec![5], "through the hold");
     }
 
     fn ones(block: usize) -> TestInputs {

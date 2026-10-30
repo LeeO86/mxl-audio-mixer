@@ -6,6 +6,13 @@
 //! writes the outputs' block ending at (n+1)·B. The control side talks to it only
 //! through lock-free single-producer/single-consumer rings and atomics; the thread
 //! never allocates, locks or does I/O other than MXL reads and writes.
+//!
+//! Outputs keep their inputs' timestamps (1.5.1): block n of an output is written
+//! at the index its inputs were read from, the read time of the latest input that
+//! reaches it ((n+1)·B − (read offset + its largest extra delay)), less the
+//! look-ahead of its path. The samples leave at the same moment as before; only
+//! their index changed, so readers need a read offset of at least the output's
+//! write delay (`OutputCounters::write_delay_samples`).
 
 mod dsp;
 pub mod meter;
@@ -128,7 +135,15 @@ pub struct OutputWriter {
     staging: Vec<f32>,
     filled: usize,
     staged: bool,
+    /// The output index up to which samples are staged or written (0: none yet).
     next: u64,
+    /// The index the current block starts at: the block clock less `offset`.
+    label: u64,
+    /// The block clock minus the output index, in samples (read offset + the
+    /// largest extra delay of its inputs + its path's look-ahead).
+    offset: u64,
+    /// Faded out for an input delay change that will move `offset`.
+    dip: bool,
     gain: f32,
     fading: i8,
 }
@@ -143,6 +158,9 @@ impl OutputWriter {
             filled: 0,
             staged: false,
             next: 0,
+            label: 0,
+            offset: 0,
+            dip: false,
             gain: 0.0,
             fading: 1,
         }
@@ -187,6 +205,10 @@ pub struct OutputCounters {
     pub errors: AtomicU64,
     /// TAI time of the last commit minus the time of its last sample, in µs.
     pub commit_lag_us: AtomicU64,
+    /// How far the output's head index can trail TAI now, in samples: the
+    /// offset of its index from the block clock plus one commit and one block
+    /// (the block in work). A reader needs at least this read offset.
+    pub write_delay_samples: AtomicU32,
 }
 
 /// Counters of the DSP thread.

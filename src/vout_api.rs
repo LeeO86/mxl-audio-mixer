@@ -61,6 +61,7 @@ pub fn status(control: &crate::control::Control) -> Vec<Value> {
                 "running": o.is_some(),
                 "errors": o.map_or(0, |o| o.errors),
                 "commit_lag_ms": o.map(|o| o.commit_lag_ms),
+                "write_delay_ms": o.map(|o| o.write_delay_ms),
             })
         })
         .collect()

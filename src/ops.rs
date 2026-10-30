@@ -625,6 +625,17 @@ async fn metrics(State(app): State<App>) -> Response {
             .map(|o| format!("{{output=\"{}\"}} {}", o.signal, o.commit_lag_ms))
             .collect(),
     );
+    metric(
+        "output_write_delay_ms",
+        "gauge",
+        "How far an output's head index can trail TAI now (it keeps its inputs' timestamps): the read offset its readers need at least.",
+        control
+            .outputs
+            .status(&control.engine, &app.node)
+            .iter()
+            .map(|o| format!("{{output=\"{}\"}} {}", o.signal, o.write_delay_ms))
+            .collect(),
+    );
     // −∞ is not exported: a series without a value is absent.
     let finite = |db: crate::mix::model::Db| db.0.is_finite().then_some(db.0);
     let loudness = control.loudness.values(&control.mix.settings);

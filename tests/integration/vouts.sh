@@ -122,6 +122,52 @@ grep -q '^mxl_audio_mixer_virtual_output_routed{slot="1",output="pgm",label="PGM
 api PUT /api/v1/virtual-outputs/3 '{"source": {"input": 1, "format": "stereo"}}' >/dev/null
 pass "bad sources refused, a deleted strip leaves silence, metrics"
 
+# 1.5.1: the outputs keep their inputs' timestamps. A ramp (each sample tells
+# its index) on input 2, written 30 ms late (a batched or mirrored input: its
+# automatic delay is about 30 ms): straight through, through a bus at −6 dB and
+# through a bus limiter (1.5 ms look-ahead, compensated) it leaves at the index
+# it was read from, while the published write delay covers the delay.
+RAMP=56565656-5656-4565-8565-565656565656
+start_tone "$WORK/mxl/tones" "$RAMP" --domain-id "$DOMAIN" --channels 2 --ramp --delay-ms 30
+wait_until 10 "ramp flow" test -d "$WORK/mxl/tones/$RAMP.mxl-flow"
+api PUT /api/v1/inputs/2/route "{\"flow_id\": \"$RAMP\", \"domain_id\": \"$DOMAIN\"}" >/dev/null
+wait_until 5 "input 2 running" is_state 2 running
+settled 2
+shift_of() { # <gain>: probe Clean for the ramp; prints the probe's ramp result
+    local out
+    out=$("$PROBE_BIN" --domain "$OWN" --flow "$CLEAN" --seconds 1 --behind-ms 100 --ramp "$1")
+    echo "$out" >>"$IT_OUT/vouts-probe.log"
+    python3 - "$out" <<'EOF2' || fail "index shift: $out"
+import json, sys
+d = json.loads(sys.argv[1])
+r = d["ramp"]
+assert d["failed_reads"] == 0 and r["samples"] > 40000, d
+assert abs(r["shift_samples"]) <= 1 and r["at_median"] > 0.99, r
+print(f"shift {r['shift_samples']} samples ({r['at_median']:.3f} at it)")
+EOF2
+}
+delay=$(input 2 effective_delay_ms)
+api PUT /api/v1/virtual-outputs/2 '{"source": {"input": 2}}' >/dev/null
+sleep 0.5
+got=$(shift_of 1)
+wd=$(json "$WEB/api/v1/virtual-outputs/2" "d['write_delay_ms']")
+python3 -c "exit(0 if $wd >= $delay + 4 else 1)" || fail "write delay $wd ms below the input's $delay ms + 4"
+grep -q "^mxl_audio_mixer_output_write_delay_ms{output=\"vout:2\"} " <<<"$(curl -fsS "$WEB/metrics")" || fail "metric output_write_delay_ms"
+pass "input 2 straight through keeps its index: $got; input delay $delay ms, write delay $wd ms"
+api POST /api/v1/strips '{"id": "ramp", "format": "stereo", "patch": [{"input": 2, "channel": 1}, {"input": 2, "channel": 2}]}' >/dev/null
+api POST /api/v1/buses '{"id": "rb", "name": "Ramp bus", "format": "stereo", "fader_db": -6.0206}' >/dev/null
+api PUT /api/v1/sends/ramp/rb >/dev/null
+api PUT /api/v1/virtual-outputs/2 '{"source": {"signal": "rb"}}' >/dev/null
+sleep 0.5
+pass "through a bus at −6 dB: $(shift_of 0.5)"
+api POST /api/v1/buses/rb/chain '{"id": "lim", "type": "limiter", "ceiling_db": 0, "release_ms": 50, "lookahead_ms": 1.5, "true_peak": false}' >/dev/null
+sleep 0.5
+wd2=$(json "$WEB/api/v1/virtual-outputs/2" "d['write_delay_ms']")
+python3 -c "exit(0 if abs($wd2 - $wd - 1.5) < 0.05 else 1)" || fail "write delay $wd2 ms, not $wd + 1.5"
+pass "through a 1.5 ms look-ahead limiter (compensated): $(shift_of 0.5); write delay $wd2 ms"
+curl -fsS -X DELETE "$WEB/api/v1/strips/ramp"
+curl -fsS -X DELETE "$WEB/api/v1/buses/rb"
+
 # A restart with other outputs: PGM (keyed) moved to slot 2 keeps its flow id
 # and its source; Clean is mono now; output 3 is gone, its source kept, silent.
 rc=0

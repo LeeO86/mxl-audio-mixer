@@ -12,6 +12,9 @@
 //! `--onsets 0.05` lists where channel 1 rises above that level after 100 ms
 //! below it: the flow index, and its position in the TAI second in ms (for a
 //! source that starts a burst on every second, the latency).
+//! `--ramp 0.5` reads channel 1 as 0.5 × the `mxl-mixer-tone --ramp` signal and
+//! reports the index shift: the flow index of each sample minus the index the
+//! ramp was written at (median, range, and the share of samples at the median).
 //! `--correlate 4` gives channel 1's correlation with tones 1 to 4 (each at its
 //! best alignment): which tones a sum carries (the N-1 check of §17).
 
@@ -38,7 +41,7 @@ fn main() {
             .and_then(|i| args.get(i + 1).cloned())
     };
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--behind-ms MS] [--expect CH:SRC:GAIN ...] [--onsets LEVEL] [--correlate N]");
+        eprintln!("usage: mxl-mixer-probe --domain DIR --flow UUID [--seconds S] [--behind-ms MS] [--expect CH:SRC:GAIN ...] [--onsets LEVEL] [--correlate N] [--ramp GAIN]");
         std::process::exit(2)
     };
     let domain = PathBuf::from(arg("--domain").unwrap_or_else(|| usage()));
@@ -253,12 +256,45 @@ fn main() {
         }
         None => Vec::new(),
     };
+    let ramp = arg("--ramp")
+        .and_then(|g| g.parse::<f32>().ok())
+        .map(|gain| {
+            // After the first 100 ms (fades); silence and gaps say nothing.
+            let mut shifts: Vec<i64> = data
+                .first()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+                .skip(4800)
+                .filter(|(_, v)| !v.is_nan() && **v != 0.0)
+                .map(|(k, v)| {
+                    let written = mxl_audio_mixer::timing::ramp_index(*v / gain);
+                    let d = (first + k as u64).wrapping_sub(written) % 65_536;
+                    if d >= 32_768 {
+                        d as i64 - 65_536
+                    } else {
+                        d as i64
+                    }
+                })
+                .collect();
+            shifts.sort_unstable();
+            let median = shifts.get(shifts.len() / 2).copied();
+            let at = shifts.iter().filter(|s| Some(**s) == median).count();
+            serde_json::json!({
+                "shift_samples": median,
+                "shift_ms": median.map(|m| m as f64 / 48.0),
+                "min": shifts.first(), "max": shifts.last(),
+                "samples": shifts.len(),
+                "at_median": at as f64 / shifts.len().max(1) as f64,
+            })
+        });
     println!(
         "{}",
         serde_json::json!({
             "flow": flow, "channels": channels, "samples": read,
             "failed_reads": failed, "levels": per_channel, "checks": checks,
-            "onsets": onsets, "correlation": correlation,
+            "onsets": onsets, "correlation": correlation, "ramp": ramp,
         })
     );
 }
