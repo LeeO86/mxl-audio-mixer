@@ -335,6 +335,7 @@ impl Parser<'_> {
             id: String::new(),
         });
         let mut ids = std::collections::BTreeSet::new();
+        let mut labels = std::collections::BTreeSet::new();
         for (i, v) in list.iter_mut().enumerate() {
             if v.label.trim().is_empty() {
                 v.label = format!("Output {}", i + 1);
@@ -359,6 +360,12 @@ impl Parser<'_> {
             };
             if !ids.insert(v.id.clone()) {
                 return err(format!("MIXER_OUTPUTS: key {} is used twice", v.id));
+            }
+            if !labels.insert(v.label.trim().to_string()) {
+                return err(format!(
+                    "MIXER_OUTPUTS: label {} is used twice",
+                    v.label.trim()
+                ));
             }
         }
         Ok(list)
@@ -1219,6 +1226,8 @@ mod tests {
             vec![("MIXER_OUTPUTS", r#"[{"key": "PGM"}]"#)],
             vec![("MIXER_OUTPUTS", r#"[{"key": "2"}, {}]"#)],
             vec![("MIXER_OUTPUTS", r#"[{"key": "a"}, {"key": "a"}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{"label": "PGM"}, {"label": " PGM "}]"#)],
+            vec![("MIXER_OUTPUTS", r#"[{}, {"label": "Output 1"}]"#)],
             vec![("MIXER_OUTPUT_FLOWS", "65")],
             vec![("MIXER_OUTPUTS", r#"[{"format": "9.1"}]"#)],
             vec![("MIXER_OUTPUTS", r#"[{"name": "x"}]"#)],

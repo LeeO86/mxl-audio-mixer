@@ -133,6 +133,9 @@ pub struct Control {
     default_commit: u32,
     mix_path: PathBuf,
     pub history: crate::history::History,
+    /// What loading `mix.json` dropped because a newer version wrote it (D279);
+    /// `load_warnings` in the status.
+    pub load_warnings: Vec<String>,
     /// Duration of the last plan compile (§15 `plan_compile_seconds`).
     pub compile_seconds: f64,
     /// Steps of the running plan by type (§15 `nodes{type}`).
@@ -207,6 +210,7 @@ impl Control {
             default_commit: config.output_commit_samples,
             mix_path: config.state_dir.join("mix.json"),
             history: crate::history::History::new(&config.state_dir),
+            load_warnings: Vec::new(),
             compile_seconds: 0.0,
             step_counts: BTreeMap::new(),
             auto: crate::auto::Auto::new(),
@@ -816,47 +820,27 @@ impl Control {
         self.analyser.set_target(target);
     }
 
-    /// Every output to publish: the virtual outputs first, so they take their
-    /// slots before the published ones at a start (D267).
+    /// Every output to publish (see [`output_specs`]).
     fn specs(&self, mix: &Mix) -> Vec<OutputSpec> {
-        let virtual_outputs = self
-            .virtual_outputs
-            .iter()
-            .enumerate()
-            .map(|(i, v)| OutputSpec {
-                signal: crate::mix::compile::vout_key(&v.id),
-                name: v.label.clone(),
-                format: v.format,
-                commit: self.default_commit,
-                virtual_slot: Some(i + 1),
-            });
-        let published = mix.outputs.iter().filter_map(|o| {
-            let (name, _) = mix.signal(&o.signal)?;
-            let format = match o.format {
-                Some(f) => f,
-                None => mix.tap_format(&o.signal, &o.tap())?,
-            };
-            Some(OutputSpec {
-                signal: o.signal.clone(),
-                name: name.to_string(),
-                format,
-                commit: o.commit_samples.unwrap_or(self.default_commit),
-                virtual_slot: None,
-            })
-        });
-        let monitors = mix
-            .control_room
-            .monitors
-            .iter()
-            .filter(|m| m.publish)
-            .map(|m| OutputSpec {
-                signal: m.key(),
-                name: format!("Monitor {}", m.name),
-                format: m.format,
-                commit: self.default_commit,
-                virtual_slot: None,
-            });
-        virtual_outputs.chain(published).chain(monitors).collect()
+        output_specs(&self.virtual_outputs, self.default_commit, mix)
+    }
+
+    /// Refuse a change that adds an NMOS label clash (the strip, bus or
+    /// monitor name of a published one equal to a virtual output's label or
+    /// another published one's): the designer routes by label. Clashes the
+    /// current mix already has (an old `mix.json`) do not block other changes.
+    pub fn check_labels(&self, next: &Mix) -> Result<(), String> {
+        match new_label_clash(&self.virtual_outputs, &self.mix, next) {
+            Some(c) => Err(format!("{c}; rename one")),
+            None => Ok(()),
+        }
+    }
+
+    /// The NMOS label clashes of the current mix (status, log at load).
+    pub fn current_label_clashes(&self) -> Vec<String> {
+        label_clashes(&self.virtual_outputs, &self.mix)
+            .into_iter()
+            .collect()
     }
 
     /// Solo `signal` (PFL or AFL), or end its solo; interlock replaces the others.
@@ -1484,17 +1468,19 @@ fn apply_value_act(mix: &mut Mix, act: crate::logic::Act) {
     }
 }
 
-/// The mix saved under `MIXER_STATE_DIR`. A file that cannot be read is moved
-/// aside (`mix.json.bad`) so it is not overwritten.
-pub fn load_mix(path: &std::path::Path) -> Mix {
+/// The mix saved under `MIXER_STATE_DIR`, with what was dropped from it: a mix
+/// of a newer version loads without what this one does not know (D279). A
+/// file that cannot be read is moved aside (`mix.json.bad`) so it is not
+/// overwritten.
+pub fn load_mix(path: &std::path::Path) -> (Mix, Vec<String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return Mix::default();
+        return (Mix::default(), Vec::new());
     };
     let parsed = serde_json::from_str::<serde_json::Value>(&text)
         .map_err(|e| e.to_string())
-        .and_then(|v| serde_json::from_value::<Mix>(v["mix"].clone()).map_err(|e| e.to_string()));
+        .and_then(|mut v| crate::mix::tolerant::mix(v["mix"].take()));
     match parsed {
-        Ok(mix) => mix,
+        Ok(loaded) => loaded,
         Err(e) => {
             let bad = path.with_extension("json.bad");
             tracing::error!(
@@ -1503,8 +1489,26 @@ pub fn load_mix(path: &std::path::Path) -> Mix {
                 bad.display()
             );
             let _ = std::fs::rename(path, &bad);
-            Mix::default()
+            (Mix::default(), Vec::new())
         }
+    }
+}
+
+/// Keep a copy of the `mix.json` a newer version wrote, before this version
+/// overwrites it: `mix.json.newer`, or `mix.json.newer-<seconds since 1970>`
+/// when that exists.
+pub fn keep_newer(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let mut newer = path.with_extension("json.newer");
+    if newer.exists() {
+        newer = path.with_extension(format!("json.newer-{}", crate::history::now_ms() / 1000));
+    }
+    match std::fs::copy(path, &newer) {
+        Ok(_) => Ok(newer),
+        Err(e) => Err(format!(
+            "copy {} to {}: {e}",
+            path.display(),
+            newer.display()
+        )),
     }
 }
 
@@ -1538,8 +1542,180 @@ fn logic_level(mix: &crate::mix::model::Mix, signal: &str, peak: Option<f64>) ->
     }
 }
 
+/// Every output to publish: the virtual outputs first, so they take their
+/// slots before the published ones at a start (D267).
+fn output_specs(
+    virtual_outputs: &[crate::config::VirtualOutput],
+    default_commit: u32,
+    mix: &Mix,
+) -> Vec<OutputSpec> {
+    let virtual_outputs = virtual_outputs.iter().enumerate().map(|(i, v)| OutputSpec {
+        signal: crate::mix::compile::vout_key(&v.id),
+        name: v.label.clone(),
+        format: v.format,
+        commit: default_commit,
+        virtual_slot: Some(i + 1),
+    });
+    let published = mix.outputs.iter().filter_map(|o| {
+        let (name, _) = mix.signal(&o.signal)?;
+        let format = match o.format {
+            Some(f) => f,
+            None => mix.tap_format(&o.signal, &o.tap())?,
+        };
+        Some(OutputSpec {
+            signal: o.signal.clone(),
+            name: name.to_string(),
+            format,
+            commit: o.commit_samples.unwrap_or(default_commit),
+            virtual_slot: None,
+        })
+    });
+    let monitors = mix
+        .control_room
+        .monitors
+        .iter()
+        .filter(|m| m.publish)
+        .map(|m| OutputSpec {
+            signal: m.key(),
+            name: format!("Monitor {}", m.name),
+            format: m.format,
+            commit: default_commit,
+            virtual_slot: None,
+        });
+    virtual_outputs.chain(published).chain(monitors).collect()
+}
+
+/// A clash `next` has that `now` has not.
+fn new_label_clash(
+    virtual_outputs: &[crate::config::VirtualOutput],
+    now: &Mix,
+    next: &Mix,
+) -> Option<String> {
+    let old = label_clashes(virtual_outputs, now);
+    label_clashes(virtual_outputs, next)
+        .into_iter()
+        .find(|c| !old.contains(c))
+}
+
+/// Every NMOS label used more than once (compared trimmed, case-sensitive),
+/// as "NMOS label \"X\" of <signal> is already used by <signal>".
+fn label_clashes(
+    virtual_outputs: &[crate::config::VirtualOutput],
+    mix: &Mix,
+) -> std::collections::BTreeSet<String> {
+    let mut seen = std::collections::BTreeMap::new();
+    let mut clashes = std::collections::BTreeSet::new();
+    for s in output_specs(virtual_outputs, 0, mix) {
+        let label = s.name.trim().to_string();
+        if let Some(other) = seen.get(&label) {
+            clashes.insert(format!(
+                "NMOS label {label:?} of {} is already used by {other}",
+                s.signal
+            ));
+        } else {
+            seen.insert(label, s.signal);
+        }
+    }
+    clashes
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn published_labels_must_not_clash() {
+        use super::label_clashes;
+        use crate::config::VirtualOutput;
+        use crate::mix::model::{Mix, Strip};
+        use crate::mix::Format;
+        let vout = [VirtualOutput {
+            key: None,
+            label: "PGM".into(),
+            format: Format::Stereo,
+            id: "1".into(),
+        }];
+        let mut m = Mix::default();
+        m.strips.push(Strip::new("a", Format::Mono));
+        m.strips.push(Strip::new("b", Format::Mono));
+        m.strips[0].name = "PGM ".into();
+        m.strips[1].name = "PGM".into();
+        m.outputs = serde_json::from_value(serde_json::json!([{"signal": "a"}])).unwrap();
+        // A published strip named like a virtual output.
+        let c = label_clashes(&vout, &m);
+        assert!(c.iter().next().unwrap().contains("\"PGM\""), "{c:?}");
+        // Not published: fine.
+        let mut quiet = m.clone();
+        quiet.outputs.clear();
+        assert!(label_clashes(&vout, &quiet).is_empty());
+        // Two published strips with the same name.
+        m.outputs =
+            serde_json::from_value(serde_json::json!([{"signal": "a"}, {"signal": "b"}])).unwrap();
+        assert_eq!(label_clashes(&[], &m).len(), 1);
+        m.strips[1].name = "pgm".into();
+        assert!(label_clashes(&[], &m).is_empty());
+    }
+
+    #[test]
+    fn only_new_label_clashes_are_refused() {
+        use super::new_label_clash;
+        use crate::mix::model::{Mix, Strip};
+        use crate::mix::Format;
+        let mut old = Mix::default();
+        for (id, name) in [("a", "X"), ("b", "X"), ("c", "Y")] {
+            let mut s = Strip::new(id, Format::Mono);
+            s.name = name.into();
+            old.strips.push(s);
+        }
+        old.outputs =
+            serde_json::from_value(serde_json::json!([{"signal": "a"}, {"signal": "b"}])).unwrap();
+        // An unrelated change passes despite the old clash.
+        let mut next = old.clone();
+        next.strips[2].fader_db = crate::mix::model::Db(-10.0);
+        assert!(new_label_clash(&[], &old, &next).is_none());
+        // A new clash is refused.
+        next.strips[2].name = "X".into();
+        next.outputs
+            .push(serde_json::from_value(serde_json::json!({"signal": "c"})).unwrap());
+        assert!(new_label_clash(&[], &old, &next).is_some());
+        // Renaming one side clears the old clash.
+        let mut fixed = old.clone();
+        fixed.strips[1].name = "Z".into();
+        assert!(new_label_clash(&[], &old, &fixed).is_none());
+        assert!(super::label_clashes(&[], &fixed).is_empty());
+    }
+
+    #[test]
+    fn a_newer_mix_json_loads_and_a_broken_one_goes_aside() {
+        use super::{keep_newer, load_mix};
+        use crate::mix::model::Strip;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("mixer-load-{}", crate::history::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mix.json");
+        let mut m = crate::mix::Mix::default();
+        m.strips.push(Strip::new("vox", crate::mix::Format::Mono));
+        let mut v = json!({"version": 1, "mix": m});
+        v["mix"]["strips"][0]["future_field"] = json!(1);
+        std::fs::write(&path, v.to_string()).unwrap();
+        let (loaded, dropped) = load_mix(&path);
+        assert_eq!(
+            (loaded, dropped),
+            (m.clone(), vec!["strips[0].future_field".to_string()])
+        );
+        assert_eq!(keep_newer(&path).unwrap(), dir.join("mix.json.newer"));
+        let second = keep_newer(&path).unwrap();
+        assert!(
+            second.to_string_lossy().contains("mix.json.newer-"),
+            "{second:?}"
+        );
+        assert_eq!(std::fs::read(&second).unwrap(), v.to_string().into_bytes());
+        // A wrong type: aside, empty.
+        v["mix"]["strips"][0]["fader_db"] = json!(true);
+        std::fs::write(&path, v.to_string()).unwrap();
+        assert_eq!(load_mix(&path), (crate::mix::Mix::default(), vec![]));
+        assert!(!path.exists() && dir.join("mix.json.bad").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn logic_hears_a_silenced_strip_as_silent() {
         use super::logic_level;

@@ -465,7 +465,18 @@ commits a 50 Hz frame of audio (960 samples) gets about 19 ms of automatic delay
 Kept in `MIXER_STATE_DIR/mix.json` and in the show file. `mix.json` is written
 atomically: within about 0.6 s of fader and parameter changes (from the API or
 from logic, at most every 500 ms; a crash loses at most that much), at once
-after any other change, and at SIGTERM. Signal ids (strips and
+after any other change, and at SIGTERM. A `mix.json` that cannot be read (bad JSON, a
+wrong type, a missing field) is moved to `mix.json.bad` and the mixer starts with an
+empty mix. One written by a newer version loads without what this version does not
+know (D279): unknown fields, and chain nodes, logic blocks (with their wires) and
+list entries of unknown types are dropped, the rest is kept. The original is kept
+as `mix.json.newer` (`mix.json.newer-<seconds>` if that exists), the mixer logs one
+WARN with the dropped paths, `GET /api/v1/status` lists them in `load_warnings` and
+the UI shows a banner until dismissed. If the mix is not valid without them (e.g. a
+logic block sets a parameter of a dropped node), it goes to `mix.json.bad` as
+before. Rollbacks from 1.6 and later to 1.5 keep the mix this way; going back to
+1.4.x still loses it when 1.5 features are used (see the "Downgrade" lines of the
+changelog). The API stays strict: an unknown field is an error there. Signal ids (strips and
 buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
 an id gets `strip-<n>` or `bus-<n>`.
 
@@ -537,6 +548,20 @@ an id gets `strip-<n>` or `bus-<n>`.
   slot whose format changed fails until its old flow is gone (as a published
   output). An IS-05 `master_enable: false` on their senders is accepted but
   writes on, as for published outputs.
+  For the designer, which routes by label: the node label is `NMOS_LABEL` as
+  given; the Source, Flow and Sender label is the configured label as given.
+  Labels are unique (compared trimmed, case-sensitive; also against the
+  defaults "Output <n>"), else the mixer does not start. A change of the mix
+  that would publish an output or monitor under a virtual output's label, or
+  two under one label (published outputs are labelled with the strip or bus
+  name, monitors "Monitor <name>"), is refused (400), also by a rename. A
+  clash an older saved mix already has does not block other changes: it is
+  logged (WARN) at the start and listed in `label_clashes` of
+  `GET /api/v1/status` until one side is renamed.
+  Channels per format: mono 1, stereo 2, 3.0 3, 5.1 6, 7.1 8, 5.1.4 10,
+  7.1.4 12. The list is fixed at the start (environment or
+  `MIXER_CONFIG_FILE`, which is only read, never written); changing it needs a
+  restart.
 - **Formats** (§4.1), channel order as SMPTE ST 2110-30: mono `M`; stereo `L R`;
   `3.0` `L R C`; `5.1` `L R C LFE Ls Rs`; `7.1` `L R C LFE Lss Rss Lrs Rrs`;
   `5.1.4` = 5.1 + `Ltf Rtf Ltr Rtr`; `7.1.4` = 7.1 + the same heights.
@@ -614,6 +639,8 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Show history:** `MIXER_STATE_DIR/history/`: an automatic version at most once a
   minute after a change (the newest 100 kept), named versions on request (kept
   until deleted). A restore or an import keeps the current show as a version first.
+  A version written by a newer version loads like `mix.json` (D279); a restore of
+  it answers with `dropped` (the paths left out).
 
 Parameter changes ramp over `ramp_ms` (default 10 ms). A change that rewires the
 graph fades the affected paths out and in (10 ms) around the plan swap; unrelated
@@ -948,7 +975,7 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET /livez` | 200 while the process runs; never depends on the registry |
 | `GET /readyz` | 200 when the engine runs and, with a registry, the node is registered and listed by the Query API; JSON details incl. `timing_trusted` |
 | `GET /metrics` | Prometheus text, prefix `mxl_audio_mixer_` |
-| `GET /api/v1/status` | version, readiness, NMOS, MXL domain, DSP, every input, the mix's size, every output |
+| `GET /api/v1/status` | version, readiness, NMOS, MXL domain, DSP, every input, the mix's size, every output, `load_warnings` (what loading `mix.json` dropped, D279; usually empty) |
 | `GET /api/v1/config` | every setting: value, origin (`environment`, `file`, `default`), default, description |
 | `GET /api/v1/config/export` | the show file: settings (for the record), inputs, mix, active connections |
 | `POST /api/v1/config/import` | restores the inputs, the mix and the connections (through IS-05); settings are not applied |

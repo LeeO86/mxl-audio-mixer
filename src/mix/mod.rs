@@ -12,6 +12,7 @@ pub mod room;
 pub mod show;
 pub mod spatial;
 pub mod talkback;
+pub mod tolerant;
 pub mod vca;
 
 pub use format::Format;
