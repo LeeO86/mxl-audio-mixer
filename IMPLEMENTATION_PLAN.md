@@ -3,7 +3,7 @@
 Decisions, deviations and results against `SPECIFICATION.md` (Draft v0.3). Kept
 current so that work can resume after an interruption.
 
-## Status (2026-10-22)
+## Status (2026-10-30)
 
 | Step | State |
 | --- | --- |
@@ -19,11 +19,12 @@ current so that work can resume after an interruption.
 | 1.4.1 input fixes from test-all (late blocks, read wait, catch-up, MXL instances) | done (PR 44), **released in 1.4.1** (2026-10-22; tag `v1.4.1` at `c3d3f42`); lab runs on `b054b9f` (`docs/release-notes/1.4.1.md`) |
 | 1.4.2 start-up of the inputs (last delay per flow, start-up phase, first lags after 0.1 s) | done (PR 47), **released in 1.4.2** (2026-10-23; the tag commit is added after the tag); lab runs (`docs/release-notes/1.4.2.md`) |
 | 1.4.3 a re-created flow keeps its last lag (forget only on a route change) | done (PR 49), **released in 1.4.3** (2026-10-24) |
+| 1.5.0 operator feedback (console A1–A10, processing B1–B6, graph and virtual outputs C1–C7, logic D1–D4), Silero leak and loudness memory fixes, tolerant show loading | done (PRs 51–60), **released in 1.5.0** (2026-10-30; the tag commit is added after the tag); maintainers' lab run 2026-10-30 on `2710e38`/`2e710c8` (`docs/release-notes/1.5.0.md`) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
 
-- 1.4.2 is released (2026-10-23). Release notes: `docs/release-notes/1.4.2.md`;
+- 1.5.0 is released (2026-10-30). Release notes: `docs/release-notes/1.5.0.md`;
   its image digest is filled in after the tag build. Earlier: `docs/release-notes/`.
 - Environment: `docs/development.md`.
 
