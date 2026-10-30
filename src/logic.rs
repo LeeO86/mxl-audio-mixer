@@ -192,6 +192,13 @@ pub enum Act {
         signal: String,
         on: bool,
     },
+    /// Virtual output `output` takes input `input` (on), or is cleared if it
+    /// still has it (off).
+    Route {
+        input: u32,
+        output: String,
+        on: bool,
+    },
     Monitor {
         monitor: String,
         source: Option<Source>,
@@ -247,6 +254,13 @@ impl Act {
             } => format!("talk {mic} to {destination} {}", on_off(*on)),
             Self::Publish { signal, on } => {
                 format!("{} {signal}", if *on { "publish" } else { "unpublish" })
+            }
+            Self::Route { input, output, on } => {
+                if *on {
+                    format!("route input {input} to virtual output {output}")
+                } else {
+                    format!("clear virtual output {output} (input {input})")
+                }
             }
             Self::Monitor { monitor, source } => format!(
                 "monitor {monitor} source {}",
@@ -766,6 +780,14 @@ impl Run {
             }),
             BlockKind::SetPfl { signal } => follow_bool(s, &|on| Act::Pfl {
                 signal: signal.clone(),
+                on,
+            }),
+            BlockKind::SetRoute {
+                input: Some(input),
+                output: Some(output),
+            } => follow_bool(s, &|on| Act::Route {
+                input: *input,
+                output: output.clone(),
                 on,
             }),
             BlockKind::SetPublish { signal } => follow_bool(s, &|on| Act::Publish {

@@ -17,7 +17,8 @@ import ConfirmButton from "./ConfirmButton.vue";
 import LogicNode from "./LogicNode.vue";
 import LogicParam from "./LogicParam.vue";
 import { api, exchange, fmtDb } from "../api.js";
-import { act, live, room, signalOf, signals, vcas } from "../store.js";
+import { act, inputName, live, room, signalOf, signals, vcas } from "../store.js";
+import { vouts } from "../vouts.js";
 import { PORT_TYPES, boundary, canWire, clipboard, copyOf, forget, freshId, group, history, historyOf, pasted, portName, portsOf, record, resource, same, sameEdit, ungroup } from "../logicEdit.js";
 
 const { applyNodeChanges, applyEdgeChanges, fitView, screenToFlowCoordinate, getSelectedNodes, getSelectedEdges, addSelectedNodes, removeSelectedNodes, findNode, setCenter, getViewport, dimensions } = useVueFlow("logic");
@@ -401,6 +402,9 @@ function optionsOf(p, b) {
   if (p.kind === "destination") return named(room.value.talkback?.destinations || []);
   if (p.kind === "node") return (signalOf(b?.signal)?.chain || []).map((n) => ({ id: n.id, name: `${n.id} (${n.type})` }));
   if (p.kind === "macro") return named(macros.value);
+  // A route block's input and virtual output (D248).
+  if (p.kind === "input") return (live.status?.inputs || []).map((i) => ({ id: i.input, name: `${i.input}: ${inputName(i)}` }));
+  if (p.kind === "vout") return vouts.value.map((o) => ({ id: o.id, name: `${o.label} (${o.id})` }));
   if (p.kind === "peer") return PEERS.map((x) => ({ id: x, name: x }));
   if (p.kind === "port-type") return PORT_TYPES.filter((t) => t !== "event" || b?.type === "macro-in" || b?.type === "macro-out").map((t) => ({ id: t, name: t }));
   return null;
@@ -470,6 +474,7 @@ function removeBlock(id) {
 function setParam(b, p, raw) {
   let value = raw;
   if (p.blank && String(raw).trim() === "") value = null;
+  else if (p.kind === "input") value = Number(raw);
   else if (NUMBER_KINDS.includes(p.kind)) {
     value = Number(raw);
     if (!Number.isFinite(value) || (p.kind === "integer" && !Number.isInteger(value))) return void (live.actionError = `${b.id}: ${p.name} must be ${p.kind === "integer" ? "a whole number" : "a number"}.`);
@@ -500,6 +505,7 @@ function labelOf(b) {
   const label = typeLabel(b.type);
   if (b.type === "macro") return `${macros.value.find((m) => m.id === b.macro)?.name || b.macro}`;
   if (b.type === "schedule") return `${label}: ${hhmm(b.start_minute)}–${hhmm(b.end_minute)}`;
+  if (b.type === "set-route" && b.input != null && b.output != null) return `Route: in ${b.input} → ${vouts.value.find((o) => o.id === b.output)?.label || b.output}`;
   if (paramsOf(b).some((q) => (BLANK_KINDS.includes(q.kind) && b[q.name] === "") || (q.blank && b[q.name] == null))) return `${label}: no target yet`;
   const p = paramsOf(b).find((q) => q.kind !== "port-type" && b[q.name] !== undefined && b[q.name] !== null && typeof b[q.name] !== "object" && b[q.name] !== "");
   if (!p) return label;

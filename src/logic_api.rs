@@ -994,6 +994,15 @@ pub fn catalog_json() -> Value {
             vec![p("signal", "signal")],
         ),
         (
+            BlockKind::SetRoute {
+                input: None,
+                output: None,
+            },
+            "Route input → output",
+            // Both start unchosen (`null`, D248).
+            vec![blank(p("input", "input")), blank(p("output", "vout"))],
+        ),
+        (
             BlockKind::SetMonitor {
                 monitor: s(),
                 source: None,
@@ -1100,7 +1109,7 @@ mod tests {
             .collect();
         let unique: std::collections::BTreeSet<&str> = types.iter().copied().collect();
         assert_eq!(types.len(), unique.len());
-        assert_eq!(types.len(), 48);
+        assert_eq!(types.len(), 49);
         let edge = c
             .as_array()
             .unwrap()

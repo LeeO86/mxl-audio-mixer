@@ -138,6 +138,23 @@ curl -fsS -X DELETE "$WEB/api/v1/monitors/cr"
 [[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['source']")" == None ]] || fail "the deleted monitor still feeds PGM"
 pass "a deleted monitor leaves silence"
 
+# D4: a logic route block puts input 1 straight on PGM (by its key) while its soft key is
+# held, and clears it when released; a source chosen meanwhile by hand stays.
+api POST /api/v1/logic '{"id": "route", "name": "Route", "blocks": [{"id": "key", "type": "button"}, {"id": "r", "type": "set-route", "input": 1, "output": "pgm"}], "wires": [{"from_block": "key", "from_port": "out", "to_block": "r", "to_port": "in"}]}' >/dev/null
+routed() { [[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "d['source']")" == "$1" ]]; }
+api PUT /api/v1/logic/route/buttons/key '{"pressed": true}' >/dev/null
+wait_until 5 "PGM from input 1" routed "{'input': 1}"
+api PUT /api/v1/logic/route/buttons/key '{"pressed": false}' >/dev/null
+wait_until 5 "PGM cleared" routed None
+api PUT /api/v1/logic/route/buttons/key '{"pressed": true}' >/dev/null
+wait_until 5 "PGM from input 1 again" routed "{'input': 1}"
+api PUT /api/v1/virtual-outputs/pgm '{"source": {"signal": "main"}}' >/dev/null
+api PUT /api/v1/logic/route/buttons/key '{"pressed": false}' >/dev/null
+sleep 0.5
+[[ "$(json "$WEB/api/v1/virtual-outputs/pgm" "(d['source'] or {}).get('signal')")" == main ]] || fail "the route block cleared a source chosen by hand"
+curl -fsS -X DELETE "$WEB/api/v1/logic/route"
+pass "logic route block: input 1 on PGM (key) while held, cleared on release, a hand-chosen source stays"
+
 rc=0
 stop_mixer || rc=$?
 [[ $rc == 143 ]] || fail "exit code $rc"
