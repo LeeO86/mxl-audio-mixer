@@ -21,6 +21,7 @@
 - Fixed: the meter tick no longer runs back-to-back after a late tick (missed ticks are delayed); the second read found the peaks empty, so wide signals flickered to −∞ and logic level blocks saw false edges.
 - Faster gain steps on the DSP thread: a gain reads only its channel's ramp values instead of copying the whole node per channel (lab plan of 40 strips and 5 buses, 96 samples: 1.4.3 22.6 µs, this branch before 25.1 µs, now 22.9 µs per block).
 - Downgrade: a show is read by 1.4.3 unless a surround panner has a height (`elevation_deg` above 0, written only then) or a 5.1.4/7.1.4 layout; set those back to 0 and 5.1/7.1 before a rollback.
+- Fixed: a loudness measurement kept every 100 ms block and short-term value until it was reset (about 160 B/s per meter, and integrated loudness and LRA recomputed over the whole list at every meter tick). Both are now histograms of 0.1 LU bins (count, power and loudness sum per bin) with the same gates (absolute −70 LUFS, relative −10 LU and −20 LU, LRA 10th–95th percentile): constant memory and time. Against the old lists: tone and steps identical, noise and speech-like sequences within 0.003 LU (integrated) and 0.042 LU (LRA). `tests/loudness_memory.rs` checks 2 h of segments keep no heap (2 MB before).
 
 ## 1.4.3 (2026-10-24)
 
