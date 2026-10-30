@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a loudness measurement kept every 100 ms block and short-term value until it was reset (about 160 B/s per meter, and integrated loudness and LRA recomputed over the whole list at every meter tick). Both are now histograms of 0.1 LU bins (count, power and loudness sum per bin) with the same gates (absolute −70 LUFS, relative −10 LU and −20 LU, LRA 10th–95th percentile): constant memory and time. Against the old lists: tone and steps identical, noise and speech-like sequences within 0.003 LU (integrated) and 0.042 LU (LRA). `tests/loudness_memory.rs` checks 2 h of segments keep no heap (2 MB before).
+
 ## 1.4.3 (2026-10-24)
 
 - A flow that goes away and comes back on the same route (a writer restart) keeps the last lag: its new reader is counted by the stall rule (0.5 s, or back within a block), not the 0.1 s start span. Only a route to another flow forgets it (D243). Before, a re-created flow whose writer started behind could raise the delay for about a minute.
