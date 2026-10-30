@@ -619,6 +619,60 @@ fn a_tsl_out_without_an_index_never_sends_and_a_shared_index_is_marked() {
 }
 
 #[test]
+fn a_route_block_follows_its_input_and_waits_for_both_targets() {
+    let route = |input, output: Option<&str>| K::SetRoute {
+        input,
+        output: output.map(str::to_string),
+    };
+    let mut mix = mix_of(
+        vec![
+            block("b", K::Button),
+            block("r", route(Some(3), Some("pgm"))),
+            block("u", route(Some(3), None)),
+        ],
+        vec![out("b", "r", "in"), out("b", "u", "in")],
+    );
+    let act = |on| Act::Route {
+        input: 3,
+        output: "pgm".into(),
+        on,
+    };
+    let mut logic = Logic::default();
+    assert_eq!(
+        tick(&mut logic, &mix),
+        vec![act(false)],
+        "u has no output yet"
+    );
+    logic.set_button("g", "b", true);
+    assert_eq!(tick(&mut logic, &mix), vec![act(true)]);
+    assert_eq!(act(true).describe(), "route input 3 to virtual output pgm");
+    let w = crate::mix::logic::warnings(&mix, &mix.logic[0].blocks);
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0].block.as_deref(), Some("u"));
+    // Two route blocks of one graph on one output: refused.
+    mix.logic[0].blocks[2].kind = route(Some(4), Some("pgm"));
+    let i = crate::mix::logic::issues(&mix);
+    assert_eq!(i.len(), 1, "{i:?}");
+    assert_eq!(i[0].block.as_deref(), Some("u"));
+    // In two graphs: marked, not refused.
+    mix.logic[0].blocks.pop();
+    mix.logic[0].wires.pop();
+    let mut other = graph(vec![block("v", route(Some(4), Some("pgm")))], vec![]);
+    other.id = "h".into();
+    mix.logic.push(other);
+    assert_eq!(crate::mix::logic::issues(&mix), vec![]);
+    let w = crate::mix::logic::warnings(&mix, &mix.logic[1].blocks);
+    assert!(w[0].message.contains("virtual output pgm"), "{w:?}");
+    // Out of range.
+    mix.logic[1].blocks[0].kind = route(Some(0), Some("pgm"));
+    assert_eq!(crate::mix::logic::issues(&mix).len(), 1);
+    mix.logic[1].blocks[0].kind = route(Some(1), Some(""));
+    assert_eq!(crate::mix::logic::issues(&mix).len(), 1);
+    mix.logic[1].blocks[0].kind = route(Some(1), Some(&"x".repeat(33)));
+    assert_eq!(crate::mix::logic::issues(&mix).len(), 1);
+}
+
+#[test]
 fn a_fader_block_of_an_old_show_is_on_from_0_db() {
     let k: K = serde_json::from_value(json!({"type": "fader", "signal": "vox"})).unwrap();
     assert_eq!(
