@@ -36,7 +36,8 @@ pub fn width_matrix(width_pct: f64, input: StereoMode, output: StereoMode) -> [f
 
 /// The speaker angles of `layout` (degrees, 0 front centre, negative left), in
 /// channel order; `None` for the LFE. ITU-R BS.775 (5.1) and BS.2051 (7.1)
-/// nominal positions.
+/// nominal positions; the height layouts (5.1.4, 7.1.4) add four top speakers
+/// at ±45° and ±135° after the bed (see [`top`]).
 fn speakers(layout: Format) -> &'static [Option<f64>] {
     match layout {
         Format::Surround71 => &[
@@ -49,6 +50,32 @@ fn speakers(layout: Format) -> &'static [Option<f64>] {
             Some(-150.0),
             Some(150.0),
         ],
+        Format::Surround514 => &[
+            Some(-30.0),
+            Some(30.0),
+            Some(0.0),
+            None,
+            Some(-110.0),
+            Some(110.0),
+            Some(-45.0),
+            Some(45.0),
+            Some(-135.0),
+            Some(135.0),
+        ],
+        Format::Surround714 => &[
+            Some(-30.0),
+            Some(30.0),
+            Some(0.0),
+            None,
+            Some(-90.0),
+            Some(90.0),
+            Some(-150.0),
+            Some(150.0),
+            Some(-45.0),
+            Some(45.0),
+            Some(-135.0),
+            Some(135.0),
+        ],
         _ => &[
             Some(-30.0),
             Some(30.0),
@@ -60,11 +87,21 @@ fn speakers(layout: Format) -> &'static [Option<f64>] {
     }
 }
 
+/// The first top (height) channel of `layout`: the speakers from there on are
+/// the upper layer. The channel count for a layout without height.
+fn top(layout: Format) -> usize {
+    match layout {
+        Format::Surround514 => 6,
+        Format::Surround714 => 8,
+        _ => speakers(layout).len(),
+    }
+}
+
 /// Powers (squared gains, summing to 1) of a point source at `azimuth`
-/// (degrees) on `layout`'s speakers: constant-power panning between the two
-/// neighbouring speakers (pairwise, as 2-D VBAP with a sine/cosine law).
-fn point(layout: Format, azimuth: f64, out: &mut [f64]) {
-    let spk = speakers(layout);
+/// (degrees) on the ring of speakers `spk` (one layer): constant-power panning
+/// between the two neighbouring speakers (pairwise, as 2-D VBAP with a
+/// sine/cosine law). `out` has a value per entry of `spk`.
+fn point(spk: &[Option<f64>], azimuth: f64, out: &mut [f64]) {
     // The speakers sorted by angle, as (angle, channel).
     let mut ring: [(f64, usize); 8] = [(0.0, 0); 8];
     let mut n = 0;
@@ -108,7 +145,10 @@ fn wrap(a: f64) -> f64 {
 
 /// The surround panner's matrix: `layout.channels()` rows × `inputs` (1 or 2)
 /// columns, row-major. A mono input sits at `azimuth_deg`; a stereo input's L
-/// and R at `azimuth_deg` ∓ 30°. `spread_pct` blends each source's powers with
+/// and R at `azimuth_deg` ∓ 30°. On a height layout (5.1.4, 7.1.4)
+/// `elevation_deg` (0 … 90) lifts the source: the bed keeps cos² of its power,
+/// the top layer gets sin², panned there at the same azimuth (A10); on the other
+/// layouts it has no effect. `spread_pct` blends each source's powers with
 /// an equal share on every speaker (100 %: all alike), `divergence_pct` moves
 /// that share of the centre's power into L and R; both keep the power (the sum
 /// of the squared gains of a column, without the LFE) at 1. The LFE gets each
@@ -121,9 +161,17 @@ pub fn surround_pan(
     spread_pct: f64,
     divergence_pct: f64,
     lfe_db: f64,
+    elevation_deg: f64,
 ) -> Vec<f32> {
     let spk = speakers(layout);
     let rows = spk.len();
+    let top = top(layout);
+    let lift = (elevation_deg.clamp(0.0, 90.0)).to_radians();
+    let (bed_share, top_share) = if top < rows {
+        (lift.cos().powi(2), lift.sin().powi(2))
+    } else {
+        (1.0, 0.0)
+    };
     let spread = (spread_pct / 100.0).clamp(0.0, 1.0);
     let divergence = (divergence_pct / 100.0).clamp(0.0, 1.0);
     let mains = spk.iter().filter(|a| a.is_some()).count() as f64;
@@ -140,8 +188,14 @@ pub fn surround_pan(
             (2, _) => azimuth_deg + 30.0,
             _ => azimuth_deg,
         };
-        let mut p = [0f64; 8];
-        point(layout, az, &mut p[..rows]);
+        let mut p = [0f64; 12];
+        point(&spk[..top], az, &mut p[..top]);
+        if top < rows {
+            point(&spk[top..], az, &mut p[top..rows]);
+        }
+        for (r, v) in p[..rows].iter_mut().enumerate() {
+            *v *= if r < top { bed_share } else { top_share };
+        }
         // Centre divergence: the share into L and R, half each.
         let c = p[2] * divergence;
         p[2] -= c;
@@ -215,14 +269,20 @@ mod tests {
 
     #[test]
     fn panner_keeps_the_power() {
-        for layout in [Format::Surround51, Format::Surround71] {
+        for layout in [
+            Format::Surround51,
+            Format::Surround71,
+            Format::Surround514,
+            Format::Surround714,
+        ] {
             let rows = layout.channels();
             for az in (-180..=180).step_by(5) {
                 for spread in [0.0, 25.0, 100.0] {
                     for div in [0.0, 40.0, 100.0] {
                         for inputs in [1, 2] {
-                            let m =
-                                surround_pan(layout, inputs, az as f64, spread, div, LFE_OFF_DB);
+                            let m = surround_pan(
+                                layout, inputs, az as f64, spread, div, LFE_OFF_DB, 0.0,
+                            );
                             assert_eq!(m.len(), rows * inputs);
                             for col in 0..inputs {
                                 let p = power(&m, rows, inputs, col, 3);
@@ -241,7 +301,7 @@ mod tests {
 
     #[test]
     fn panner_positions() {
-        let one = |layout, az: f64| surround_pan(layout, 1, az, 0.0, 0.0, LFE_OFF_DB);
+        let one = |layout, az: f64| surround_pan(layout, 1, az, 0.0, 0.0, LFE_OFF_DB, 0.0);
         // On a speaker: that speaker alone.
         for (az, ch) in [(0.0, 2), (-30.0, 0), (30.0, 1), (-110.0, 4), (110.0, 5)] {
             let m = one(Format::Surround51, az);
@@ -275,24 +335,65 @@ mod tests {
             one(Format::Surround51, 180.0)
         );
         // Full divergence: the centre's power into L and R.
-        let m = surround_pan(Format::Surround51, 1, 0.0, 0.0, 100.0, LFE_OFF_DB);
+        let m = surround_pan(Format::Surround51, 1, 0.0, 0.0, 100.0, LFE_OFF_DB, 0.0);
         assert!(close(m[2].into(), 0.0));
         assert!(close(m[0].into(), std::f64::consts::FRAC_1_SQRT_2));
         // Full spread: every main speaker alike.
-        let m = surround_pan(Format::Surround71, 1, 40.0, 100.0, 0.0, LFE_OFF_DB);
+        let m = surround_pan(Format::Surround71, 1, 40.0, 100.0, 0.0, LFE_OFF_DB, 0.0);
         for r in [0, 1, 2, 4, 5, 6, 7] {
             assert!(close(m[r].into(), (1.0f64 / 7.0).sqrt()));
         }
         // LFE: off, at 0 dB, at −10 dB; a stereo input's channels at half each.
         assert_eq!(one(Format::Surround51, 0.0)[3], 0.0);
-        let m = surround_pan(Format::Surround51, 1, 0.0, 0.0, 0.0, 0.0);
+        let m = surround_pan(Format::Surround51, 1, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(close(m[3].into(), 1.0));
-        let m = surround_pan(Format::Surround51, 2, 0.0, 0.0, 0.0, -10.0);
+        let m = surround_pan(Format::Surround51, 2, 0.0, 0.0, 0.0, -10.0, 0.0);
         assert!(close(m[6].into(), 0.5 * 10f64.powf(-0.5)));
         assert!(close(m[7].into(), 0.5 * 10f64.powf(-0.5)));
         // A stereo input at 0°: L on the L speaker, R on the R speaker.
-        let m = surround_pan(Format::Surround51, 2, 0.0, 0.0, 0.0, LFE_OFF_DB);
+        let m = surround_pan(Format::Surround51, 2, 0.0, 0.0, 0.0, LFE_OFF_DB, 0.0);
         assert!(close(m[0].into(), 1.0) && close(m[3].into(), 1.0));
         assert!(close(m[1].into(), 0.0) && close(m[2].into(), 0.0));
+    }
+
+    #[test]
+    fn panner_lifts_into_the_height_layer() {
+        let at = |layout, az: f64, el: f64| surround_pan(layout, 1, az, 0.0, 0.0, LFE_OFF_DB, el);
+        // At 0° elevation a height layout pans like its bed.
+        let m = at(Format::Surround514, -110.0, 0.0);
+        assert!(close(m[4].into(), 1.0) && m[6..].iter().all(|g| *g == 0.0));
+        // All the way up at −45°: the top front left speaker alone.
+        let m = at(Format::Surround714, -45.0, 90.0);
+        assert!(close(m[8].into(), 1.0), "{m:?}");
+        assert!(m[..8].iter().all(|g| f64::from(*g).abs() < 1e-6));
+        // The power stays 1 at every height.
+        for layout in [Format::Surround514, Format::Surround714] {
+            for el in [0.0, 20.0, 45.0, 70.0, 90.0] {
+                for az in (-180..=180).step_by(15) {
+                    let m = surround_pan(layout, 2, az as f64, 30.0, 50.0, LFE_OFF_DB, el);
+                    for col in 0..2 {
+                        let p = power(&m, layout.channels(), 2, col, 3);
+                        assert!((p - 1.0).abs() < 1e-6, "{layout:?} az {az} el {el}: {p}");
+                    }
+                }
+            }
+        }
+        // 45° elevation: half the power in each layer.
+        let m = at(Format::Surround714, 0.0, 45.0);
+        assert!(close(m[2].into(), std::f64::consts::FRAC_1_SQRT_2));
+        assert!(close(m[8].into(), 0.5) && close(m[9].into(), 0.5));
+        // Behind and up on 5.1.4: the top rear pair.
+        let m = at(Format::Surround514, 180.0, 90.0);
+        assert!(close(m[8].into(), m[9].into()) && m[8] > 0.7);
+        // No height layer: elevation changes nothing.
+        assert_eq!(
+            at(Format::Surround51, 30.0, 60.0),
+            at(Format::Surround51, 30.0, 0.0)
+        );
+        // Full spread on 7.1.4: all 11 main speakers alike.
+        let m = surround_pan(Format::Surround714, 1, 10.0, 100.0, 0.0, LFE_OFF_DB, 30.0);
+        for r in (0..12).filter(|r| *r != 3) {
+            assert!(close(m[r].into(), (1.0f64 / 11.0).sqrt()));
+        }
     }
 }

@@ -7,6 +7,7 @@ import Meter from "./Meter.vue";
 import Pill from "./Pill.vue";
 import Segmented from "./Segmented.vue";
 import { SCALES } from "../dsp.js";
+import { channelLabels } from "../console.js";
 import { TAPS } from "../nodes.js";
 import { api, fmtHz } from "../api.js";
 import { act, live, patchSignal, signalOf, signals, store, stored, wantAnalysis } from "../store.js";
@@ -118,7 +119,7 @@ const gonio = computed(() => {
     <div class="bridge">
       <div v-for="s in signals" :key="s.id" class="mcol" :style="{ '--colour': s.colour || 'var(--border)' }">
         <span class="mname" :title="s.id">{{ s.name }}</span>
-        <Meter :signal="s.id" :values="live.meters[s.id]" :channels="channels(s)" :scale="scale" :alignment="alignment" />
+        <Meter :signal="s.id" :values="live.meters[s.id]" :channels="channels(s)" :labels="channelLabels(s.format)" :scale="scale" :alignment="alignment" :muted="!!s.mute" />
         <div v-if="channels(s) >= 2" class="corr" :title="`phase correlation ${corr(s.id)?.toFixed(2) ?? '–'}`">
           <span v-if="corr(s.id) !== undefined && corr(s.id) !== null" :style="{ left: `${((corr(s.id) + 1) / 2) * 100}%` }"></span>
         </div>

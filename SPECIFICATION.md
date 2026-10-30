@@ -310,7 +310,7 @@ across multichannel signals, parameter smoothing.
 
 | Category | Nodes |
 | --- | --- |
-| Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (mono/stereo into 5.1/7.1: position, spread, divergence, LFE), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
+| Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (mono/stereo into 5.1/7.1/5.1.4/7.1.4: position, height on 5.1.4/7.1.4, spread, divergence, LFE), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
 | EQ | parametric EQ (up to 8 bands: bell, shelf, notch, high-pass, low-pass), high-pass/low-pass (12–48 dB/oct), **dynamic EQ** (per-band threshold/ratio/attack/release) |
 | Dynamics | compressor (feed-forward, soft knee, sidechain with filter), limiter (look-ahead, true-peak option), expander, gate (with hysteresis, hold), **de-esser** (split-band and wide-band modes, frequency 2–12 kHz, threshold, range, listen/sidechain monitor), ducker (keyed by any signal or by VAD), multiband dynamics (3–5 bands, linear-phase crossover option) |
 | Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs |
@@ -326,7 +326,9 @@ across multichannel signals, parameter smoothing.
 ## 7. Metering and measurement
 
 - Per signal: sample peak, **true peak** (ITU-R BS.1770 oversampling), RMS, PPM
-  (selectable scales: EBU, Nordic, BBC, DIN), gain reduction per dynamics node.
+  (selectable scales: EBU, Nordic, BBC, DIN), gain reduction per dynamics node. A
+  strip's meter reads after its fader and before its mute, so a muted strip still
+  shows its level (drawn grey); a bus's reads its output.
 - **Loudness** per configurable signal (outputs, buses, any monitor point):
   momentary, short-term, integrated, Loudness Range, max true peak, per ITU-R BS.1770
   and EBU R 128 (target −23 LUFS, tolerances configurable); start/stop/reset of
@@ -530,6 +532,14 @@ new ones:
   mute, PFL/AFL, VCA assignment, meter, name/colour. Strip layers/banks; custom
   layouts (user-defined strip order and pages); group/bus/VCA/master sections.
 - Touch-friendly, works on tablets; multiple simultaneous clients stay in sync.
+- 1.5.0 (A1–A10): the browser tab's title names the tab ("Console – <label> – MXL
+  Audio Mixer"). The name has the strip's width; format, gear and menu share the row
+  below. A click on the fader value types a level. Sends show as values (changed in
+  Routing). Strips of 8 or more channels are wider; meters above 3 channels have
+  narrower bars with channel labels below (not in a strip, where the meter only tells
+  whether there is signal). A strip with a surround panner shows a top view of its
+  layout with the source (drag it: left/right, front/rear) and, on 5.1.4/7.1.4, its
+  height; one sending to a surround bus offers to add one.
 
 ### 12.2 Processing chain editor
 
@@ -549,6 +559,12 @@ input patch), remote link (§13), settings (G1, G10).
   drive the mixer. Hardware surfaces (e.g. MIDI/HUI, Ember+, OSC) are not implemented
   in v1, but the parameter addressing scheme (stable IDs for every parameter) MUST make
   such mappings possible later; document it.
+- MIDI (1.5.0, A7) runs in the browser (Web MIDI; a secure page: https or localhost)
+  through the same API calls as the console: Mackie Control (banks of 8 strips, motor
+  faders, mute, solo, select, V-pot pan, bank/channel, master, the display; an
+  extender for the next 8) and generic MIDI learn (a CC, note or pitch bend on a
+  fader, mute, PFL, AFL or pan), with feedback to the device. Mappings are kept per
+  browser and exported/imported as JSON.
 
 ### 12.5 Snapshots and show files
 

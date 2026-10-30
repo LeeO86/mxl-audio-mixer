@@ -1,7 +1,8 @@
 <script setup>
 // The mixer UI (§12): header with state pills, banners, tabs addressed by the URL hash, and the theme
-// (follows the system, or light or dark; remembered in this browser).
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+// (follows the system, or light or dark; remembered in this browser). The browser tab's title names the
+// tab shown and the node ("Console – <label> – MXL Audio Mixer"), so many open tabs can be told apart.
+import { computed, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import Pill from "./components/Pill.vue";
 import ConsoleTab from "./components/ConsoleTab.vue";
 import ControlRoomTab from "./components/ControlRoomTab.vue";
@@ -15,6 +16,7 @@ import NmosTab from "./components/NmosTab.vue";
 import StatusTab from "./components/StatusTab.vue";
 import SettingsTab from "./components/SettingsTab.vue";
 import { buses, live, settingValue, startLive, stopLive, store, stored, strips } from "./store.js";
+import { midi, startMidi } from "./midi.js";
 
 const tabs = [
   { id: "console", label: "Console", component: ConsoleTab, full: true },
@@ -32,6 +34,11 @@ const tabs = [
 
 const current = ref("console");
 const tab = computed(() => tabs.find((t) => t.id === current.value));
+
+watchEffect(() => {
+  const label = live.status?.label;
+  document.title = [tab.value.label, label, "MXL Audio Mixer"].filter(Boolean).join(" – ");
+});
 
 function onHash() {
   const id = location.hash.slice(1);
@@ -71,6 +78,8 @@ onMounted(() => {
   onHash();
   window.addEventListener("hashchange", onHash);
   startLive();
+  // MIDI control surfaces (A7) come back on their own once connected in this browser.
+  if (midi.enabled) startMidi();
 });
 onUnmounted(() => {
   window.removeEventListener("hashchange", onHash);
