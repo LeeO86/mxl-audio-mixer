@@ -2437,3 +2437,28 @@ surround panner per send.
 | D276 | Endpoints in the flow view are the mix's own objects: sends (bus outs), the published output (`outputs[].tap`: a strip's direct out, a bus's bus out, default post-fader) and chain keys (sidechain in/out). A drop on gap k sets `{after: node k−1}`, the end of the chain `pre-fader`, the start `pre-eq`/`pre-dynamics` when one starts there. | No second model for the same points: the Graph view reads the same mix (B4). `Output.tap` is left out of the JSON while unset, so a 1.4 show loads and a 1.5 show without taps loads in 1.4. |
 | D277 | Spread keeps its matrix (power = (1 − spread) × point + spread × equal share); the pad draws the bubble at the position moved towards the centre by the spread, radius growing to the speaker ring at 100 %. | It is what the DSP does: the image moves to the middle and widens (B5). |
 | D278 | A send's `pan` applies when its source is mono or stereo at the send's tap (post-pan of a strip without a surround panner counts as the strip's own format, read before the strip's panner) and the bus is 5.1, 7.1, 5.1.4 or 7.1.4 (the bed; heights get nothing); it is a ramped matrix node, so moving it changes values only. | Panning "fixed in the processing" per send (B6), smooth while dragging; the same field serves the Graph view's wire editing (C1). |
+
+## 1.5.0: tolerant show loading
+
+Decided with the maintainer: a rollback from a later version (1.6 → 1.5) keeps the
+mix instead of starting empty. Before, any unknown field or variant in `mix.json`
+moved it to `mix.json.bad` and the mixer started with an empty mix.
+
+#### What exists
+
+- `src/mix/tolerant.rs`: `mix(value)`: the strict parse, else repairs at the error's
+  path (`serde_path_to_error`), at most `MAX_REPAIRS` (1000) steps, and the dropped
+  paths.
+- `src/control.rs`: `load_mix` returns the mix and what was dropped; `keep_newer`;
+  `Control.load_warnings` (`load_warnings` in `GET /api/v1/status`). `src/main.rs`
+  keeps the original and logs one WARN once the repaired mix is valid.
+- `src/history.rs`: versions are read the same way; `History::load`; a restore
+  answers with `dropped`.
+- UI: the dismissible banner in `App.vue`.
+- Tests: `mix::tolerant`, `control` (`mix.json.newer`, `.bad`), `history`.
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D279 | Saved show state (`mix.json`, show-history versions) is parsed strictly first; only when that fails it is repaired on the JSON at the path of each error: an unknown field is removed (inside a `flatten`ed part, where the path stops at the node or block, the first key of that name at or below it); an unknown variant removes the array element it is in (a chain node, a logic block with its wires, a list entry), or the field when it is not in an array; anything else (a wrong type, a missing field, an untagged enum that matches no variant) is not repaired and the file goes to `mix.json.bad` as before. Then the normal validation runs; a mix that is not valid without the dropped parts (e.g. a logic `set-param` on a dropped node) is not repaired further (no reference cleaner besides the wires of a dropped block). The original stays as `mix.json.newer` (`mix.json.newer-<seconds>` when that exists); one WARN lists the dropped paths; `load_warnings` in the status and a banner in the UI show them. The API (and the show import) stays strict (`deny_unknown_fields`). | A rollback keeps what this version understands; a typo in an API call is still an error. Strict first, so a mix of this version never takes the repair path. |

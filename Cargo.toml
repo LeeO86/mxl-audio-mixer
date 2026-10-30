@@ -21,6 +21,8 @@ mxl-nmos = { git = "https://github.com/LeeO86/mxl-nmos", tag = "v0.1.1" }
 rtrb = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# The path of a parse error, to repair a mix saved by a newer version (D279).
+serde_path_to_error = "0.1"
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net", "process"] }
 # rustls with the system certificate store, for wss:// peers (rustls and aws-lc-rs
 # are already built for reqwest).

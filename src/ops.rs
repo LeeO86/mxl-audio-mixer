@@ -207,6 +207,7 @@ pub fn status_json(app: &App) -> Value {
             "state": control.tally_status(),
         },
         "solo": control.solo(),
+        "load_warnings": control.load_warnings,
         "auto": {
             "vad_signals": control.auto.vads.len(),
             "speech": control.auto.vads.iter().filter(|(_, v)| v.state.speech_active).map(|(s, _)| s.clone()).collect::<Vec<_>>(),

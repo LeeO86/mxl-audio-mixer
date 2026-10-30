@@ -133,6 +133,9 @@ pub struct Control {
     default_commit: u32,
     mix_path: PathBuf,
     pub history: crate::history::History,
+    /// What loading `mix.json` dropped because a newer version wrote it (D279);
+    /// `load_warnings` in the status.
+    pub load_warnings: Vec<String>,
     /// Duration of the last plan compile (§15 `plan_compile_seconds`).
     pub compile_seconds: f64,
     /// Steps of the running plan by type (§15 `nodes{type}`).
@@ -207,6 +210,7 @@ impl Control {
             default_commit: config.output_commit_samples,
             mix_path: config.state_dir.join("mix.json"),
             history: crate::history::History::new(&config.state_dir),
+            load_warnings: Vec::new(),
             compile_seconds: 0.0,
             step_counts: BTreeMap::new(),
             auto: crate::auto::Auto::new(),
@@ -1477,17 +1481,19 @@ fn apply_value_act(mix: &mut Mix, act: crate::logic::Act) {
     }
 }
 
-/// The mix saved under `MIXER_STATE_DIR`. A file that cannot be read is moved
-/// aside (`mix.json.bad`) so it is not overwritten.
-pub fn load_mix(path: &std::path::Path) -> Mix {
+/// The mix saved under `MIXER_STATE_DIR`, with what was dropped from it: a mix
+/// of a newer version loads without what this one does not know (D279). A
+/// file that cannot be read is moved aside (`mix.json.bad`) so it is not
+/// overwritten.
+pub fn load_mix(path: &std::path::Path) -> (Mix, Vec<String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return Mix::default();
+        return (Mix::default(), Vec::new());
     };
     let parsed = serde_json::from_str::<serde_json::Value>(&text)
         .map_err(|e| e.to_string())
-        .and_then(|v| serde_json::from_value::<Mix>(v["mix"].clone()).map_err(|e| e.to_string()));
+        .and_then(|mut v| crate::mix::tolerant::mix(v["mix"].take()));
     match parsed {
-        Ok(mix) => mix,
+        Ok(loaded) => loaded,
         Err(e) => {
             let bad = path.with_extension("json.bad");
             tracing::error!(
@@ -1496,8 +1502,26 @@ pub fn load_mix(path: &std::path::Path) -> Mix {
                 bad.display()
             );
             let _ = std::fs::rename(path, &bad);
-            Mix::default()
+            (Mix::default(), Vec::new())
         }
+    }
+}
+
+/// Keep a copy of the `mix.json` a newer version wrote, before this version
+/// overwrites it: `mix.json.newer`, or `mix.json.newer-<seconds since 1970>`
+/// when that exists.
+pub fn keep_newer(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let mut newer = path.with_extension("json.newer");
+    if newer.exists() {
+        newer = path.with_extension(format!("json.newer-{}", crate::history::now_ms() / 1000));
+    }
+    match std::fs::copy(path, &newer) {
+        Ok(_) => Ok(newer),
+        Err(e) => Err(format!(
+            "copy {} to {}: {e}",
+            path.display(),
+            newer.display()
+        )),
     }
 }
 
@@ -1533,6 +1557,39 @@ fn logic_level(mix: &crate::mix::model::Mix, signal: &str, peak: Option<f64>) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_newer_mix_json_loads_and_a_broken_one_goes_aside() {
+        use super::{keep_newer, load_mix};
+        use crate::mix::model::Strip;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("mixer-load-{}", crate::history::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mix.json");
+        let mut m = crate::mix::Mix::default();
+        m.strips.push(Strip::new("vox", crate::mix::Format::Mono));
+        let mut v = json!({"version": 1, "mix": m});
+        v["mix"]["strips"][0]["future_field"] = json!(1);
+        std::fs::write(&path, v.to_string()).unwrap();
+        let (loaded, dropped) = load_mix(&path);
+        assert_eq!(
+            (loaded, dropped),
+            (m.clone(), vec!["strips[0].future_field".to_string()])
+        );
+        assert_eq!(keep_newer(&path).unwrap(), dir.join("mix.json.newer"));
+        let second = keep_newer(&path).unwrap();
+        assert!(
+            second.to_string_lossy().contains("mix.json.newer-"),
+            "{second:?}"
+        );
+        assert_eq!(std::fs::read(&second).unwrap(), v.to_string().into_bytes());
+        // A wrong type: aside, empty.
+        v["mix"]["strips"][0]["fader_db"] = json!(true);
+        std::fs::write(&path, v.to_string()).unwrap();
+        assert_eq!(load_mix(&path), (crate::mix::Mix::default(), vec![]));
+        assert!(!path.exists() && dir.join("mix.json.bad").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn logic_hears_a_silenced_strip_as_silent() {
         use super::logic_level;

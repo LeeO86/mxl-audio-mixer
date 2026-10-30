@@ -1014,6 +1014,7 @@ dependencies = [
  "rtrb",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha1",
  "tempfile",
  "tokio",
