@@ -820,40 +820,16 @@ impl Control {
         self.analyser.set_target(target);
     }
 
-    /// Every output to publish: the virtual outputs first, so they take their
-    /// slots before the published ones at a start (D267).
+    /// Every output to publish (see [`output_specs`]).
     fn specs(&self, mix: &Mix) -> Vec<OutputSpec> {
-        let virtual_outputs = self.virtual_outputs.iter().map(|v| OutputSpec {
-            signal: crate::mix::compile::vout_key(&v.id),
-            name: v.label.clone(),
-            format: v.format,
-            commit: self.default_commit,
-        });
-        let published = mix.outputs.iter().filter_map(|o| {
-            let (name, _) = mix.signal(&o.signal)?;
-            let format = match o.format {
-                Some(f) => f,
-                None => mix.tap_format(&o.signal, &o.tap())?,
-            };
-            Some(OutputSpec {
-                signal: o.signal.clone(),
-                name: name.to_string(),
-                format,
-                commit: o.commit_samples.unwrap_or(self.default_commit),
-            })
-        });
-        let monitors = mix
-            .control_room
-            .monitors
-            .iter()
-            .filter(|m| m.publish)
-            .map(|m| OutputSpec {
-                signal: m.key(),
-                name: format!("Monitor {}", m.name),
-                format: m.format,
-                commit: self.default_commit,
-            });
-        virtual_outputs.chain(published).chain(monitors).collect()
+        output_specs(&self.virtual_outputs, self.default_commit, mix)
+    }
+
+    /// Refuse a mix whose published outputs or monitors take an NMOS label
+    /// (the strip, bus or monitor name) that a virtual output or another
+    /// published one already has: the designer routes by label.
+    pub fn check_labels(&self, next: &Mix) -> Result<(), String> {
+        check_labels(&self.virtual_outputs, next)
     }
 
     /// Solo `signal` (PFL or AFL), or end its solo; interlock replaces the others.
@@ -1555,8 +1531,97 @@ fn logic_level(mix: &crate::mix::model::Mix, signal: &str, peak: Option<f64>) ->
     }
 }
 
+/// Every output to publish: the virtual outputs first, so they take their
+/// slots before the published ones at a start (D267).
+fn output_specs(
+    virtual_outputs: &[crate::config::VirtualOutput],
+    default_commit: u32,
+    mix: &Mix,
+) -> Vec<OutputSpec> {
+    let virtual_outputs = virtual_outputs.iter().map(|v| OutputSpec {
+        signal: crate::mix::compile::vout_key(&v.id),
+        name: v.label.clone(),
+        format: v.format,
+        commit: default_commit,
+    });
+    let published = mix.outputs.iter().filter_map(|o| {
+        let (name, _) = mix.signal(&o.signal)?;
+        let format = match o.format {
+            Some(f) => f,
+            None => mix.tap_format(&o.signal, &o.tap())?,
+        };
+        Some(OutputSpec {
+            signal: o.signal.clone(),
+            name: name.to_string(),
+            format,
+            commit: o.commit_samples.unwrap_or(default_commit),
+        })
+    });
+    let monitors = mix
+        .control_room
+        .monitors
+        .iter()
+        .filter(|m| m.publish)
+        .map(|m| OutputSpec {
+            signal: m.key(),
+            name: format!("Monitor {}", m.name),
+            format: m.format,
+            commit: default_commit,
+        });
+    virtual_outputs.chain(published).chain(monitors).collect()
+}
+
+/// Every NMOS sender label is used once (compared trimmed, case-sensitive).
+fn check_labels(virtual_outputs: &[crate::config::VirtualOutput], mix: &Mix) -> Result<(), String> {
+    let mut seen = std::collections::BTreeMap::new();
+    for s in output_specs(virtual_outputs, 0, mix) {
+        let label = s.name.trim().to_string();
+        if let Some(other) = seen.insert(label.clone(), s.signal.clone()) {
+            return Err(format!(
+                "NMOS label {label:?} of {} is already used by {other}; rename one",
+                s.signal
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn published_labels_must_not_clash() {
+        use super::check_labels;
+        use crate::config::VirtualOutput;
+        use crate::mix::model::{Mix, Strip};
+        use crate::mix::Format;
+        let vout = VirtualOutput {
+            key: None,
+            label: "PGM".into(),
+            format: Format::Stereo,
+            id: "1".into(),
+        };
+        let mut m = Mix::default();
+        m.strips.push(Strip::new("a", Format::Mono));
+        m.strips.push(Strip::new("b", Format::Mono));
+        m.strips[0].name = "PGM ".into();
+        m.strips[1].name = "PGM".into();
+        let outputs = serde_json::from_value(serde_json::json!([{"signal": "a"}])).unwrap();
+        m.outputs = outputs;
+        // A published strip named like a virtual output.
+        let e = check_labels(std::slice::from_ref(&vout), &m).unwrap_err();
+        assert!(e.contains("\"PGM\""), "{e}");
+        // Not published: fine.
+        let mut quiet = m.clone();
+        quiet.outputs.clear();
+        assert!(check_labels(std::slice::from_ref(&vout), &quiet).is_ok());
+        // Two published strips with the same name.
+        m.outputs =
+            serde_json::from_value(serde_json::json!([{"signal": "a"}, {"signal": "b"}])).unwrap();
+        assert!(check_labels(&[], &m).is_err());
+        m.strips[1].name = "pgm".into();
+        assert!(check_labels(&[], &m).is_ok());
+    }
+
     #[test]
     fn a_newer_mix_json_loads_and_a_broken_one_goes_aside() {
         use super::{keep_newer, load_mix};
