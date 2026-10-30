@@ -2,6 +2,11 @@
 
 ## Unreleased — 1.5.0
 
+- D1: a fader position block has a threshold (`threshold_db`, −120 to +15 dB, default 0 dB; the "High at" column left of Value): where it feeds an on/off input (also through macro ports) it is on from that position (before: from 0.5 dB); without a signal it is off.
+- Upgrade: a fader feeding an on/off input is now on from 0 dB (was +0.5 dB); check live graphs with faders at 0 dB.
+- D2: "Copy logic to" copies all blocks and cables of a graph into a new graph (dry run) or into an existing graph (below its blocks, one undo step there). Copy and paste rename only the block ids that clash (before: every pasted block got a new id).
+- D3: HTTP webhook and TSL tally out drop onto the canvas like every block (they asked first, away from the drop, and were never made); a webhook's URL may be empty (inert, amber) until typed in the list, a TSL out starts without an index (`null`, inert, amber). Two `tsl-out` blocks of the show on one index are marked with a warning (not refused).
+- Fixed: a memory leak of about 16 kB/s per Silero VAD (test-all: OOM at the 1 GiB limit about every 2.75 h, since 1.3.0). `ort` 2.0.0-rc.14 leaks an `OrtTypeInfo` (about 290 bytes) for every output tensor it creates itself, two per inference (31 per second per detector). The two outputs are now preallocated once and reused. `tests/silero_memory.rs` checks that 3750 inferences keep no heap (2.2 MB before).
 - A1: the browser tab's title names the tab and the node ("Console – <label> – MXL Audio Mixer").
 - A2: strips of 7.1 and wider are wider (124 px) and their meter bars narrower, so the fader stays usable; the strip meter only shows whether there is signal.
 - A3: a muted strip's meter still shows its level (it now reads after the fader and before the mute), grey instead of green.

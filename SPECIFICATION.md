@@ -460,7 +460,8 @@ The control room is a dedicated part of the engine and UI, not just another bus.
 - A **logic graph** of blocks (rectangles) with typed ports, connected by cables drawn
   in the UI. Signal types: boolean, number, level (dB), event (trigger), string.
 - Blocks:
-  - **Inputs/triggers:** UI button (soft key), fader position, mute/PFL state, meter
+  - **Inputs/triggers:** UI button (soft key), fader position (with the position from
+    which it is "high" where it feeds an on/off input), mute/PFL state, meter
     level (with threshold and hysteresis), loudness value, VAD outputs, tally (TSL 5.0
     input), timer/clock (TAI-based), schedule (time of day), NMOS connection state,
     remote-link state, webhook/HTTP endpoint.
@@ -486,7 +487,9 @@ The control room is a dedicated part of the engine and UI, not just another bus.
 
 - Canvas with drag-and-drop blocks from a palette, cables by dragging between ports,
   zoom/pan, grouping into sub-graphs (macros) with exposed ports, copy/paste,
-  undo/redo, validation markers on invalid wiring.
+  copy of a whole graph into a new or an existing graph, undo/redo, validation
+  markers on invalid wiring. Every block, actions too, lands where it is dropped;
+  a target not chosen yet (also a webhook's URL) is chosen in the list.
 
 ---
 

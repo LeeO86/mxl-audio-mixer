@@ -6,7 +6,7 @@
 // selected blocks copy and paste with their cables. A refused edit shows the server's issues as red
 // markers on the blocks, ports and cables (D162). The list under the canvas edits the same graph or
 // macro. Live values, soft keys and the action log (dry run) are polled while the tab is open.
-import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch } from "vue";
+import { computed, h as render, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch } from "vue";
 import { VueFlow, useVueFlow } from "@vue-flow/core";
 import { MiniMap } from "@vue-flow/minimap";
 import { Controls } from "@vue-flow/controls";
@@ -90,7 +90,6 @@ watch(
     forgetShown();
     // A dialog belongs to the graph or macro it was opened in.
     confirming.value = null;
-    choosing.value = null;
     grouping.value = null;
   },
 );
@@ -410,25 +409,19 @@ const JSON_KINDS = ["points", "source"];
 const NUMBER_KINDS = ["number", "integer"];
 
 // The parameters a new block starts with. A target (the strip, VCA, snapshot, monitor, mic, destination,
-// node or parameter it reads or acts on) is never guessed: it stays "" (the block is valid and inert,
-// with a warning) until the operator chooses one, unless a strip or bus is picked in the add row. Other
-// parameters take the catalog's default, else 1000 ms or the lowest number allowed. An action's other
-// parameters without a default (a webhook's URL, a TSL index) are `needs`, asked for before the block is
-// made. A string is why the block cannot be made.
-const BLANK_KINDS = ["signal", "signal-or-vca", "vca", "snapshot", "monitor", "mic", "destination", "node", "param"];
+// node or parameter, a webhook's URL) is never guessed: it stays "" (the block is valid and inert, with a
+// warning) until the operator chooses one in the list, unless a strip or bus is picked in the add row.
+// A parameter the catalog marks `blank` (a TSL out's index) starts as null, also not chosen yet (D247).
+// Other parameters take the catalog's default, else 1000 ms or the lowest number allowed. So every block,
+// actions too, lands at once where it is dropped (D246). A string is why the block cannot be made.
+const BLANK_KINDS = ["signal", "signal-or-vca", "vca", "snapshot", "monitor", "mic", "destination", "node", "param", "url"];
 function paramsFor(type, inView) {
   const e = entryOf(type);
-  const action = categoryOf(type) === "action";
   const params = {};
-  const needs = [];
   for (const p of e?.params || []) {
-    let v = p.default ?? (p.kind === "source" ? null : undefined);
+    let v = p.default ?? (p.kind === "source" || p.blank ? null : undefined);
     if (p.name === "name" && (type === "macro-in" || type === "macro-out")) v = freshId(type === "macro-in" ? "in" : "out", new Set(inView.filter((b) => b.type === type).map((b) => b.name)));
     if (v === undefined && BLANK_KINDS.includes(p.kind)) v = p.kind.startsWith("signal") && signals.value.some((x) => x.id === addSignal.value) ? addSignal.value : "";
-    if (v === undefined && action) {
-      needs.push(p);
-      continue;
-    }
     if (v === undefined && p.name === "ms") v = 1000;
     if (v === undefined) {
       const opts = optionsOf(p, { type, ...params });
@@ -444,34 +437,18 @@ function paramsFor(type, inView) {
     if (v === undefined) return `${typeLabel(type)} needs a ${p.kind}, and there is none yet.`;
     params[p.name] = v;
   }
-  return { params, needs };
+  return params;
 }
 
-// A new block at `at` (canvas coordinates), or in a row; it is selected. `extra` sets parameters. An
-// action whose target is not chosen yet asks for it first.
-const choosing = ref(null); // { type, at, extra, draft, needs } while an action's target is asked for
+// A new block at `at` (canvas coordinates), or in a row; it is selected. `extra` sets parameters.
 function place(type, at, extra = {}) {
   const v = view.value;
   if (!v) return;
   const r = paramsFor(type, v.blocks);
   if (typeof r === "string") return void (live.actionError = r);
-  const needs = r.needs.filter((p) => !(p.name in extra));
-  if (needs.length) choosing.value = { type, at, extra, needs, draft: { id: "new", type, ...r.params, ...extra } };
   // A new action has no wired input, so it does nothing yet; a macro instance's inner actions may act.
-  else if (type === "macro") guardLive([{ type }], "A macro's actions act at once, with whatever its inputs read.", () => add(type, at, { ...r.params, ...extra }));
-  else add(type, at, { ...r.params, ...extra });
-}
-const chosen = computed(() => choosing.value?.needs.every((p) => choosing.value.draft[p.name] !== undefined && choosing.value.draft[p.name] !== ""));
-function choose(p, raw) {
-  const n = Number(raw);
-  choosing.value.draft[p.name] = NUMBER_KINDS.includes(p.kind) ? (String(raw).trim() === "" || !Number.isFinite(n) ? undefined : n) : raw;
-}
-function addChosen() {
-  const c = choosing.value;
-  if (!c || !chosen.value) return;
-  choosing.value = null;
-  const { id: _id, type: _type, ...params } = c.draft;
-  add(c.type, c.at, params);
+  if (type === "macro") guardLive([{ type }], "A macro's actions act at once, with whatever its inputs read.", () => add(type, at, { ...r, ...extra }));
+  else add(type, at, { ...r, ...extra });
 }
 function add(type, at, params) {
   commit(`Add ${typeLabel(type)}`, (g) => {
@@ -492,7 +469,8 @@ function removeBlock(id) {
 
 function setParam(b, p, raw) {
   let value = raw;
-  if (NUMBER_KINDS.includes(p.kind)) {
+  if (p.blank && String(raw).trim() === "") value = null;
+  else if (NUMBER_KINDS.includes(p.kind)) {
     value = Number(raw);
     if (!Number.isFinite(value) || (p.kind === "integer" && !Number.isInteger(value))) return void (live.actionError = `${b.id}: ${p.name} must be ${p.kind === "integer" ? "a whole number" : "a number"}.`);
   } else if (JSON_KINDS.includes(p.kind)) {
@@ -506,12 +484,23 @@ function setParam(b, p, raw) {
 }
 
 const paramsOf = (b) => (entryOf(b.type)?.params || []).filter((p) => p.name !== "x" && p.name !== "y");
+// The list's "High at" column: from which fader position a fader block feeds "on" to an on/off input.
+const HIGH_AT = { fader: "threshold_db" };
+const listParamsOf = (b) => paramsOf(b).filter((p) => p.name !== HIGH_AT[b.type]);
+const highParamOf = (b) => paramsOf(b).find((p) => p.name === HIGH_AT[b.type]);
+function highNow(b) {
+  const v = valueOf(b);
+  if (v === undefined || b.signal === "") return "";
+  // Like the runtime: a fader whose strip or bus is gone is off.
+  const there = signals.value.some((s) => s.id === b.signal);
+  return there && typeof v === "number" && v >= (b.threshold_db ?? 0) ? "high" : "low";
+}
 
 function labelOf(b) {
   const label = typeLabel(b.type);
   if (b.type === "macro") return `${macros.value.find((m) => m.id === b.macro)?.name || b.macro}`;
   if (b.type === "schedule") return `${label}: ${hhmm(b.start_minute)}–${hhmm(b.end_minute)}`;
-  if (paramsOf(b).some((q) => BLANK_KINDS.includes(q.kind) && b[q.name] === "")) return `${label}: no target yet`;
+  if (paramsOf(b).some((q) => (BLANK_KINDS.includes(q.kind) && b[q.name] === "") || (q.blank && b[q.name] == null))) return `${label}: no target yet`;
   const p = paramsOf(b).find((q) => q.kind !== "port-type" && b[q.name] !== undefined && b[q.name] !== null && typeof b[q.name] !== "object" && b[q.name] !== "");
   if (!p) return label;
   const v = b[p.name];
@@ -563,7 +552,7 @@ const state = computed(() => (!graph.value ? "" : openMacro.value ? (liveGraphs.
 
 // Group, ungroup and paste re-make blocks: in a live graph, actions among them apply at once and blocks
 // that remember start empty (D172). Then the operator confirms, or goes to dry run first.
-const confirming = ref(null); // { text, run }
+const confirming = ref(null); // { text, run, graphs? }: graphs to switch to dry run (default: the live ones here)
 const risky = (blocks) => blocks.some((b) => categoryOf(b.type) === "action" || entryOf(b.type)?.remembers || b.type === "macro");
 function guardLive(blocks, text, run) {
   if (liveGraphs.value.length && risky(blocks)) confirming.value = { text, run };
@@ -574,7 +563,7 @@ async function confirmLive(dryFirst) {
   const c = confirming.value;
   confirming.value = null;
   if (!c) return;
-  if (dryFirst && !(await setGraphs(liveGraphs.value.map((g) => g.id), { dry_run: true }))) {
+  if (dryFirst && !(await setGraphs(c.graphs || liveGraphs.value.map((g) => g.id), { dry_run: true }))) {
     live.actionError = `Not switched to dry run, so nothing was changed. ${live.actionError || ""}`.trim();
     return;
   }
@@ -654,8 +643,8 @@ function copy() {
   return true;
 }
 
-// The clipboard into the open graph or macro (any one), with new ids, a bit further down and right on
-// each paste. A macro's own inputs and outputs are left out when pasting into a graph.
+// The clipboard into the open graph or macro (any one), with new ids where they clash, a bit further
+// down and right on each paste. A macro's own inputs and outputs are left out when pasting into a graph.
 function paste() {
   if (!view.value || (!clipboard.blocks.length && !copying)) return false;
   // After a copy that is still reading.
@@ -680,6 +669,60 @@ function pasteNow(clip) {
     return { blocks: [...g.blocks, ...p.blocks], wires: [...g.wires, ...p.wires] };
   });
   return true;
+}
+
+// "Copy logic to": the whole open graph (its blocks and cables) into a new graph (in dry run) or into
+// another graph, under what that one holds, with new ids where they clash. Then that graph is opened.
+const copyTo = ref(""); // "" is a new graph
+watch(() => graph.value?.id, () => (copyTo.value = ""));
+function copyLogic() {
+  const src = graph.value;
+  if (!src) return;
+  const to = copyTo.value === src.id ? "" : copyTo.value;
+  queued = queued
+    .then(async () => {
+      const cur = await api.get(`/api/v1/logic/${src.id}`).catch(() => null);
+      if (!cur) return void (live.actionError = "The graph could not be read; nothing was copied.");
+      const clip = { blocks: cur.blocks, wires: cur.wires };
+      // A name has at most 64 characters.
+      const copyName = `${[...cur.name].slice(0, 59).join("")} copy`;
+      if (!to) {
+        const made = await act(
+          () => api.post("/api/v1/logic", { name: copyName, description: cur.description, dry_run: true, blocks: cur.blocks, wires: cur.wires }),
+          `Copied to a new graph "${copyName}" (dry run).`,
+        );
+        if (made) selected.value = made.id;
+        return;
+      }
+      if (!clip.blocks.length) return void (live.notice = "The graph has no blocks to copy.");
+      const target = graphs.value.find((g) => g.id === to);
+      const run = () => copyInto(to, clip);
+      if (target?.enabled && !target.dry_run && risky(clip.blocks)) confirming.value = { text: `${target.name} is live: copied actions act at once there, and copied blocks that remember start empty.`, run, graphs: [to] };
+      else run();
+    })
+    .catch(failed);
+}
+function copyInto(to, clip) {
+  queued = queued
+    .then(async () => {
+      const cur = await api.get(`/api/v1/logic/${to}`).catch(() => null);
+      if (!cur) return void (live.actionError = `Graph ${to} could not be read; nothing was copied.`);
+      if (cur.blocks.length + clip.blocks.length > MAX_BLOCKS) return void (live.actionError = `Copying gives ${cur.blocks.length + clip.blocks.length} blocks; a graph holds at most ${MAX_BLOCKS}.`);
+      const p = pasted(cur, clip, 0);
+      // Below what the graph holds already.
+      const below = cur.blocks.length ? Math.max(...cur.blocks.map((b) => b.y || 0)) + 140 - Math.min(...p.blocks.map((b) => b.y || 0)) : 0;
+      for (const b of p.blocks) b.y += below;
+      const body = { graphs: [{ ...resource(cur), blocks: [...cur.blocks, ...p.blocks], wires: [...cur.wires, ...p.wires], revision: cur.revision }] };
+      const done = await send(body);
+      if (done?.conflict) live.actionError = "Changed elsewhere meanwhile; nothing was written. Try again.";
+      if (!done || done.conflict || done.refused) return;
+      const after = (done.graphs || []).find((x) => x.id === to);
+      if (after) record(`graph:${to}`, { label: `Copy ${p.ids.length} block${p.ids.length > 1 ? "s" : ""} in`, changes: [{ kind: "graph", id: to, before: resource(cur), after: resource(after) }] });
+      live.notice = `${p.ids.length} block${p.ids.length > 1 ? "s" : ""} copied to ${cur.name}.`;
+      want = new Set(p.ids);
+      selected.value = to;
+    })
+    .catch(failed);
 }
 
 // Whether the last click was on the canvas (then Ctrl+C is for blocks, whatever text is selected).
@@ -878,6 +921,14 @@ function nodeData(b) {
 
 // The list's value cell: a component of its own, so that a new value redraws only it.
 const LiveText = { props: { block: { type: Object, required: true } }, setup: (p) => () => shown(p.block) };
+// The "High at" cell's high / low, also a component of its own.
+const HighText = {
+  props: { block: { type: Object, required: true } },
+  setup: (p) => () => {
+    const t = highNow(p.block);
+    return t ? render("span", { class: ["small", t === "high" ? "lhigh" : "muted"] }, t) : null;
+  },
+};
 
 // Only blocks whose drawing changed are redrawn.
 function showValues() {
@@ -937,7 +988,7 @@ const drawnKey = computed(() => {
 });
 watch([drawnKey, () => detail.ports, () => detail.warnings, () => catalog.value, issues, rejected], rebuild, { immediate: true });
 // Blocks that wait for their target (D164: valid, never acting).
-const waiting = computed(() => new Set(detail.warnings.map((w) => w.block)));
+const waiting = computed(() => new Set(detail.warnings.filter((w) => w.message === "choose a target").map((w) => w.block)));
 // Another graph or macro: start with all of it in view.
 watch(
   () => (doc.value ? keyOf(doc.value) : ""),
@@ -1022,6 +1073,13 @@ onUnmounted(() => {
         <label class="check"><input type="checkbox" :checked="graph.enabled" @change="toggle($event, 'enabled')" /> on</label>
         <label class="check" title="values are computed, actions are listed below and not done"><input type="checkbox" :checked="graph.dry_run" @change="toggle($event, 'dry_run')" /> dry run</label>
         <ConfirmButton label="Remove" small @confirm="removeGraph(graph.id)" />
+        <span class="row tight" style="flex-wrap: nowrap">
+          <button class="btn small secondary" title="Copy all blocks and cables of this graph into a new graph (dry run) or into another graph" @click="copyLogic">Copy logic to</button>
+          <select v-model="copyTo" aria-label="Copy the logic to" style="width: auto; max-width: 14rem">
+            <option value="">new graph</option>
+            <option v-for="g in graphs.filter((x) => x.id !== graph.id)" :key="g.id" :value="g.id">{{ g.name }}</option>
+          </select>
+        </span>
       </div>
 
       <div class="lcrumbs" role="navigation" aria-label="Macro path">
@@ -1079,15 +1137,6 @@ onUnmounted(() => {
           <button class="btn small" :disabled="!!groupProblem" @click="makeGroup">Create macro</button>
           <button class="btn small secondary" @click="grouping = null">Cancel</button>
           <span v-if="groupProblem" class="small" style="color: var(--bad)">{{ groupProblem }}</span>
-        </div>
-      </div>
-
-      <div v-if="choosing" class="lgroup" role="dialog" aria-label="Choose the target">
-        <div class="row tight">
-          <strong>{{ typeLabel(choosing.type) }}: choose what it acts on</strong>
-          <LogicParam v-for="p in choosing.needs" :key="p.name" :block="choosing.draft" :param="p" :options="optionsOf" @set="choose(p, $event)" />
-          <button class="btn small" :disabled="!chosen" @click="addChosen">Add</button>
-          <button class="btn small secondary" @click="choosing = null">Cancel</button>
         </div>
       </div>
 
@@ -1159,19 +1208,26 @@ onUnmounted(() => {
       <div class="ltable">
         <table class="amtable">
           <thead>
-            <tr><th>Block</th><th>Type</th><th></th><th>Value</th><th></th></tr>
+            <tr><th>Block</th><th>Type</th><th></th><th title="Fader position: on/off inputs it feeds are on from this position (dB)">High at</th><th>Value</th><th></th></tr>
           </thead>
           <tbody>
             <tr v-for="b in view.blocks" :key="b.id" :data-block="b.id" :class="{ chosen: selectedIds.includes(b.id), waiting: waiting.has(b.id) }" title="click: select it in the graph" @click="pickRow($event, b.id)">
               <td>{{ b.id }}</td>
               <td>{{ typeLabel(b.type) }}</td>
               <td class="lparams">
-                <LogicParam v-for="p in paramsOf(b)" :key="p.name" :block="b" :param="p" :options="optionsOf" @set="setParam(b, p, $event)" />
+                <LogicParam v-for="p in listParamsOf(b)" :key="p.name" :block="b" :param="p" :options="optionsOf" @set="setParam(b, p, $event)" />
                 <template v-if="!openMacro">
                   <button v-if="b.type === 'button'" class="btn small" :aria-pressed="pressed(b)" @click="press(b, !pressed(b))">{{ pressed(b) ? "Pressed" : "Press" }}</button>
                   <button v-if="b.type === 'trigger'" class="btn small" :aria-label="`Fire ${b.id}`" @click="fire(b)">Fire</button>
                 </template>
                 <button v-if="b.type === 'macro'" class="btn small secondary" :aria-label="`Open ${b.id}`" @click="openInstance(b)">Open</button>
+              </td>
+              <td :data-high="b.id">
+                <div v-if="highParamOf(b)" class="lparams">
+                  <LogicParam :block="b" :param="highParamOf(b)" :options="optionsOf" @set="setParam(b, highParamOf(b), $event)" />
+                  <span class="muted small">dB</span>
+                  <HighText v-if="!openMacro" :block="b" />
+                </div>
               </td>
               <td class="num" :data-value="b.id"><LiveText :block="b" /></td>
               <td><button class="btn small secondary" :aria-label="`Remove ${b.id}`" @click="removeBlock(b.id)">×</button></td>

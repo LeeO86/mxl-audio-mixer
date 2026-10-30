@@ -76,16 +76,20 @@ graphs, §11: drag blocks in from the palette or click them; draw cables between
 ports, coloured by type (boolean, number, level, event, text), where an input that
 cannot take the cable is dimmed while drawing; zoom, pan and a minimap; select
 several blocks (Ctrl-click, Shift-drag), copy and paste them with their cables
-(Ctrl+C, Ctrl+V, also into another graph), Delete; undo and redo (Ctrl+Z,
+(Ctrl+C, Ctrl+V, also into another graph), "Copy logic to" a new graph (dry run) or
+into another graph, Delete; undo and redo (Ctrl+Z,
 Ctrl+Shift+Z) of every edit; group blocks into a macro with the ports you choose,
 open it (double-click, a breadcrumb back) and ungroup it; a refused edit shows the
 server's reasons as red markers on the blocks, ports and the dashed cable; every
 block shows its live value; soft keys, triggers, dry run and the list of the last
-actions; the list under the canvas edits every parameter, and a click on a block's
+actions; the list under the canvas edits every parameter (a fader position's
+threshold in the "High at" column, left of Value), and a click on a block's
 row selects it in the graph. A new graph starts in
 dry run, and the toolbar shows LIVE, DRY RUN or OFF; undo never changes that. A
 new block gets no target by itself (amber until one is chosen: an action without
-one never acts, an input without one reads off, 0 or the floor). In a live graph,
+one never acts, an input without one reads off, 0 or the floor; a webhook without
+a URL, a `tsl-out` without an index too; two `tsl-out` blocks of the show on one
+index are marked amber, as they would write one display). In a live graph,
 paste, group, ungroup, undo and redo ask first when they make actions or blocks
 that remember: those actions act at once, and re-made blocks start empty),
 **Snapshots** (take, recall with filters, recall-safe, crossfade; layouts; show
@@ -806,7 +810,8 @@ with `dry_run` it computes and lists its actions without running them.
 
 **Ports are typed:** `boolean`, `number`, `level` (dB), `event` (true for one
 tick) and `string`. An input converts what it receives: booleans, numbers and
-levels into each other (on is ≥ 0.5, true is 1); a value into an event fires when
+levels into each other (on is ≥ 0.5, true is 1; a `fader` block, also through
+macro ports, is on from its `threshold_db` instead); a value into an event fires when
 it turns on (not on the first tick); an event into a value is on for its tick;
 anything but an event into a string (numbers with up to two decimals). A string
 feeds only a string and an event never feeds a string. An input takes one wire;
@@ -816,7 +821,8 @@ those publish last tick's value.
 
 **Blocks** (`GET /api/v1/logic-blocks` lists each with its parameters and ports):
 - inputs: `const`, `text`, `button` (a soft key), `trigger` (fired by `POST
-  /api/v1/logic/<graph>/trigger/<block>`), `mute`, `pfl`, `fader`, `vad`, `level`,
+  /api/v1/logic/<graph>/trigger/<block>`), `mute`, `pfl`, `fader` (the position in
+  dB; into an on/off input it is on from `threshold_db`, default 0 dB), `vad`, `level`,
   `above` (a peak level with hysteresis), `loudness` (momentary, short-term,
   integrated, range or true peak), `tally` (on air), `schedule` (UTC time of
   day), `nmos-receiver` and `nmos-sender` (active), `link` (a remote-link peer is
@@ -830,7 +836,8 @@ those publish last tick's value.
   `bypass`; clamped to its range, ramped), `set-pfl`, `set-talk`, `set-publish`,
   `set-monitor` (a monitor's source), `loudness-control` (start, stop, reset),
   `recall` (a snapshot), `webhook` (POST `{"graph", "block", "value"}`), `tsl-out`
-  (TSL UMD 5.0 to `TSL_OUT_TARGET`: left lamp red, right lamp green, a label; on
+  (TSL UMD 5.0 to `TSL_OUT_TARGET`: left lamp red, right lamp green, a label; the
+  `index` is `null` until chosen; on
   every change and every second), `log` (a log line and a `logic` message on the
   events WebSocket).
 

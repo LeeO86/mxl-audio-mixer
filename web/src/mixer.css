@@ -391,6 +391,7 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .lparams select { width: auto; max-width: 14rem; }
 .lparams .elsewhere { outline: 2px solid var(--warn); outline-offset: 1px; }
 .lparams { display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
+.lhigh { color: var(--ok); font-weight: 600; }
 .vue-flow__controls { box-shadow: none; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .vue-flow__controls-button { background: var(--panel2); border-bottom: 1px solid var(--border); }
 .vue-flow__controls-button:hover { background: var(--border); }
