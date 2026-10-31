@@ -460,6 +460,35 @@ fade, or waits for `POST /api/v1/inputs/<n>/delay/confirm` with
 N samples of read offset plus extra delay: with the 2 ms default, a browser source that
 commits a 50 Hz frame of audio (960 samples) gets about 19 ms of automatic delay.
 
+**Outputs keep the input timestamps (1.5.1).** A sample read from an input at MXL
+index i leaves on every output (bus, direct out, monitor, published or virtual) at
+index i: the mixer writes each block at the index its inputs were read from, not at
+"now". Lip sync with a video that keeps its index (a video mixer) is then kept
+without any delay in the video path. An output that mixes inputs of different extra
+delays takes the read time of the latest of them (its largest delay); the inputs
+themselves are still each read at their own delay, so they stay that far apart in
+the mix, as before. Look-ahead (limiter `lookahead_ms`, the leveler's 1 ms safety
+limiter) is taken off the index too, so it costs no sync. Gain, EQ, pan and the
+rest have no latency. Sources without an MXL time (oscillators, talkback) take the
+output's time. The samples are written at the same moment as before, so what is
+heard (also on monitors and in-ears) is no later; only the index changed.
+
+So the mixer writes "late" against its outputs' timestamps, by the output's
+**write delay**: read offset + the largest extra delay of its inputs + its
+look-ahead + one commit + one block (the block being worked on). It is
+`write_delay_ms` per output in `GET /api/v1/status` and
+`GET /api/v1/virtual-outputs`, and the metric `output_write_delay_ms{output}`.
+**A reader of a mixer output needs a read offset of at least the write delay**
+(the ST 2110 gateway's read offset, a video mixer or multiviewer reading the audio,
+another mixer: its automatic delay covers it). With local inputs and the defaults
+that is about 6–9 ms; an input with 37 ms of automatic delay makes it about 43 ms.
+When an output's delay changes (an input's automatic delay changes, a later input
+is routed into it, a look-ahead node is added), its index jumps: it fades out
+with the input whose delay changes (10 ms) and in after the jump; a range already
+written is not written again, a gap is written as silence. `output_commit_lag_ms`
+(TAI time of a commit minus the time of its last sample) now includes the offset:
+it is the measured write delay without the commit and block margin.
+
 ## The mix
 
 Kept in `MIXER_STATE_DIR/mix.json` and in the show file. `mix.json` is written
@@ -513,7 +542,9 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Delay compensation** (§4.4): the sends into a bus are delayed to the largest
   latency among them (look-ahead limiters), so parallel paths stay phase-coherent.
   Keys and block-delay sends are not compensated. Each output reports its
-  `processing_latency_ms` and `latency_ms` (read offset + one block + processing).
+  `processing_latency_ms` and `latency_ms` (read offset + one block + processing),
+  and `write_delay_ms`: the read offset its readers need (the output keeps its
+  inputs' timestamps; see Settings, "Outputs keep the input timestamps").
 - **Output:** a bus (post-fader) or a strip (its direct out: post-fader, before
   the pan; or at another `tap`) published as an `audio/float32` MXL flow in the own domain and an NMOS
   Source, Flow and Sender (label = its name, group hint `<name>:Audio`).
@@ -1041,7 +1072,7 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `PATCH /api/v1/inputs/<n>` | `{"label": …, "extra_delay": "auto" \| ms}`; `label` is the input's alias (`""`: back to "Input n"): strips that read only this input and still have the old alias as name take a new one |
 | `PUT /api/v1/inputs/<n>/route` | `{"flow_id", "domain_id", "sender_id"?}` or `{"flow_id": null}`: routes (or disconnects) the input through its own IS-05 receiver |
 | `GET /api/v1/flows` | the audio flows in the visible MXL domains: `domain_id`, `domain_label`, `own`, `flow_id`, `label`, `channels` |
-| `GET /api/v1/virtual-outputs`, `GET /api/v1/virtual-outputs/<n>` | `<n>`: the slot number or the key. The virtual outputs: `slot`, `id`, `key`, `signal`, `label`, `format`, `source`, `nmos_sender_id`, `mxl_flow_id`, `running`, `errors`, `commit_lag_ms` (also in `GET /api/v1/status`) |
+| `GET /api/v1/virtual-outputs`, `GET /api/v1/virtual-outputs/<n>` | `<n>`: the slot number or the key. The virtual outputs: `slot`, `id`, `key`, `signal`, `label`, `format`, `source`, `nmos_sender_id`, `mxl_flow_id`, `running`, `errors`, `commit_lag_ms`, `write_delay_ms` (also in `GET /api/v1/status`) |
 | `PUT /api/v1/virtual-outputs/<n>`, `DELETE …/<n>` | `{"source": <source> \| null}`: what feeds it (above); DELETE: silence. 404 for a slot above `MIXER_OUTPUT_FLOWS`, 400 for a source that does not exist |
 | `POST /api/v1/inputs/<n>/delay/confirm` | apply a proposed automatic delay |
 | `/x-nmos/…` on `NMOS_PORT` | IS-04 v1.3, IS-05 v1.2, BCP-007-03 ([mxl-nmos](https://github.com/LeeO86/mxl-nmos) v0.1.1) |
@@ -1071,6 +1102,7 @@ their answers at once.
 the control engine did not get), `signals`,
 `nodes{type}` (steps of the running plan), `output_blocks_total`,
 `output_commit_lag_ms{output}` (virtual outputs as `vout:<n>`),
+`output_write_delay_ms{output}` (the read offset a reader of the output needs at least),
 `virtual_output_routed{slot,output,label}` (`output`: key or slot; 1 with a source, 0 silent), `loudness_lufs{signal,window}` (window
 `momentary`, `short-term`, `integrated`), `true_peak_dbtp{signal}`,
 `timing_trusted`, `tally_packets_total`, `vad_active{signal}`, `preview_state{path}` (0 idle, 1
@@ -1158,8 +1190,9 @@ IS-05-02, BCP-007-03-01 against the mixer with a published bus). Hardware tests 
 the maintainers are in `tests/hw/`.
 
 `mxl-mixer-tone` (a test tone writer; `--wav` writes a recording instead, e.g.
-speech) and `mxl-mixer-probe` (a reader that checks a flow against the tone) are in
-the image too.
+speech; `--ramp` a ramp whose samples tell their index; `--lead-ms` writes ahead of
+the timestamps) and `mxl-mixer-probe` (a reader that checks a flow against the tone;
+`--ramp GAIN` reports the index shift of a ramp) are in the image too.
 
 ## Licence
 

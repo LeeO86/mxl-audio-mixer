@@ -22,6 +22,9 @@ struct Input {
     channels: usize,
     /// Extra delay in samples (beyond the read offset).
     delay: u32,
+    /// The extra delay the current block was read with (`delay` may already
+    /// be the next block's, after a fade-out ended in this one).
+    read_delay: u32,
     /// A delay change waiting for the fade-out to finish.
     pending_delay: Option<u32>,
     /// Current gain of the fade, 0..=1.
@@ -43,6 +46,7 @@ impl Input {
             reader: None,
             channels: 0,
             delay: 0,
+            read_delay: 0,
             pending_delay: None,
             gain: 0.0,
             fading: 1,
@@ -489,7 +493,8 @@ pub(super) fn run(
                 }
                 Command::SetOutput { slot, mut output } => {
                     if let Some(s) = outputs.get_mut(slot) {
-                        output.next = start;
+                        // Its first index comes from the first block's offset.
+                        output.next = 0;
                         if let Some(old) = s.replace(output) {
                             let _ = returned.push(Returned::Output(old));
                         }
@@ -555,6 +560,7 @@ pub(super) fn run(
 
         for (i, input) in inputs.iter_mut().enumerate() {
             let c = &counters.inputs[i];
+            input.read_delay = input.delay;
             let Some(reader) = input.reader.as_ref() else {
                 if input.gain > 0.0 {
                     apply_fades(input, block, c, false);
@@ -624,13 +630,52 @@ pub(super) fn run(
             let Some(o) = o.as_mut() else {
                 continue;
             };
-            if o.next != start {
-                if o.next < start {
-                    fill_gap(o, start, &counters.outputs[slot]);
-                }
-                o.filled = 0;
+            let oc = &counters.outputs[slot];
+            // The output keeps its inputs' timestamps: this block is written at
+            // the index the latest of its inputs was read from, less its path's
+            // look-ahead (not at the block clock).
+            let (latency, sources) = plan.as_ref().map_or((0, &[][..]), |p| {
+                (
+                    p.output_latency.get(slot).copied().unwrap_or(0),
+                    p.output_sources.get(slot).map_or(&[][..], Vec::as_slice),
+                )
+            });
+            let (delay, upcoming) = source_delays(&inputs, sources);
+            let offset = u64::from(config.read_offset) + u64::from(delay) + u64::from(latency);
+            let label = start.saturating_sub(offset);
+            if o.next == 0 {
+                o.next = label;
+                o.offset = offset;
             }
-            o.next = start + b;
+            if offset != o.offset {
+                // The index moved (an input's delay, a route, a look-ahead):
+                // a gap is filled with silence below, an overlap is not written
+                // again. Either way the output fades in after the jump.
+                o.offset = offset;
+                o.dip = false;
+                if !stopping {
+                    o.gain = 0.0;
+                    o.fading = 1;
+                }
+            } else if upcoming != delay && !stopping {
+                // An input's delay change will move the index once its fade-out
+                // is over: fade the output out with it.
+                o.fading = -1;
+                o.dip = true;
+            } else if o.dip && !stopping {
+                o.dip = false;
+                o.fading = 1;
+            }
+            if label > o.next {
+                fill_gap(o, label, oc);
+                o.next = label;
+            }
+            if o.filled > 0 && o.filled + block > o.commit {
+                commit(o, o.next, oc);
+            }
+            oc.write_delay_samples
+                .store((offset + o.commit as u64 + b) as u32, Ordering::Relaxed);
+            o.label = label;
             o.staged = false;
             for c in 0..o.channels() {
                 let at = c * o.commit + o.filled;
@@ -669,19 +714,30 @@ pub(super) fn run(
             };
             if !o.staged {
                 o.filled = 0;
+                o.next = o.next.max(o.label + b);
                 if stopping {
                     o.gain = 0.0;
                 }
                 continue;
             }
-            fade_output(o, block);
-            o.filled += block;
+            // After the index moved back, the part of the block at indices
+            // already written is left out.
+            let skip = o.next.saturating_sub(o.label).min(b) as usize;
+            if skip > 0 {
+                for c in 0..o.channels() {
+                    let at = c * o.commit + o.filled;
+                    o.staging.copy_within(at + skip..at + block, at);
+                }
+            }
+            fade_output(o, block - skip);
+            o.filled += block - skip;
+            o.next = o.next.max(o.label + b);
             let oc = &counters.outputs[slot];
             oc.blocks.fetch_add(1, Ordering::Relaxed);
             counters.output_blocks.fetch_add(1, Ordering::Relaxed);
             let last = stopping && o.gain <= 0.0;
-            if o.filled >= o.commit || last {
-                commit(o, start + b, oc);
+            if o.filled > 0 && (o.filled >= o.commit || last) {
+                commit(o, o.next, oc);
             }
         }
 
@@ -724,13 +780,29 @@ pub(super) fn run(
     }
 }
 
-/// Apply the output's fade to the block just staged.
-fn fade_output(o: &mut OutputWriter, block: usize) {
+/// The largest extra delay among `sources` this block was read with, and the
+/// largest they are about to have (an input fading out for a delay change).
+/// Talkback inputs (beyond the MXL inputs) have none.
+fn source_delays(inputs: &[Input], sources: &[u16]) -> (u32, u32) {
+    let (mut now, mut upcoming) = (0, 0);
+    for input in sources.iter().filter_map(|&i| inputs.get(usize::from(i))) {
+        now = now.max(input.read_delay);
+        let next = match input.pending_delay {
+            Some(d) if input.fading == -1 => d,
+            _ => input.delay,
+        };
+        upcoming = upcoming.max(next);
+    }
+    (now, upcoming)
+}
+
+/// Apply the output's fade to the `samples` just staged.
+fn fade_output(o: &mut OutputWriter, samples: usize) {
     if o.fading == 0 && o.gain >= 1.0 {
         return;
     }
     let channels = o.channels();
-    for k in 0..block {
+    for k in 0..samples {
         match o.fading {
             1 => {
                 o.gain = (o.gain + FADE_STEP).min(1.0);

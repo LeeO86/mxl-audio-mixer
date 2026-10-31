@@ -210,7 +210,9 @@ rates other than 48 kHz, recording.
   and flagged.
 - **Alignment and latency:** each input is read at
   `t_out − (MIXER_READ_OFFSET + input_extra_delay)`; `input_extra_delay` is per input.
-  All inputs are therefore time-aligned on the TAI timeline. Late or missing samples
+  Inputs with the same extra delay are therefore time-aligned on the TAI timeline;
+  inputs with different extra delays are read that much apart (1.5.1 note: the
+  outputs take their inputs' timestamps, §4.4). Late or missing samples
   are counted and replaced by silence with a short fade (no clicks).
   - **`auto` is the default for `input_extra_delay`.** The mixer measures each input's
     **arrival lag**: how far the flow's head index trails the end of each read block
@@ -290,7 +292,27 @@ rates other than 48 kHz, recording.
 ### 4.4 Timing and latency
 
 - The DSP loop is clocked by TAI: block n covers samples `[n·B, (n+1)·B)` of the
-  output timeline; it starts when the input read deadline for that block is reached.
+  block clock (each output's index is offset from it, below); it starts when the input read deadline for that block is reached.
+- **Outputs keep the input timestamps (1.5.1, the owner's decision):** a sample read
+  from an input at MXL index i leaves on every output (bus, direct out, monitor,
+  published or virtual) at index i plus only the algorithmic latency of its path,
+  and that latency is compensated too: block n of an output ends at index
+  `(n+1)·B − (MIXER_READ_OFFSET + d + L)`, d the largest extra delay among the inputs
+  that reach the output (found from the plan's steps; sends at gain 0 count, keys do
+  not), L its path's look-ahead (limiter, leveler; plain pass-through, gain and EQ
+  have none). Samples are written at the same time as before (listening latency on
+  monitors and in-ears is unchanged); only their index changed. Measured on the
+  platform before 1.5.1: an AV-sync signal through an input straight to a virtual
+  output was re-stamped by +39 ms (read offset 2 ms + the input's automatic delay
+  for a writer that commits a video frame of audio at once).
+  - **Write delay:** readers of an output need a read offset of at least
+    `MIXER_READ_OFFSET + d + L + commit + one block` (the head index is written one
+    commit at a time, after the block's processing): `write_delay_ms` per output in
+    the status, metric `output_write_delay_ms{output}`. It changes with d at run
+    time, so it is not an NMOS tag.
+  - **A change of d or L** moves the output's index: the output fades out with the
+    input whose delay changes and in after the jump; indices already written are
+    not written again, a gap is written as silence.
 - **Latency budget (target):** `MIXER_READ_OFFSET` (default 2 ms) + one block + processing
   ≤ 5 ms end-to-end for default settings **with local inputs**, measured and exported
   (§15). Mirrored inputs add their measured arrival lag (§4.2). The UI shows each input's
@@ -795,7 +817,9 @@ Also:
 - `input_reopens_total{input}`, `input_missing_samples_total{input}`,
   `input_overrun_samples_total{input}` (the ring had already overwritten the
   samples; `input_late_samples_total` is the source that had not written them);
-- `output_commit_lag_ms{output}`;
+- `output_commit_lag_ms{output}` (1.5.1: includes the output's offset from the block
+  clock, §4.4);
+- `output_write_delay_ms{output}` (the read offset an output's readers need, §4.4);
 - `virtual_output_routed{slot,output,label}` (1 with a source, 0 silent; §4.3);
 - `timing_trusted` (0/1, §4.4);
 - `preview_state{path}` and `preview_readers{path}` (Appendix B.1);

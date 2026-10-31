@@ -55,6 +55,11 @@ pub struct OutputStatus {
     pub commits: u64,
     pub errors: u64,
     pub commit_lag_ms: f64,
+    /// How far the output's head index can trail TAI now (1.5.1: the output
+    /// keeps its inputs' timestamps): read offset + the largest extra delay of
+    /// its inputs + its look-ahead + one commit + one block. Readers of the
+    /// flow need a read offset of at least this.
+    pub write_delay_ms: f64,
     /// Processing latency of the bus (look-ahead, delay compensation).
     pub processing_latency_ms: f64,
     /// Input sample to output sample for local inputs (§4.4): read offset + one
@@ -302,6 +307,7 @@ impl Outputs {
                     commits: c.commits.load(Relaxed),
                     errors: c.errors.load(Relaxed),
                     commit_lag_ms: c.commit_lag_us.load(Relaxed) as f64 / 1000.0,
+                    write_delay_ms: f64::from(c.write_delay_samples.load(Relaxed)) / 48.0,
                     processing_latency_ms: 0.0,
                     latency_ms: 0.0,
                 }

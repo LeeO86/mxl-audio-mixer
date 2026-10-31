@@ -6,7 +6,8 @@
 //!
 //! Channel c carries 1 kHz × (c + 1) at −20 dBFS; every sample depends only on its
 //! index, so a reader can check what it gets. `--delay-ms` writes every block that
-//! much late (a mirrored or batched input). The domain directory and its
+//! much late (a mirrored or batched input), `--lead-ms` that much early (a writer
+//! ahead of its timestamps, like an AV-sync generator). The domain directory and its
 //! `domain_def.json` are created if missing (`--domain-id` sets the id).
 //!
 //! Commit timing like real writers: `--block 48` commits per packet like the
@@ -17,6 +18,10 @@
 //! (on the TAI clock): lag outliers that come and go. `--start-behind-ms X
 //! --catch-up R` starts X ms behind and catches up at R times real time (a
 //! mirror filling at the start).
+//!
+//! `--ramp` writes a ramp instead, the same on every channel: sample index i
+//! carries (i mod 65536) / 131072 (exact in f32), so a reader can tell from a
+//! sample which index it was written at (`mxl-mixer-probe --ramp`).
 //!
 //! `--wav FILE` writes a recording instead (speech for the VAD tests; the mean of
 //! its channels, at 48 kHz, on every channel), followed by `--gap-s` seconds of
@@ -47,7 +52,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--block B] [--commit C] [--batch N] [--late-ms X --every-s P --for-s D] [--start-behind-ms X --catch-up R] [--wav FILE [--gap-s G] [--offset-s O]]");
+        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--lead-ms L] [--block B] [--commit C] [--batch N] [--late-ms X --every-s P --for-s D] [--start-behind-ms X --catch-up R] [--wav FILE [--gap-s G] [--offset-s O]] [--ramp]");
         std::process::exit(2)
     };
     let domain_dir = PathBuf::from(arg(&args, "--domain").unwrap_or_else(|| usage()));
@@ -103,7 +108,11 @@ fn main() {
         .as_ref()
         .map_or(1, |r| r.len() as u64 + gap)
         .max(1);
+    let ramp = args.iter().any(|a| a == "--ramp");
     let sample = |c: usize, index: u64| -> f32 {
+        if ramp {
+            return mxl_audio_mixer::timing::ramp(index);
+        }
         match &recording {
             Some(r) => r
                 .get(((index + shift) % period) as usize)
@@ -160,6 +169,7 @@ fn main() {
         let _ = unsafe { signal_hook(signal, flag) };
     }
     let delay_ns = (delay_ms * 1e6) as u64;
+    let lead_ns = nanos("--lead-ms") / 1000;
     let mut n = index_at(tai_ns()) / block + 1;
     while !stop.load(Ordering::Relaxed) {
         let last = (n + batch) * block;
@@ -169,7 +179,7 @@ fn main() {
         } else {
             0
         };
-        sleep_until_tai(due + delay_ns + late + behind_ns);
+        sleep_until_tai((due + delay_ns + late + behind_ns).saturating_sub(lead_ns));
         // Behind by `behind_ns`, catching up at `catch_up` times real time.
         behind_ns =
             behind_ns.saturating_sub((time_of(batch * block) as f64 * (catch_up - 1.0)) as u64);

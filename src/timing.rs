@@ -40,6 +40,17 @@ pub fn time_of(index: u64) -> u64 {
     (u128::from(index) * u128::from(NANOS)).div_ceil(48_000) as u64
 }
 
+/// The test ramp of `mxl-mixer-tone --ramp`: sample index `index` carries
+/// (index mod 65536) / 131072, exact in f32.
+pub fn ramp(index: u64) -> f32 {
+    (index % 65_536) as f32 / 131_072.0
+}
+
+/// The index (mod 65536) a ramp sample was written at.
+pub fn ramp_index(sample: f32) -> u64 {
+    (f64::from(sample) * 131_072.0).round().max(0.0) as u64 % 65_536
+}
+
 /// TAI−UTC since 2017.
 pub const TAI_UTC_OFFSET_S: i64 = 37;
 
@@ -324,6 +335,16 @@ mod tests {
         assert!(time_of(i) <= t && time_of(i + 1) > t);
         assert_eq!(index_at(time_of(i)), i);
         assert_eq!(time_of(48_000), NANOS);
+    }
+
+    #[test]
+    fn the_ramp_tells_its_index() {
+        for i in [0u64, 1, 4_799, 65_535, 65_536, 1_800_000_000 * 48_000 + 77] {
+            assert_eq!(ramp_index(ramp(i)), i % 65_536);
+            // Through a gain and back, as the probe reads it.
+            let h = std::f32::consts::FRAC_1_SQRT_2;
+            assert_eq!(ramp_index(ramp(i) * h / h), i % 65_536);
+        }
     }
 
     #[test]

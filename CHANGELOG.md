@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.1 (unreleased)
+
+- **Behaviour change for the platform: outputs keep the input timestamps.** A sample read from an input at MXL index i leaves on every output (bus, direct out, monitor, published and virtual output) at index i, not at the mixer's block clock ("now"). Before, every output was re-stamped by the read offset plus the input's extra delay: an AV-sync signal through an input straight to a virtual output was +39 ms (37.0–41.2) late against its video on the test platform; in the lab (a ramp whose samples tell their index) +41.1 ms for a writer that commits a 25 fps video frame of audio at once, +39.0 ms for the same 25 ms early, +5.0 ms and +2.0 ms for writers per block on time and 25 ms early; now 0 samples in every case. The old shift was the read offset plus the input's automatic delay, so it depended on how the source commits. An output that mixes inputs of different delays takes the largest of them. Look-ahead (limiter, leveler) is taken off the index too. When samples are written is unchanged, so listening latency is unchanged.
+- **Readers of mixer outputs need a read offset of at least the output's write delay:** read offset + the largest extra delay of its inputs + look-ahead + one commit + one block; new `write_delay_ms` per output in `GET /api/v1/status` and `GET /api/v1/virtual-outputs`, new metric `output_write_delay_ms{output}`. `output_commit_lag_ms` now includes the output's offset from the block clock. Release notes: `docs/release-notes/1.5.1.md`.
+- When an output's delay changes (an input's automatic delay, a route, a look-ahead node), the output fades out with that input and in after the index jump; already written indices are not written again, a gap is written as silence.
+- Tests: `mxl-mixer-tone --ramp` and `mxl-mixer-probe --ramp GAIN` measure the index shift exactly (`--lead-ms` writes ahead of the timestamps); `vouts.sh` checks shift 0 straight through, through a bus at −6 dB and through a 1.5 ms look-ahead limiter.
+
 ## 1.5.0 (2026-10-30)
 
 - C7: NMOS labels are unique: `MIXER_OUTPUTS` labels used twice stop the start; a publish or rename that gives a published output or monitor a virtual output's label, or two the same label, is refused (400); a clash an old mix already has is a WARN at the start and `label_clashes` in the status.

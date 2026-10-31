@@ -1094,11 +1094,17 @@ impl Compiler {
             } else {
                 1.0
             };
+            // The look-ahead of the monitored signal, for a published monitor.
+            let mut source_latency = 0;
             let source = match &m.source {
                 Some(Source::Signal(id)) => {
                     let tap = mix.default_tap(id);
                     match (taps.get(id), mix.tap_format(id, &tap)) {
-                        (Some(t), Some(from)) => Some((t.get(&tap).0, from, id.clone(), t.chain)),
+                        (Some(t), Some(from)) => {
+                            let (span, latency) = t.get(&tap);
+                            source_latency = latency;
+                            Some((span, from, id.clone(), t.chain))
+                        }
                         _ => None,
                     }
                 }
@@ -1199,6 +1205,7 @@ impl Compiler {
             });
             let (_, _, out, _) = c.chain(&key, &m.chain, level, m.format, false, &taps, None);
             cur = out.0;
+            let monitor_latency = source_latency + out.1;
             if let (Some(b), Some(lfe)) = (m.bass_management.filter(|b| b.enabled), m.lfe()) {
                 let kind = ProcKind::BassManagement {
                     crossover_hz: b.crossover_hz,
@@ -1268,6 +1275,7 @@ impl Compiler {
                     src: cur,
                     slot: slot as u32,
                 });
+                c.b.output_latency(slot, monitor_latency);
             }
             if j < control_room_monitors {
                 monitor_out.insert(m.id.clone(), (cur, m.format));
@@ -1312,6 +1320,7 @@ impl Compiler {
                 src: out,
                 slot: slot as u32,
             });
+            c.b.output_latency(slot, tap_latency);
         }
 
         // Virtual outputs (C7): their source through the width rules, else silence,
@@ -1322,12 +1331,15 @@ impl Compiler {
             };
             let out = c.b.buffers(to.channels());
             c.b.step(Step::Clear { dst: out });
+            let mut vout_latency = 0;
             let source: Option<(Span, Format, String, u64)> = match mix.virtual_source(&n) {
                 Some(OutputSource::Signal { signal, tap }) => {
                     let tap = tap.clone().unwrap_or(Tap::PostFader);
                     match (taps.get(signal), mix.tap_format(signal, &tap)) {
                         (Some(t), Some(from)) => {
-                            Some((t.get(&tap).0, from, format!("{signal}/{tap:?}"), t.chain))
+                            let (span, tap_latency) = t.get(&tap);
+                            vout_latency = tap_latency;
+                            Some((span, from, format!("{signal}/{tap:?}"), t.chain))
                         }
                         _ => None,
                     }
@@ -1415,6 +1427,7 @@ impl Compiler {
                 src: out,
                 slot: slot as u32,
             });
+            c.b.output_latency(slot, vout_latency);
         }
 
         for s in all_sends.iter().filter(|s| s.block_delay) {
@@ -1695,6 +1708,21 @@ mod tests {
         assert!(out.0[&5][1][0] > 0.0, "the monitor's output");
         let h = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
         assert!((out.0[&6][0][0] - h).abs() < 1e-6 && (out.0[&6][1][0] - h).abs() < 1e-6);
+        // 1.5.1: each slot takes the time of the inputs that reach it (engine
+        // inputs from 0): main has both, input 2 straight through only input 2,
+        // the silent slot none.
+        let sources = &c.plan.output_sources;
+        assert_eq!(sources[0], vec![0, 1], "main");
+        assert_eq!(sources[1], vec![0, 1], "main up-mixed");
+        assert!(sources[2].is_empty(), "no source");
+        assert_eq!(sources[3], vec![1], "input 2 straight through");
+        assert_eq!(sources[4], vec![0], "vox direct out");
+        assert_eq!(sources[5], vec![1], "monitor on music");
+        assert_eq!(sources[6], vec![0], "input 1 straight through");
+        assert!(
+            c.plan.output_latency.iter().all(|l| *l == 0),
+            "no look-ahead"
+        );
         // A source that is gone leaves the slot silent, never an error.
         m.remove_signal("main");
         assert!(m.virtual_source("1").is_none());
@@ -2637,6 +2665,9 @@ mod tests {
         assert_eq!(c.latency["a"], 48);
         assert_eq!(c.output_latency["a"], 0);
         assert_eq!(c.output_latency["main"], 48);
+        // 1.5.1: the DSP thread takes the look-ahead off the output's index.
+        assert_eq!(c.plan.output_latency[3], 48);
+        assert_eq!(c.plan.output_latency[4], 0);
         let mut out = Outputs::default();
         for k in 0..50 {
             let block: Vec<f32> = (0..96)
@@ -2680,6 +2711,8 @@ mod tests {
             c.plan
                 .process(k * 48, &Inputs(vec![vec![vec![x; 48]]]), &mut out);
         }
+        // The loop's hold carries the input to main's output too.
+        assert_eq!(c.plan.output_sources[3], vec![0]);
         let main = &out.0[&3][0];
         for (k, expected) in [1.0f32, 0.5, 0.25, 0.125].iter().enumerate() {
             assert!(
