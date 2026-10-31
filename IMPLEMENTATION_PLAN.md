@@ -3,7 +3,7 @@
 Decisions, deviations and results against `SPECIFICATION.md` (Draft v0.3). Kept
 current so that work can resume after an interruption.
 
-## Status (2026-10-30)
+## Status (2026-10-31)
 
 | Step | State |
 | --- | --- |
@@ -24,7 +24,7 @@ current so that work can resume after an interruption.
 
 ## Resume
 
-- 1.5.0 is released (2026-10-30). Release notes: `docs/release-notes/1.5.0.md`;
+- 1.5.1 is released (2026-10-31; outputs keep the input timestamps). Release notes: `docs/release-notes/1.5.1.md`;
   its image digest is filled in after the tag build. Earlier: `docs/release-notes/`.
 - Environment: `docs/development.md`.
 
