@@ -1,7 +1,7 @@
 // The per-send surround panner (B6), as the server decides it (Mix::send_pan): a mono or stereo source
 // into a 5.1, 7.1, 5.1.4 or 7.1.4 bus can be panned in the send; a post-pan send then reads the strip
-// before its stereo panner. A strip with its own surround panner at post-pan is already surround.
-import { isBus, signalOf } from "./store.js";
+// before its stereo panner (the strip's own surround panner, A6, does not apply then).
+import { signalOf } from "./store.js";
 
 const BEDS = { "5.1": "5.1", "5.1.4": "5.1", "7.1": "7.1", "7.1.4": "7.1" };
 
@@ -13,6 +13,5 @@ export function sendPanBed(send) {
   const bed = BEDS[signalOf(send?.to)?.format];
   const src = signalOf(send?.from);
   if (!bed || !src) return "";
-  if (!isBus(src.id) && send.tap === "post-pan" && src.chain?.some((n) => n.type === "surround-pan" && !n.bypass)) return "";
   return src.format === "mono" || src.format === "stereo" ? bed : "";
 }

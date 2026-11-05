@@ -3,13 +3,15 @@
 // stays: nodes that run on any width adapt, nodes that cannot are bypassed and flagged; sends stay and
 // map through the down-mix or up-mix; a strip's input patch is extended or trimmed; the change fades
 // the signal out and in. What the server reports (bypassed nodes, a kept output layout) shows as a notice.
+// With `actions` (a dialog, A4), "Change to …" sits beside Close in the dialog's action row, in its style.
 import { computed, ref, watch } from "vue";
 import ConfirmButton from "./ConfirmButton.vue";
 import { api } from "../api.js";
 import { act, isBus, live, signalPath } from "../store.js";
 import { FORMATS, channelsOf, unsupported } from "../nodes.js";
 
-const props = defineProps({ signal: { type: Object, required: true } });
+const props = defineProps({ signal: { type: Object, required: true }, actions: { type: Boolean, default: false } });
+const emit = defineEmits(["close"]);
 const picked = ref(props.signal.format);
 watch(
   () => [props.signal.id, props.signal.format],
@@ -38,11 +40,15 @@ async function apply() {
       <select v-model="picked" :aria-label="`${signal.name} format`">
         <option v-for="f in FORMATS" :key="f" :value="f">{{ f }} ({{ channelsOf(f) }} ch)</option>
       </select>
-      <ConfirmButton v-if="changed" small :label="`Change to ${picked}`" @confirm="apply" />
+      <ConfirmButton v-if="changed && !actions" small :label="`Change to ${picked}`" @confirm="apply" />
     </div>
     <p v-if="changed" class="note">
       The chain and the sends stay; the signal fades out and in.
       <template v-if="flagged.length"> Bypassed (cannot run on {{ picked }}): {{ flagged.join(", ") }}.</template>
     </p>
+    <div v-if="actions" class="actions">
+      <button class="btn secondary" @click="emit('close')">Close</button>
+      <ConfirmButton v-if="changed" :label="`Change to ${picked}`" @confirm="apply" />
+    </div>
   </div>
 </template>

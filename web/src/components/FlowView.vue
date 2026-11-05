@@ -67,7 +67,7 @@ const stages = computed(() => {
   const st = bus.value ? [{ label: "Sum" }] : [{ label: "Input" }, { gap: "in" }, { label: "Trim" }];
   chain.value.forEach((n, i) => st.push({ gap: i }, { node: n, i }));
   st.push({ gap: chain.value.length }, { label: "Fader" }, { gap: "fader" });
-  if (!bus.value) st.push({ label: chain.value.some((n) => n.type === "surround-pan" && !n.bypass) ? "Surround pan" : "Pan" }, { gap: "pan" });
+  if (!bus.value) st.push({ label: "Pan" }, { gap: "pan" });
   st.push({ label: "Out" });
   return st;
 });

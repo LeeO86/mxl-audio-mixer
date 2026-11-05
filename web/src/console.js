@@ -50,3 +50,63 @@ export function parseFaderDb(text, max) {
   if (v < -80) return -Infinity;
   return Math.min(max, Math.round(v * 10) / 10 || 0);
 }
+
+// ---- unfolded strips (A13) ----------------------------------------------------------------
+const MAX_OFFSET = 100; // as the server's MAX_MEMBER_OFFSET_DB
+const TRIM_RANGE = 42;
+const FADER_MAX = 15;
+const num = (v) => (v === "-inf" || v === null || v === undefined ? -Infinity : Number(v));
+const out = (d) => (Number.isFinite(d) ? Math.round(d * 10) / 10 : "-inf");
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+/** The strip's members (one per channel), with the defaults for a strip that has none. */
+export function membersOf(s, n) {
+  return Array.from({ length: n }, (_, ch) => ({ fader_db: 0, trim_db: 0, mute: false, ...(s.members?.[ch] || {}) }));
+}
+
+/** What member `ch` shows: its fader (the strip's plus its offset, at most +15 dB), trim and mute. */
+export function memberValue(s, n, ch) {
+  const m = membersOf(s, n)[ch];
+  const f = num(s.fader_db) + num(m.fader_db);
+  return { fader_db: Number.isFinite(f) ? Math.min(FADER_MAX, f) : -Infinity, trim_db: clamp(s.trim_db + m.trim_db, -TRIM_RANGE, TRIM_RANGE), mute: !!s.mute || !!m.mute };
+}
+
+/**
+ * The PATCH body for moving member `ch`'s `field` ("fader_db", "trim_db" or "mute") to `value`. Linked:
+ * the strip's own value moves so that member lands there, every offset stays (a member at −∞ cannot
+ * lead the fader). Unlinked: only that member's offset changes; a strip fader at −∞ goes to 0 dB and the
+ * other members keep −∞.
+ */
+export function memberChange(s, n, ch, field, value) {
+  const list = membersOf(s, n);
+  const m = list[ch];
+  if (field === "mute") {
+    if (!s.unlinked) return { mute: !!value };
+    list[ch] = { ...m, mute: !!value };
+    return { members: list };
+  }
+  if (field === "trim_db") {
+    if (!s.unlinked) return { trim_db: clamp(Math.round((value - m.trim_db) * 10) / 10, -TRIM_RANGE, TRIM_RANGE) };
+    list[ch] = { ...m, trim_db: clamp(Math.round((value - s.trim_db) * 10) / 10, -MAX_OFFSET, MAX_OFFSET) };
+    return { members: list };
+  }
+  const d = num(value);
+  const off = num(m.fader_db);
+  if (!s.unlinked) {
+    if (!Number.isFinite(off)) return null;
+    return { fader_db: out(Number.isFinite(d) ? Math.min(FADER_MAX, d - off) : -Infinity) };
+  }
+  const body = {};
+  let base = num(s.fader_db);
+  if (!Number.isFinite(base)) {
+    base = 0;
+    body.fader_db = 0;
+    list.forEach((x, i) => i !== ch && (list[i] = { ...x, fader_db: "-inf" }));
+  }
+  list[ch] = { ...m, fader_db: Number.isFinite(d) ? out(clamp(d - base, -MAX_OFFSET, MAX_OFFSET)) : "-inf" };
+  body.members = list;
+  return body;
+}
+
+/** Whether any member has an offset or a mute of its own. */
+export const hasOffsets = (s) => (s.members || []).some((m) => num(m.fader_db) !== 0 || m.trim_db || m.mute);
