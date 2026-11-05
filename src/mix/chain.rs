@@ -974,8 +974,11 @@ pub fn validate(chain: &[Proc]) -> Result<(), String> {
         .iter()
         .filter(|p| matches!(p.kind, ProcKind::SurroundPan { .. }))
         .count();
-    if panners > 1 {
-        return Err("a chain has at most one surround panner".into());
+    if panners > 0 {
+        return Err(
+            "the surround panner is no processing node since 1.6.0: set the strip's surround pan (`surround`)"
+                .into(),
+        );
     }
     Ok(())
 }

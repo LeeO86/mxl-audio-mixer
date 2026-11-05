@@ -213,9 +213,19 @@ fn parse<T: DeserializeOwned>(mut v: Value) -> Result<(T, Vec<Removed>), String>
 
 /// A saved mix: the mix and the paths of what was dropped (empty when it
 /// parsed as it is).
+///
+/// A mix of an older version is brought to this one's model first
+/// ([`super::upgrade`]: a 1.5 surround panner node becomes the strip's surround
+/// pan); logic blocks that lose their target there are listed too.
 pub fn mix(v: Value) -> Result<(Mix, Vec<String>), String> {
-    let (mix, removed) = parse::<Mix>(v)?;
-    Ok((mix, removed.iter().map(|r| path_text(&r.at)).collect()))
+    let (mut mix, removed) = parse::<Mix>(v)?;
+    let mut dropped: Vec<String> = removed.iter().map(|r| path_text(&r.at)).collect();
+    let (notes, gone) = super::upgrade::upgrade(&mut mix);
+    for n in notes {
+        tracing::info!("show from an older version: {n}");
+    }
+    dropped.extend(gone);
+    Ok((mix, dropped))
 }
 
 #[cfg(test)]

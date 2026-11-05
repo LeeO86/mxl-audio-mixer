@@ -299,6 +299,14 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
             format!("show file version {} is not supported", show.version),
         );
     }
+    let mut show = show;
+    if let Some(mix) = &mut show.mix {
+        // An older version's show in this one's model (a 1.5 surround panner
+        // node becomes the strip's surround pan).
+        for n in crate::mix::upgrade::upgrade(mix).0 {
+            tracing::info!("imported show: {n}");
+        }
+    }
     if let Some(mix) = &show.mix {
         let inputs = app.control().inputs.len();
         if let Err(e) = mix.validate(inputs, app.config.block_samples) {

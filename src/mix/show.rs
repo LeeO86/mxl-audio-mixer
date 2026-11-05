@@ -40,6 +40,13 @@ pub struct SignalState {
     /// Every chain node as JSON (its id, type, bypass and parameters).
     #[serde(default)]
     pub chain: Vec<Value>,
+    /// A strip's surround panner (A6–A8, the pan class); absent in snapshots of
+    /// 1.5 (a recall leaves it then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surround: Option<Vec<Option<super::model::SurroundPos>>>,
+    /// A strip's member offsets (A13, the fader class); absent before 1.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<super::model::Member>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,6 +153,8 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
                 pan: Some(s.pan),
                 width: Some(s.width),
                 chain: s.chain.iter().map(node_json).collect(),
+                surround: Some(s.surround.clone()),
+                members: Some(s.members.clone()),
             },
         );
     }
@@ -160,6 +169,8 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
                 pan: None,
                 width: None,
                 chain: b.chain.iter().map(node_json).collect(),
+                surround: None,
+                members: None,
             },
         );
     }
@@ -174,6 +185,8 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
                 pan: None,
                 width: None,
                 chain: Vec::new(),
+                surround: None,
+                members: None,
             },
         );
     }
@@ -315,6 +328,11 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
         }
         if filter.class(Class::Fader) {
             s.fader_db = st.fader_db;
+            if let Some(m) = &st.members {
+                if m.is_empty() || m.len() == s.format.channels() {
+                    s.members = m.clone();
+                }
+            }
         }
         if filter.class(Class::Mute) {
             s.mute = st.mute;
@@ -325,6 +343,11 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
             }
             if let Some(w) = st.width {
                 s.width = w;
+            }
+            if let Some(p) = &st.surround {
+                if p.is_empty() || p.len() == super::model::surround_entries(s.format) {
+                    s.surround = p.clone();
+                }
             }
         }
         if filter.class(Class::Chain) {
@@ -470,6 +493,9 @@ mod tests {
             mute_safe: false,
             tally_index: None,
             afv: None,
+            surround: Vec::new(),
+            members: Vec::new(),
+            unlinked: false,
         }
         };
         let mut m = Mix::default();
