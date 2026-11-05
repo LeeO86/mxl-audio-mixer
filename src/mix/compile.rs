@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use super::chain::{Category, Proc, ProcKind};
-use super::format::{pan_gains, stereo_matrix, width_matrix, Format};
+use super::format::{pan_gains, stereo_matrix, width_matrix, Format, Laws};
 use super::model::{Db, Kind, Mix, MonitorFeed, OutputSource, Patch, Tap};
 use super::room::{channel_gains, check_matrix, Monitor, SoloKind, Source};
 use super::talkback::{destination_gains, dims_control_room, MicInfo, Talking};
@@ -46,6 +46,9 @@ pub struct Compiled {
     pub output_latency: HashMap<String, usize>,
     /// Equal for two compiles exactly when only values differ.
     pub structure: u64,
+    /// The inserts' round-trip probes: (output key, probe index, the insert's
+    /// signature: its return), C4.
+    pub probes: Vec<(String, usize, u64)>,
 }
 
 #[derive(Default)]
@@ -156,7 +159,7 @@ fn build_solo_bus(
             continue;
         };
         let src = t.get(&tap).0;
-        let w = width_matrix(from, Format::Stereo, laws);
+        let w = width_matrix(from, Format::Stereo, &laws);
         let coefficients = c.b.coefficients(&w);
         let gain = match kind {
             SoloKind::Pfl => Db(pfl_trim_db).gain() as f32,
@@ -223,7 +226,8 @@ struct Taps {
     pre_dynamics: (Span, usize),
     post_dynamics: (Span, usize),
     pre_fader: (Span, usize),
-    post: Span,
+    /// The chain's end (after the fader stage and every node after it).
+    post: (Span, usize),
     pan: Span,
     /// Where the meter reads: a strip's after its fader and before its mute
     /// (A3), a bus's its output.
@@ -234,7 +238,7 @@ struct Taps {
 
 impl Taps {
     fn get(&self, tap: &Tap) -> (Span, usize) {
-        let total = self.pre_fader.1;
+        let total = self.post.1;
         match tap {
             Tap::Input => (self.input, self.input_latency),
             Tap::PreEq => self.pre_eq,
@@ -242,7 +246,7 @@ impl Taps {
             Tap::PreDynamics => self.pre_dynamics,
             Tap::PostDynamics => self.post_dynamics,
             Tap::PreFader => self.pre_fader,
-            Tap::PostFader => (self.post, total),
+            Tap::PostFader => self.post,
             Tap::PostPan => (self.pan, total),
             Tap::After(id) => self
                 .after
@@ -286,6 +290,12 @@ struct Build<'a> {
     procs: HashMap<NodeId, LayoutNode>,
     node_meters: Vec<(String, String, usize, usize)>,
     structure: DefaultHasher,
+    /// Direct outs and insert sends (C4, C5), published after the signals.
+    endpoints: Vec<Endpoint>,
+    /// Meters of inserts: (key, first channel, channels).
+    extra_meters: Vec<(String, u32, usize)>,
+    /// Inserts' round-trip probes: (output key, send meter, return meter, signature).
+    probes: Vec<(String, u32, u32, u64)>,
 }
 
 impl Build<'_> {
@@ -397,16 +407,137 @@ impl Build<'_> {
         }
     }
 
-    /// Emit a signal's chain on `input` (`n` channels); returns the taps it
-    /// defines: (after each node, the named taps, the output with its latency)
-    /// and where its VAD reads. With `auto` (the node key, format and chain hash
-    /// of a signal with an auto gain) the gain goes where the chain's `auto`
-    /// node is, or after the chain; the VAD reads at its input.
+    /// The gain step of node `key` on `src`; returns its output.
+    fn gain(&mut self, key: String, signature: impl Hash, values: Vec<f32>, src: Span) -> Span {
+        let n = values.len();
+        let node = self.node(key, signature, values);
+        let dst = self.b.buffers(n);
+        self.b.step(Step::Gain { node, src, dst });
+        dst
+    }
+
+    /// The fader stage on `src`: (where the strip's meter reads, its output).
+    fn fader_stage(&mut self, stage: &FaderStage, src: Span) -> (Span, Span) {
+        let (k, sig, v) = &stage.fader;
+        let mut level = self.gain(k.clone(), sig, v.clone(), src);
+        if let Some((k, sig, v)) = &stage.afv {
+            level = self.gain(k.clone(), sig, v.clone(), level);
+        }
+        let out = match &stage.mute {
+            Some((k, sig, v)) => self.gain(k.clone(), sig, v.clone(), level),
+            None => level,
+        };
+        (level, out)
+    }
+
+    /// An insert (C4) on `src` of `signal` (`n` channels): the send (level,
+    /// meter, the output `key`), the return (an input's channels at a level,
+    /// metered) and the switch between the dry signal and the return. Returns
+    /// the insert's output.
+    #[allow(clippy::too_many_arguments)]
+    fn insert(
+        &mut self,
+        signal: &str,
+        p: &Proc,
+        format: Format,
+        src: Span,
+        latency: usize,
+    ) -> Span {
+        let ProcKind::Insert {
+            send_db,
+            return_db,
+            return_input,
+            return_channel,
+            ..
+        } = &p.kind
+        else {
+            return src;
+        };
+        let n = format.channels();
+        let base = format!("insert/{signal}/{}", p.id);
+        let shape = (format_name(format), p.kind.signature());
+        let send = self.gain(
+            format!("{base}/send"),
+            shape,
+            vec![Db(*send_db).gain() as f32; n],
+            src,
+        );
+        let key = super::chain::output_key(signal, &p.id, &p.kind);
+        let send_meter = self.b.meter(n);
+        self.b.step(Step::Meter {
+            src: send,
+            slot: send_meter,
+        });
+        self.extra_meters
+            .push((format!("insert:{key}:send"), send_meter, n));
+        self.endpoints.push(Endpoint {
+            key: key.clone(),
+            src: send,
+            latency,
+            from: format,
+            to: None,
+            open: true,
+            chain: hash(shape),
+        });
+        let Some(input) = return_input else {
+            return src;
+        };
+        let raw = self.b.buffers(n);
+        for ch in 0..n {
+            let dst = self.b.buffer(raw, ch);
+            self.b.step(Step::Patch {
+                input: (*input - 1) as u32,
+                channel: (*return_channel - 1 + ch) as u32,
+                dst,
+            });
+        }
+        let ret = self.gain(
+            format!("{base}/return"),
+            shape,
+            vec![Db(*return_db).gain() as f32; n],
+            raw,
+        );
+        let return_meter = self.b.meter(n);
+        self.b.step(Step::Meter {
+            src: ret,
+            slot: return_meter,
+        });
+        self.extra_meters
+            .push((format!("insert:{key}:return"), return_meter, n));
+        self.probes
+            .push((key, send_meter, return_meter, hash(shape)));
+        // Bypass ramps between the dry signal and the return.
+        let wet = if p.bypass { 0.0 } else { 1.0 };
+        let dry = self.gain(format!("{base}/dry"), shape, vec![1.0 - wet; n], src);
+        let wet = self.gain(format!("{base}/wet"), shape, vec![wet; n], ret);
+        let out = self.b.buffers(n);
+        let coefficients = self
+            .b
+            .coefficients(&width_matrix(format, format, &Laws::default()));
+        for (k, from) in [("dryin", dry), ("wetin", wet)] {
+            let node = self.node(format!("{base}/{k}"), shape, vec![1.0]);
+            self.b.step(Step::Send {
+                node,
+                src: from,
+                dst: out,
+                coefficients,
+            });
+        }
+        out
+    }
+
+    /// Emit a signal's chain on `input`; returns the taps it defines (C3,
+    /// 1.6.0: the chain is the whole flow between the trim, or the sum, and the
+    /// panner). With `stage` the fader stage runs where the chain's `fader`
+    /// node is, or after the chain. With `auto` (the node key, format and chain
+    /// hash of a signal with an auto gain) the gain goes where the chain's
+    /// `auto` node is, or just before the fader stage; the VAD reads at its
+    /// input. Direct outs and insert sends are collected as endpoints.
     ///
     /// A node that cannot run on `format` (C10) passes the signal through, as
     /// does a surround panner (it acts at the strip's panner, D5); the M/S /
     /// width node is a gain matrix (D3).
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn chain(
         &mut self,
         signal: &str,
@@ -416,95 +547,127 @@ impl Build<'_> {
         strip: bool,
         taps: &HashMap<String, Taps>,
         auto: Option<(String, Format, u64)>,
-    ) -> (
-        Vec<(String, Span, usize)>,
-        [(Span, usize); 4],
-        (Span, usize),
-        Span,
-    ) {
+        stage: Option<&FaderStage>,
+    ) -> ChainOut {
         let n = format.channels();
         let mut cur = input;
         let mut latency = 0;
         let mut after = Vec::new();
         let mut vad = None;
+        let explicit_auto = chain.iter().any(|p| p.kind == (ProcKind::Auto {}));
+        let marked = chain.iter().any(|p| p.kind == (ProcKind::Fader {}));
+        let mut pre_fader = None;
+        let mut meter = None;
+        // The fader stage (and the default auto gain before it) on `cur`.
+        let mut fader = |b: &mut Self, cur: &mut Span, vad: &mut Option<Span>, latency: usize| {
+            if let (Some((key, format, sig)), false) = (&auto, explicit_auto) {
+                *vad = Some(*cur);
+                *cur = b.auto_node(key, signal, *format, *sig, *cur);
+            }
+            pre_fader = Some((*cur, latency));
+            if let Some(stage) = stage {
+                let (level, out) = b.fader_stage(stage, *cur);
+                meter = Some(level);
+                *cur = out;
+            }
+        };
         for p in chain {
+            if p.kind == (ProcKind::Fader {}) {
+                fader(self, &mut cur, &mut vad, latency);
+                after.push((p.id.clone(), cur, latency));
+                continue;
+            }
             if p.kind.supports(format, strip).is_err()
                 || matches!(p.kind, ProcKind::SurroundPan { .. })
             {
                 after.push((p.id.clone(), cur, latency));
                 continue;
             }
-            if let ProcKind::Width {
-                width_pct,
-                input: mode_in,
-                output: mode_out,
-            } = &p.kind
-            {
-                let values = if p.bypass {
-                    vec![1.0, 0.0, 0.0, 1.0]
-                } else {
-                    super::spatial::width_matrix(*width_pct, *mode_in, *mode_out)
-                        .iter()
-                        .map(|v| *v as f32)
-                        .collect()
-                };
-                let node = self.node(
-                    format!("proc/{signal}/{}", p.id),
-                    p.kind.signature(),
-                    values,
-                );
-                let dst = self.b.buffers(n);
-                self.b.step(Step::Matrix {
-                    node,
-                    src: cur,
-                    dst,
-                });
-                after.push((p.id.clone(), dst, latency));
-                cur = dst;
-                continue;
-            }
-            if p.kind == (ProcKind::Auto {}) {
-                if let (Some((key, format, sig)), false) = (&auto, p.bypass) {
-                    vad = Some(cur);
-                    cur = self.auto_node(key, signal, *format, *sig, cur);
+            match &p.kind {
+                ProcKind::Width {
+                    width_pct,
+                    input: mode_in,
+                    output: mode_out,
+                } => {
+                    let values = if p.bypass {
+                        vec![1.0, 0.0, 0.0, 1.0]
+                    } else {
+                        super::spatial::width_matrix(*width_pct, *mode_in, *mode_out)
+                            .iter()
+                            .map(|v| *v as f32)
+                            .collect()
+                    };
+                    let node = self.node(
+                        format!("proc/{signal}/{}", p.id),
+                        p.kind.signature(),
+                        values,
+                    );
+                    let dst = self.b.buffers(n);
+                    self.b.step(Step::Matrix {
+                        node,
+                        src: cur,
+                        dst,
+                    });
+                    cur = dst;
                 }
-                after.push((p.id.clone(), cur, latency));
-                continue;
+                ProcKind::Auto {} => {
+                    if let (Some((key, format, sig)), false) = (&auto, p.bypass) {
+                        vad = Some(cur);
+                        cur = self.auto_node(key, signal, *format, *sig, cur);
+                    }
+                }
+                ProcKind::DirectOut {
+                    format: to,
+                    commit_samples,
+                } => {
+                    self.endpoints.push(Endpoint {
+                        key: super::chain::output_key(signal, &p.id, &p.kind),
+                        src: cur,
+                        latency,
+                        from: format,
+                        to: *to,
+                        open: !p.bypass,
+                        chain: hash((commit_samples, &p.id)),
+                    });
+                }
+                ProcKind::Insert { .. } => {
+                    cur = self.insert(signal, p, format, cur, latency);
+                }
+                _ => {
+                    let key = p
+                        .kind
+                        .key()
+                        .and_then(|k| taps.get(&k.signal).map(|t| t.get(&k.tap).0))
+                        .unwrap_or_default();
+                    let meter = self.b.node_meter();
+                    self.node_meters.push((
+                        signal.to_string(),
+                        p.id.clone(),
+                        meter,
+                        p.kind.metered_bands(),
+                    ));
+                    let proc = self.processor(
+                        format!("proc/{signal}/{}", p.id),
+                        &p.kind,
+                        p.values(),
+                        n,
+                        meter,
+                    );
+                    let dst = self.b.buffers(n);
+                    self.b.step(Step::Process {
+                        proc,
+                        src: cur,
+                        dst,
+                        key,
+                    });
+                    latency += p.kind.latency();
+                    cur = dst;
+                }
             }
-            let key = p
-                .kind
-                .key()
-                .and_then(|k| taps.get(&k.signal).map(|t| t.get(&k.tap).0))
-                .unwrap_or_default();
-            let meter = self.b.node_meter();
-            self.node_meters.push((
-                signal.to_string(),
-                p.id.clone(),
-                meter,
-                p.kind.metered_bands(),
-            ));
-            let proc = self.processor(
-                format!("proc/{signal}/{}", p.id),
-                &p.kind,
-                p.values(),
-                n,
-                meter,
-            );
-            let dst = self.b.buffers(n);
-            self.b.step(Step::Process {
-                proc,
-                src: cur,
-                dst,
-                key,
-            });
-            latency += p.kind.latency();
-            after.push((p.id.clone(), dst, latency));
-            cur = dst;
+            after.push((p.id.clone(), cur, latency));
         }
-        let explicit = chain.iter().any(|p| p.kind == (ProcKind::Auto {}));
-        if let (Some((key, format, sig)), false) = (&auto, explicit) {
-            vad = Some(cur);
-            cur = self.auto_node(key, signal, *format, *sig, cur);
+        if !marked {
+            fader(self, &mut cur, &mut vad, latency);
         }
         let at = |pos: usize| -> (Span, usize) {
             if pos == 0 {
@@ -516,8 +679,53 @@ impl Build<'_> {
         let (fe, le) = Mix::category_span(chain, Category::Eq);
         let (fd, ld) = Mix::category_span(chain, Category::Dynamics);
         let named = [at(fe), at(le), at(fd), at(ld)];
-        (after, named, (cur, latency), vad.unwrap_or(cur))
+        let pre_fader = pre_fader.expect("the fader stage ran");
+        ChainOut {
+            named,
+            pre_fader,
+            meter: meter.unwrap_or(cur),
+            post: (cur, latency),
+            vad: vad.unwrap_or(pre_fader.0),
+            after,
+        }
     }
+}
+
+/// A signal's fader stage (C3): the strip's fader, audio-follows-video and
+/// mute, or a bus's fader: (node key, signature, values) each.
+struct FaderStage {
+    fader: (String, u64, Vec<f32>),
+    afv: Option<(String, u64, Vec<f32>)>,
+    mute: Option<(String, u64, Vec<f32>)>,
+}
+
+/// What a chain gives its signal.
+struct ChainOut {
+    /// After each node: (node id, buffer, latency).
+    after: Vec<(String, Span, usize)>,
+    /// Pre-EQ, post-EQ, pre-dynamics, post-dynamics.
+    named: [(Span, usize); 4],
+    /// The fader stage's input.
+    pre_fader: (Span, usize),
+    /// Where a strip's meter reads: after its fader, before its mute.
+    meter: Span,
+    /// The chain's end (post-fader).
+    post: (Span, usize),
+    /// Where the VAD reads (the auto gain's input).
+    vad: Span,
+}
+
+/// A direct out or an insert send (C4, C5): published as output `key`.
+struct Endpoint {
+    key: String,
+    src: Span,
+    latency: usize,
+    from: Format,
+    /// The flow's layout; `None`: `from`.
+    to: Option<Format>,
+    /// `false`: a bypassed direct out writes silence.
+    open: bool,
+    chain: u64,
 }
 
 /// A control-room source (a signal at its default tap, or an input as
@@ -579,6 +787,9 @@ impl Compiler {
             procs: HashMap::new(),
             node_meters: Vec::new(),
             structure: DefaultHasher::new(),
+            endpoints: Vec::new(),
+            extra_meters: Vec::new(),
+            probes: Vec::new(),
         };
         let mut taps: HashMap<String, Taps> = HashMap::new();
         let mut meters = Vec::new();
@@ -729,63 +940,51 @@ impl Compiler {
                     let auto = auto_signals
                         .contains(&s.id)
                         .then(|| (format!("strip/{}/auto", s.id), s.format, chain_sig));
-                    let (after, named, pre, vad) =
-                        c.chain(&s.id, &s.chain, chain_in, s.format, true, &taps, auto);
-                    c.vad_tap(&s.id, vad);
                     let sip_muted = mix.control_room.solo.sip
                         && !soloed_signals.is_empty()
                         && !soloed_signals.contains_key(&s.id)
                         && !s.solo_safe;
                     // The fader, audio-follows-video, then the mute as a gain of
                     // its own: the strip's meter reads before the mute, so a muted
-                    // strip still shows its level (A3).
+                    // strip still shows its level (A3). Where the chain's fader
+                    // node is, or after the chain (C3).
                     let fader = if sip_muted {
                         0.0
                     } else {
                         mix.fader_level(&s.id, s.fader_db, &vca_effects)
                     };
-                    let node = c.node(
-                        format!("strip/{}/fader", s.id),
-                        (format_name(s.format), chain_sig),
-                        vec![fader; n],
-                    );
-                    let mut level = c.b.buffers(n);
-                    c.b.step(Step::Gain {
-                        node,
-                        src: pre.0,
-                        dst: level,
-                    });
-                    if s.afv.is_some_and(|a| a.enabled) {
+                    let shape = hash((format_name(s.format), chain_sig));
+                    let afv = s.afv.is_some_and(|a| a.enabled).then(|| {
                         let g = c.compiler.afv.get(&s.id).copied().unwrap_or(0.0);
-                        let node = c.node(
-                            format!("strip/{}/afv", s.id),
-                            (format_name(s.format), chain_sig),
-                            vec![g; n],
-                        );
-                        let after = c.b.buffers(n);
-                        c.b.step(Step::Gain {
-                            node,
-                            src: level,
-                            dst: after,
-                        });
-                        level = after;
-                    }
+                        (format!("strip/{}/afv", s.id), shape, vec![g; n])
+                    });
                     let open = if mix.silenced(&s.id, s.mute, &vca_effects, &grouped) {
                         0.0
                     } else {
                         1.0
                     };
-                    let node = c.node(
-                        format!("strip/{}/mute", s.id),
-                        (format_name(s.format), chain_sig),
-                        vec![open; n],
+                    let stage = FaderStage {
+                        fader: (format!("strip/{}/fader", s.id), shape, vec![fader; n]),
+                        afv,
+                        mute: Some((format!("strip/{}/mute", s.id), shape, vec![open; n])),
+                    };
+                    let first_endpoint = c.endpoints.len();
+                    let out = c.chain(
+                        &s.id,
+                        &s.chain,
+                        chain_in,
+                        s.format,
+                        true,
+                        &taps,
+                        auto,
+                        Some(&stage),
                     );
-                    let post = c.b.buffers(n);
-                    c.b.step(Step::Gain {
-                        node,
-                        src: level,
-                        dst: post,
-                    });
+                    c.vad_tap(&s.id, out.vad);
+                    // Its direct outs and insert sends start at what it reads (D1).
+                    for e in &mut c.endpoints[first_endpoint..] {
+                        e.latency += input_latency;
+                    }
+                    let post = out.post.0;
                     // The panner: mono and stereo strips to stereo, or a surround
                     // panner's matrix into its layout (D5).
                     let surround = s.chain.iter().find_map(|p| match &p.kind {
@@ -850,18 +1049,19 @@ impl Compiler {
                         input,
                         input_latency,
                         chain_in,
-                        after: after
+                        after: out
+                            .after
                             .into_iter()
                             .map(|(i, s, l)| (i, s, l + input_latency))
                             .collect(),
-                        pre_eq: shift(named[0]),
-                        post_eq: shift(named[1]),
-                        pre_dynamics: shift(named[2]),
-                        post_dynamics: shift(named[3]),
-                        pre_fader: shift(pre),
-                        post,
+                        pre_eq: shift(out.named[0]),
+                        post_eq: shift(out.named[1]),
+                        pre_dynamics: shift(out.named[2]),
+                        post_dynamics: shift(out.named[3]),
+                        pre_fader: shift(out.pre_fader),
+                        post: shift(out.post),
                         pan,
-                        meter: level,
+                        meter: out.meter,
                         chain: chain_sig,
                     }
                 }
@@ -872,7 +1072,9 @@ impl Compiler {
                     c.b.step(Step::Clear { dst: sum });
                     let into: Vec<_> = all_sends.iter().filter(|s| s.to == bus.id).collect();
                     // The bus's own down-mix, if it has one (D2).
-                    let into_laws = laws.with_downmix(bus.downmix);
+                    let into_laws =
+                        mix.settings
+                            .laws_with(&laws, bus.downmix_set.as_deref(), bus.downmix);
                     let source = |s: &super::model::Send| -> Option<(Span, usize, u64)> {
                         if s.block_delay {
                             return held
@@ -952,7 +1154,7 @@ impl Compiler {
                             src = dst;
                             from = bed;
                         }
-                        let w = width_matrix(from, bus.format, into_laws);
+                        let w = width_matrix(from, bus.format, &into_laws);
                         let coefficients = c.b.coefficients(&w);
                         let mut gain = if send.mute {
                             0.0
@@ -987,24 +1189,39 @@ impl Compiler {
                     let auto = auto_signals
                         .contains(&bus.id)
                         .then(|| (format!("bus/{}/auto", bus.id), bus.format, chain_sig));
-                    let (after, named, pre, vad) =
-                        c.chain(&bus.id, &bus.chain, sum, bus.format, false, &taps, auto);
-                    c.vad_tap(&bus.id, vad);
-                    let pre = (pre.0, pre.1 + most);
-                    let shift = |(s, l): (Span, usize)| (s, l + most);
                     let fader =
                         mix.fader_gain(&bus.id, bus.fader_db, bus.mute, &vca_effects, &grouped);
-                    let node = c.node(
-                        format!("bus/{}/fader", bus.id),
-                        (format_name(bus.format), chain_sig),
-                        vec![fader; n],
+                    let stage = FaderStage {
+                        fader: (
+                            format!("bus/{}/fader", bus.id),
+                            hash((format_name(bus.format), chain_sig)),
+                            vec![fader; n],
+                        ),
+                        afv: None,
+                        mute: None,
+                    };
+                    let first_endpoint = c.endpoints.len();
+                    let out = c.chain(
+                        &bus.id,
+                        &bus.chain,
+                        sum,
+                        bus.format,
+                        false,
+                        &taps,
+                        auto,
+                        Some(&stage),
                     );
-                    let mut post = c.b.buffers(n);
-                    c.b.step(Step::Gain {
-                        node,
-                        src: pre.0,
-                        dst: post,
-                    });
+                    c.vad_tap(&bus.id, out.vad);
+                    // An insert's send on the bus carries the compensation of its sends.
+                    for e in &mut c.endpoints[first_endpoint..] {
+                        e.latency += most;
+                    }
+                    let shift = |(s, l): (Span, usize)| (s, l + most);
+                    let named = out.named;
+                    let after = out.after;
+                    let pre = shift(out.pre_fader);
+                    let post_latency = out.post.1 + most;
+                    let mut post = out.post.0;
                     // Talkback into this bus (§10.2): the programme (down while an
                     // interrupt talks), plus every mic at its gain.
                     let dest = mix
@@ -1027,7 +1244,7 @@ impl Compiler {
                             dst: out,
                         });
                         let coefficients =
-                            c.b.coefficients(&width_matrix(Format::Mono, bus.format, laws));
+                            c.b.coefficients(&width_matrix(Format::Mono, bus.format, &laws));
                         for (m, g) in mics.iter().zip(gains) {
                             let node = c.node(
                                 format!("talkback/{}/{}", d.id, m.info.id),
@@ -1061,7 +1278,7 @@ impl Compiler {
                         pre_dynamics: shift(named[2]),
                         post_dynamics: shift(named[3]),
                         pre_fader: pre,
-                        post,
+                        post: (post, post_latency),
                         pan: post,
                         meter: post,
                         chain: chain_sig,
@@ -1076,11 +1293,11 @@ impl Compiler {
             meters.push((id.clone(), slot, n));
             if let Some(&slot) = loudness.get(id) {
                 c.b.step(Step::Loudness {
-                    src: t.post,
+                    src: t.post.0,
                     slot: slot as u32,
                 });
             }
-            latency.insert(id.clone(), t.pre_fader.1);
+            latency.insert(id.clone(), t.post.1);
             taps.insert(id.clone(), t);
         }
 
@@ -1133,7 +1350,9 @@ impl Compiler {
             let n = m.format.channels();
             let key = m.key();
             // The monitor's own down-mix, if it has one (D2).
-            let laws = laws.with_downmix(m.downmix);
+            let laws = mix
+                .settings
+                .laws_with(&laws, m.downmix_set.as_deref(), m.downmix);
             let mon = c.b.buffers(n);
             c.b.step(Step::Clear { dst: mon });
             let under_solo = solo_bus.is_some() && m.follows_solo;
@@ -1171,7 +1390,7 @@ impl Compiler {
                 None => None,
             };
             if let Some((src, from, name, chain)) = source {
-                let w = width_matrix(from, m.format, laws);
+                let w = width_matrix(from, m.format, &laws);
                 let coefficients = c.b.coefficients(&w);
                 let node = c.node(
                     format!("{key}/source"),
@@ -1193,7 +1412,7 @@ impl Compiler {
                 });
             }
             if let (Some(bus), true) = (solo_bus, m.follows_solo) {
-                let w = width_matrix(Format::Stereo, m.format, laws);
+                let w = width_matrix(Format::Stereo, m.format, &laws);
                 let coefficients = c.b.coefficients(&w);
                 let node = c.node(
                     format!("{key}/solo"),
@@ -1251,9 +1470,9 @@ impl Compiler {
                 src: cur,
                 dst: level,
             });
-            let (_, _, out, _) = c.chain(&key, &m.chain, level, m.format, false, &taps, None);
-            cur = out.0;
-            let monitor_latency = source_latency + out.1;
+            let out = c.chain(&key, &m.chain, level, m.format, false, &taps, None, None);
+            cur = out.post.0;
+            let monitor_latency = source_latency + out.post.1;
             if let (Some(b), Some(lfe)) = (m.bass_management.filter(|b| b.enabled), m.lfe()) {
                 let kind = ProcKind::BassManagement {
                     crossover_hz: b.crossover_hz,
@@ -1297,7 +1516,7 @@ impl Compiler {
                 } else {
                     let st = c.b.buffers(2);
                     c.b.step(Step::Clear { dst: st });
-                    let w = width_matrix(m.format, Format::Stereo, laws);
+                    let w = width_matrix(m.format, Format::Stereo, &laws);
                     let coefficients = c.b.coefficients(&w);
                     let node = c.node(
                         format!("{key}/stream"),
@@ -1331,36 +1550,53 @@ impl Compiler {
         }
 
         let mut output_latency = HashMap::new();
+        // The published outputs: bus outs (and pre-1.6 direct outs at the input
+        // or post-pan tap), then the direct outs and insert sends of the chains.
+        let mut endpoints = Vec::new();
         for o in &mix.outputs {
-            let (Some(&slot), Some(t)) = (outputs.get(&o.signal), taps.get(&o.signal)) else {
+            let Some(t) = taps.get(&o.signal) else {
                 continue;
             };
             let tap = o.tap();
             let Some(from) = mix.tap_format(&o.signal, &tap) else {
                 continue;
             };
-            let (src, tap_latency) = t.get(&tap);
-            output_latency.insert(o.signal.clone(), tap_latency);
-            let to = o.format.unwrap_or(from);
+            let (src, latency) = t.get(&tap);
+            endpoints.push(Endpoint {
+                key: o.signal.clone(),
+                src,
+                latency,
+                from,
+                to: o.format,
+                open: true,
+                chain: hash((t.chain, &tap)),
+            });
+        }
+        endpoints.append(&mut c.endpoints);
+        for e in endpoints {
+            let Some(&slot) = outputs.get(&e.key) else {
+                continue;
+            };
+            output_latency.insert(e.key.clone(), e.latency);
+            let to = e.to.unwrap_or(e.from);
             let out = c.b.buffers(to.channels());
             c.b.step(Step::Clear { dst: out });
-            let w = width_matrix(from, to, laws);
+            let w = width_matrix(e.from, to, &laws);
             let coefficients = c.b.coefficients(&w);
             let node = c.node(
-                format!("output/{}", o.signal),
+                format!("output/{}", e.key),
                 (
-                    format_name(from),
+                    format_name(e.from),
                     format_name(to),
                     slot,
                     matrix_hash(&w),
-                    t.chain,
-                    &tap,
+                    e.chain,
                 ),
-                vec![1.0],
+                vec![if e.open { 1.0 } else { 0.0 }],
             );
             c.b.step(Step::Send {
                 node,
-                src,
+                src: e.src,
                 dst: out,
                 coefficients,
             });
@@ -1368,8 +1604,13 @@ impl Compiler {
                 src: out,
                 slot: slot as u32,
             });
-            c.b.output_latency(slot, tap_latency);
+            c.b.output_latency(slot, e.latency);
         }
+        meters.append(&mut c.extra_meters);
+        let probes: Vec<(String, usize, u64)> = std::mem::take(&mut c.probes)
+            .into_iter()
+            .map(|(key, send, ret, sig)| (key, c.b.probe(send, ret), sig))
+            .collect();
 
         // Virtual outputs (C7): their source through the width rules, else silence,
         // so the flow keeps running for its readers.
@@ -1409,8 +1650,10 @@ impl Compiler {
                         Some((m, room_source(&mut c, mix, &taps, m.source.as_ref()?)?))
                     });
                     src.map(|(m, (span, from, name, chain))| {
-                        let laws = laws.with_downmix(m.downmix);
-                        let w = width_matrix(from, m.format, laws);
+                        let laws =
+                            mix.settings
+                                .laws_with(&laws, m.downmix_set.as_deref(), m.downmix);
+                        let w = width_matrix(from, m.format, &laws);
                         let coefficients = c.b.coefficients(&w);
                         let dst = c.b.buffers(m.format.channels());
                         c.b.step(Step::Clear { dst });
@@ -1450,7 +1693,7 @@ impl Compiler {
                 None => None,
             };
             if let Some((src, from, name, chain)) = source {
-                let w = width_matrix(from, to, laws);
+                let w = width_matrix(from, to, &laws);
                 let coefficients = c.b.coefficients(&w);
                 let node = c.node(
                     format!("vout/{n}"),
@@ -1507,6 +1750,7 @@ impl Compiler {
             latency,
             output_latency,
             structure,
+            probes,
         }
     }
 }
@@ -1586,6 +1830,7 @@ mod tests {
             minus: None,
             subgroup: false,
             downmix: None,
+            downmix_set: None,
         }
     }
 
@@ -3423,5 +3668,322 @@ mod tests {
             c.plan.process(k * 96, &inputs, &mut Null);
         }
         assert_eq!(crate::test_alloc::allocations() - before, 0);
+    }
+
+    fn node(id: &str, kind: ProcKind) -> Proc {
+        Proc {
+            id: id.into(),
+            bypass: false,
+            kind,
+        }
+    }
+
+    fn tone() -> ProcKind {
+        ProcKind::Oscillator {
+            waveform: super::super::chain::Waveform::White,
+            freq_hz: 1000.0,
+            level_dbfs: -20.0,
+            sweep_to_hz: 20_000.0,
+            sweep_s: 10.0,
+        }
+    }
+
+    #[test]
+    fn nodes_after_the_fader_run_post_fader() {
+        let mut compiler = Compiler::default();
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        // A tone after the fader plays with the fader closed; before it, not.
+        let mut m = mix();
+        m.strips[0].fader_db = Db::MINUS_INF;
+        m.strips[0].chain = vec![node("fader", ProcKind::Fader {}), node("osc", tone())];
+        assert_eq!(m.validate(2, 48), Ok(()));
+        let mut c = compile(&mut compiler, &m, 48);
+        let out = run(&mut c, &inputs, 2);
+        assert!(
+            out.0[&3][0].iter().any(|v| (v - 0.1).abs() > 1e-3),
+            "tone post-fader"
+        );
+        m.strips[0].chain.swap(0, 1);
+        let mut c = compile(&mut compiler, &m, 48);
+        let out = run(&mut c, &inputs, 2);
+        assert!(
+            out.0[&3][0].iter().all(|v| (v - 0.1).abs() < 1e-6),
+            "only music: the tone is before the closed fader"
+        );
+        // Two faders are refused.
+        m.strips[0].chain.push(node("fader-2", ProcKind::Fader {}));
+        assert!(m.validate(2, 48).unwrap_err().contains("one fader"));
+    }
+
+    #[test]
+    fn post_fader_is_the_end_of_the_flow_and_after_fader_right_after_it() {
+        let mut compiler = Compiler::default();
+        let mut m = mix();
+        m.strips[0].chain = vec![
+            node("fader", ProcKind::Fader {}),
+            node(
+                "d",
+                ProcKind::Delay {
+                    time: 10.0,
+                    unit: super::super::chain::DelayUnit::Samples,
+                    frame_rate: None,
+                },
+            ),
+        ];
+        m.buses.push(bus("a", Format::Mono));
+        m.buses.push(bus("b", Format::Mono));
+        m.sends.push(Send {
+            ..send("vox", "a", Tap::PostFader)
+        });
+        m.sends.push(send("vox", "b", Tap::After("fader".into())));
+        m.buses[1].compensate = false;
+        m.buses[2].compensate = false;
+        assert_eq!(m.validate(2, 48), Ok(()));
+        let slots = HashMap::from([("a".to_string(), 1), ("b".to_string(), 2)]);
+        for id in ["a", "b"] {
+            m.outputs.push(Output {
+                signal: id.into(),
+                format: None,
+                commit_samples: None,
+                tap: None,
+            });
+        }
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let inputs = Inputs(vec![vec![vec![0.5; 48]], vec![]]);
+        let out = run(&mut c, &inputs, 1);
+        assert_eq!(out.0[&1][0][9], 0.0, "post-fader: after the delay");
+        assert_eq!(out.0[&1][0][10], 0.5);
+        assert_eq!(out.0[&2][0][0], 0.5, "after the fader: before the delay");
+    }
+
+    #[test]
+    fn a_lifted_direct_out_sounds_as_before() {
+        let inputs = Inputs(vec![
+            vec![(0..48).map(|i| i as f32 / 48.0).collect()],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let eq = node(
+            "eq-1",
+            ProcKind::Eq {
+                bands: vec![super::super::chain::EqBand {
+                    kind: super::super::chain::BandType::Bell,
+                    freq_hz: 1000.0,
+                    q: 1.0,
+                    gain_db: 6.0,
+                    slope_db_per_oct: None,
+                }],
+            },
+        );
+        for tap in [
+            None,
+            Some(Tap::PreFader),
+            Some(Tap::PostEq),
+            Some(Tap::PreEq),
+            Some(Tap::After("eq-1".into())),
+            Some(Tap::Input),
+            Some(Tap::PostPan),
+        ] {
+            let mut m = mix();
+            m.strips[0].fader_db = Db(-6.0);
+            m.strips[0].chain = vec![eq.clone()];
+            m.automixes.push(crate::mix::auto::Automix {
+                id: "am".into(),
+                name: "am".into(),
+                enabled: true,
+                last_mic_hold: true,
+                vad_weighting: false,
+                members: vec![crate::mix::auto::AutomixMember::new("vox")],
+                recall_safe: false,
+            });
+            m.outputs.push(Output {
+                signal: "vox".into(),
+                format: None,
+                commit_samples: None,
+                tap: tap.clone(),
+            });
+            let mut lifted = m.clone();
+            let changed = lifted.lift_direct_outs();
+            assert_eq!(
+                changed,
+                !matches!(tap, Some(Tap::Input | Tap::PostPan)),
+                "{tap:?}"
+            );
+            assert_eq!(lifted.validate(2, 48), Ok(()), "{tap:?}");
+            assert_eq!(lifted.chain_outputs().len(), usize::from(changed));
+            let slots = HashMap::from([("main".to_string(), 3), ("vox".to_string(), 4)]);
+            let run_one = |mix: &Mix| {
+                let mut compiler = Compiler {
+                    auto: HashMap::from([("vox".to_string(), vec![0.5])]),
+                    ..Default::default()
+                };
+                let mut c = compiler.compile(mix, 48, 0, &slots, &HashMap::new());
+                (run(&mut c, &inputs, 2), c.output_latency["vox"])
+            };
+            let (before, lb) = run_one(&m);
+            let (after, la) = run_one(&lifted);
+            assert_eq!(before.0[&4], after.0[&4], "{tap:?}: the direct out");
+            assert_eq!(before.0[&3], after.0[&3], "{tap:?}: the bus");
+            assert_eq!(lb, la);
+            assert!(before.0[&4][0].iter().any(|v| *v != 0.0));
+        }
+    }
+
+    #[test]
+    fn several_direct_outs_have_their_own_keys() {
+        let mut m = mix();
+        m.strips[0].fader_db = Db(-6.0);
+        m.strips[0].chain = vec![
+            node(
+                "out",
+                ProcKind::DirectOut {
+                    format: None,
+                    commit_samples: None,
+                },
+            ),
+            node("fader", ProcKind::Fader {}),
+            node(
+                "out-2",
+                ProcKind::DirectOut {
+                    format: Some(Format::Stereo),
+                    commit_samples: None,
+                },
+            ),
+        ];
+        assert_eq!(m.validate(2, 48), Ok(()));
+        let keys: Vec<String> = m.chain_outputs().into_iter().map(|o| o.key).collect();
+        assert_eq!(keys, ["vox", "vox/out-2"]);
+        let slots = HashMap::from([("vox".to_string(), 1), ("vox/out-2".to_string(), 2)]);
+        let mut c = Compiler::default().compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &Inputs(vec![vec![vec![0.5; 48]], vec![]]), 1);
+        assert_eq!(out.0[&1][0][0], 0.5, "pre-fader");
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let post = 0.5 * 0.501_187_2 * h;
+        assert!(
+            (out.0[&2][1][0] - post).abs() < 1e-6,
+            "post-fader, mono into stereo"
+        );
+        // A bypassed direct out writes silence; a bus has none.
+        m.strips[0].chain[2].bypass = true;
+        let mut c = Compiler::default().compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &Inputs(vec![vec![vec![0.5; 48]], vec![]]), 1);
+        assert!(out.0[&2][0].iter().all(|v| *v == 0.0));
+        m.buses[0].chain.push(node(
+            "out",
+            ProcKind::DirectOut {
+                format: None,
+                commit_samples: None,
+            },
+        ));
+        assert!(m.validate(2, 48).is_err());
+    }
+
+    #[test]
+    fn an_insert_sends_and_returns_and_bypass_passes_dry() {
+        let mut m = mix();
+        m.strips[0].chain = vec![node(
+            "insert-1",
+            ProcKind::Insert {
+                send_db: -6.0,
+                return_db: 6.0,
+                return_input: Some(2),
+                return_channel: 2,
+                commit_samples: None,
+            },
+        )];
+        m.sends[0].tap = Tap::PostFader;
+        assert_eq!(m.validate(2, 48), Ok(()));
+        assert_eq!(m.chain_outputs()[0].key, "vox/insert-1");
+        let slots = HashMap::from([("main".to_string(), 3), ("vox/insert-1".to_string(), 1)]);
+        let inputs = Inputs(vec![
+            vec![vec![0.5; 48]],
+            vec![vec![0.1; 48], vec![0.2; 48]],
+        ]);
+        let mut compiler = Compiler::default();
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &inputs, 1);
+        assert!(
+            (out.0[&1][0][0] - 0.5 * 0.501_187_2).abs() < 1e-6,
+            "send at −6 dB"
+        );
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // The return (input 2, channel 2: 0.2) at +6 dB replaces vox, plus music.
+        let want = 0.2 * 1.995_262_3 * h + 0.1;
+        assert!((out.0[&3][0][0] - want).abs() < 1e-5, "{}", out.0[&3][0][0]);
+        let ids: Vec<&String> = c.meters.iter().map(|(k, _, _)| k).collect();
+        assert!(ids.contains(&&"insert:vox/insert-1:send".to_string()));
+        assert!(ids.contains(&&"insert:vox/insert-1:return".to_string()));
+        assert_eq!(c.plan.meters.probes.len(), 1);
+        // Bypass: the dry signal, the send keeps going; a value change only.
+        let structure = c.structure;
+        m.strips[0].chain[0].bypass = true;
+        let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
+        assert_eq!(c.structure, structure);
+        let out = run(&mut c, &inputs, 1);
+        assert!((out.0[&3][0][0] - (0.5 * h + 0.1)).abs() < 1e-6);
+        assert!((out.0[&1][0][0] - 0.5 * 0.501_187_2).abs() < 1e-6);
+        // An input that does not exist is refused.
+        if let ProcKind::Insert { return_input, .. } = &mut m.strips[0].chain[0].kind {
+            *return_input = Some(3);
+        }
+        assert!(m.validate(2, 48).is_err());
+    }
+
+    #[test]
+    fn named_down_mixes_for_the_mix_and_a_bus() {
+        use crate::mix::downmix::{DownmixSet, Matrix, Rules};
+        let mut m = Mix::fresh();
+        m.strips.push(strip("film", Format::Surround51, 1));
+        m.buses.push(bus("main", Format::Stereo));
+        m.buses.push(bus("own", Format::Stereo));
+        m.buses.push(bus("wide", Format::Surround71));
+        for b in ["main", "own", "wide"] {
+            m.sends.push(send("film", b, Tap::PostFader));
+            m.outputs.push(Output {
+                signal: b.into(),
+                format: None,
+                commit_samples: None,
+                tap: None,
+            });
+        }
+        let mut side = DownmixSet {
+            id: "side".into(),
+            name: "Side".into(),
+            rules: Rules::SurroundToSide,
+            ..DownmixSet::reference()
+        };
+        let mut g = crate::mix::downmix::matrix_db(&side, Format::Surround51, Format::Stereo);
+        g[0][2] = Db(0.0); // C fully into L
+        side.matrices.push(Matrix {
+            from: Format::Surround51,
+            to: Format::Stereo,
+            gains_db: g,
+        });
+        m.settings.downmixes.push(side);
+        m.buses[1].downmix_set = Some("side".into());
+        m.buses[2].downmix_set = Some("side".into());
+        assert_eq!(m.validate(1, 48), Ok(()));
+        let slots = HashMap::from([
+            ("main".to_string(), 0),
+            ("own".to_string(), 1),
+            ("wide".to_string(), 2),
+        ]);
+        let mut c = Compiler::default().compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &surround_inputs(), 1);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // main: the reference (C −3, Ls −6.02, LFE −3 into L and R).
+        let want = 0.1 + 0.4 * h + 0.8 * h + 0.05 * 0.5;
+        assert!((out.0[&0][0][0] - want).abs() < 1e-5, "{}", out.0[&0][0][0]);
+        // own: C at 0 dB into L (edited).
+        let want = 0.1 + 0.4 + 0.8 * h + 0.05 * 0.5;
+        assert!((out.0[&1][0][0] - want).abs() < 1e-5, "{}", out.0[&1][0][0]);
+        // wide: the 5.1 surrounds to the sides of 7.1.
+        assert_eq!(out.0[&2][4][0], 0.05);
+        assert_eq!(out.0[&2][6][0], 0.0);
+        // An unknown set is refused.
+        m.buses[1].downmix_set = Some("nope".into());
+        assert!(m.validate(1, 48).is_err());
     }
 }

@@ -213,7 +213,9 @@ fn parse<T: DeserializeOwned>(mut v: Value) -> Result<(T, Vec<Removed>), String>
 
 /// A saved mix: the mix and the paths of what was dropped (empty when it
 /// parsed as it is).
-pub fn mix(v: Value) -> Result<(Mix, Vec<String>), String> {
+pub fn mix(mut v: Value) -> Result<(Mix, Vec<String>), String> {
+    // What 1.6 wrote for 1.5.1 too (exact taps, legacy direct outs) first.
+    super::rollback::restore(&mut v);
     let (mix, removed) = parse::<Mix>(v)?;
     Ok((mix, removed.iter().map(|r| path_text(&r.at)).collect()))
 }
@@ -340,5 +342,59 @@ mod tests {
             json!({"id": "x", "type": "eq", "bands": [], "future": 1})
         )
         .is_err());
+    }
+
+    /// A show saved by 1.5.1 (C3–C8): direct outs become blocks at their tap,
+    /// the down-mix stays parametric, and a 1.6 show without the new parts
+    /// writes nothing 1.5.1 cannot read.
+    #[test]
+    fn a_1_5_1_show_loads_into_the_1_6_flow() {
+        let v = json!({
+            "settings": {"pan_law_db": -3.0, "mono_sum_db": -3.0, "loudness_target_lufs": -23.0, "loudness_tolerance_lu": 1.0,
+                "downmix": {"centre_db": -6.0, "surround_db": -3.0, "lfe_db": "-inf", "normalise": false}},
+            "strips": [
+                {"id": "vox", "name": "Vox", "format": "mono", "patch": [{"input": 1, "channel": 1}], "trim_db": 0.0,
+                 "polarity": [false], "fader_db": -6.0, "mute": false, "pan": 0.0, "width": 1.0,
+                 "chain": [{"id": "eq-1", "type": "eq", "bands": [{"type": "bell", "freq_hz": 1000.0, "q": 1.0, "gain_db": 3.0}]}]},
+                {"id": "amb", "name": "Amb", "format": "stereo", "patch": [{"input": 1, "channel": 1}, {"input": 1, "channel": 2}],
+                 "trim_db": 0.0, "polarity": [false, false], "fader_db": 0.0, "mute": false, "pan": 0.0, "width": 1.0}
+            ],
+            "buses": [{"id": "main", "name": "Main", "format": "stereo", "fader_db": 0.0, "mute": false, "compensate": true}],
+            "sends": [{"from": "vox", "to": "main", "tap": "post-pan", "gain_db": 0.0, "mute": false, "phase": false}],
+            "outputs": [
+                {"signal": "main", "format": null, "commit_samples": null},
+                {"signal": "vox", "format": "stereo", "commit_samples": 480, "tap": {"after": "eq-1"}},
+                {"signal": "amb", "format": null, "commit_samples": null, "tap": "post-pan"}
+            ]
+        });
+        let (mut m, dropped) = mix(v).unwrap();
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert!(m.settings.downmix_set.is_none() && m.settings.downmixes.is_empty());
+        assert!(m.lift_direct_outs());
+        assert_eq!(m.validate(1, 96), Ok(()));
+        let vox: Vec<&str> = m.strips[0].chain.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(vox, ["eq-1", "out"]);
+        let keys: Vec<String> = m.chain_outputs().into_iter().map(|o| o.key).collect();
+        assert_eq!(
+            keys,
+            ["vox"],
+            "the same output key: the same flow and sender ids"
+        );
+        assert_eq!(
+            m.chain_outputs()[0].commit_samples,
+            Some(480),
+            "commit and layout kept"
+        );
+        let outputs: Vec<&str> = m.outputs.iter().map(|o| o.signal.as_str()).collect();
+        assert_eq!(
+            outputs,
+            ["main", "amb"],
+            "a post-pan direct out stays an output"
+        );
+        assert!(!m.lift_direct_outs(), "once");
+        // Nothing new is written for what 1.5.1 had (it loads it back the same).
+        let back = serde_json::to_value(&m).unwrap();
+        assert!(back["settings"].get("downmixes").is_none());
+        assert!(back["buses"][0].get("downmix_set").is_none());
     }
 }

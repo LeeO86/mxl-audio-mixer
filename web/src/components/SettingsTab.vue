@@ -4,8 +4,7 @@
 import { computed, onMounted, ref } from "vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
-import DownmixEdit from "./DownmixEdit.vue";
-import { DEFAULT_DOWNMIX } from "../nodes.js";
+import DownmixSets from "./DownmixSets.vue";
 import { api, copyText, download } from "../api.js";
 import { act, live, refreshConfig, settingValue } from "../store.js";
 
@@ -97,9 +96,7 @@ const seed = computed(() => settingValue("NMOS_SEED") || settingValue("HOST_ID")
     </div>
     <h3 style="margin-top: 1rem">Down-mix</h3>
     <p class="note" style="margin-top: 0">Wherever a wider format meets a narrower one: sends, monitors, solo, published layouts. A bus or monitor can have its own.</p>
-    <div class="params">
-      <DownmixEdit :value="settings.downmix || DEFAULT_DOWNMIX" label="Down-mix" @change="(d) => setMix({ downmix: d })" />
-    </div>
+    <DownmixSets />
   </div>
 
   <div class="panel">

@@ -18,6 +18,7 @@ mod dsp;
 pub mod meter;
 pub mod plan;
 pub mod proc;
+pub mod roundtrip;
 pub mod talk;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

@@ -62,6 +62,8 @@ function nodeSource(id) {
 /** What a published output is (C2): a bus, a strip's direct out or a monitor. */
 function publishedNote(o) {
   if (o.signal.startsWith("monitor:")) return "monitor";
+  // A direct out or insert send block (1.6.0): its strip or bus is `source`.
+  if (o.kind) return o.kind === "insert" ? `insert ${o.node}` : `direct out ${o.node}`;
   return isBus(o.signal) ? "bus" : "direct out";
 }
 
@@ -146,7 +148,7 @@ function build() {
     if (from) e.push({ id: `vsrc:${v.slot}`, source: from, target: `_vout_${v.slot}`, class: "pub", label: tap, data: { vout: v.slot } });
   }
   for (const o of published.value) {
-    const from = o.signal.startsWith("monitor:") ? `_mon_${o.signal.slice(8)}` : o.signal;
+    const from = o.signal.startsWith("monitor:") ? `_mon_${o.signal.slice(8)}` : o.source || o.signal;
     e.push({ id: `pub:${o.signal}`, source: from, target: outId(o.signal), class: "pub", data: { output: o.signal } });
   }
   // After Vue Flow has the nodes: it drops edges to nodes it does not know yet.

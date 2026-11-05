@@ -60,14 +60,20 @@ bus without a panner offers "+ Surround pan". "MIDI" connects control surfaces, 
 node types in from the palette, which stays in view, drag a tile by its header to
 reorder (the wheel scrolls meanwhile, Escape cancels), a click on the header opens
 or closes it, bypass, delete; ◀ ▶ or the `[` and `]` keys step to the previous or
-next strip or bus; EQ curve with band handles (a double-click resets a band;
+next strip or bus, its place ("2 of 12"), node count and latency under the select,
+"Format" beside its dropdown; the colour is one of 16 fixed ones; the fader is a
+tile of the flow (dashed while it follows the chain): units after it run
+post-fader, a click on a palette unit puts it before the fader; the **Flow** group
+of the palette has the fader, direct outs, inserts and the automixer (an automixed
+signal without one shows it dashed before the fader, drag it to place it); EQ curve with band handles (a double-click resets a band;
 high- and low-pass bands with their slope), one band's controls at a time, filter,
 dynamics transfer curves with the live level, de-esser listen, keys, the surround
 panner's position pad (spread: a bubble around the dot grows and drifts to the centre; the dot keeps its position and height); every
 band's gain reduction of a multiband or dynamic EQ; copy and paste of units (a
 unit's ⧉ puts it on the browser's clipboard; the clipboard bar pastes all or one,
 a unit's ⇩ takes the copied unit of its type); the signal flow below the chain
-(drag nodes to reorder, drag sends, the direct or bus out and keys to another tap);
+(drag nodes to reorder, drag sends, a bus out and keys to another tap; direct outs
+and inserts are nodes there);
 the signal's format, changed after a confirming second
 press, with the nodes it would bypass named first and a flag on every node that
 cannot run on the format; a bus's own down-mix), **Routing** (the send matrix,
@@ -534,7 +540,9 @@ changelog). The API stays strict: an unknown field is an error there. Signal ids
 buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
 an id gets `strip-<n>` or `bus-<n>`.
 
-- **Strip:** patch → trim and polarity → `chain` → fader and mute → panner.
+- **Strip:** patch → trim and polarity → `chain` → panner. The fader and mute
+  (with audio-follows-video) are the chain's `fader` node, or after the chain
+  without one (1.6.0, C3).
   `patch` has one entry per strip channel: `{"input": n, "channel": c}` (both from
   1) or `null`. A channel the input does not have is silent and shows `missing` in
   `patch_state`. Outputs of the mix are inputs too (D1, 1.6.0), read in the same
@@ -553,7 +561,8 @@ an id gets `strip-<n>` or `bus-<n>`.
   position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
   (measure it). A mono strip is stereo after its panner; with a surround panner
   (below) a mono or stereo strip is 5.1 or 7.1 there.
-- **Bus:** sum of its sends → `chain` → fader (`"-inf"` … +15) and mute; `loudness`;
+- **Bus:** sum of its sends → `chain` (with the fader, `"-inf"` … +15, and mute where its
+  `fader` node is, else after it); `loudness`;
   `compensate` (delay compensation, default `true`). A **subgroup** bus
   (`subgroup: true`) takes every send into it from its source's output (a strip's
   post-pan, a bus's post-fader) at 0 dB, whatever the send's `tap` and `gain_db`
@@ -570,8 +579,10 @@ an id gets `strip-<n>` or `bus-<n>`.
   `without` names `of`'s direct sources.
 - **Taps** (sends and keys): `input` (strips), `pre-eq`, `post-eq`,
   `pre-dynamics`, `post-dynamics` (the input of the first and the output of the last
-  node of that kind; the chain's input without one), `pre-fader` (the chain's
-  output), `post-fader`, `post-pan` (strips), or `{"after": "<node id>"}`.
+  node of that kind; the chain's input without one), `pre-fader` (the fader's
+  input), `post-fader` (the chain's end: after the fader and every node after it;
+  `{"after": "fader"}` is right after the fader), `post-pan` (strips), or
+  `{"after": "<node id>"}`.
 - **Send** (`from` a strip or bus `to` a bus): `tap`, `gain_db` (`"-inf"` … +10),
   `mute`, `phase`, `block_delay`. New sends default to 0 dB from a strip's post-pan
   or a bus's post-fader. A loop is rejected unless one of its sends has
@@ -582,9 +593,20 @@ an id gets `strip-<n>` or `bus-<n>`.
   `processing_latency_ms` and `latency_ms` (read offset + one block + processing),
   and `write_delay_ms`: the read offset its readers need (the output keeps its
   inputs' timestamps; see Settings, "Outputs keep the input timestamps").
-- **Output:** a bus (post-fader) or a strip (its direct out: post-fader, before
-  the pan; or at another `tap`) published as an `audio/float32` MXL flow in the own domain and an NMOS
-  Source, Flow and Sender (label = its name, group hint `<name>:Audio`).
+- **Output:** a bus (post-fader, or at another `tap`), a strip's **direct out** or
+  an **insert**'s send published as an `audio/float32` MXL flow in the own domain and an NMOS
+  Source, Flow and Sender (label = its name, group hint `<name>:Audio`). Since
+  1.6.0 (C5) a strip's direct outs are `direct-out` nodes of its chain (below),
+  several per strip; `PUT /api/v1/outputs/<strip>` makes (or changes) the node
+  `out`, `DELETE` removes it, and a pre-1.6 strip output becomes that node at the
+  same point (its input and post-pan taps stay outputs). Saved state (`mix.json`,
+  history, export) also carries `out` as that pre-1.6 entry and every tap 1.5.1
+  lacks as its nearest tap with the exact one in `tap_exact`, so a rollback to 1.5.1
+  keeps the outputs (SPECIFICATION §5.1). Output keys
+  (`GET /api/v1/outputs`, `signal`): the signal for a bus and for the direct out
+  `out`, `<strip>/<node>` for the other direct outs and the inserts; those also
+  have `source`, `node` and `kind` (`direct-out`, `insert`; an insert
+  `round_trip_ms`).
   `format` (default: the signal's) maps it to another layout; `commit_samples`
   (default `MIXER_OUTPUT_COMMIT_SAMPLES`) is a multiple of the block size. The MXL
   flow id is UUIDv5 of `NMOS_SEED` and the signal id, so it survives restarts. At
@@ -642,6 +664,23 @@ an id gets `strip-<n>` or `bus-<n>`.
   silent. `normalise` scales the whole matrix of a down-mix from 3.0 or wider into
   fewer channels (the front channels too) by its largest row sum, so that no
   output channel sums to more than unity.
+- **Down-mix settings** (1.6.0, C8; `settings.downmixes`): named matrices for every
+  pair of formats, `{"id", "name", "rules", "normalise", "matrices"}`. `rules`
+  `reference` (Adrian's `downmix.json`, `assets/downmix.json`: for each source
+  channel the first alternative whose channels the target has; 5.1's Ls / Rs are its
+  Lrs / Rrs, mono is C), `surround-to-side` or `surround-to-side-and-rear` (its
+  variants for the surrounds); `matrices` the edited pairs
+  `{"from", "to", "gains_db": [[...]]}` (rows the target's channels, columns the
+  source's; −60 … +10 dB or `"-inf"`). They apply where the target lacks a channel
+  of the source, not from mono or stereo into mono (the pan law, the mono sum).
+  `settings.downmix_set` picks the mix's (`null`: the parametric `downmix` below, as
+  1.5); a bus's or monitor's `downmix_set` its own (it wins over its `downmix`). A
+  new show starts with the reference set `reference` as the mix's; a show of 1.5
+  keeps the parametric one, so it sounds the same.
+  `GET /api/v1/downmix-matrix?set=<id>&from=<format>&to=<format>` (or `rules=`
+  without `set`) shows a pair: `rows`, `columns`, `gains_db`, `reference_db`,
+  `edited`, `applies`. `PATCH /api/v1/mix/settings` with `downmixes` replaces the
+  list (a bus or monitor whose set is gone uses the mix's again).
 - **Down-mix** (`downmix`: `{"centre_db", "surround_db", "lfe_db", "normalise"}`;
   levels −40 … 0 dB, LFE −40 … +10 dB, or `"-inf"`): the mix's in its settings
   (default −3, −3, `"-inf"`, `false`: the fixed down-mix of 1.3), and a bus's or a
@@ -663,7 +702,7 @@ an id gets `strip-<n>` or `bus-<n>`.
   what changed in `warnings`. The signal fades out and in.
 - **Mix settings:** `pan_law_db` 0, −3 (default), −4.5, −6; `mono_sum_db` −3
   (default) or −6; `loudness_target_lufs` (−23) and `loudness_tolerance_lu` (1);
-  `downmix` (above).
+  `downmix`, `downmixes`, `downmix_set` (above).
 - **Tally:** `tally_index` and `afv` on strips (below, "Tally and
   audio-follows-video").
 - **Console:** `colour` (`#rrggbb`), `recall_safe`, `solo_safe` and `mute_safe`
@@ -901,7 +940,10 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `leveler` | for buses and streams (inspired by the idea of master_me; own code): `target_lufs` −40 … −5, `max_gain_db` 0–30, `max_cut_db` 0–30, `speed_db_per_s` 0.1–20, `gate_lufs` −90 … −10, `limiter` (default true), `ceiling_db` −20 … 0 (default −1). Rides the gain so the short-term loudness (BS.1770, 3 s, measured in the node every 100 ms) meets the target; a 100 ms segment below the gate (a pause) is left out and holds the gain; the optional safety limiter has 1 ms look-ahead (the node's latency, compensated). Switching `limiter` rebuilds the node: its gain starts again at 0 dB |
 | `delay` | `time`, `unit` `samples` \| `ms` \| `frames`, `frame_rate` (frames); at most 2000 ms |
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
-| `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
+| `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain, also after the fader (1.6.0, C6); bypass: none |
+| `fader` | no parameters (1.6.0, C3): where the fader, audio-follows-video and mute run; the nodes after it run post-fader. At most one per chain; without one the fader follows the chain. Bypass does nothing |
+| `direct-out` | strips only (1.6.0, C5): `format` (default: the strip's), `commit_samples` (default `MIXER_OUTPUT_COMMIT_SAMPLES`): publishes the strip at this point as an MXL flow and NMOS sender (output key: the strip for the node `out`, else `<strip>/<node>`; new ones are `out`, `out-2`, …); passes the signal on. Bypass writes silence |
+| `insert` | 1.6.0, C4: `send_db`, `return_db` (−40 … +20), `return_input` (an input, from 1; `null`: none, the signal passes dry), `return_channel` (its first channel, default 1), `commit_samples`. The signal leaves as an MXL flow (output `<signal>/<node>`) at `send_db` and comes back on the input at `return_db`, which replaces it from here on (no delay compensation: the return is mixed in when it arrives). Meters `insert:<key>:send` and `insert:<key>:return` in `/api/v1/meters`; the round trip (send to return, cross-correlated on the meter thread, ≥ 0.5 normalised, up to 500 ms) in the output's `round_trip_ms` (`null` until measured). Bypass ramps to the dry signal; the send keeps going |
 | `width` | M/S / width, stereo only: `width_pct` 0–200 (0 mono, 100 unchanged, 200 double side), `input` and `output` `lr` \| `ms` (M = (L + R) / 2, S = (L − R) / 2; L = M + S, R = M − S); a gain matrix that ramps per sample, bypass ramps to the identity |
 | `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1` \| `5.1.4` \| `7.1.4`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `elevation_deg` 0–90 (default 0; 5.1.4 and 7.1.4 only: the bed keeps cos² of the power, the top layer at ±45° and ±135° sin², panned there at the same azimuth), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off; the LFE send is full band, no low-pass); constant power. A stereo strip aimed behind has L and R mirrored (L at the right rear). It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
 

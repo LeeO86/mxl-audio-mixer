@@ -140,7 +140,12 @@ const published = computed(() => (live.status?.outputs || []).find((o) => o.sign
             <label>Calibration: dB SPL at a level of 0 dB (for the presets)</label>
             <input type="number" min="40" max="130" step="0.5" :value="m.calibration_spl ?? ''" placeholder="not calibrated" aria-label="Calibration" @change="set({ calibration_spl: $event.target.value === '' ? null : Number($event.target.value) })" />
             <label>Down-mix of its source (the solo bus is folded with the mix's)</label>
-            <template v-if="m.downmix">
+            <select v-if="(live.mix?.settings?.downmixes || []).length" :value="m.downmix_set || ''" aria-label="Monitor down-mix setting" @change="set({ downmix_set: $event.target.value || null })">
+              <option value="">{{ m.downmix ? "Its own levels" : "The mix's" }}</option>
+              <option v-for="d in live.mix.settings.downmixes" :key="d.id" :value="d.id">{{ d.name }}</option>
+            </select>
+            <template v-if="m.downmix_set"></template>
+            <template v-else-if="m.downmix">
               <DownmixEdit :value="m.downmix" label="Monitor down-mix" @change="(d) => set({ downmix: d })" />
               <ConfirmButton small label="Use the mix's down-mix" @confirm="set({ downmix: null })" />
             </template>

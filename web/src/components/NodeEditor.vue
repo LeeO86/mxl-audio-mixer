@@ -9,6 +9,7 @@ import EqCurve from "./EqCurve.vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
 import SurroundPad from "./SurroundPad.vue";
+import FlowNodeEditor from "./FlowNodeEditor.vue";
 import { BAND_TYPES, NODE_TYPES, PASS_BANDS, SLOPES, TAPS } from "../nodes.js";
 import { live, patchNode, signals } from "../store.js";
 
@@ -89,6 +90,7 @@ function toggleOptional(field, on) {
   <div class="editor">
     <EqCurve v-if="EQ.has(node.type)" :node="node" :active="shown" @select="active = $event" @bands="set" />
     <SurroundPad v-if="node.type === 'surround-pan'" :node="node" @change="set" />
+    <FlowNodeEditor v-if="['fader', 'direct-out', 'insert'].includes(node.type)" :signal="signal" :node="node" />
     <div v-if="DYN.has(node.type)" class="row tight" style="align-items: flex-start">
       <DynCurve :node="node" :meter="meter" />
       <div class="grbar" style="flex-direction: column; align-items: flex-start">
@@ -102,7 +104,7 @@ function toggleOptional(field, on) {
       <span class="lev"><span :style="levStyle"></span></span>
       <span class="num">{{ fmtGain(meter?.leveler_gain_db) }}</span>
     </div>
-    <div v-if="meter && !DYN.has(node.type) && !['eq', 'filter', 'delay', 'width', 'surround-pan'].includes(node.type) && (node.type !== 'leveler' || node.limiter)" class="grbar">
+    <div v-if="meter && !DYN.has(node.type) && !['eq', 'filter', 'delay', 'width', 'surround-pan', 'fader', 'direct-out', 'insert', 'auto'].includes(node.type) && (node.type !== 'leveler' || node.limiter)" class="grbar">
       <span class="muted small">{{ node.type === "leveler" ? "Limiter" : "Gain reduction" }}</span>
       <span class="gr"><span :style="{ width: `${Math.min(100, (meter.gain_reduction_db / 20) * 100)}%` }"></span></span>
       <span class="num">{{ meter.gain_reduction_db.toFixed(1) }} dB</span>

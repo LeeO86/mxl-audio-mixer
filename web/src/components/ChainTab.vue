@@ -16,9 +16,9 @@ import NodeEditor from "./NodeEditor.vue";
 import FormatSelect from "./FormatSelect.vue";
 import FlowView from "./FlowView.vue";
 import { clear, clipboard, copy, forget, latestOf, replacePatch } from "../clipboard.js";
-import { NODE_TYPES, DYNAMICS, unsupported } from "../nodes.js";
+import { NODE_TYPES, DYNAMICS, FLOW_TYPES, unsupported } from "../nodes.js";
 import { api } from "../api.js";
-import { act, flush, isBus, live, patchNode, select, signalOf, signalPath, signals } from "../store.js";
+import { act, automixes, ducks, autolevels, flush, isBus, live, patchNode, select, signalOf, signalPath, signals } from "../store.js";
 
 const sig = computed(() => signalOf(live.selected) || signals.value[0] || null);
 const chain = computed(() => sig.value?.chain || []);
@@ -30,6 +30,18 @@ const groups = computed(() => {
   for (const [type, t] of Object.entries(NODE_TYPES)) (out[t.group] ||= []).push({ type, label: t.label, help: t.help || "" });
   return out;
 });
+
+// The flow (C3, C6): the fader node, or a virtual fader tile at the end; an automixed (or ducked,
+// auto-levelled) signal without an automixer node shows a virtual one just before the fader. Dragging a
+// virtual tile (or a unit onto "after the fader") makes the node.
+const faderAt = computed(() => chain.value.findIndex((n) => n.type === "fader"));
+const isAuto = computed(() => {
+  const id = sig.value?.id;
+  return automixes.value.some((a) => a.members.some((m) => m.signal === id)) || ducks.value.some((d) => d.targets.includes(id)) || autolevels.value.some((l) => l.signal === id);
+});
+const virtualAuto = computed(() => isAuto.value && !chain.value.some((n) => n.type === "auto"));
+const paletteDisabled = (type) => chain.value.length >= 32 || ((type === "auto" || type === "fader") && chain.value.some((n) => n.type === type));
+const forBus = (type) => !(NODE_TYPES[type].strip && isBus(sig.value?.id));
 
 // The previous and next strip or bus (strips first, then buses, as in the signal list).
 const at = computed(() => signals.value.findIndex((s) => s.id === sig.value?.id));
@@ -54,8 +66,20 @@ async function add(type, position) {
   if (!sig.value) return;
   const others = signals.value.filter((s) => s.id !== sig.value.id).map((s) => s.id);
   const body = NODE_TYPES[type].make(others);
+  // "post": after the fader, making the fader node first when there is none.
+  if (position === "post") {
+    if (faderAt.value < 0 && !(await ensureFader())) return;
+    position = undefined;
+  }
   if (position !== undefined) body.position = position;
   await act(() => api.post(`${signalPath(sig.value.id)}/chain`, body));
+}
+const ensureFader = () => act(() => api.post(`${signalPath(sig.value.id)}/chain`, { type: "fader" }));
+// A click on a palette chip: a unit goes before the fader (pre-fader, as before 1.6); a direct out after it.
+function clickAdd(type) {
+  if (type === "direct-out") return add(type, "post");
+  if (type !== "fader" && faderAt.value >= 0) return add(type, faderAt.value);
+  return add(type);
 }
 async function move(node, position) {
   flush();
@@ -148,7 +172,7 @@ function pointerMove(ev) {
 function findOver() {
   if (!drag.active) return;
   const el = document.elementFromPoint(drag.x, drag.y)?.closest("[data-drop]");
-  drag.over = el ? Number(el.dataset.drop) : -1;
+  drag.over = el ? (el.dataset.drop === "post" ? "post" : Number(el.dataset.drop)) : -1;
 }
 // Near the top or bottom edge of the window, scroll (faster closer to the edge).
 function autoScroll() {
@@ -165,7 +189,7 @@ function pointerUp() {
   if (!active) return;
   justDragged = true;
   setTimeout(() => (justDragged = false), 0);
-  if (over >= 0) drop(what, over);
+  if (over === "post" || over >= 0) drop(what, over);
 }
 function endDrag() {
   window.removeEventListener("pointermove", pointerMove);
@@ -177,10 +201,15 @@ function endDrag() {
   document.body.classList.remove("dragging-node");
   Object.assign(drag, { what: "", label: "", active: false, over: -1 });
 }
-function drop(what, i) {
+async function drop(what, i) {
   if (what.startsWith("type:")) add(what.slice(5), i);
+  else if (what.startsWith("virt:")) add(what.slice(5), i === "post" ? undefined : i);
   else if (what.startsWith("node:")) {
     const id = what.slice(5);
+    if (i === "post") {
+      if (!(await ensureFader())) return;
+      i = chain.value.length;
+    }
     const from = chain.value.findIndex((n) => n.id === id);
     if (from < 0) return;
     const to = i > from ? i - 1 : i;
@@ -190,13 +219,15 @@ function drop(what, i) {
 // A click (not the end of a drag) on a palette chip appends; on a tile's header (not on its buttons)
 // opens or closes the tile.
 function chipClick(type) {
-  if (!justDragged) add(type);
+  if (!justDragged) clickAdd(type);
 }
 function headClick(ev, id) {
   if (justDragged || ev.target.closest(INTERACTIVE)) return;
   open.value[id] = !isOpen(id);
 }
 const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", "filter", "dynamic-eq"].includes(n.type)));
+// "2 of 12": where the signal is in the list (C1).
+const position = computed(() => `${at.value + 1} of ${signals.value.length}`);
 </script>
 
 <template>
@@ -208,7 +239,7 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
         <p class="note" style="margin-top: 0">Drag into the chain, or click to append.</p>
         <template v-for="(items, g) in groups" :key="g">
           <div class="group-caption">{{ g }}</div>
-          <button v-for="t in items" :key="t.type" class="pchip" :title="t.help" :disabled="chain.length >= 32 || (t.type === 'auto' && chain.some((n) => n.type === 'auto'))" @pointerdown="pointerDown($event, `type:${t.type}`, t.label)" @click="chipClick(t.type)">
+          <button v-for="t in items.filter((x) => forBus(x.type))" :key="t.type" class="pchip" :title="t.help" :disabled="paletteDisabled(t.type)" @pointerdown="pointerDown($event, `type:${t.type}`, t.label)" @click="chipClick(t.type)">
             {{ t.label }} <span class="muted">+</span>
           </button>
         </template>
@@ -217,20 +248,22 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
 
     <div>
       <div class="panel chainhead">
-        <button class="btn secondary" :disabled="!prev" :title="prev ? `${prev.name} ( [ )` : ''" aria-label="Previous strip or bus" @click="step(prev)">◀</button>
-        <select :value="sig?.id" aria-label="Signal" @change="select($event.target.value)">
-          <optgroup label="Strips">
-            <option v-for="s in live.mix.strips" :key="s.id" :value="s.id">{{ s.name }}</option>
-          </optgroup>
-          <optgroup label="Buses">
-            <option v-for="b in live.mix.buses" :key="b.id" :value="b.id">{{ b.name }}</option>
-          </optgroup>
-        </select>
-        <button class="btn secondary" :disabled="!next" :title="next ? `${next.name} ( ] )` : ''" aria-label="Next strip or bus" @click="step(next)">▶</button>
-        <span class="note">{{ chain.length }} of 32 nodes · latency {{ (live.latency[sig?.id] || 0).toFixed(2) }} ms</span>
-        <FormatSelect v-if="sig" :signal="sig" />
-        <span class="spacer"></span>
-        <span class="muted small">[ and ]: previous, next</span>
+        <div class="pick">
+          <div class="row tight">
+            <button class="btn secondary" :disabled="!prev" :title="prev ? `${prev.name} ( [ )` : ''" aria-label="Previous strip or bus" @click="step(prev)">◀</button>
+            <select :value="sig?.id" aria-label="Signal" @change="select($event.target.value)">
+              <optgroup label="Strips">
+                <option v-for="s in live.mix.strips" :key="s.id" :value="s.id">{{ s.name }}</option>
+              </optgroup>
+              <optgroup label="Buses">
+                <option v-for="b in live.mix.buses" :key="b.id" :value="b.id">{{ b.name }}</option>
+              </optgroup>
+            </select>
+            <button class="btn secondary" :disabled="!next" :title="next ? `${next.name} ( ] )` : ''" aria-label="Next strip or bus" @click="step(next)">▶</button>
+          </div>
+          <span class="note" data-chain-info>{{ position }} · {{ chain.length }} of 32 nodes · latency {{ (live.latency[sig?.id] || 0).toFixed(2) }} ms</span>
+        </div>
+        <FormatSelect v-if="sig" :signal="sig" class="headformat" />
       </div>
       <div v-if="clipboard.units.length" class="panel clipbar" role="group" aria-label="Clipboard">
         <span class="muted small">Clipboard</span>
@@ -257,9 +290,9 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
             <span v-if="unsupported(n, sig.format, !isBus(sig.id))" class="state-tag bypass" :title="unsupported(n, sig.format, !isBus(sig.id))">⚠ not on {{ sig.format }}</span>
             <span v-if="DYNAMICS.has(n.type)" class="grbar"><span class="gr"><span :style="{ width: `${Math.min(100, ((meters[n.id]?.gain_reduction_db || 0) / 20) * 100)}%` }"></span></span></span>
             <span class="spacer"></span>
-            <button class="btn small secondary" :title="`Copy ${n.id} to the clipboard`" :aria-label="`Copy ${n.id}`" @click="copyNode(n)">{{ copied === n.id ? "✓" : "⧉" }}</button>
-            <button v-if="latestOf(n.type)" class="btn small secondary" :title="`Paste the copied ${NODE_TYPES[n.type]?.label || n.type} (from ${nameOf(latestOf(n.type).from)}) onto ${n.id}: its parameters`" :aria-label="`Paste onto ${n.id}`" @click="pasteOnto(n)">⇩</button>
-            <button class="btn small bypass" :class="{ secondary: !n.bypass }" :aria-pressed="n.bypass" @click="bypass(n)">Bypass</button>
+            <button v-if="n.type !== 'fader'" class="btn small secondary" :title="`Copy ${n.id} to the clipboard`" :aria-label="`Copy ${n.id}`" @click="copyNode(n)">{{ copied === n.id ? "✓" : "⧉" }}</button>
+            <button v-if="latestOf(n.type) && !FLOW_TYPES.has(n.type)" class="btn small secondary" :title="`Paste the copied ${NODE_TYPES[n.type]?.label || n.type} (from ${nameOf(latestOf(n.type).from)}) onto ${n.id}: its parameters`" :aria-label="`Paste onto ${n.id}`" @click="pasteOnto(n)">⇩</button>
+            <button v-if="n.type !== 'fader'" class="btn small bypass" :class="{ secondary: !n.bypass }" :aria-pressed="n.bypass" @click="bypass(n)">Bypass</button>
             <button class="btn small secondary" :disabled="i === 0" :aria-label="`Move ${n.id} earlier`" @click="move(n.id, i - 1)">←</button>
             <button class="btn small secondary" :disabled="i === chain.length - 1" :aria-label="`Move ${n.id} later`" @click="move(n.id, i + 1)">→</button>
             <button class="btn small secondary" :aria-label="isOpen(n.id) ? `Collapse ${n.id}` : `Expand ${n.id}`" @click="open[n.id] = !isOpen(n.id)">{{ isOpen(n.id) ? "▾" : "▸" }}</button>
@@ -269,8 +302,18 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
             <NodeEditor :signal="sig.id" :node="n" />
           </div>
         </div>
-        <div class="dropzone" :data-drop="chain.length" :class="{ over: drag.active && drag.over === chain.length }">
-          {{ chain.length ? "Drop here to append" : "No processing yet: drag a node type here, or click one in the palette." }}
+        <div v-if="virtualAuto" class="nodecard virtual closed" :data-drop="faderAt >= 0 ? faderAt : chain.length" :class="{ over: drag.active && drag.over === (faderAt >= 0 ? faderAt : chain.length) }" data-virtual="auto">
+          <div class="nhead" title="The automixer acts here, just before the fader: drag it elsewhere in the flow" @pointerdown="pointerDown($event, 'virt:auto', 'Automixer')">
+            <span class="ntitle">Automixer</span><span class="muted small">before the fader · drag to place</span>
+          </div>
+        </div>
+        <div v-if="faderAt < 0" class="nodecard virtual closed" :data-drop="chain.length" :class="{ over: drag.active && drag.over === chain.length }" data-virtual="fader">
+          <div class="nhead" title="The fader follows the chain: drag it into the chain to run units after it (post-fader)" @pointerdown="pointerDown($event, 'virt:fader', 'Fader')">
+            <span class="ntitle">Fader</span><span class="muted small">after the chain · drag to place</span>
+          </div>
+        </div>
+        <div class="dropzone" :data-drop="faderAt < 0 ? 'post' : chain.length" :class="{ over: drag.active && drag.over === (faderAt < 0 ? 'post' : chain.length) }">
+          {{ chain.length ? "Drop here to append (after the fader: post-fader)" : "No processing yet: drag a node type here, or click one in the palette." }}
         </div>
       </div>
       <FlowView v-if="sig" :signal="sig" />
@@ -280,6 +323,33 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
 </template>
 
 <style scoped>
+.chainhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 1.5rem;
+}
+.chainhead .pick {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+/* C1: "Format" left of its dropdown, without touching FormatSelect (the console uses it too). */
+.chainhead :deep(.headformat) {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.chainhead :deep(.headformat > label) {
+  margin: 0;
+}
+.nodecard.virtual {
+  border-style: dashed;
+  opacity: 0.8;
+}
+.nodecard.virtual .nhead {
+  cursor: grab;
+}
 .clipbar {
   display: flex;
   flex-wrap: wrap;

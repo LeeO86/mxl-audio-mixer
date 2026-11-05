@@ -152,6 +152,9 @@ struct MonitorBody {
     /// The monitor's own down-mix (`null`: the mix's).
     #[serde(default, deserialize_with = "present")]
     downmix: Option<Option<crate::mix::format::Downmix>>,
+    /// Its own named down-mix (`null`: none, C8).
+    #[serde(default, deserialize_with = "present")]
+    downmix_set: Option<Option<String>>,
     ramp_ms: Option<f64>,
 }
 
@@ -185,7 +188,8 @@ impl MonitorBody {
             calibration_spl,
             bass_management,
             publish,
-            downmix
+            downmix,
+            downmix_set
         );
         let n = m.format.channels();
         if trim_mute {

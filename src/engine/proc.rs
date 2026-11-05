@@ -563,9 +563,12 @@ impl Processor {
             ProcKind::Delay { .. } => Kind::Delay(Delay::new(channels, kind.delay_samples())),
             // The compiler makes the auto node a gain step and the width and the
             // surround panner gain matrices; a processor of them passes through.
-            ProcKind::Auto {} | ProcKind::Width { .. } | ProcKind::SurroundPan { .. } => {
-                Kind::Delay(Delay::new(channels, 0))
-            }
+            ProcKind::Auto {}
+            | ProcKind::Fader {}
+            | ProcKind::DirectOut { .. }
+            | ProcKind::Insert { .. }
+            | ProcKind::Width { .. }
+            | ProcKind::SurroundPan { .. } => Kind::Delay(Delay::new(channels, 0)),
         };
         Self {
             id,
@@ -1629,7 +1632,7 @@ mod tests {
         matrix(
             "send 5.1 → stereo (down-mix)",
             6,
-            crate::mix::format::width_matrix(Format::Surround51, Format::Stereo, laws),
+            crate::mix::format::width_matrix(Format::Surround51, Format::Stereo, &laws),
             true,
         );
         // A metered channel on the meter thread: peak, energy, true peak, PPM.

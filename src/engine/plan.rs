@@ -206,6 +206,8 @@ pub struct MeterChannel {
 pub struct MeterBank {
     pub channels: Vec<MeterChannel>,
     pub ppm: [crate::dsp::ppm::Ballistics; 2],
+    /// The inserts' round-trip probes (C4): pairs of meter slots.
+    pub probes: Vec<super::roundtrip::Probe>,
 }
 
 impl MeterBank {
@@ -214,6 +216,7 @@ impl MeterBank {
         Self {
             channels: (0..channels).map(|_| MeterChannel::default()).collect(),
             ppm: [Ballistics::type_i(), Ballistics::type_ii()],
+            probes: Vec::new(),
         }
     }
 }
@@ -254,6 +257,7 @@ pub struct PlanBuilder {
     buffers: u32,
     meters: u32,
     node_meters: usize,
+    probes: Vec<(u32, u32)>,
 }
 
 impl PlanBuilder {
@@ -280,6 +284,7 @@ impl PlanBuilder {
             buffers: 0,
             meters: 0,
             node_meters: 0,
+            probes: Vec::new(),
         }
     }
 
@@ -345,6 +350,12 @@ impl PlanBuilder {
         );
         self.plan.nodes.push(Node::new(id, values, ramp));
         (self.plan.nodes.len() - 1) as u32
+    }
+
+    /// A round-trip probe between the meters at `send` and `ret` (C4); its index.
+    pub fn probe(&mut self, send: u32, ret: u32) -> usize {
+        self.probes.push((send, ret));
+        self.probes.len() - 1
     }
 
     /// `n` meter channels.
@@ -446,7 +457,13 @@ impl PlanBuilder {
         static GENERATIONS: AtomicU32 = AtomicU32::new(1);
         self.plan.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
         self.plan.buffers = vec![0.0; self.buffers as usize * self.plan.block];
-        self.plan.meters = Arc::new(MeterBank::new(self.meters as usize));
+        let mut bank = MeterBank::new(self.meters as usize);
+        bank.probes = self
+            .probes
+            .iter()
+            .map(|&(send, ret)| super::roundtrip::Probe::new(send, ret))
+            .collect();
+        self.plan.meters = Arc::new(bank);
         self.plan.lookup = self
             .plan
             .nodes
