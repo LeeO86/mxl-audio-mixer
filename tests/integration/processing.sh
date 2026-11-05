@@ -171,8 +171,10 @@ sleep 0.3
 probe 1 1:1:1 2:1:0
 pass "format change stereo → 5.1: chain kept (width bypassed and flagged), send kept and down-mixed, patch extended"
 
-# A 5.1 strip with the tone on C into a stereo bus: the global down-mix (−3 dB),
-# the bus's own (−6 dB), a global change the bus does not follow, then the global.
+# A 5.1 strip with the tone on C into a stereo bus: the global down-mix (a new
+# show's downmix.json reference: −3 dB), the bus's own (−6 dB), the parametric
+# global down-mix changed (the bus does not follow), then the global, then the
+# reference set again (C8).
 api POST /api/v1/strips '{"id": "film", "format": "5.1", "patch": [null, null, {"input": 1, "channel": 1}, null, null, null]}' >/dev/null
 api POST /api/v1/buses '{"id": "dm", "format": "stereo"}' >/dev/null
 api PUT /api/v1/sends/film/dm '{"tap": "post-fader"}' >/dev/null
@@ -182,15 +184,18 @@ probe 1 1:1:0.7071068 2:1:0.7071068
 api PATCH /api/v1/buses/dm '{"downmix": {"centre_db": -6}}' >/dev/null
 sleep 0.3
 probe 1 1:1:0.5011872 2:1:0.5011872
-api PATCH /api/v1/mix/settings '{"downmix": {"centre_db": 0}}' >/dev/null
+api PATCH /api/v1/mix/settings '{"downmix": {"centre_db": 0}, "downmix_set": null}' >/dev/null
 sleep 0.3
 probe 1 1:1:0.5011872
 api PATCH /api/v1/buses/dm '{"downmix": null}' >/dev/null
 sleep 0.3
 probe 1 1:1:1 2:1:1
+api PATCH /api/v1/mix/settings '{"downmix_set": "reference"}' >/dev/null
+sleep 0.3
+probe 1 1:1:0.7071068 2:1:0.7071068
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: application/json' "$WEB/api/v1/mix/settings" -d '{"downmix": {"centre_db": 3}}')
 [[ "$code" == 400 ]] || fail "a +3 dB centre answered $code"
-pass "down-mix: BS.775 default, per-bus override, global change, back to the global"
+pass "down-mix: the reference set, per-bus override, parametric global change, back to the global, the reference again"
 
 # A mono strip with a surround panner (the strip's, 1.6.0) into a 5.1 bus: Rs at
 # 110°, L at −30° (a value change, no plan swap), the LFE send; a panner node is

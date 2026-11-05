@@ -27,6 +27,17 @@
 - B9: "Auto…" and "Operations…" moved from the toolbar into the strip and bus menu (Operations starts with the selected strips).
 - B10: the strip and bus menus, the new strip/bus form, Operations and Auto open as dialogs over the mixer.
 - B11: "Copy settings…" in the strip and bus menu copies all settings and the processing (not the name, input, format or sends) to another strip or bus, or to all selected.
+- C1: processing view header: "n of m", node count and latency under the signal select, "Format" left of its dropdown, the key hint at the right removed.
+- C2: strip and bus colours are 16 fixed, muted colours (no colour picker); an older show's own colour stays until changed.
+- C3: processing blocks can run after the fader: the `fader` node places the fader stage (fader, AFV, mute) in the flow; `post-fader` is the flow's end, `{"after": "fader"}` right after the fader; shows without one sound as before.
+- C4: `insert` block: the signal leaves as an MXL flow (output `<signal>/<node>`) and returns on a chosen input (and its flow), levels and meters out and in, bypass; no delay compensation, the measured round trip in `round_trip_ms` of the output.
+- C5: direct outs are `direct-out` blocks, several per strip (`out` publishes as the strip, others as `<strip>/<node>`); a 1.5 direct out becomes the block `out` at its old point (same sound, flow and sender ids); outputs have `source`, `node`, `kind`.
+- C6: the automixer is a block of the flow (also after the fader); an automixed signal without one shows it before the fader in the chain and the flow view.
+- C7: send taps (and keys, bus outs) are set in the flow at any point, including after the fader and around the automixer.
+- C8: named down-mix settings (`settings.downmixes`, `downmix_set` of the mix, buses and monitors): a matrix for every pair of formats from `downmix.json` (`assets/downmix.json`), edited as a matrix in Settings; `GET /api/v1/downmix-matrix`; a new show starts with the reference, a 1.5 show keeps its parametric down-mix.
+- Downgrade (C3–C8) to 1.5.1 (unchanged): what 1.6 saves (`mix.json`, the show history, the export) loads in 1.5.1 with the same published outputs: each strip's direct out `out` is also written as the 1.5 output entry (same key, MXL flow and NMOS sender) at the nearest 1.5.1 point, and a tap 1.5.1 cannot take is written as the nearest one, the exact one beside it (`tap_exact`, which 1.6 reads back). Still different in 1.5.1: units after the fader run before it; taps after the fader, an insert or a direct out are approximate (post-fader, pre-fader or after the node before); inserts pass dry; the other direct outs (`<strip>/<node>`) and insert sends are not published; the named down-mix settings are dropped (the parametric down-mix applies). `tests/rollback/check-1.5.1.sh` checks the saved form with the released 1.5.1 code.
+- C4: a monitor's chain refuses `fader`, `direct-out` and `insert`.
+- Rollback to 1.5.x uses the saved `mix.json` (and the show history); a 1.6 export file does not import into 1.5.x (its strict import refuses the new fields, e.g. `schema`, `surround`).
 
 ## 1.5.1 (2026-10-31)
 

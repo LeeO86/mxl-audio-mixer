@@ -2439,6 +2439,53 @@ surround panner per send.
 | D277 | Spread keeps its matrix (power = (1 − spread) × point + spread × equal share); the pad draws the bubble at the position moved towards the centre by the spread, radius growing to the speaker ring at 100 %. | It is what the DSP does: the image moves to the middle and widens (B5). |
 | D278 | A send's `pan` applies when its source is mono or stereo at the send's tap (post-pan of a strip without a surround panner counts as the strip's own format, read before the strip's panner) and the bus is 5.1, 7.1, 5.1.4 or 7.1.4 (the bed; heights get nothing); it is a ramped matrix node, so moving it changes values only. | Panning "fixed in the processing" per send (B6), smooth while dragging; the same field serves the Graph view's wire editing (C1). |
 
+## 1.6.0: processing and DSP (C1–C8)
+
+From the operators' feedback (Confluence "Feedback MXL Audio-Mixer", scope of
+2026-11-05, part C): the processing view's header and colours, units after the
+fader, an insert with MXL send and return, direct outs and the automixer as blocks,
+send taps in the flow, down-mix matrices from `downmix.json`.
+
+#### What exists
+
+- `src/mix/chain.rs`: node types `fader`, `direct-out`, `insert`; `output_key`,
+  `MAIN_DIRECT_OUT`; `next_id` gives `fader`, `out`, `out-2` ….
+- `src/mix/compile.rs`: `Build::chain` runs the whole flow: the fader stage
+  (`FaderStage`) at the `fader` node or after the chain, the default auto gain just
+  before it, direct outs and insert sends as `Endpoint`s published after the
+  signals, `Build::insert` (send gain, meter, return patch, gain, meter, dry/wet
+  sends). `Taps.post` is the flow's end with its latency.
+- `src/mix/model.rs`: `Mix::chain_outputs`, `lift_direct_outs` (in `Control::stage`),
+  `is_published`, `unpublish`, `Mix::fresh`; `MixSettings.downmixes`,
+  `downmix_set`, `laws_with`; `Bus.downmix_set` (and `Monitor.downmix_set`).
+- `src/mix/downmix.rs`: `DownmixSet`, `Rules`, `rules_matrix` from
+  `assets/downmix.json`, `applies`, `matrix_db`; `Laws.set` is used by `width_matrix`.
+- `src/engine/roundtrip.rs`: `Probe` in the `MeterBank`, `Correlator` on the meter
+  thread; `Meters::round_trips`, `round_trip_ms` in the output status.
+- API: `GET /api/v1/downmix-matrix`; outputs' `source`, `node`, `kind`,
+  `round_trip_ms`; chain node ids are given inside the change (two adds in a row
+  get two ids).
+- UI: `ChainTab.vue` (header, virtual fader and automixer tiles, Flow palette group),
+  `FlowView.vue`, `FlowNodeEditor.vue`, `ColourPick.vue` (`colours.js`),
+  `DownmixSets.vue` (Settings), a set per bus (`SignalSettings.vue`) and monitor
+  (`MonitorCard.vue`).
+- Tests: `compile.rs` (post-fader nodes, post-fader vs after-fader taps, a lifted
+  direct out sounds and times as before at every tap, several direct outs, the
+  insert, named down-mixes), `downmix.rs`, `roundtrip.rs`, `tolerant.rs` (a 1.5.1
+  show); `web/tests/dsp16.mjs` in `tests/integration/ui.sh`.
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D290 | The fader is a chain node (`fader`, at most one); without one the fader stage follows the chain. `pre-fader` is its input, `post-fader` the flow's end (after the nodes after it), `{"after": "fader"}` right after it. A click on a palette unit puts it before the fader. | Old shows have no node and every tap means what it meant (C3). A bus's limiter after the fader still protects its bus out and its post-fader sends. |
+| D291 | Direct outs are `direct-out` nodes; the one with id `out` publishes as the strip itself (the pre-1.6 key: same MXL flow and NMOS sender ids), the others as `<strip>/<node>`. A strip's `outputs[]` entry is lifted into `out` at the same point in `Control::stage` (every change path); taps outside the chain (`input`, `post-pan`) stay outputs. | One place for every direct out (C5) without breaking downstream receivers; the lift is exact (tests at every tap). |
+| D292 | The insert's return is an input of the mixer (with its MXL flow picked in the block, through the input's route); no delay compensation (the owner). The send runs while bypassed; bypass ramps dry/wet gains. | "Read like an input" with the inputs' timing and adaptive delay; no second reader. |
+| D293 | The round trip is measured by cross-correlation of the send and return meter blocks on the meter thread (mono, decimated by 8, 2048 samples against lags up to 500 ms, once a second, ≥ 0.5 normalised, the best peak elsewhere at least 0.2 lower); the last measured value stays over a plan swap of the same insert and return, and is forgotten after 5 s without a clear measurement. A dropped meter record shifts the history once (left as it is, noted in the code). | Works whatever the far end does with timestamps; costs nothing on the DSP thread. A periodic signal (a sine) is ambiguous by its period. |
+| D294 | Down-mix settings are named matrices for every pair of formats from `downmix.json` (kept verbatim in `assets/`), edited pairs stored whole. They apply where the target lacks a source channel, not from mono or stereo into mono (pan law, mono sum stay). A show without a set keeps the parametric down-mix; a new show (no `mix.json`, or a broken one) starts with the reference. | "Cover the largest bus format, several settings, downmix.json as reference and default" (C8) without changing how a 1.5 show sounds. |
+| D295 | The automixer stays the `auto` node; an automixed signal without one shows a virtual automixer before the fader (chain and flow view), dragged into place it becomes the node. | The gain-sharing automixer visible in the flow (C6) with no new state for shows that never place it. |
+| D296 | Saved state is written for 1.5.1 too (`mix::rollback`): each `out` also as the 1.5 output entry at the nearest 1.5.1 point, each tap 1.5.1 lacks as its nearest tap with the exact one in `tap_exact`; loading drops that entry and takes `tap_exact` back (on the JSON, before the strict or tolerant parse). `tests/fixtures/rollback-1.6.json` is the saved form of a show with every new block and tap; `tests/rollback/check-1.5.1.sh` loads it with the released v1.5.1 code into `…loaded-by-1.5.1.json`, which `cargo test` checks (valid, same outputs; with the 1.6 strip fields `surround`, `members`, `unlinked` and `schema`, which 1.5.1 drops). The rollback uses the saved `mix.json`: a 1.6 export does not import into 1.5.x (its strict import refuses the new fields; `schema` stays, the upgrade (D304, D306) needs it). On load the restore runs on the JSON first, then the parse, the upgrade, and the lift in `stage`. | The rollback target stays 1.5.1 unchanged: a tap on a dropped node would make its mix invalid (it starts empty) and a direct out that is only a node would lose its flow and sender. |
+
 ## 1.5.0: tolerant show loading
 
 Decided with the maintainer: a rollback from a later version (1.6 → 1.5) keeps the

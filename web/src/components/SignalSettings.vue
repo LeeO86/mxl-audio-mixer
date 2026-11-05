@@ -5,6 +5,7 @@ import { computed, ref, watch } from "vue";
 import Pot from "./Pot.vue";
 import DownmixEdit from "./DownmixEdit.vue";
 import ConfirmButton from "./ConfirmButton.vue";
+import ColourPick from "./ColourPick.vue";
 import { DEFAULT_DOWNMIX } from "../nodes.js";
 import { dbValue } from "../api.js";
 import { buses, isBus, live, patchSignal, signalOf, signals, tallyOf } from "../store.js";
@@ -36,6 +37,8 @@ const minusSources = computed(() => {
 // A bus's own down-mix of everything arriving from a wider format (D2); off: the mix's.
 const globalDownmix = computed(() => live.mix?.settings?.downmix || DEFAULT_DOWNMIX);
 const setOwnDownmix = (on) => set({ downmix: on ? { ...globalDownmix.value } : null });
+// The mix's named down-mix settings (C8): the bus can take one of them.
+const downmixSets = computed(() => live.mix?.settings?.downmixes || []);
 function saveName() {
   if (name.value.trim() && name.value !== s.value.name) set({ name: name.value.trim() });
 }
@@ -65,10 +68,7 @@ const depth = computed(() => {
       </div>
       <div>
         <label>Colour</label>
-        <div class="row tight">
-          <input type="color" :value="s.colour || '#8496a8'" aria-label="Colour" style="width: 3rem; padding: 0.1rem" @change="set({ colour: $event.target.value })" />
-          <button class="btn small secondary" :disabled="!s.colour" @click="set({ colour: '' })">No colour</button>
-        </div>
+        <ColourPick :value="s.colour || ''" @change="(c) => set({ colour: c })" />
         <label class="check"><input type="checkbox" :checked="s.recall_safe" @change="set({ recall_safe: $event.target.checked })" /> Recall-safe</label>
         <label class="check" title="solo in place never mutes it"><input type="checkbox" :checked="s.solo_safe" @change="set({ solo_safe: $event.target.checked })" /> Solo-safe</label>
         <label class="check" title="mute groups never mute it (isolate)"><input type="checkbox" :checked="s.mute_safe" @change="set({ mute_safe: $event.target.checked })" /> Mute-safe</label>
@@ -87,7 +87,12 @@ const depth = computed(() => {
       </div>
       <div v-if="bus" class="downmixedit">
         <label>Down-mix of what arrives here</label>
-        <template v-if="s.downmix">
+        <select v-if="downmixSets.length" :value="s.downmix_set || ''" aria-label="Bus down-mix setting" @change="set({ downmix_set: $event.target.value || null })">
+          <option value="">{{ s.downmix ? "Its own levels (below)" : "The mix's" }}</option>
+          <option v-for="d in downmixSets" :key="d.id" :value="d.id">{{ d.name }}</option>
+        </select>
+        <template v-if="s.downmix_set"></template>
+        <template v-else-if="s.downmix">
           <DownmixEdit :value="s.downmix" label="Bus down-mix" @change="(d) => set({ downmix: d })" />
           <ConfirmButton small label="Use the mix's down-mix" aria-label="Use the mix's down-mix" @confirm="setOwnDownmix(false)" />
           <p class="note">Going back to the mix's fades the affected sends out and in: a brief dip.</p>

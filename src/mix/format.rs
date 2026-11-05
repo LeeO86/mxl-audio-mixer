@@ -205,20 +205,38 @@ impl Downmix {
 }
 
 /// The laws width mapping uses.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Laws {
     pub pan: PanLaw,
     pub mono_sum: MonoSum,
     pub downmix: Downmix,
+    /// A named down-mix setting (C8): where it applies, its matrix replaces the
+    /// parametric `downmix`.
+    pub set: Option<std::sync::Arc<super::downmix::DownmixSet>>,
 }
 
 impl Laws {
     /// These laws with `downmix` instead of their own, when there is one (a
-    /// target's override).
-    pub fn with_downmix(self, downmix: Option<Downmix>) -> Self {
-        Self {
-            downmix: downmix.unwrap_or(self.downmix),
-            ..self
+    /// target's override; it also drops the mix's named set).
+    pub fn with_downmix(&self, downmix: Option<Downmix>) -> Self {
+        match downmix {
+            Some(d) => Self {
+                downmix: d,
+                set: None,
+                ..self.clone()
+            },
+            None => self.clone(),
+        }
+    }
+
+    /// These laws with the named set `set` when there is one (C8).
+    pub fn with_set(&self, set: Option<std::sync::Arc<super::downmix::DownmixSet>>) -> Self {
+        match set {
+            Some(s) => Self {
+                set: Some(s),
+                ..self.clone()
+            },
+            None => self.clone(),
         }
     }
 }
@@ -287,7 +305,14 @@ fn db_to_gain(db: f64) -> f64 {
 /// Channels `dst` has and `src` lacks stay silent. With normalisation, a
 /// down-mix from 3.0 or wider into fewer channels is scaled so that its largest
 /// row sum is unity.
-pub fn width_matrix(src: Format, dst: Format, laws: Laws) -> Vec<f32> {
+pub fn width_matrix(src: Format, dst: Format, laws: &Laws) -> Vec<f32> {
+    if let Some(set) = laws
+        .set
+        .as_ref()
+        .filter(|_| super::downmix::applies(src, dst))
+    {
+        return set.matrix(src, dst).into_iter().map(|g| g as f32).collect();
+    }
     let columns = src.channels();
     let mut m = vec![0f64; dst.channels() * columns];
     for (s, label) in src.labels().iter().enumerate() {
@@ -314,7 +339,7 @@ fn level(db: Db) -> f64 {
     }
 }
 
-fn fold(label: &str, dst: Format, gain: f64, laws: Laws, add: &mut dyn FnMut(usize, f64)) {
+fn fold(label: &str, dst: Format, gain: f64, laws: &Laws, add: &mut dyn FnMut(usize, f64)) {
     if let Some(d) = dst.index(label) {
         add(d, gain);
         return;
@@ -428,7 +453,7 @@ mod tests {
                 mono_sum: [MonoSum::Minus3, MonoSum::Minus6][sum],
                 ..Laws::default()
             };
-            let m = width_matrix(ALL[src], ALL[dst], laws);
+            let m = width_matrix(ALL[src], ALL[dst], &laws);
             proptest::prop_assert_eq!(m.len(), ALL[src].channels() * ALL[dst].channels());
             // At most +0.01 dB: C reaches mono as 2 × 1/√2 × the −3 dB (0.7079) sum.
             for g in m {
@@ -460,7 +485,7 @@ mod tests {
     #[test]
     fn same_format_is_identity() {
         for f in ALL {
-            let m = width_matrix(f, f, Laws::default());
+            let m = width_matrix(f, f, &Laws::default());
             let n = f.channels();
             for d in 0..n {
                 for s in 0..n {
@@ -473,19 +498,19 @@ mod tests {
     #[test]
     fn mono_and_stereo() {
         let laws = Laws::default();
-        let m = width_matrix(Format::Mono, Format::Stereo, laws);
+        let m = width_matrix(Format::Mono, Format::Stereo, &laws);
         assert!(close(m[0].into(), FRAC_1_SQRT_2) && close(m[1].into(), FRAC_1_SQRT_2));
-        let m = width_matrix(Format::Stereo, Format::Mono, laws);
+        let m = width_matrix(Format::Stereo, Format::Mono, &laws);
         assert!(close(m[0].into(), 0.707_945_8) && close(m[1].into(), 0.707_945_8));
         let six = Laws {
             mono_sum: MonoSum::Minus6,
-            ..laws
+            ..laws.clone()
         };
-        let m = width_matrix(Format::Stereo, Format::Mono, six);
+        let m = width_matrix(Format::Stereo, Format::Mono, &six);
         assert!(close(m[0].into(), 0.501_187_2));
         // Mono into 3.0 and the surround formats goes to C.
         for dst in [Format::Lcr, Format::Surround51, Format::Surround714] {
-            let m = width_matrix(Format::Mono, dst, laws);
+            let m = width_matrix(Format::Mono, dst, &laws);
             for (d, g) in m.iter().enumerate() {
                 assert_eq!(*g, if d == 2 { 1.0 } else { 0.0 }, "{dst:?}");
             }
@@ -494,7 +519,7 @@ mod tests {
 
     #[test]
     fn bs775_down_mix_of_5_1() {
-        let m = width_matrix(Format::Surround51, Format::Stereo, Laws::default());
+        let m = width_matrix(Format::Surround51, Format::Stereo, &Laws::default());
         let h = FRAC_1_SQRT_2;
         // L row: L, R, C, LFE, Ls, Rs
         let expected_l = [1.0, 0.0, h, 0.0, h, 0.0];
@@ -518,7 +543,7 @@ mod tests {
             },
             ..Laws::default()
         };
-        let m = width_matrix(Format::Surround51, Format::Stereo, laws);
+        let m = width_matrix(Format::Surround51, Format::Stereo, &laws);
         let c = Db(-6.0).gain();
         // L row: L, R, C, LFE, Ls, Rs
         let expected_l = [1.0, 0.0, c, 1.0, 1.0, 0.0];
@@ -533,9 +558,9 @@ mod tests {
                 normalise: true,
                 ..laws.downmix
             },
-            ..laws
+            ..laws.clone()
         };
-        let n = width_matrix(Format::Surround51, Format::Stereo, normalised);
+        let n = width_matrix(Format::Surround51, Format::Stereo, &normalised);
         let sum = 1.0 + c + 1.0 + 1.0;
         for (a, b) in n.iter().zip(&m) {
             assert!(close((*a).into(), f64::from(*b) / sum));
@@ -550,7 +575,7 @@ mod tests {
             },
             ..Laws::default()
         };
-        let n = width_matrix(Format::Surround51, Format::Stereo, d);
+        let n = width_matrix(Format::Surround51, Format::Stereo, &d);
         assert!(close(n[0].into(), 1.0 / (1.0 + 2.0 * h)));
         // −inf drops: no centre and no surrounds in the down-mix.
         let none = Laws {
@@ -561,7 +586,7 @@ mod tests {
             },
             ..Laws::default()
         };
-        let m = width_matrix(Format::Surround51, Format::Stereo, none);
+        let m = width_matrix(Format::Surround51, Format::Stereo, &none);
         assert_eq!(&m[..6], &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         // Normalisation leaves up-mixes, same formats and stereo → mono alone.
         for (src, dst) in [
@@ -571,8 +596,8 @@ mod tests {
             (Format::Surround51, Format::Surround71),
         ] {
             assert_eq!(
-                width_matrix(src, dst, d),
-                width_matrix(src, dst, Laws::default()),
+                width_matrix(src, dst, &d),
+                width_matrix(src, dst, &Laws::default()),
                 "{src:?} → {dst:?}"
             );
         }
@@ -601,24 +626,24 @@ mod tests {
         let laws = Laws::default();
         let h = FRAC_1_SQRT_2;
         // 5.1 → 7.1: Ls to the side surround, rear surrounds silent.
-        let m = width_matrix(Format::Surround51, Format::Surround71, laws);
+        let m = width_matrix(Format::Surround51, Format::Surround71, &laws);
         let lss = 4;
         assert_eq!(m[lss * 6 + 4], 1.0);
         assert!(m[6 * 6..].iter().all(|g| *g == 0.0));
         // 7.1 → 5.1: both left surrounds into Ls at −3 dB.
-        let m = width_matrix(Format::Surround71, Format::Surround51, laws);
+        let m = width_matrix(Format::Surround71, Format::Surround51, &laws);
         assert!(close(m[4 * 8 + 4].into(), h) && close(m[4 * 8 + 6].into(), h));
         // 7.1.4 → 7.1: top rear into the rear surround, top front into the front.
-        let m = width_matrix(Format::Surround714, Format::Surround71, laws);
+        let m = width_matrix(Format::Surround714, Format::Surround71, &laws);
         assert!(close(m[6 * 12 + 10].into(), h));
         assert!(close(m[8].into(), h));
         // 7.1.4 → stereo: a top rear reaches L through Ls at −6 dB.
-        let m = width_matrix(Format::Surround714, Format::Stereo, laws);
+        let m = width_matrix(Format::Surround714, Format::Stereo, &laws);
         assert!(close(m[10].into(), h * h));
         // Every source channel except LFE reaches every narrower format.
         for src in ALL {
             for dst in ALL {
-                let m = width_matrix(src, dst, laws);
+                let m = width_matrix(src, dst, &laws);
                 for (s, label) in src.labels().iter().enumerate() {
                     let reaches = (0..dst.channels()).any(|d| m[d * src.channels() + s] != 0.0);
                     assert_eq!(

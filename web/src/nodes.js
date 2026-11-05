@@ -168,10 +168,35 @@ export const NODE_TYPES = {
       { key: "level_dbfs", label: "Level", min: -60, max: 0, def: -18, fine: 0.5, unit: "dBFS (noise: RMS)" },
     ],
   },
+  fader: {
+    label: "Fader",
+    group: "Flow",
+    help: "Where the fader (with audio-follows-video and mute) sits in the flow (one per chain): the units after it run post-fader. Without it, the fader follows the chain.",
+    make: () => ({ type: "fader" }),
+    fields: [],
+  },
+  "direct-out": {
+    label: "Direct out",
+    group: "Flow",
+    strip: true,
+    help: "Publishes the strip at this point of its flow as an MXL flow and NMOS sender; the signal passes on. Several per strip; bypass writes silence.",
+    make: () => ({ type: "direct-out" }),
+    fields: [],
+  },
+  insert: {
+    label: "Insert",
+    group: "Flow",
+    help: "Sends the signal out as an MXL flow and takes it back from an input (the return), which replaces it from here on. Levels and meters out and in; bypass passes the dry signal (the send keeps going). No delay compensation: the measured round trip is shown.",
+    make: () => ({ type: "insert", send_db: 0, return_db: 0, return_input: null, return_channel: 1 }),
+    fields: [
+      { key: "send_db", label: "Send level", min: -40, max: 20, def: 0, fine: 0.1, unit: "dB" },
+      { key: "return_db", label: "Return level", min: -40, max: 20, def: 0, fine: 0.1, unit: "dB" },
+    ],
+  },
   auto: {
-    label: "Auto gain",
-    group: "Other",
-    help: "Where the auto-mix and ducking gain acts (one per chain). Without it, after the chain, before the fader; the voice detection reads at its input.",
+    label: "Automixer",
+    group: "Flow",
+    help: "Where the gain-sharing automixer and the ducking act (one per chain). Without it, just before the fader; the voice detection reads at its input.",
     make: () => ({ type: "auto" }),
     fields: [],
   },
@@ -214,6 +239,7 @@ export const channelsOf = (format) => CHANNELS[format] || 0;
 /** Why node `n` cannot run on a signal of `format` (a strip's when `strip`), or "" (as the server's
  * ProcKind::supports): such a node is kept, bypassed and flagged (C10). */
 export function unsupported(n, format, strip) {
+  if (n.type === "direct-out" && !strip) return "a direct out is on a strip (a bus has its bus out)";
   if (n.type === "width" && format !== "stereo") return "M/S / width needs a stereo signal";
   return "";
 }
@@ -234,3 +260,10 @@ export const tapLabel = (tap) => (typeof tap === "object" && tap ? `after ${tap.
 /** Nodes whose gain reduction is metered. */
 export const DYNAMICS = new Set(["compressor", "limiter", "expander", "gate", "de-esser", "ducker", "multiband", "dynamic-eq", "leveler"]);
 export const EQ_LIKE = new Set(["eq", "filter", "dynamic-eq"]);
+
+/** Node types that shape the flow (C3–C6) rather than the sound: no copy, no curve. */
+export const FLOW_TYPES = new Set(["fader", "direct-out", "insert", "auto"]);
+
+/** The output key of a direct out or insert (as the server's chain::output_key): the strip itself for
+ * the direct out "out", else "<signal>/<node>". */
+export const outputKey = (signal, n) => (n.type === "direct-out" && n.id === "out" ? signal : `${signal}/${n.id}`);

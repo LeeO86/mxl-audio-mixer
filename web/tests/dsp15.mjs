@@ -129,12 +129,13 @@ try {
   await flow.locator('[data-flow-node="eq-1"]').dragTo(flow.locator('[data-gap="2"]'));
   await until("EQ after the compressor", async () => (await strip("dx")).chain.map((n) => n.id).join() === "compressor-1,eq-1");
   await flow.locator('[data-gap="2"] [data-endpoint="send:stream"]').waitFor();
-  await flow.getByLabel("Add an endpoint").selectOption("output");
-  await until("Dx published", async () => (await api("/api/v1/mix")).outputs.some((o) => o.signal === "dx"));
-  await flow.locator('[data-endpoint="output"]').dragTo(flow.locator('[data-gap="in"]'));
-  await until("the direct out at the input", async () => (await api("/api/v1/mix")).outputs.find((o) => o.signal === "dx")?.tap === "input");
+  // 1.6.0 (C5): the direct out is a block after the fader; dragged to the chain's start.
+  await flow.getByLabel("Add an endpoint").selectOption("direct-out");
+  await until("Dx published", async () => (await api("/api/v1/outputs")).some((o) => o.signal === "dx" && o.kind === "direct-out"));
+  await flow.locator('[data-flow-node="out"]').dragTo(flow.locator('[data-gap="0"]'));
+  await until("the direct out first", async () => (await strip("dx")).chain[0]?.id === "out");
   await page.screenshot({ path: `${out}/dsp15-B4-flow.png`, fullPage: true });
-  pass("B4: flow view: send dragged after the EQ, the EQ moved behind the compressor (the send with it), direct out added and taken at the input");
+  pass("B4: flow view: send dragged after the EQ, the EQ moved behind the compressor (the send with it), direct out added and moved to the chain's start");
 
   // B5: spread opens: the bubble moves to the centre and grows; at 100 % it covers every speaker (in the
   // strip's surround dialog since 1.6.0, A6).

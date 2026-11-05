@@ -286,7 +286,7 @@ async fn run(mut config: Config) -> ExitCode {
             );
             let _ = std::fs::rename(&mix_path, &bad);
             control
-                .stage(Default::default(), 0)
+                .stage(mxl_audio_mixer::mix::Mix::fresh(), 0)
                 .unwrap_or(Staged::Swap { wait: false })
         }
     };

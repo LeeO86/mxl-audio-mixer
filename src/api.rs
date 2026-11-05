@@ -85,6 +85,7 @@ pub fn routes() -> Router<App> {
         )
         .route("/api/v1/tally", get(tally))
         .route("/api/v1/taps", get(taps))
+        .route("/api/v1/downmix-matrix", get(downmix_matrix))
 }
 
 /// The taps each strip and bus offers (for sends, keys and the analyser):
@@ -275,6 +276,11 @@ struct SettingsBody {
     loudness_target_lufs: Option<f64>,
     loudness_tolerance_lu: Option<f64>,
     downmix: Option<crate::mix::format::Downmix>,
+    /// The named down-mixes (C8), all of them.
+    downmixes: Option<Vec<crate::mix::downmix::DownmixSet>>,
+    /// The mix-wide one (`null`: the parametric `downmix`).
+    #[serde(default, deserialize_with = "present")]
+    downmix_set: Option<Option<String>>,
 }
 
 async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
@@ -302,13 +308,84 @@ async fn patch_settings(State(app): State<App>, bytes: axum::body::Bytes) -> Res
             if let Some(d) = b.downmix {
                 m.settings.downmix = d;
             }
+            if let Some(d) = b.downmixes {
+                // A bus or monitor whose set is gone uses the mix's again.
+                let ids: Vec<String> = d.iter().map(|x| x.id.clone()).collect();
+                let gone = |id: &mut Option<String>| {
+                    if id.as_ref().is_some_and(|i| !ids.contains(i)) {
+                        *id = None;
+                    }
+                };
+                for bus in &mut m.buses {
+                    gone(&mut bus.downmix_set);
+                }
+                for mon in &mut m.control_room.monitors {
+                    gone(&mut mon.downmix_set);
+                }
+                gone(&mut m.settings.downmix_set);
+                m.settings.downmixes = d;
+            }
+            if let Some(d) = b.downmix_set {
+                m.settings.downmix_set = d;
+            }
             Ok(())
         })
         .await?;
-        let s: MixSettings = app.control().mix.settings;
+        let s: MixSettings = app.control().mix.settings.clone();
         Ok::<_, Box<Response>>(Json(with_errors(settings_json(&s), errors)).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatrixQuery {
+    /// A named down-mix; left out: the rules' reference.
+    set: Option<String>,
+    rules: Option<crate::mix::downmix::Rules>,
+    from: crate::mix::Format,
+    to: crate::mix::Format,
+}
+
+/// A down-mix matrix (C8) in dB: rows the channels of `to`, columns those of
+/// `from`, as the set has it and as its rules give it.
+async fn downmix_matrix(
+    State(app): State<App>,
+    axum::extract::Query(q): axum::extract::Query<MatrixQuery>,
+) -> Response {
+    use crate::mix::downmix::{matrix_db, DownmixSet};
+    let set = match &q.set {
+        Some(id) => match app
+            .control()
+            .mix
+            .settings
+            .downmixes
+            .iter()
+            .find(|d| &d.id == id)
+        {
+            Some(d) => d.clone(),
+            None => return not_found(format!("downmix {id} does not exist")).into_response(),
+        },
+        None => DownmixSet {
+            rules: q.rules.unwrap_or_default(),
+            ..DownmixSet::reference()
+        },
+    };
+    let reference = DownmixSet {
+        matrices: Vec::new(),
+        ..set.clone()
+    };
+    Json(json!({
+        "from": q.from,
+        "to": q.to,
+        "columns": q.from.labels(),
+        "rows": q.to.labels(),
+        "applies": crate::mix::downmix::applies(q.from, q.to),
+        "edited": set.matrices.iter().any(|m| m.from == q.from && m.to == q.to),
+        "gains_db": matrix_db(&set, q.from, q.to),
+        "reference_db": matrix_db(&reference, q.from, q.to),
+    }))
+    .into_response()
 }
 
 /// The settings with `downmix` always shown (the show file leaves out the default).
@@ -594,11 +671,17 @@ pub(crate) struct BusBody {
     /// The bus's own down-mix (`null`: the mix's, D2).
     #[serde(default, deserialize_with = "present")]
     downmix: Option<Option<crate::mix::format::Downmix>>,
+    /// Its own named down-mix (`null`: none, C8).
+    #[serde(default, deserialize_with = "present")]
+    downmix_set: Option<Option<String>>,
     pub(crate) ramp_ms: Option<f64>,
 }
 
 impl BusBody {
     pub(crate) fn apply(self, b: &mut Bus) {
+        if let Some(v) = self.downmix_set {
+            b.downmix_set = v;
+        }
         if let Some(v) = self.minus {
             b.minus = v;
         }
@@ -668,6 +751,7 @@ async fn create_bus(State(app): State<App>, bytes: axum::body::Bytes) -> Respons
             minus: None,
             subgroup: false,
             downmix: None,
+            downmix_set: None,
         };
         b.apply(&mut bus);
         let errors = apply(&app, 0, |m| {
@@ -885,6 +969,19 @@ async fn put_output(
                 return Err(not_found(format!("signal {signal} does not exist")));
             }
             m.outputs.retain(|o| o.signal != signal);
+            // A strip's direct out `out` (C5): changed in place at its point of
+            // the flow; with a tap it moves there.
+            if let Some(s) = m.strips.iter_mut().find(|s| s.id == signal) {
+                let main = crate::mix::chain::MAIN_DIRECT_OUT;
+                if let (Some(p), None) = (s.chain.iter_mut().find(|p| p.id == main), &b.tap) {
+                    p.kind = crate::mix::chain::ProcKind::DirectOut {
+                        format: b.format,
+                        commit_samples: b.commit_samples,
+                    };
+                    return Ok(());
+                }
+                s.chain.retain(|p| p.id != main);
+            }
             m.outputs.push(Output {
                 signal: signal.clone(),
                 format: b.format,
@@ -907,10 +1004,17 @@ async fn put_output(
 async fn delete_output(State(app): State<App>, Path(signal): Path<String>) -> Response {
     let run = async {
         apply(&app, 0, |m| {
-            if m.output(&signal).is_none() {
+            if m.chain_outputs()
+                .iter()
+                .any(|o| o.key == signal && o.insert)
+            {
+                return Err(bad(format!(
+                    "{signal} is an insert's send: remove the insert from its chain"
+                )));
+            }
+            if !m.unpublish(&signal) {
                 return Err(not_found(format!("{signal} is not published")));
             }
-            m.outputs.retain(|o| o.signal != signal);
             Ok(())
         })
         .await?;
@@ -1007,15 +1111,26 @@ async fn chain_add(
             o.insert("id".into(), json!("new"));
         }
         let mut node: Proc = serde_json::from_value(v).map_err(|e| bad(e.to_string()))?;
-        let node_id = {
-            let chain = chain_of(&app, kind, &id)?;
-            given.unwrap_or_else(|| crate::mix::chain::next_id(&chain, &node.kind))
-        };
-        node.id = node_id.clone();
+        // The id is found on the mix it goes into, so two adds in a row get two.
+        let mut node_id = String::new();
         let errors = apply(&app, crate::engine::FADE_SAMPLES, |m| {
+            // A strip still published by a pre-1.6 entry (input or post-pan tap)
+            // has its key taken: its new direct outs start at `out-2`.
+            let legacy = m.output(&id).is_some();
             let chain = chain_mut(m, kind, &id)?;
+            node.id = given.clone().unwrap_or_else(|| {
+                let mut taken = chain.clone();
+                if legacy && matches!(node.kind, crate::mix::chain::ProcKind::DirectOut { .. }) {
+                    taken.push(Proc {
+                        id: crate::mix::chain::MAIN_DIRECT_OUT.into(),
+                        ..node.clone()
+                    });
+                }
+                crate::mix::chain::next_id(&taken, &node.kind)
+            });
+            node_id = node.id.clone();
             let at = position.map_or(chain.len(), |p| (p as usize).min(chain.len()));
-            chain.insert(at, node);
+            chain.insert(at, node.clone());
             Ok(())
         })
         .await?;

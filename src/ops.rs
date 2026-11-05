@@ -273,7 +273,7 @@ async fn export(State(app): State<App>) -> Json<Value> {
         "application_version": VERSION,
         "settings": settings,
         "inputs": app.control().inputs.configs(),
-        "mix": app.control().mix,
+        "mix": crate::mix::rollback::for_saving(&app.control().mix),
         "connections": app.node.connections(),
     }))
 }
@@ -290,10 +290,17 @@ struct ShowFile {
 }
 
 async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
-    let show: ShowFile = match serde_json::from_slice(&body) {
-        Ok(show) => show,
-        Err(e) => return error(StatusCode::BAD_REQUEST, format!("not a show file: {e}")),
-    };
+    // An export of 1.6 carries taps and outputs for 1.5.1 too: back to its own.
+    let show: ShowFile =
+        match serde_json::from_slice::<serde_json::Value>(&body).and_then(|mut v| {
+            if v.get("mix").is_some_and(|m| !m.is_null()) {
+                crate::mix::rollback::restore(&mut v["mix"]);
+            }
+            serde_json::from_value(v)
+        }) {
+            Ok(show) => show,
+            Err(e) => return error(StatusCode::BAD_REQUEST, format!("not a show file: {e}")),
+        };
     if show.version != 1 {
         return error(
             StatusCode::BAD_REQUEST,

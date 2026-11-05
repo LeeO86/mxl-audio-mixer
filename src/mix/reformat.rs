@@ -5,6 +5,7 @@
 //! mapping (down-mix or up-mix), and a strip's input patch is extended or
 //! trimmed. The plan swap fades the signal out and in again (§2).
 
+use super::chain::ProcKind;
 use super::format::Format;
 use super::model::{Kind, Mix, Patch, PatchPoint};
 
@@ -62,6 +63,26 @@ pub fn change_format(mix: &mut Mix, id: &str, format: Format) -> Result<Vec<Stri
     }
     // A published signal keeps its flow's layout: downstream receivers go on
     // reading the same channels (the output maps the new format into it).
+    let direct = mix
+        .strips
+        .iter_mut()
+        .filter(|s| s.id == id)
+        .flat_map(|s| s.chain.iter_mut())
+        .filter_map(|p| match &mut p.kind {
+            ProcKind::DirectOut { format, .. } if format.is_none() => Some(format),
+            _ => None,
+        });
+    let mut kept = false;
+    for f in direct {
+        *f = Some(old);
+        kept = true;
+    }
+    if kept {
+        notes.push(format!(
+            "its direct outs keep their {} layout; change it in the block when wanted",
+            super::compile::format_name(old)
+        ));
+    }
     if let Some(o) = mix.outputs.iter_mut().find(|o| o.signal == id) {
         if o.format.is_none() {
             o.format = Some(old);

@@ -540,6 +540,7 @@ mod tests {
             minus: None,
             subgroup: false,
             downmix: None,
+            downmix_set: None,
         });
         for from in ["a", "b"] {
             m.sends.push(Send {

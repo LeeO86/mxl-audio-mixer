@@ -7,8 +7,9 @@
 # its MIDI control with a fake Web MIDI (web/tests/midi.mjs), the processing items
 # of 1.5.0 (B1–B6): web/tests/dsp15.mjs, and the graph and routing of 1.5.0
 # (virtual outputs): web/tests/graph.mjs, the console of 1.6.0 (B1–B11):
-# web/tests/link.mjs, web/tests/console16.mjs, and its strip (A1–A13):
-# web/tests/strip16.mjs. Needs `npm ci` in web/
+# web/tests/link.mjs, web/tests/console16.mjs, its strip (A1–A13):
+# web/tests/strip16.mjs, and its processing (C1–C8): web/tests/dsp16.mjs.
+# Needs `npm ci` in web/
 # and Chrome (CHROME, default /usr/bin/google-chrome). Screenshots: $IT_OUT/ui/.
 # shellcheck source=tests/integration/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -42,6 +43,7 @@ node "$ROOT/web/tests/dsp15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/dsp15.mj
 node "$ROOT/web/tests/graph.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/graph.mjs"
 node "$ROOT/web/tests/link.mjs" || fail "web/tests/link.mjs"
 node "$ROOT/web/tests/console16.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console16.mjs"
+node "$ROOT/web/tests/dsp16.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/dsp16.mjs"
 
 rc=0
 stop_mixer || rc=$?
