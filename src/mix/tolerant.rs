@@ -213,7 +213,9 @@ fn parse<T: DeserializeOwned>(mut v: Value) -> Result<(T, Vec<Removed>), String>
 
 /// A saved mix: the mix and the paths of what was dropped (empty when it
 /// parsed as it is).
-pub fn mix(v: Value) -> Result<(Mix, Vec<String>), String> {
+pub fn mix(mut v: Value) -> Result<(Mix, Vec<String>), String> {
+    // What 1.6 wrote for 1.5.1 too (exact taps, legacy direct outs) first.
+    super::rollback::restore(&mut v);
     let (mix, removed) = parse::<Mix>(v)?;
     Ok((mix, removed.iter().map(|r| path_text(&r.at)).collect()))
 }

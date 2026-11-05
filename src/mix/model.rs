@@ -1137,12 +1137,17 @@ impl Mix {
             };
             let tap = o.tap();
             let full = s.chain.len() >= super::chain::MAX_NODES - 1;
-            let taken = s
-                .chain
+            // The strip has its direct out `out`: this is the entry a save writes
+            // beside it for 1.5.1 (D286).
+            if s.chain
                 .iter()
-                .any(|p| p.id == super::chain::MAIN_DIRECT_OUT);
+                .any(|p| p.id == super::chain::MAIN_DIRECT_OUT)
+            {
+                changed = true;
+                continue;
+            }
             let at = match &tap {
-                _ if full || taken => None,
+                _ if full => None,
                 Tap::Input | Tap::PostPan => None,
                 Tap::After(node) => s.chain.iter().position(|p| &p.id == node).map(|i| i + 1),
                 Tap::PreEq => Some(Mix::category_span(&s.chain, Category::Eq).0),

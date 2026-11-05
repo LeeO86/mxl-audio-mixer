@@ -1097,10 +1097,20 @@ async fn chain_add(
         // The id is found on the mix it goes into, so two adds in a row get two.
         let mut node_id = String::new();
         let errors = apply(&app, crate::engine::FADE_SAMPLES, |m| {
+            // A strip still published by a pre-1.6 entry (input or post-pan tap)
+            // has its key taken: its new direct outs start at `out-2`.
+            let legacy = m.output(&id).is_some();
             let chain = chain_mut(m, kind, &id)?;
-            node.id = given
-                .clone()
-                .unwrap_or_else(|| crate::mix::chain::next_id(chain, &node.kind));
+            node.id = given.clone().unwrap_or_else(|| {
+                let mut taken = chain.clone();
+                if legacy && matches!(node.kind, crate::mix::chain::ProcKind::DirectOut { .. }) {
+                    taken.push(Proc {
+                        id: crate::mix::chain::MAIN_DIRECT_OUT.into(),
+                        ..node.clone()
+                    });
+                }
+                crate::mix::chain::next_id(&taken, &node.kind)
+            });
             node_id = node.id.clone();
             let at = position.map_or(chain.len(), |p| (p as usize).min(chain.len()));
             chain.insert(at, node.clone());

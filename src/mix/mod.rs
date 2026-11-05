@@ -9,6 +9,7 @@ pub mod logic;
 pub mod model;
 pub mod operations;
 pub mod reformat;
+pub mod rollback;
 pub mod room;
 pub mod show;
 pub mod spatial;

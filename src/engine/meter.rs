@@ -107,6 +107,7 @@ impl Meterer {
                     if let Some(lag) = c.measure() {
                         p.lag
                             .store(lag.round().max(0.0) as u32 + 1, Ordering::Relaxed);
+                        p.count.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }

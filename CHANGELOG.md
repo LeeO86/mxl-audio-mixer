@@ -10,7 +10,8 @@
 - C6: the automixer is a block of the flow (also after the fader); an automixed signal without one shows it before the fader in the chain and the flow view.
 - C7: send taps (and keys, bus outs) are set in the flow at any point, including after the fader and around the automixer.
 - C8: named down-mix settings (`settings.downmixes`, `downmix_set` of the mix, buses and monitors): a matrix for every pair of formats from `downmix.json` (`assets/downmix.json`), edited as a matrix in Settings; `GET /api/v1/downmix-matrix`; a new show starts with the reference, a 1.5 show keeps its parametric down-mix.
-- Downgrade (C3–C8): 1.5.1 drops the `fader`, `direct-out` and `insert` nodes and the down-mix settings (tolerant load, `load_warnings`): direct-out blocks are unpublished and post-fader units run pre-fader there; re-publish direct outs after going back. A send, key or output tapped `{"after": …}` one of those nodes makes the 1.5.1 mix invalid (it starts empty, `mix.json.bad`): move such taps to a named tap first.
+- Downgrade (C3–C8) to 1.5.1 (unchanged): what 1.6 saves (`mix.json`, the show history, the export) loads in 1.5.1 with the same published outputs: each strip's direct out `out` is also written as the 1.5 output entry (same key, MXL flow and NMOS sender) at the nearest 1.5.1 point, and a tap 1.5.1 cannot take is written as the nearest one, the exact one beside it (`tap_exact`, which 1.6 reads back). Still different in 1.5.1: units after the fader run before it; taps after the fader, an insert or a direct out are approximate (post-fader, pre-fader or after the node before); inserts pass dry; the other direct outs (`<strip>/<node>`) and insert sends are not published; the named down-mix settings are dropped (the parametric down-mix applies). `tests/rollback/check-1.5.1.sh` checks the saved form with the released 1.5.1 code.
+- C4: a monitor's chain refuses `fader`, `direct-out` and `insert`.
 
 ## 1.5.1 (2026-10-31)
 

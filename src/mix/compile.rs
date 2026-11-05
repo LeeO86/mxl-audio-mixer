@@ -46,8 +46,9 @@ pub struct Compiled {
     pub output_latency: HashMap<String, usize>,
     /// Equal for two compiles exactly when only values differ.
     pub structure: u64,
-    /// The inserts' round-trip probes: (output key, probe index), C4.
-    pub probes: Vec<(String, usize)>,
+    /// The inserts' round-trip probes: (output key, probe index, the insert's
+    /// signature: its return), C4.
+    pub probes: Vec<(String, usize, u64)>,
 }
 
 #[derive(Default)]
@@ -291,8 +292,8 @@ struct Build<'a> {
     endpoints: Vec<Endpoint>,
     /// Meters of inserts: (key, first channel, channels).
     extra_meters: Vec<(String, u32, usize)>,
-    /// Inserts' round-trip probes: (output key, send meter, return meter).
-    probes: Vec<(String, u32, u32)>,
+    /// Inserts' round-trip probes: (output key, send meter, return meter, signature).
+    probes: Vec<(String, u32, u32, u64)>,
 }
 
 impl Build<'_> {
@@ -501,7 +502,8 @@ impl Build<'_> {
         });
         self.extra_meters
             .push((format!("insert:{key}:return"), return_meter, n));
-        self.probes.push((key, send_meter, return_meter));
+        self.probes
+            .push((key, send_meter, return_meter, hash(shape)));
         // Bypass ramps between the dry signal and the return.
         let wet = if p.bypass { 0.0 } else { 1.0 };
         let dry = self.gain(format!("{base}/dry"), shape, vec![1.0 - wet; n], src);
@@ -1145,6 +1147,7 @@ impl Compiler {
                         afv: None,
                         mute: None,
                     };
+                    let first_endpoint = c.endpoints.len();
                     let out = c.chain(
                         &bus.id,
                         &bus.chain,
@@ -1156,6 +1159,10 @@ impl Compiler {
                         Some(&stage),
                     );
                     c.vad_tap(&bus.id, out.vad);
+                    // An insert's send on the bus carries the compensation of its sends.
+                    for e in &mut c.endpoints[first_endpoint..] {
+                        e.latency += most;
+                    }
                     let shift = |(s, l): (Span, usize)| (s, l + most);
                     let named = out.named;
                     let after = out.after;
@@ -1546,12 +1553,9 @@ impl Compiler {
             c.b.output_latency(slot, e.latency);
         }
         meters.append(&mut c.extra_meters);
-        let probes: Vec<(String, usize)> = std::mem::take(&mut c.probes)
+        let probes: Vec<(String, usize, u64)> = std::mem::take(&mut c.probes)
             .into_iter()
-            .map(|(key, send, ret)| {
-                let i = c.b.probe(send, ret);
-                (key, i)
-            })
+            .map(|(key, send, ret, sig)| (key, c.b.probe(send, ret), sig))
             .collect();
 
         // Virtual outputs (C7): their source through the width rules, else silence,

@@ -562,7 +562,10 @@ an id gets `strip-<n>` or `bus-<n>`.
   1.6.0 (C5) a strip's direct outs are `direct-out` nodes of its chain (below),
   several per strip; `PUT /api/v1/outputs/<strip>` makes (or changes) the node
   `out`, `DELETE` removes it, and a pre-1.6 strip output becomes that node at the
-  same point (its input and post-pan taps stay outputs). Output keys
+  same point (its input and post-pan taps stay outputs). Saved state (`mix.json`,
+  history, export) also carries `out` as that pre-1.6 entry and every tap 1.5.1
+  lacks as its nearest tap with the exact one in `tap_exact`, so a rollback to 1.5.1
+  keeps the outputs (SPECIFICATION §5.1). Output keys
   (`GET /api/v1/outputs`, `signal`): the signal for a bus and for the direct out
   `out`, `<strip>/<node>` for the other direct outs and the inserts; those also
   have `source`, `node` and `kind` (`direct-out`, `insert`; an insert

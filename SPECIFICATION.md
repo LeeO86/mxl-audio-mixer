@@ -369,8 +369,10 @@ rates other than 48 kHz, recording.
     round trip is measured off the DSP thread: the meter thread, which gets the send
     and return blocks anyway, sums each to mono, decimates by 8, and about once a
     second cross-correlates the last 2048 return samples with the send at every lag
-    up to 500 ms; the best normalised correlation, when ≥ 0.5, gives the lag
-    (parabolic refinement), shown with the output (`round_trip_ms`). A return without
+    up to 500 ms; the best normalised correlation, when ≥ 0.5 and the best peak
+    more than 4 lags away at least 0.2 lower (a steady tone is not clear), gives the
+    lag (parabolic refinement), shown with the output (`round_trip_ms`). A value not
+    measured again for 5 s, or of an insert whose return changed, is forgotten. A return without
     an input passes dry.
 - **Taps** (C7): `pre-fader` is the fader stage's input, `post-fader` the flow's end
   (after the fader and every node after it; what goes to the panner), `{"after":
@@ -381,6 +383,19 @@ rates other than 48 kHz, recording.
   with nodes after the fader; a bus's reads its output.
 - **Real time:** the blocks are gain steps, patches, meters and output steps of the
   plan like every other; nothing allocates on the DSP thread.
+- **Monitors** (§10.1) have no flow blocks: their chain refuses `fader`, `direct-out`
+  and `insert`.
+- **Rollback to 1.5.1** (the rollback target, unchanged): saved state (`mix.json`, the
+  show history, the export) is written so 1.5.1 loads it with the same published
+  outputs: every strip's direct out `out` also as its 1.5 output entry (nearest
+  1.5.1 point: post-fader after the fader node, pre-fader when only new blocks lie
+  before the fader, else after the nearest node 1.5.1 knows), every tap 1.5.1 lacks
+  (after a new block, or after the fader) as the nearest one with the exact one in
+  `tap_exact` beside it (a virtual output's beside its `source`). 1.6 reads
+  `tap_exact` back and drops the entry of `out` when it loads; 1.5.1 drops what it
+  does not know. In 1.5.1 such taps are approximate, units after the fader run before
+  it, inserts pass dry, other direct outs and insert sends are gone, the down-mix
+  settings fall back to the parametric down-mix.
 
 ### 5.2 Routing details
 

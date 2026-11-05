@@ -80,8 +80,8 @@ pub struct Meters {
     node_bands: Vec<[f32; MAX_BANDS]>,
     /// The inserts' probes of the plan (output key, probe index) and the last
     /// round trip each measured, in samples (kept over a plan swap).
-    probes: Vec<(String, usize)>,
-    round_trips: BTreeMap<String, u32>,
+    probes: Vec<(String, usize, u64)>,
+    round_trips: BTreeMap<String, Trip>,
 }
 
 impl Default for Meters {
@@ -100,6 +100,19 @@ impl Default for Meters {
         }
     }
 }
+
+/// The last round trip of an insert: samples, the insert's signature, the
+/// probe's count of clear measurements and when it last grew.
+#[derive(Debug, Clone)]
+struct Trip {
+    lag: u32,
+    signature: u64,
+    count: u32,
+    at: std::time::Instant,
+}
+
+/// A round trip not measured again for this long is forgotten (C4).
+const TRIP_STALE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn dbfs(level: f64) -> Db {
     if level > 0.0 {
@@ -127,17 +140,28 @@ impl Meters {
         self.signals = signals;
     }
 
-    /// Follow a new plan's round-trip probes (C4): `(insert output key, index)`.
-    pub fn set_probes(&mut self, probes: Vec<(String, usize)>) {
-        self.round_trips
-            .retain(|k, _| probes.iter().any(|(p, _)| p == k));
+    /// Follow a new plan's round-trip probes (C4): `(insert output key, index,
+    /// signature)`. A value stays only for the same insert with the same return;
+    /// the new probes count from 0.
+    pub fn set_probes(&mut self, probes: Vec<(String, usize, u64)>) {
+        self.round_trips.retain(|k, t| {
+            probes
+                .iter()
+                .any(|(p, _, sig)| p == k && *sig == t.signature)
+        });
+        for t in self.round_trips.values_mut() {
+            t.count = 0;
+        }
         self.probes = probes;
     }
 
     /// The measured round trip of each insert (C4), in samples (as of the
     /// last [`Meters::tick`]).
-    pub fn round_trips(&self) -> &BTreeMap<String, u32> {
-        &self.round_trips
+    pub fn round_trips(&self) -> BTreeMap<String, u32> {
+        self.round_trips
+            .iter()
+            .map(|(k, t)| (k.clone(), t.lag))
+            .collect()
     }
 
     /// Follow a new plan's node meters; `nodes` is `(signal, node id, slot,
@@ -186,11 +210,27 @@ impl Meters {
     }
 
     pub fn tick(&mut self) {
-        for (key, i) in &self.probes {
-            if let Some(lag) = self.bank.probes.get(*i).and_then(|p| p.samples()) {
-                self.round_trips.insert(key.clone(), lag);
+        let now = std::time::Instant::now();
+        for (key, i, signature) in &self.probes {
+            let Some(p) = self.bank.probes.get(*i) else {
+                continue;
+            };
+            let count = p.count.load(Ordering::Relaxed);
+            let fresh = self.round_trips.get(key).is_none_or(|t| t.count != count);
+            if let (true, Some(lag)) = (fresh, p.samples()) {
+                self.round_trips.insert(
+                    key.clone(),
+                    Trip {
+                        lag,
+                        signature: *signature,
+                        count,
+                        at: now,
+                    },
+                );
             }
         }
+        self.round_trips
+            .retain(|_, t| now.duration_since(t.at) < TRIP_STALE);
         let window = u64::from(SAMPLE_RATE) * RMS_WINDOW.as_millis() as u64 / 1000;
         for (i, m) in self.bank.channels.iter().enumerate() {
             let c = &mut self.channels[i];

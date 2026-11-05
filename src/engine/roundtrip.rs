@@ -5,7 +5,13 @@
 //! once a second the last [`WINDOW`] return samples are compared with the send
 //! at every lag up to [`MAX_LAG_MS`], and the lag of the best normalised
 //! correlation (with a parabolic refinement) is the round trip, when that
-//! correlation is clear (≥ [`MIN_CORRELATION`]). Otherwise the last value stays.
+//! correlation is clear: at least [`MIN_CORRELATION`], and the best peak away from
+//! it (more than [`APART`] lags off) at least [`MARGIN`] lower, so a steady tone,
+//! which correlates at every period, is not clear. Otherwise nothing is measured
+//! (the control side forgets a value that is not measured again for a while).
+//! A meter record the DSP thread drops (`meter_drops`) shifts the history by a
+//! block until the next measurements; such drops are rare and counted, and
+//! not corrected here.
 //! No delay compensation follows from it (Adrian, 2026-11-05): it is shown.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -22,6 +28,10 @@ const HISTORY: usize = MAX_LAG + WINDOW;
 const EVERY: usize = 6000;
 /// Below this normalised correlation the lag is not trusted.
 pub const MIN_CORRELATION: f64 = 0.5;
+/// Lags (decimated) around the best one that belong to its peak.
+pub const APART: usize = 4;
+/// How much lower the best peak elsewhere must be.
+pub const MARGIN: f64 = 0.2;
 
 /// A probe of the meter bank: the meter slots of the send and the return and
 /// the result (samples + 1; 0: not measured yet), written by the meter thread.
@@ -30,6 +40,8 @@ pub struct Probe {
     pub send: u32,
     pub ret: u32,
     pub lag: AtomicU32,
+    /// Clear measurements so far (the control side sees new ones by it).
+    pub count: AtomicU32,
 }
 
 impl Probe {
@@ -38,6 +50,7 @@ impl Probe {
             send,
             ret,
             lag: AtomicU32::new(0),
+            count: AtomicU32::new(0),
         }
     }
 
@@ -139,6 +152,15 @@ impl Correlator {
         if best.1 < MIN_CORRELATION {
             return None;
         }
+        let elsewhere = scores
+            .iter()
+            .enumerate()
+            .filter(|(l, _)| l.abs_diff(best.0) > APART)
+            .map(|(_, s)| *s)
+            .fold(f64::MIN, f64::max);
+        if elsewhere > best.1 - MARGIN {
+            return None;
+        }
         let (lag, peak) = best;
         let refine = if lag > 0 && lag + 1 < MAX_LAG {
             let (a, c) = (scores[lag - 1], scores[lag + 1]);
@@ -186,6 +208,20 @@ mod tests {
             }
             let got = got.expect("measured");
             assert!((got - delay as f64).abs() <= 8.0, "{delay}: {got}");
+        }
+        // A steady sine correlates at every period: not clear.
+        let mut c = Correlator::default();
+        let mut n = 0u64;
+        for _ in 0..2000 {
+            let block: Vec<f32> = (0..96)
+                .map(|_| {
+                    n += 1;
+                    (n as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48_000.0).sin()
+                })
+                .collect();
+            c.feed(false, &[&block]);
+            c.feed(true, &[&block]);
+            assert_eq!(c.measure(), None, "a sine is ambiguous");
         }
         // A return that is something else: nothing.
         let mut c = Correlator::default();

@@ -77,9 +77,12 @@ impl History {
             mix: mix.clone(),
         };
         let id = time_ms.to_string();
+        // Loadable by 1.5.1 too (the rollback target).
+        let mut v = serde_json::to_value(&file).unwrap_or_default();
+        v["mix"] = crate::mix::rollback::for_saving(mix);
         crate::state::write_atomic(
             &self.dir.join(format!("{id}.json")),
-            &serde_json::to_vec_pretty(&file).unwrap_or_default(),
+            &serde_json::to_vec_pretty(&v).unwrap_or_default(),
         )?;
         Ok(id)
     }

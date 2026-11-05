@@ -1338,7 +1338,9 @@ impl Control {
     }
 
     fn write_mix(&self) -> Result<(), String> {
-        let body = serde_json::json!({"version": 1, "mix": self.mix});
+        // Loadable by 1.5.1 too (the rollback target).
+        let body =
+            serde_json::json!({"version": 1, "mix": crate::mix::rollback::for_saving(&self.mix)});
         crate::state::write_atomic(
             &self.mix_path,
             &serde_json::to_vec_pretty(&body).unwrap_or_default(),

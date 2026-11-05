@@ -288,6 +288,22 @@ pub fn validate(mix: &Mix, inputs: usize) -> Result<(), String> {
             range("calibration_spl", c, 40.0, 130.0).map_err(at)?;
         }
         chain::validate(&m.chain).map_err(at)?;
+        // The flow blocks (1.6.0) belong to strips and buses: a monitor has its
+        // own level and mute, and an insert would replace it with its return.
+        if let Some(p) = m.chain.iter().find(|p| {
+            matches!(
+                p.kind,
+                chain::ProcKind::Fader {}
+                    | chain::ProcKind::DirectOut { .. }
+                    | chain::ProcKind::Insert { .. }
+            )
+        }) {
+            return Err(at(format!(
+                "node {}: a {} is not a monitor node",
+                p.id,
+                p.kind.type_name()
+            )));
+        }
         if let Some(d) = &m.downmix {
             d.validate().map_err(at)?;
         }
@@ -402,6 +418,15 @@ mod tests {
         assert!(bad(&|m| m.control_room.monitors[0].level_db = 20.0));
         assert!(bad(&|m| m.control_room.monitors[0].id = "Main".into()));
         assert!(bad(&|m| m.control_room.solo.programme_db = Db(3.0)));
+        // The flow blocks of strips and buses are not monitor nodes (1.6.0).
+        for t in ["fader", "direct-out", "insert"] {
+            let node: Proc =
+                serde_json::from_value(serde_json::json!({"id": "x", "type": t})).unwrap();
+            assert!(
+                bad(&|m| m.control_room.monitors[0].chain.push(node.clone())),
+                "{t}"
+            );
+        }
     }
 
     #[test]
