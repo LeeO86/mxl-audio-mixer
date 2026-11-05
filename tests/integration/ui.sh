@@ -5,7 +5,8 @@
 # web/tests/console.mjs, and the format, down-mix and spatial nodes of 1.4.0:
 # web/tests/spatial.mjs, then the console of 1.5.0 (web/tests/console15.mjs) and
 # its MIDI control with a fake Web MIDI (web/tests/midi.mjs), the processing items
-# of 1.5.0 (B1–B6): web/tests/dsp15.mjs, and the graph and routing of 1.5.0
+# of 1.5.0 (B1–B6): web/tests/dsp15.mjs, the console strip of 1.6.0 (A1–A13):
+# web/tests/console16.mjs, and the graph and routing of 1.5.0
 # (virtual outputs): web/tests/graph.mjs. Needs `npm ci` in web/
 # and Chrome (CHROME, default /usr/bin/google-chrome). Screenshots: $IT_OUT/ui/.
 # shellcheck source=tests/integration/lib.sh
@@ -34,6 +35,7 @@ node "$ROOT/web/tests/logic.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/logic.mj
 node "$ROOT/web/tests/console.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console.mjs"
 node "$ROOT/web/tests/spatial.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/spatial.mjs"
 node "$ROOT/web/tests/console15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console15.mjs"
+node "$ROOT/web/tests/console16.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console16.mjs"
 node "$ROOT/web/tests/midi.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/midi.mjs"
 node "$ROOT/web/tests/dsp15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/dsp15.mjs"
 node "$ROOT/web/tests/graph.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/graph.mjs"

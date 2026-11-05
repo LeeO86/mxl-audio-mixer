@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 1.6.0
+
+- **Behaviour change (A5–A7): the surround panner is no processing block any more but the strip's surround pan** (`surround` on the strip; the Panner block is gone from the add list, a new `surround-pan` node is refused with 400). It pans the strip's post-pan sends into 5.1, 7.1, 5.1.4 and 7.1.4 buses, each in that bus's own layout; every other bus, a direct out and an output get the strip's L/R pan (before: the panner's layout, down-mixed). Old shows load: an active panner node becomes the strip's surround pan (its layout is dropped), a bypassed one is removed, a logic `set-param` on it is removed with its wires (`load_warnings`). Downgrade: 1.5.x loads such a show tolerantly without `surround`, `members` and `unlinked` (the original kept as `mix.json.newer`): the strips pan L/R only and the member offsets are gone; its show import refuses the file.
+- A1: the strip shows channel 1's source; a click opens every channel's source side by side, with the Link switch.
+- A2: the name sits at the very bottom of the strip; long names wrap to two lines, then … with the full name as tooltip.
+- A3: the ⋮ menu of the first strip is no longer covered at the left edge (it opens as a layer inside the window).
+- A4: in the format dialog "Change to …" sits beside Close, in the same style.
+- A5: the pan sits right above PFL/AFL and is L/R only for every format; strips wider than stereo have a balance of their left and right channels.
+- A6: a strip whose post-pan sends feed a surround bus has a surround button: the surround panner opens in a dialog.
+- A7: the surround panner is not a processing block any more (see the behaviour change above).
+- A8: on strips wider than stereo the dialog has a panner per channel (the LFE stays 1:1); "Restore 1:1" removes them.
+- A9: a strip in an auto-mix carries the auto-mix's colour mark.
+- A10: a strip under VCAs shows a second, grey "VCA" cap on its fader where it is with them.
+- A11: a click on a strip's auto-mix meter takes it out of the sharing (grey, the member's `bypass`) and back.
+- A12: "Sel" beside Mute selects the strip.
+- A13: a strip of two or more channels unfolds (triangle left of the format) into a fader, trim, mute and meter per channel under a linked/unlinked bar: linked (default) moves all and keeps the offsets, unlinked keeps an offset per member (`members`: `fader_db`, `trim_db`, `mute`; `unlinked`); pan is never linked.
+
 ## 1.5.1 (2026-10-31)
 
 - **Behaviour change for the platform: outputs keep the input timestamps.** A sample read from an input at MXL index i leaves on every output (bus, direct out, monitor, published and virtual output) at index i, not at the mixer's block clock ("now"). Before, every output was re-stamped by the read offset plus the input's extra delay: an AV-sync signal through an input straight to a virtual output was +39 ms (37.0–41.2) late against its video on the test platform; in the lab (a ramp whose samples tell their index) +41.1 ms for a writer that commits a 25 fps video frame of audio at once, +39.0 ms for the same 25 ms early, +5.0 ms and +2.0 ms for writers per block on time and 25 ms early; now 0 samples in every case. The old shift was the read offset plus the input's automatic delay, so it depended on how the source commits. An output that mixes inputs of different delays takes the largest of them. Look-ahead (limiter, leveler) is taken off the index too. When samples are written is unchanged, so listening latency is unchanged.

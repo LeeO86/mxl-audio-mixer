@@ -32,26 +32,38 @@ logic graphs; master/slave remote production.
 `http://<host>:8190/`: one page built into the binary (no CDN, no other files). Tabs
 (the URL hash addresses them): **Console** (strips in banks or in a layout's pages:
 patch, trim, polarity, the chain overview with its response and gain reduction,
-sends, pan and width, mute, fader, meter; the buses and VCAs beside them, behind a
+sends, width and pan, PFL/AFL, mute and select, fader, meter, name; the buses and VCAs beside them, behind a
 divider that sets how wide each side is (drag it or use the arrow keys; double-click
-or Home: automatic), each side scrolling on its own. A click on a strip's name
+or Home: automatic), each side scrolling on its own. The name sits at the bottom of
+the strip (two lines, then … with the full name as its tooltip); a click on it
 renames it, the gear opens its processing, and its ⋮ menu has "Send to…" (a new
 send at 0 dB to a bus), on a bus "Add source…" and "Subgroup…", "Format…" (the
 format change of the Processing view, confirmed by a second press), and "Delete…" (with
 a confirmation listing what goes with it). "+ Strip" and "+ Bus" add several at
-once with numbered names; the first new one is selected. A stereo or wider strip's
-input patch is linked by default: choose the first channel and the others follow
-in order on the same input (untick "Link" to choose each). Wider strips have one
+once with numbered names; the first new one is selected. A stereo or wider strip
+shows its first channel's source; a click opens every channel's source side by
+side. Its patch is linked by default: choose the first channel and the others
+follow in order on the same input (untick "Link" in that dialog to choose each).
+"Sel" beside Mute selects the strip (the one the Processing view edits). Wider strips have one
 polarity button that opens a toggle per channel and shows how many are inverted.
-"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile. The name has the
-strip's width; the format, the gear and the ⋮ menu share the row below it. A click
+"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile. A strip in an
+auto-mix carries the auto-mix's colour mark in its format row, and a click on its
+auto-mix meter takes it out of the sharing (grey, 0 dB) and back. A strip under
+VCAs shows a second, grey "VCA" cap on its fader where it is with them. The format,
+the gear and the ⋮ menu share the top row. A click
 on the fader value types a level (`0`, `-20`, `-inf`; Enter applies, Escape keeps
 it). The sends show their levels; a click opens Routing. A muted strip's meter still
 shows its level, grey. Strips of 8 or more channels are wider, with narrow meter
-bars. A mono or stereo strip with a surround panner shows a top view of its layout
-with the source: drag on it to move the source (left/right, front/rear); on 5.1.4
-and 7.1.4 a height slider lifts it into the top layer. One that sends to a surround
-bus without a panner offers "+ Surround pan". "MIDI" connects control surfaces, see
+bars. The pan right above PFL/AFL is L/R only, whatever the format (mono: pan;
+stereo and wider: the balance of the left and right channels). A strip whose
+post-pan sends feed a 5.1, 7.1, 5.1.4 or 7.1.4 bus has a "◎" surround button: it
+opens the surround panner, a top view of the layout with the source (drag on it:
+left/right, front/rear; height, spread, divergence and LFE beside it), for a wider
+strip one panner per channel; "Restore 1:1" removes it. A strip of two or more
+channels unfolds with the triangle left of its format: a fader, trim, mute and
+meter per channel under a bar that shows and switches whether they are linked
+(linked, the default: one moves all and keeps their offsets; unlinked: each keeps
+its own offset; "0" clears them). "MIDI" connects control surfaces, see
 [MIDI control](#midi-control)), **Processing**
 (the chain of a strip or bus as tiles of one size in a grid, in chain order: drag
 node types in from the palette, which stays in view, drag a tile by its header to
@@ -513,9 +525,23 @@ an id gets `strip-<n>` or `bus-<n>`.
   `patch` has one entry per strip channel: `{"input": n, "channel": c}` (both from
   1) or `null`. A channel the input does not have is silent and shows `missing` in
   `patch_state`. `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
-  position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
-  (measure it). A mono strip is stereo after its panner; with a surround panner
-  (below) a mono or stereo strip is 5.1 or 7.1 there.
+  position; stereo and wider: balance of the left and right channels), `width` 0 … 2
+  (stereo; 1 unchanged), `loudness` (measure it). A mono strip is stereo after its
+  panner.
+  - `surround` (1.6.0, left out while empty): the strip's surround panner. It pans
+    the strip's post-pan sends into a 5.1, 7.1, 5.1.4 or 7.1.4 bus, each in that
+    bus's layout, read before the L/R panner (a send with its own `pan` keeps it;
+    pre-fader and other taps are not panned); every other bus gets the L/R pan.
+    Mono and stereo: one position `[{azimuth_deg, elevation_deg, spread_pct,
+    divergence_pct, lfe_db}]` (as the 1.5 `surround-pan` node; a stereo strip's L
+    and R at ∓30° from it; `elevation_deg` only on 5.1.4 and 7.1.4); wider: one entry
+    per channel, `null` for a channel that maps 1:1 (the LFE always does). `[]`
+    removes it (1:1).
+  - `members` (1.6.0, left out while empty): per channel of a strip of 2 or more,
+    `{fader_db, trim_db, mute}` added to the strip's fader (`"-inf"` silences it)
+    and trim (each ±100 dB; the result is held to +15 dB and ±42 dB) and a mute of
+    its own. `unlinked` (default `false`) only tells the console whether a member
+    moves the strip or its own offset.
 - **Bus:** sum of its sends → `chain` → fader (`"-inf"` … +15) and mute; `loudness`;
   `compensate` (delay compensation, default `true`). A **subgroup** bus
   (`subgroup: true`) takes every send into it from its source's output (a strip's
@@ -617,8 +643,8 @@ an id gets `strip-<n>` or `bus-<n>`.
   sends whose coefficients change fade out and in (10 ms, a brief dip), the others
   are not touched. The UI asks for a second press.
 - **Format change** (`PATCH` a strip's or bus's `format`): the chain stays; nodes
-  that run on any width adapt, nodes that cannot (M/S / width off stereo, a
-  surround panner off a mono or stereo strip) are bypassed, flagged in
+  that run on any width adapt, nodes that cannot (M/S / width off stereo) are
+  bypassed, flagged in
   `chain_warnings` and pass the signal through; sends stay and use the width
   mapping; a strip's patch is trimmed, or extended (a run of consecutive channels
   of one input goes on, else unpatched) and its polarity with it; a published bus
@@ -866,7 +892,7 @@ change the node's structure. Dynamics detect on the largest level of all channel
 | `oscillator` | `waveform` `sine` \| `ebu-ident` (EBU R 49: the left channel off for 0.25 s every 3 s) \| `white` \| `pink` (noise, independent on every channel) \| `sweep` (logarithmic, `freq_hz` to `sweep_to_hz` in `sweep_s`, 0.1–600 s, repeated) \| `second-pulse` (the tone in the first 20 ms of every TAI second), `freq_hz`, `level_dbfs` (−100 … 0; peak, for noise RMS); replaces the signal (bypass: the input again) |
 | `auto` | no parameters: where the auto gain (auto-level, auto-mix and ducking, above) acts, at most one per chain; bypass: none |
 | `width` | M/S / width, stereo only: `width_pct` 0–200 (0 mono, 100 unchanged, 200 double side), `input` and `output` `lr` \| `ms` (M = (L + R) / 2, S = (L − R) / 2; L = M + S, R = M − S); a gain matrix that ramps per sample, bypass ramps to the identity |
-| `surround-pan` | surround panner of a mono or stereo strip: `layout` `5.1` \| `7.1` \| `5.1.4` \| `7.1.4`, `azimuth_deg` −180 … 180 (0 front centre, negative left; a stereo strip's L and R at ∓30° from it), `elevation_deg` 0–90 (default 0; 5.1.4 and 7.1.4 only: the bed keeps cos² of the power, the top layer at ±45° and ±135° sin², panned there at the same azimuth), `spread_pct` 0–100 (towards all speakers alike), `divergence_pct` 0–100 (the centre's share into L and R), `lfe_db` −100 … +10 (−100: off; the LFE send is full band, no low-pass); constant power. A stereo strip aimed behind has L and R mirrored (L at the right rear). It replaces the strip's stereo panner, wherever it sits in the chain: the post-pan tap has the layout's channels. At most one per chain; on a bus it does nothing (flagged) |
+| `surround-pan` | removed in 1.6.0: the surround panner is the strip's `surround` (above). A show of 1.5 with one loads: an active node becomes the strip's surround position (its `layout` is dropped, the panner pans into each surround bus in its own layout), a bypassed one goes; a logic `set-param` on it is removed with its wires (listed in `load_warnings`); a new one is refused (400) |
 
 Ranges: thresholds −100 … 0 dB, attack 0–1000 ms, release 0–10 000 ms, makeup
 ±24 dB, a chain at most 32 nodes. A node that cannot run on its signal's format
@@ -1013,7 +1039,7 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET /api/v1/mix` | the whole mix |
 | `GET`, `PATCH /api/v1/mix/settings` | `{"pan_law_db": …, "mono_sum_db": …, "loudness_target_lufs": …, "loudness_tolerance_lu": …, "downmix": …}` |
 | `GET`, `POST /api/v1/strips` | list (with `patch_state`), create (`format` required) |
-| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field (`tally_index` and `afv` take `null` to clear), `ramp_ms`; a `format` change keeps the chain and sends (above; answer `warnings`); GET adds `chain_warnings`; delete removes its sends and references (above, "Mute groups") |
+| `GET`, `PATCH`, `DELETE /api/v1/strips/<id>` | any strip field (`tally_index` and `afv` take `null` to clear; `surround` and `members` take `[]`), `ramp_ms`; a `format` change keeps the chain and sends (above; answer `warnings`); GET adds `chain_warnings`; delete removes its sends and references (above, "Mute groups") |
 | `GET`, `POST /api/v1/buses` | list, create (`format` required) |
 | `GET`, `PATCH`, `DELETE /api/v1/buses/<id>` | `name`, `format` (as strips), `fader_db`, `mute`, `chain`, `loudness`, `compensate`, `colour` (`""` clears it), `recall_safe`, `subgroup`, `downmix` (`null`: the mix's), `ramp_ms`; GET adds `chain_warnings`; delete removes its sends and output |
 | `GET /api/v1/sends` | every send |
