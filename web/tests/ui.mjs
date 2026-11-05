@@ -426,9 +426,13 @@ try {
   await until("send gtr → aux removed by Delete", async () => !(await api("/api/v1/sends")).some((x) => x.from === "gtr" && x.to === "aux"));
   pass("graph: a send drawn from Guitar to Aux, edited from its edge, removed with Delete");
 
-  // Operations: N-1s of Main for the selection, made in the operations panel.
+  // Operations: N-1s of Main for the selection, made in the operations panel (from a strip's menu, 1.6.0 B9).
   await page.goto(`${base}/#console`);
-  await page.getByRole("button", { name: "Operations" }).click();
+  const menu = async (id, item) => {
+    await page.locator(`[data-signal="${id}"]`).getByRole("button", { name: /menu$/ }).click();
+    await page.getByRole("menuitem", { name: item }).click();
+  };
+  await menu("vox", "Operations…");
   await page.getByLabel("Select Vox").check();
   await page.getByLabel("Select Guitar").check();
   await page.getByLabel("N-1 of").selectOption("main");
@@ -443,8 +447,9 @@ try {
 
   // Auto: an auto-mix of Vox and Guitar, a weight, a duck of Main under Vox. (Vox has an EQ boost near
   // its 1 kHz tone from the processing steps: it gets the larger share.)
-  await page.getByRole("button", { name: "Operations" }).click();
-  await page.getByRole("button", { name: "Auto-mix", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await menu("vox", "Auto-mix…");
+  await page.getByRole("button", { name: "Add auto-mix…" }).click();
   await page.getByLabel("New auto-mix name").fill("Panel");
   await page.getByRole("button", { name: "+ Auto-mix" }).click();
   await page.getByLabel("Vox in Panel").check();
@@ -505,7 +510,7 @@ try {
   await page.screenshot({ path: `${out}/automix.png` });
   await page.keyboard.press("Escape");
   pass("auto-mix members are tiles: out and in again, nothing moves");
-  await page.getByRole("button", { name: "Auto", exact: true }).click();
+  await menu("vox", "Auto…");
   await page.getByLabel("New duck name").fill("Bed");
   await page.getByRole("button", { name: "+ Duck" }).click();
   await page.getByLabel("Vox keys Bed").check();

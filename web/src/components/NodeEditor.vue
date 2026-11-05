@@ -8,7 +8,6 @@ import DynCurve from "./DynCurve.vue";
 import EqCurve from "./EqCurve.vue";
 import Pot from "./Pot.vue";
 import Segmented from "./Segmented.vue";
-import SurroundPad from "./SurroundPad.vue";
 import FlowNodeEditor from "./FlowNodeEditor.vue";
 import { BAND_TYPES, NODE_TYPES, PASS_BANDS, SLOPES, TAPS } from "../nodes.js";
 import { live, patchNode, signals } from "../store.js";
@@ -89,7 +88,6 @@ function toggleOptional(field, on) {
 <template>
   <div class="editor">
     <EqCurve v-if="EQ.has(node.type)" :node="node" :active="shown" @select="active = $event" @bands="set" />
-    <SurroundPad v-if="node.type === 'surround-pan'" :node="node" @change="set" />
     <FlowNodeEditor v-if="['fader', 'direct-out', 'insert'].includes(node.type)" :signal="signal" :node="node" />
     <div v-if="DYN.has(node.type)" class="row tight" style="align-items: flex-start">
       <DynCurve :node="node" :meter="meter" />

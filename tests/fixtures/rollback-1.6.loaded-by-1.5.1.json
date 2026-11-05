@@ -1,5 +1,6 @@
 {
   "chains": {
+    "amb": [],
     "aux": [],
     "bed": [
       "compressor-1"
@@ -17,11 +18,20 @@
   "dropped": [
     "buses[0].chain[0]",
     "buses[1].downmix_set",
+    "schema",
     "sends[1].tap_exact",
     "sends[2].tap_exact",
     "sends[4].tap_exact",
     "settings.downmix_set",
     "settings.downmixes",
+    "snapshots[0].signals.amb.members",
+    "snapshots[0].signals.amb.surround",
+    "snapshots[0].signals.bed.members",
+    "snapshots[0].signals.bed.surround",
+    "snapshots[0].signals.pre.members",
+    "snapshots[0].signals.pre.surround",
+    "snapshots[0].signals.vox.members",
+    "snapshots[0].signals.vox.surround",
     "strips[0].chain[0]",
     "strips[0].chain[1]",
     "strips[0].chain[1]",
@@ -29,6 +39,10 @@
     "strips[1].chain[1]",
     "strips[1].chain[1]",
     "strips[2].chain[0].key.tap_exact",
+    "strips[3].chain[0]",
+    "strips[3].members",
+    "strips[3].surround",
+    "strips[3].unlinked",
     "virtual_outputs[0].tap_exact"
   ],
   "error": null,
@@ -53,6 +67,12 @@
       "commit_samples": null,
       "format": "stereo",
       "signal": "pre",
+      "tap": "pre-fader"
+    },
+    {
+      "commit_samples": null,
+      "format": null,
+      "signal": "amb",
       "tap": "pre-fader"
     }
   ],

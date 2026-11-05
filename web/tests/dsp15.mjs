@@ -71,16 +71,16 @@ try {
     return c.id === "compressor-1" && c.threshold_db === -31 && c.ratio === 5 && c.sidechain_hpf_hz == null;
   });
   await page.screenshot({ path: `${out}/dsp15-B1-clipboard.png`, fullPage: true });
-  // Paste all is all or nothing: a second surround panner is refused, the EQ pasted before it is removed.
-  await send("POST", "/api/v1/strips/dx2/chain", { type: "surround-pan", layout: "5.1", azimuth_deg: 30 });
-  await until("a panner on Dx 2", async () => (await strip("dx2")).chain.length === 3);
+  // Paste all is all or nothing: a second auto node is refused, the EQ pasted before it is removed.
+  await send("POST", "/api/v1/strips/dx2/chain", { type: "auto" });
+  await until("an auto node on Dx 2", async () => (await strip("dx2")).chain.length === 3);
   await page.getByRole("button", { name: "Clear", exact: true }).click();
   await page.getByLabel("Copy eq-1").click();
-  await page.getByLabel("Copy surround-pan-1").click();
+  await page.getByLabel("Copy auto-1").click();
   await page.getByRole("button", { name: "Paste all" }).click();
   await page.locator(".banner", { hasText: "nothing pasted" }).waitFor();
   if ((await strip("dx2")).chain.length !== 3) throw new Error("paste all left a part behind");
-  await send("DELETE", "/api/v1/strips/dx2/chain/surround-pan-1");
+  await send("DELETE", "/api/v1/strips/dx2/chain/auto-1");
   await page.getByRole("button", { name: "Clear", exact: true }).click();
   await page.getByRole("group", { name: "Clipboard" }).waitFor({ state: "detached" });
   pass("B1: two units copied, pasted all onto another strip, one pasted onto a changed unit (its parameters), a refused paste all left nothing behind, clipboard cleared");
@@ -137,27 +137,31 @@ try {
   await page.screenshot({ path: `${out}/dsp15-B4-flow.png`, fullPage: true });
   pass("B4: flow view: send dragged after the EQ, the EQ moved behind the compressor (the send with it), direct out added and moved to the chain's start");
 
-  // B5: spread opens: the bubble moves to the centre and grows; at 100 % it covers every speaker.
-  if (!(await strip("vox")).chain.some((n) => n.type === "surround-pan")) await send("POST", "/api/v1/strips/vox/chain", { type: "surround-pan", layout: "5.1", azimuth_deg: 0 });
-  await page.getByLabel("Signal", { exact: true }).selectOption("vox");
-  const pan = (await strip("vox")).chain.find((n) => n.type === "surround-pan");
-  const bubble = page.locator("svg.surroundpad [data-bubble]").first();
+  // B5: spread opens: the bubble moves to the centre and grows; at 100 % it covers every speaker (in the
+  // strip's surround dialog since 1.6.0, A6).
+  const setPan = (body) => send("PATCH", "/api/v1/strips/vox", { surround: [{ azimuth_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100, ...body }] });
+  await setPan({});
+  await page.locator("nav button", { hasText: "Console" }).click();
+  await page.getByLabel("Vox surround pan").click();
+  const bubble = page.locator(".modal svg.surroundpad [data-bubble]").first();
   const geo = async () => ({ cx: Number(await bubble.getAttribute("cx")), cy: Number(await bubble.getAttribute("cy")), r: Number(await bubble.getAttribute("r")) });
-  await send("PATCH", `/api/v1/strips/vox/chain/${pan.id}`, { azimuth_deg: 90, spread_pct: 0 });
+  await setPan({ azimuth_deg: 90, spread_pct: 0 });
   await until("bubble at the position", async () => (await geo()).cx > 130);
-  await send("PATCH", `/api/v1/strips/vox/chain/${pan.id}`, { spread_pct: 50 });
+  await setPan({ azimuth_deg: 90, spread_pct: 50 });
   await until("bubble half way, bigger", async () => {
     const g = await geo();
     return g.cx > 100 && g.cx < 115 && g.r > 30;
   });
   await bubble.scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${out}/dsp15-B5-spread-50.png`, fullPage: true });
-  await send("PATCH", `/api/v1/strips/vox/chain/${pan.id}`, { spread_pct: 100 });
+  await setPan({ azimuth_deg: 90, spread_pct: 100 });
   await until("bubble over all speakers", async () => {
     const g = await geo();
     return Math.abs(g.cx - 80) < 0.5 && Math.abs(g.cy - 80) < 0.5 && g.r >= 63;
   });
   await page.screenshot({ path: `${out}/dsp15-B5-spread-100.png`, fullPage: true });
+  await page.keyboard.press("Escape");
+  await setPan({});
   pass("B5: spread moves the bubble from the position to the centre and grows it over every speaker");
 
   // B6: a send from mono Dx into the 5.1.4 bus: its editor has a surround panner; a click pans the send.

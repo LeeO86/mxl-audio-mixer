@@ -156,20 +156,6 @@ export const NODE_TYPES = {
       { key: "output", label: "Output", options: [["lr", "L/R"], ["ms", "M/S"]] },
     ],
   },
-  "surround-pan": {
-    label: "Surround panner",
-    group: "Spatial",
-    help: "A mono or stereo strip into 5.1, 7.1, 5.1.4 or 7.1.4: replaces the stereo panner (after the fader), so its post-pan sends feed surround buses. Height lifts it into the top speakers (5.1.4, 7.1.4).",
-    make: () => ({ type: "surround-pan", layout: "5.1", azimuth_deg: 0, elevation_deg: 0, spread_pct: 0, divergence_pct: 0, lfe_db: -100 }),
-    fields: [
-      { key: "layout", label: "Layout", options: [["5.1", "5.1"], ["7.1", "7.1"], ["5.1.4", "5.1.4"], ["7.1.4", "7.1.4"]] },
-      { key: "azimuth_deg", label: "Position", min: -180, max: 180, def: 0, fine: 0.5, digits: 0, unit: "°" },
-      { key: "elevation_deg", label: "Height", min: 0, max: 90, def: 0, fine: 0.5, digits: 0, unit: "° (90: top)", when: (n) => HEIGHT_LAYOUTS.has(n.layout) },
-      { key: "spread_pct", label: "Spread", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "%" },
-      { key: "divergence_pct", label: "Divergence", min: 0, max: 100, def: 0, fine: 0.5, digits: 0, unit: "% (C into L/R)" },
-      { key: "lfe_db", label: "LFE", min: -100, max: 10, def: -100, fine: 0.5, unit: "dB (−100: off)" },
-    ],
-  },
   oscillator: {
     label: "Oscillator",
     group: "Other",
@@ -255,8 +241,6 @@ export const channelsOf = (format) => CHANNELS[format] || 0;
 export function unsupported(n, format, strip) {
   if (n.type === "direct-out" && !strip) return "a direct out is on a strip (a bus has its bus out)";
   if (n.type === "width" && format !== "stereo") return "M/S / width needs a stereo signal";
-  if (n.type === "surround-pan" && !strip) return "the surround panner works on strips, not on buses";
-  if (n.type === "surround-pan" && format !== "mono" && format !== "stereo") return "the surround panner pans a mono or stereo strip";
   return "";
 }
 

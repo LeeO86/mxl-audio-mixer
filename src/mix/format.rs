@@ -263,6 +263,23 @@ pub fn balance_gains(b: f64) -> (f64, f64) {
     ((1.0 - b).min(1.0), (1.0 + b).min(1.0))
 }
 
+/// The per-channel gains of the L/R balance `b` of a strip wider than stereo
+/// (A5): its left channels (L, Ls, Lss, Lrs, Ltf, Ltr) and right channels as a
+/// stereo balance, the others (C, LFE) unchanged.
+pub fn balance_of(format: Format, b: f64) -> Vec<f32> {
+    let (gl, gr) = balance_gains(b);
+    format
+        .labels()
+        .iter()
+        .map(|l| match l.as_bytes() {
+            _ if *l == "LFE" => 1.0,
+            [b'L', ..] => gl as f32,
+            [b'R', ..] => gr as f32,
+            _ => 1.0,
+        })
+        .collect()
+}
+
 /// The 2 × 2 matrix (row-major: L←L, L←R, R←L, R←R) of a stereo width `w`
 /// (0 mono, 1 unchanged, 2 double side signal) followed by balance `b`.
 pub fn stereo_matrix(w: f64, b: f64) -> [f64; 4] {

@@ -213,11 +213,24 @@ fn parse<T: DeserializeOwned>(mut v: Value) -> Result<(T, Vec<Removed>), String>
 
 /// A saved mix: the mix and the paths of what was dropped (empty when it
 /// parsed as it is).
+///
+/// A mix of an older version is then brought to this one's model
+/// ([`super::upgrade`]: a 1.5 surround panner node becomes the strip's surround
+/// pan); what that changes for the operator follows the dropped paths, each
+/// starting with [`super::upgrade::NOTE`].
+///
+/// What 1.6 wrote for 1.5.1 too (exact taps, the legacy entries of direct
+/// outs, [`super::rollback`]) is undone on the JSON first.
 pub fn mix(mut v: Value) -> Result<(Mix, Vec<String>), String> {
-    // What 1.6 wrote for 1.5.1 too (exact taps, legacy direct outs) first.
     super::rollback::restore(&mut v);
-    let (mix, removed) = parse::<Mix>(v)?;
-    Ok((mix, removed.iter().map(|r| path_text(&r.at)).collect()))
+    let (mut mix, removed) = parse::<Mix>(v)?;
+    let mut dropped: Vec<String> = removed.iter().map(|r| path_text(&r.at)).collect();
+    let (notes, log) = super::upgrade::upgrade(&mut mix);
+    for n in log {
+        tracing::info!("show from an older version: {n}");
+    }
+    dropped.extend(notes);
+    Ok((mix, dropped))
 }
 
 #[cfg(test)]
@@ -396,5 +409,44 @@ mod tests {
         let back = serde_json::to_value(&m).unwrap();
         assert!(back["settings"].get("downmixes").is_none());
         assert!(back["buses"][0].get("downmix_set").is_none());
+    }
+
+    /// A 1.5.1 show with a surround panner node and a direct out: A's upgrade
+    /// (panner → the strip's surround) and the direct out's lift both apply.
+    #[test]
+    fn a_1_5_1_show_with_a_panner_and_a_direct_out() {
+        let v = json!({
+            "strips": [
+                {"id": "fx", "name": "Fx", "format": "mono", "patch": [{"input": 1, "channel": 1}], "trim_db": 0.0,
+                 "polarity": [false], "fader_db": -6.0, "mute": false, "pan": 0.0, "width": 1.0,
+                 "chain": [
+                    {"id": "eq-1", "type": "eq", "bands": [{"type": "bell", "freq_hz": 1000.0, "q": 1.0, "gain_db": 3.0}]},
+                    {"id": "surround-pan-1", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 110.0},
+                    {"id": "eq-2", "type": "eq", "bands": [{"type": "bell", "freq_hz": 2000.0, "q": 1.0, "gain_db": 1.0}]}
+                 ]}
+            ],
+            "buses": [{"id": "sur", "name": "Sur", "format": "5.1", "fader_db": 0.0, "mute": false, "compensate": true}],
+            "sends": [{"from": "fx", "to": "sur", "tap": "post-pan", "gain_db": 0.0, "mute": false, "phase": false}],
+            "outputs": [{"signal": "fx", "format": null, "commit_samples": null, "tap": {"after": "eq-2"}}]
+        });
+        let (mut m, notes) = mix(v).unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with(super::super::upgrade::NOTE)),
+            "{notes:?}"
+        );
+        assert!(m.lift_direct_outs());
+        assert_eq!(m.validate(1, 96), Ok(()));
+        let ids: Vec<&str> = m.strips[0].chain.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["eq-1", "eq-2", "out"]);
+        assert_eq!(m.strips[0].surround.len(), 1);
+        assert_eq!(m.chain_outputs()[0].key, "fx");
+        // Saved again it loads in 1.5.1 with its direct out.
+        let saved = super::super::rollback::for_saving(&m);
+        assert_eq!(
+            saved["outputs"][0],
+            json!({"signal": "fx", "format": null, "commit_samples": null, "tap": "pre-fader"})
+        );
     }
 }

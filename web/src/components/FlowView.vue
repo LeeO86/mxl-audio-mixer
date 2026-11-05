@@ -91,7 +91,7 @@ const stages = computed(() => {
     if (virtualAuto.value) st.push({ label: "Automixer", virtual: true }, { gap: "pre" });
     st.push({ label: "Fader" }, { gap: "fader" });
   } else st.push({ gap: chain.value.length });
-  if (!bus.value) st.push({ label: chain.value.some((n) => n.type === "surround-pan" && !n.bypass) ? "Surround pan" : "Pan" }, { gap: "pan" });
+  if (!bus.value) st.push({ label: "Pan" }, { gap: "pan" });
   st.push({ label: "Out" });
   return st;
 });

@@ -253,6 +253,7 @@ mod tests {
         };
         let send = |from: &str, to: &str, tap: Value| json!({"from": from, "to": to, "tap": tap, "gain_db": 0.0, "mute": false, "phase": false});
         let v = json!({
+            "schema": 16,
             "strips": [
                 strip("vox", json!([
                     {"id": "out-2", "type": "direct-out"},
@@ -268,7 +269,13 @@ mod tests {
                     {"id": "out", "type": "direct-out", "format": "stereo"},
                     {"id": "fader", "type": "fader"}
                 ])),
-                strip("bed", json!([comp]))
+                strip("bed", json!([comp])),
+                // A's 1.6 strip fields: its surround pan, members, unlinked.
+                {"id": "amb", "name": "amb", "format": "stereo", "patch": [{"input": 1, "channel": 1}, {"input": 1, "channel": 2}],
+                 "trim_db": 0.0, "polarity": [false, false], "fader_db": 0.0, "mute": false, "pan": 0.0, "width": 1.0,
+                 "surround": [{"azimuth_deg": 30.0, "spread_pct": 10.0}],
+                 "members": [{"fader_db": -3.0}, {"mute": true}], "unlinked": true,
+                 "chain": [{"id": "out", "type": "direct-out"}]}
             ],
             "buses": [
                 {"id": "main", "name": "Main", "format": "stereo", "fader_db": 0.0, "mute": false, "compensate": true,
@@ -349,7 +356,7 @@ mod tests {
         // The direct outs `out` as 1.5 outputs: after the fader → post-fader;
         // right before the fader → pre-fader.
         let outs: Vec<&Value> = saved["outputs"].as_array().unwrap().iter().collect();
-        assert_eq!(outs.len(), 4);
+        assert_eq!(outs.len(), 5);
         assert_eq!(
             outs[2],
             &json!({"signal": "vox", "format": null, "commit_samples": 480})

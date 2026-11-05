@@ -331,9 +331,11 @@ function pick(e) {
   e.stopPropagation();
   if (e.type === "pointerdown") setTarget({ signal, param: el.dataset.learn }, el);
 }
-export function startLearn() {
+/** Learn mode; `target` ({ signal, param }, from a strip's menu, B8) is picked at once. */
+export function startLearn(target = null) {
   midi.learning = true;
   midi.learnt = "";
+  if (target) setTarget(target, document.querySelector(`[data-signal="${CSS.escape(target.signal)}"] [data-learn="${target.param}"]`));
   document.body.classList.add("midi-learning");
   for (const t of ["pointerdown", "click", "dblclick"]) window.addEventListener(t, pick, true);
 }
