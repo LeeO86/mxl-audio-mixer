@@ -565,7 +565,11 @@ as `mix.json.newer` (`mix.json.newer-<seconds>` if that exists), the mixer logs 
 WARN with the dropped paths, `GET /api/v1/status` lists them in `load_warnings` and
 the UI shows a banner until dismissed. If the mix is not valid without them (e.g. a
 logic block sets a parameter of a dropped node), it goes to `mix.json.bad` as
-before. Rollbacks from 1.6 and later to 1.5 keep the mix this way; going back to
+before. The older version saves its form of the mix at once, so after going back
+to the newer one the mix is that form; when the newest `mix.json.newer*` is a 1.6
+show and `mix.json` is not, 1.6 says so in a `load_warnings` note: to take that show
+back, stop the mixer and copy the file over `mix.json` (changes made in the older
+version are then lost). Rollbacks from 1.6 and later to 1.5 keep the mix this way; going back to
 1.4.x still loses it when 1.5 features are used (see the "Downgrade" lines of the
 changelog). The API stays strict: an unknown field is an error there. Signal ids (strips and
 buses share one namespace) are 1–32 characters `a-z`, `0-9`, `-`; a new one without
@@ -595,7 +599,7 @@ an id gets `strip-<n>` or `bus-<n>`.
   moves the reads to the new strips' channels; a format change unpatches reads of
   channels that go away (with a note). Saved for a rollback
   to 1.5.1, such channels are `null` (silent there) with the exact patch in
-  `patch_exact`, which 1.6 puts back. `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
+  `patch_exact`, which 1.6 puts back from its own file (1.5.1 drops it when it saves). `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
   position; stereo and wider: balance of the left and right channels), `width` 0 … 2
   (stereo; 1 unchanged), `loudness` (measure it). A mono strip is stereo after its
   panner.

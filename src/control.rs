@@ -1580,7 +1580,15 @@ pub fn load_mix(path: &std::path::Path) -> (Mix, Vec<String>) {
     };
     let parsed = serde_json::from_str::<serde_json::Value>(&text)
         .map_err(|e| e.to_string())
-        .and_then(|mut v| crate::mix::tolerant::mix(v["mix"].take()));
+        .and_then(|mut v| {
+            let older = v["mix"].get("schema").is_none();
+            crate::mix::tolerant::mix(v["mix"].take()).map(|(mix, mut warnings)| {
+                if older {
+                    warnings.extend(kept_before_rollback(path));
+                }
+                (mix, warnings)
+            })
+        });
     match parsed {
         Ok(loaded) => loaded,
         Err(e) => {
@@ -1594,6 +1602,34 @@ pub fn load_mix(path: &std::path::Path) -> (Mix, Vec<String>) {
             (Mix::fresh(), Vec::new())
         }
     }
+}
+
+/// After a rollback and back: `mix.json` was written by an older version
+/// (no `schema`), which drops what it does not know when it loads (and saves at
+/// once), but the newest `mix.json.newer*` next to it is a show of this
+/// version. A note for `load_warnings` that names it, so the operator knows
+/// the exact show is there.
+fn kept_before_rollback(path: &std::path::Path) -> Option<String> {
+    let dir = path.parent()?;
+    let newest = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("mix.json.newer")
+        })
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .max()?
+        .1;
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&newest).ok()?).ok()?;
+    v["mix"].get("schema")?.as_u64()?;
+    let name = newest.file_name()?.to_string_lossy().into_owned();
+    Some(format!(
+        "{}mix.json was written by an older version (a rollback); the show this version saved before it is kept in {name}. What the older version does not know is not in the loaded mix (exact taps and patches, surround pans, member offsets, down-mix settings, blocks after the fader, the other direct outs and inserts). To go back to that show: stop the mixer and copy {name} over mix.json (changes made in the older version are then lost).",
+        crate::mix::upgrade::NOTE
+    ))
 }
 
 /// Keep a copy of the `mix.json` a newer version wrote, before this version
@@ -1836,6 +1872,33 @@ mod tests {
         std::fs::write(&path, v.to_string()).unwrap();
         assert_eq!(load_mix(&path), (crate::mix::Mix::fresh(), vec![]));
         assert!(!path.exists() && dir.join("mix.json.bad").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn back_from_a_rollback_names_the_kept_show() {
+        use super::load_mix;
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("mixer-back-{}", crate::history::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mix.json");
+        let older = json!({"version": 1, "mix": {"strips": [], "buses": []}});
+        std::fs::write(&path, older.to_string()).unwrap();
+        // A 1.5 show without a kept newer one: no note.
+        assert!(load_mix(&path).1.is_empty());
+        // A kept file of an older version is no 1.6 show either.
+        std::fs::write(dir.join("mix.json.newer"), older.to_string()).unwrap();
+        assert!(load_mix(&path).1.is_empty());
+        // The 1.6 show kept by the older version: named in a note.
+        let newer = json!({"version": 1, "mix": {"schema": 16, "strips": []}});
+        std::fs::write(dir.join("mix.json.newer-1"), newer.to_string()).unwrap();
+        let (_, notes) = load_mix(&path);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(crate::mix::upgrade::is_note(&notes[0]));
+        assert!(notes[0].contains("mix.json.newer-1"), "{}", notes[0]);
+        // Once this version saved mix.json (with its schema): no note.
+        std::fs::write(&path, newer.to_string()).unwrap();
+        assert!(load_mix(&path).1.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
