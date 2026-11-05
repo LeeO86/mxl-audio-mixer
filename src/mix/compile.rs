@@ -511,6 +511,8 @@ impl Build<'_> {
         let dry = self.gain(format!("{base}/dry"), shape, vec![1.0 - wet; n], src);
         let wet = self.gain(format!("{base}/wet"), shape, vec![wet; n], ret);
         let out = self.b.buffers(n);
+        // The dry and the wet path are sent (added) into it: from silence every block.
+        self.b.step(Step::Clear { dst: out });
         let coefficients = self
             .b
             .coefficients(&width_matrix(format, format, &Laws::default()));
@@ -4170,7 +4172,8 @@ mod tests {
         ]);
         let mut compiler = Compiler::default();
         let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
-        let out = run(&mut c, &inputs, 1);
+        // Several blocks: the insert's output must not add up from block to block.
+        let out = run(&mut c, &inputs, 4);
         assert!(
             (out.0[&1][0][0] - 0.5 * 0.501_187_2).abs() < 1e-6,
             "send at −6 dB"
@@ -4178,7 +4181,12 @@ mod tests {
         let h = std::f32::consts::FRAC_1_SQRT_2;
         // The return (input 2, channel 2: 0.2) at +6 dB replaces vox, plus music.
         let want = 0.2 * 1.995_262_3 * h + 0.1;
-        assert!((out.0[&3][0][0] - want).abs() < 1e-5, "{}", out.0[&3][0][0]);
+        assert_eq!(out.0[&3][0].len(), 4 * 48);
+        assert!(
+            out.0[&3][0].iter().all(|v| (v - want).abs() < 1e-5),
+            "{:?}",
+            &out.0[&3][0][..]
+        );
         let ids: Vec<&String> = c.meters.iter().map(|(k, _, _)| k).collect();
         assert!(ids.contains(&&"insert:vox/insert-1:send".to_string()));
         assert!(ids.contains(&&"insert:vox/insert-1:return".to_string()));
@@ -4188,8 +4196,10 @@ mod tests {
         m.strips[0].chain[0].bypass = true;
         let mut c = compiler.compile(&m, 48, 0, &slots, &HashMap::new());
         assert_eq!(c.structure, structure);
-        let out = run(&mut c, &inputs, 1);
-        assert!((out.0[&3][0][0] - (0.5 * h + 0.1)).abs() < 1e-6);
+        let out = run(&mut c, &inputs, 4);
+        assert!(out.0[&3][0]
+            .iter()
+            .all(|v| (v - (0.5 * h + 0.1)).abs() < 1e-6));
         assert!((out.0[&1][0][0] - 0.5 * 0.501_187_2).abs() < 1e-6);
         // An input that does not exist is refused.
         if let ProcKind::Insert { return_input, .. } = &mut m.strips[0].chain[0].kind {
