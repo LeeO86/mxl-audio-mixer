@@ -299,6 +299,43 @@ fn replace_refs(mix: &mut Mix, old: &[String], new: &[String]) {
         }
     }
     mix.control_room.sources.dedup();
+    // Strip channels that read one of them (D1): linked mono strips are the
+    // channels of the new one in order; a split strip's channel c is the new
+    // c-th mono strip. Post-pan (another width) or a tap the new strip lacks:
+    // unpatched.
+    let map = |signal: &str, channel: usize| -> Option<(String, usize)> {
+        let i = old.iter().position(|o| o == signal)?;
+        match (old.len(), new.len()) {
+            (_, 1) => Some((new[0].clone(), i + 1)),
+            (1, _) => new.get(channel - 1).map(|n| (n.clone(), 1)),
+            _ => None,
+        }
+    };
+    let mut repatched: Vec<(usize, usize, Option<super::model::Patch>)> = Vec::new();
+    for (k, st) in mix.strips.iter().enumerate() {
+        for (ch, p) in st.patch.iter().enumerate() {
+            let Some(super::model::Patch::Signal(sp)) = p else {
+                continue;
+            };
+            if !old.contains(&sp.signal) {
+                continue;
+            }
+            let point = map(&sp.signal, sp.channel)
+                .filter(|(n, _)| *n != st.id && sp.tap() != Tap::PostPan)
+                .filter(|(n, _)| mix.check_tap(n, &sp.tap()).is_ok())
+                .map(|(signal, channel)| {
+                    super::model::Patch::Signal(super::model::SignalPoint {
+                        signal,
+                        channel,
+                        tap: sp.tap.clone(),
+                    })
+                });
+            repatched.push((k, ch, point));
+        }
+    }
+    for (k, ch, p) in repatched {
+        mix.strips[k].patch[ch] = p;
+    }
     let Some(n) = first else { return };
     // A published output of one of them is the first new strip's (once).
     if let Some(o) = mix
@@ -475,6 +512,58 @@ pub fn unlink(mix: &mut Mix, strip: &str) -> Result<Made, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D1: strips that read the linked or split strips follow them.
+    #[test]
+    fn link_and_unlink_carry_the_strips_that_read_them() {
+        use crate::mix::model::SignalPoint;
+        let read = |signal: &str, channel| {
+            Some(Patch::Signal(SignalPoint {
+                signal: signal.into(),
+                tap: None,
+                channel,
+            }))
+        };
+        let mut mix = Mix::default();
+        for id in ["a", "b"] {
+            let mut s = crate::mix::model::tests::strip(id, Format::Mono);
+            s.patch[0] = patched(1, 1);
+            mix.strips.push(s);
+        }
+        let mut r = crate::mix::model::tests::strip("r", Format::Stereo);
+        r.patch = vec![read("a", 1), read("b", 1)];
+        r.polarity = vec![false; 2];
+        mix.strips.push(r);
+        let mut pp = crate::mix::model::tests::strip("pp", Format::Mono);
+        pp.patch[0] = Some(Patch::Signal(SignalPoint {
+            signal: "b".into(),
+            tap: Some(Tap::PostPan),
+            channel: 2,
+        }));
+        mix.strips.push(pp);
+        assert_eq!(mix.validate(2, 96), Ok(()));
+        let made = link(
+            &mut mix,
+            &["a".into(), "b".into()],
+            None,
+            Some("ab".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(made.strips, ["ab"]);
+        let r = mix.strip("r").unwrap();
+        assert_eq!(r.patch, vec![read("ab", 1), read("ab", 2)]);
+        assert_eq!(
+            mix.strip("pp").unwrap().patch[0],
+            None,
+            "post-pan: another width"
+        );
+        assert_eq!(mix.validate(2, 96), Ok(()));
+        unlink(&mut mix, "ab").unwrap();
+        let r = mix.strip("r").unwrap();
+        assert_eq!(r.patch, vec![read("ab-l", 1), read("ab-r", 1)]);
+        assert_eq!(mix.validate(2, 96), Ok(()));
+    }
     use crate::mix::model::Patch;
 
     fn patched(input: usize, channel: usize) -> Option<Patch> {

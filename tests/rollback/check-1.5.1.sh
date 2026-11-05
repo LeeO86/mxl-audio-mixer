@@ -27,6 +27,7 @@ fn load() {
                 "sends": mix.sends,
                 "chains": mix.chains().map(|(id, c)| (id.to_string(), c.iter().map(|p| p.id.clone()).collect::<Vec<_>>())).collect::<std::collections::BTreeMap<_, _>>(),
                 "virtual_outputs": mix.virtual_outputs,
+                "strips": mix.strips.iter().map(|s| (s.id.clone(), serde_json::to_value(&s.patch).unwrap())).collect::<std::collections::BTreeMap<_, _>>(),
             })
         }
         Err(e) => serde_json::json!({"valid": false, "error": e}),

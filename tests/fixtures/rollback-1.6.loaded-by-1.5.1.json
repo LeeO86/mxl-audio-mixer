@@ -2,10 +2,12 @@
   "chains": {
     "amb": [],
     "aux": [],
+    "back": [],
     "bed": [
       "compressor-1"
     ],
     "main": [],
+    "mixed": [],
     "pre": [
       "eq-1"
     ],
@@ -26,8 +28,12 @@
     "settings.downmixes",
     "snapshots[0].signals.amb.members",
     "snapshots[0].signals.amb.surround",
+    "snapshots[0].signals.back.members",
+    "snapshots[0].signals.back.surround",
     "snapshots[0].signals.bed.members",
     "snapshots[0].signals.bed.surround",
+    "snapshots[0].signals.mixed.members",
+    "snapshots[0].signals.mixed.surround",
     "snapshots[0].signals.pre.members",
     "snapshots[0].signals.pre.surround",
     "snapshots[0].signals.vox.members",
@@ -43,6 +49,8 @@
     "strips[3].members",
     "strips[3].surround",
     "strips[3].unlinked",
+    "strips[4].patch_exact",
+    "strips[5].patch_exact",
     "virtual_outputs[0].tap_exact"
   ],
   "error": null,
@@ -125,6 +133,47 @@
       "to": "aux"
     }
   ],
+  "strips": {
+    "amb": [
+      {
+        "channel": 1,
+        "input": 1
+      },
+      {
+        "channel": 2,
+        "input": 1
+      }
+    ],
+    "back": [
+      null,
+      null
+    ],
+    "bed": [
+      {
+        "channel": 1,
+        "input": 1
+      }
+    ],
+    "mixed": [
+      {
+        "channel": 1,
+        "input": 2
+      },
+      null
+    ],
+    "pre": [
+      {
+        "channel": 1,
+        "input": 1
+      }
+    ],
+    "vox": [
+      {
+        "channel": 1,
+        "input": 1
+      }
+    ]
+  },
   "valid": true,
   "virtual_outputs": [
     {

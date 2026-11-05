@@ -134,6 +134,16 @@ fn main() -> ExitCode {
         Ok(n) => tracing::info!("open files limit {n}"),
         Err(e) => tracing::warn!("open files limit not raised: {e}"),
     }
+    if config.numa_local {
+        match timing::leave_numa_balancing() {
+            Ok(()) => tracing::info!("memory policy local: no automatic NUMA balancing"),
+            // Worth a warning only where the DSP thread is meant to be real time.
+            Err(e) if config.rt_priority.is_some() => tracing::warn!(
+                "memory policy not set ({e}): automatic NUMA balancing may fault and move the DSP thread's pages (the container needs SYS_NICE for set_mempolicy)"
+            ),
+            Err(e) => tracing::info!("memory policy not set ({e})"),
+        }
+    }
     let workers = timing::worker_threads();
     timing::reserve_dsp_core();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -234,7 +244,15 @@ async fn run(mut config: Config) -> ExitCode {
     let configs = inputs.configs();
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::unbounded_channel::<RouteRequest>();
-    let node = match nmos::build(&config, &configs, route_tx, connections_path.clone()) {
+    // The control side, once it exists: IS-05 activations are checked against it (D1).
+    let loop_check = Arc::new(std::sync::OnceLock::new());
+    let node = match nmos::build(
+        &config,
+        &configs,
+        route_tx,
+        connections_path.clone(),
+        loop_check.clone(),
+    ) {
         Ok(node) => node,
         Err(e) => return abort(created, &config, EX_CONFIG, format!("NMOS: {e}")),
     };
@@ -315,6 +333,7 @@ async fn run(mut config: Config) -> ExitCode {
     // One change lock for the API and the logic's plan changes (D167).
     let changes = control.changes.clone();
     let control = Arc::new(Mutex::new(control));
+    let _ = loop_check.set(control.clone());
     let link_peers = Arc::new(tokio::sync::Mutex::new(
         mxl_audio_mixer::link::Peers::default(),
     ));

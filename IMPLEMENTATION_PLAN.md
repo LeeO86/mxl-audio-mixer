@@ -2567,3 +2567,34 @@ block); the model in `src/mix/model.rs` (`Strip.surround`, `members`, `unlinked`
 | D305 | The auto-mix mark (A9) is a fixed colour per auto-mix by its place in the list (8 colours), the auto-mix meter a button that toggles the member's `bypass` (A11). The VCA cap (A10) is drawn from the mix (fader plus the VCAs above, at most +15 dB), not measured. The strip menu (A3) became a dialog with B10 (D284). | No model change for a mark; `bypass` already means "out of the sharing at 0 dB". |
 | D306 | Review of #67: a mix has `schema` (16 since 1.6.0, absent before), so the upgrade runs once (it centres stale L/R pans: on converted strips and on strips wider than stereo, where pan did nothing before). Its notes go into `load_warnings` with the prefix "1.5 show: " (only a non-note entry keeps `mix.json.newer` and says "newer version"), the import answers them as `upgraded`. A send's `pan` stops the strip's panner only where it applies (`Mix::send_pan`, a mono or stereo source). A 1.5 snapshot with a bypassed panner recalls `surround: []`. Members recall by class (fader, trim, mute). Linked, a member's own mute is cleared by its button, and a value beyond the strip's range goes into that member's offset. The column sends of a wide strip stay as they are: the send skips zero coefficients, so the identity costs one multiply-add per bus channel and column. | Old shows must load audibly close and say what changed; a 1.6 show must never be "upgraded" again. |
 | D307 | Merge with B (#66): the linked multi-selection never links `surround`, `members` or `unlinked` (only B's relative and same-value fields are linked; pan never is), and "Sel" is a click selection (`pickSignal`, Shift and Ctrl too). A copy of settings (B11, D285) takes the surround panner where the formats fit (one position between mono and stereo, else the same format) and the member offsets and `unlinked` where the channel counts match; otherwise the target's go. | Pan is never linked (A13, B1); a copy is all settings. |
+
+## 1.6.0: outputs as inputs, input delay, deadline misses (D1–D3)
+
+#### What exists
+
+- `src/mix/model.rs`: `Patch::Signal` (`{"signal", "tap"?, "channel"}`) and
+  `Patch::Output` (`{"output", "channel"}`); a strip reading a signal comes after it in
+  `signal_order`, so a loop through sends, subgroups, mix-minus, keys, direct outs or
+  virtual outputs is the existing loop error (also for a logic route: it is validated
+  like every change); `carries_input` for a route to an own flow
+  (`PUT /api/v1/inputs/<n>/route`, `src/sources.rs`).
+- `src/mix/compile.rs`: the strip's channel is a unity gain from the signal's tap
+  buffer in the same block; its taps start at the highest latency it reads.
+- UI: `web/src/patchsources.js` lists buses, direct outs (post-fader, the published
+  tap, `direct-out` blocks by id) and virtual outputs per channel; `reaches` follows
+  patches.
+- `src/inputs.rs`: `DelayHold` over a window of per-second peaks; `DelayPolicy`
+  (window, margin, hold); status and metrics `worst_lag_ms`, `delay_changes`,
+  `late_events`; the D-347 simulation (`d347_replicated_flow`, ignored) and
+  `mxl-mixer-tone --jitter-ms` for the lab.
+- `src/engine/dsp.rs`, `src/timing.rs`, `src/ops.rs`: one miss per skipped block,
+  `dsp_wake_late_seconds`, the DSP thread's page faults and context switches;
+  `timing::leave_numa_balancing` in `main`.
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D310 | The automatic delay covers the worst arrival lag of the last `MIXER_INPUT_DELAY_WINDOW_S` (300 s, per-second peaks) plus `MIXER_INPUT_DELAY_MARGIN_MS` (1 ms) and `MIXER_INPUT_DELAY_MARGIN_PCT` (20 %) of that lag above the read offset. Up at once when less than half the margin is left or a block was late; down when the window's worst stayed 1 ms lower for a hold time, at most once per hold time. Start-up: 5 s window and hold for 60 s, ended by a second late event or a lag that needs about the seeded delay. Replaces the short/recurring floors of D235/D236. | D-347: a replicated flow with a long tail (p50 11, p99 20, p99.9 25 ms) lost a block for every new spike above p99.9 + 1 ms (lab and simulation: about 30 per hour at 33 ms). The worst of 5 min with a margin that grows with the lag loses under one per hour at about +9 ms (curve in the 1.6.0 notes); a local input's worst is about its p99.9 and its margin about 1 ms, so its delay stays. |
+| D311 | `dsp_deadline_misses_total` counts the blocks skipped (silence), once each; how late the thread woke is a histogram of its own. The process takes a local memory policy at start (`MIXER_NUMA_LOCAL`). | A wake more than a block late always skips the next block, which was counted too: every stall counted twice (the "pairs" of the 1.5.0 lab). The mixer's block takes ≤ 1 ms of the 2 ms in the lab: misses are the DSP thread not run in time; the new metrics tell scheduling from work, preemptions and page faults. Automatic NUMA balancing gave the DSP thread 12 000 hinting faults and moved 79 of its pages in its first minutes; with the policy none. |
+| D312 | Outputs are strip inputs inside the mix (no MXL round trip, no extra delay); a virtual output as input reads its source channel for channel (a monitor cannot feed a strip: monitors come after every signal). Loops are refused, never delayed (the owner). An input routed to an own flow that carries it is refused: at the UI route, at an IS-05 activation (the handler rejects it: 500 with the reason) and at every later mix change (`Control::stage`). Channels of one strip that arrive with different latencies are delayed to the latest. A rollback to 1.5.1 saves such channels as `null` with `patch_exact` beside (1.5.1's untagged patch cannot be repaired). An insert (C4) send → outside device → return input is never refused: the return is an MXL input, no edge of the mix, and an insert send flow is no signal of the mix. | The owner wants every output available as an input "directly"; through MXL the 1.5.1 timestamps would make such a loop raise its own delay up to the maximum. |

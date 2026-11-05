@@ -185,10 +185,18 @@ log "input 5: $ups rises and $downs falls of the automatic delay in 28 s, effect
 ((downs <= 1)) || fail "input 5: the automatic delay went down $downs times in 28 s (flapping)"
 pass "lag outliers: the automatic delay holds instead of flapping"
 
-# 1.4.2: 28 s after its start the backlog mirror (input 7) is back near its 12 ms.
+# 1.4.2: 28 s after its start the backlog mirror (input 7) is back near its 12 ms. 1.6.0
+# (D310): the delay covers the worst lag of the window plus 1 ms + 20 % of it above the read
+# offset, so "back" is: the 75 ms backlog has left the window (worst lag well below it) and the
+# delay is what that worst lag needs (on a busy runner the 12 ms writer's worst is 14-17 ms).
 d=$(input 7 extra_delay_ms)
-log "input 7 (a mirror with a 75 ms backlog at its start): delay $d ms after 28 s"
-python3 -c "import sys; sys.exit(0 if $d < 16 else 1)" || fail "input 7: the backlog's delay is still $d ms after 28 s"
+w=$(input 7 worst_lag_ms)
+log "input 7 (a mirror with a 75 ms backlog at its start): delay $d ms, worst lag $w ms after 28 s"
+python3 -c "
+import sys
+d, w = $d, $w
+need = 1 + 1.2 * max(w - 2, 0)
+sys.exit(0 if w < 30 and d <= need + 0.1 else 1)" || fail "input 7: the backlog's delay is still $d ms (worst lag $w ms) after 28 s"
 pass "a mirror starting with a backlog: the start-up phase brings its delay back within 28 s"
 
 # 1.4.1: since its third outlier input 6 lost nothing over two more.

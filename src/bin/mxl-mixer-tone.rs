@@ -19,6 +19,14 @@
 //! --catch-up R` starts X ms behind and catches up at R times real time (a
 //! mirror filling at the start).
 //!
+//! `--jitter-ms M [--jitter-sigma S] [--spikes-per-h N --spike-ms LO:HI]
+//! [--seed X]` commits every block a random time late: log-normal with median
+//! M ms and shape S (default 0.3), and N times an hour (on average) LO to HI ms
+//! more; commits stay in order, so a spike holds up the blocks after it. With
+//! `--block 210` that is a flow replicated by the fabrics agent (D-347: p50 about
+//! 11, p99 21, p99.9 25–30 ms with `--jitter-ms 8.5 --spikes-per-h 30
+//! --spike-ms 10:22`).
+//!
 //! `--ramp` writes a ramp instead, the same on every channel: sample index i
 //! carries (i mod 65536) / 131072 (exact in f32), so a reader can tell from a
 //! sample which index it was written at (`mxl-mixer-probe --ramp`).
@@ -52,7 +60,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = || -> ! {
-        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--lead-ms L] [--block B] [--commit C] [--batch N] [--late-ms X --every-s P --for-s D] [--start-behind-ms X --catch-up R] [--wav FILE [--gap-s G] [--offset-s O]] [--ramp]");
+        eprintln!("usage: mxl-mixer-tone --domain DIR --flow UUID [--domain-id UUID] [--channels N] [--delay-ms D] [--lead-ms L] [--block B] [--commit C] [--batch N] [--late-ms X --every-s P --for-s D] [--start-behind-ms X --catch-up R] [--jitter-ms M [--jitter-sigma S] [--spikes-per-h N --spike-ms LO:HI] [--seed X]] [--wav FILE [--gap-s G] [--offset-s O]] [--ramp]");
         std::process::exit(2)
     };
     let domain_dir = PathBuf::from(arg(&args, "--domain").unwrap_or_else(|| usage()));
@@ -109,6 +117,47 @@ fn main() {
         .map_or(1, |r| r.len() as u64 + gap)
         .max(1);
     let ramp = args.iter().any(|a| a == "--ramp");
+    let float = |name: &str, default: f64| -> f64 {
+        arg(&args, name)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let jitter_ms = float("--jitter-ms", 0.0);
+    let sigma = float("--jitter-sigma", 0.3);
+    let spikes_per_h = float("--spikes-per-h", 0.0);
+    let (spike_lo, spike_hi) = arg(&args, "--spike-ms")
+        .and_then(|v| {
+            let (a, b) = v.split_once(':')?;
+            Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?))
+        })
+        .unwrap_or((0.0, 0.0));
+    let mut rng: u64 = float("--seed", 1.0) as u64;
+    rng = rng.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut uniform = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    // Blocks per hour, for the chance of a spike per block.
+    let spike_p = spikes_per_h * block as f64 / (3600.0 * 48_000.0);
+    let mut jitter_ns = move || -> u64 {
+        if jitter_ms <= 0.0 && spike_p <= 0.0 {
+            return 0;
+        }
+        let (a, b) = (uniform().max(1e-300), uniform());
+        let normal = (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos();
+        let mut ms = if jitter_ms > 0.0 {
+            jitter_ms * (sigma * normal).exp()
+        } else {
+            0.0
+        };
+        if uniform() < spike_p {
+            ms += spike_lo + uniform() * (spike_hi - spike_lo);
+        }
+        (ms * 1e6) as u64
+    };
+    let mut last_commit = 0u64;
     let sample = |c: usize, index: u64| -> f32 {
         if ramp {
             return mxl_audio_mixer::timing::ramp(index);
@@ -179,7 +228,12 @@ fn main() {
         } else {
             0
         };
-        sleep_until_tai((due + delay_ns + late + behind_ns).saturating_sub(lead_ns));
+        // Commits stay in order: a late one holds up the next.
+        let at = (due + delay_ns + late + behind_ns + jitter_ns())
+            .saturating_sub(lead_ns)
+            .max(last_commit);
+        last_commit = at;
+        sleep_until_tai(at);
         // Behind by `behind_ns`, catching up at `catch_up` times real time.
         behind_ns =
             behind_ns.saturating_sub((time_of(batch * block) as f64 * (catch_up - 1.0)) as u64);

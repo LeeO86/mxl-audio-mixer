@@ -304,6 +304,12 @@ async fn route_input(
             (Some(_), None) => return Err(bad("a flow_id needs its domain_id")),
             (None, _) => None,
         };
+        if let Some((_, flow)) = route {
+            let control = app.control();
+            if let Some(why) = control.own_loop(&control.mix, input, flow) {
+                return Err(bad(why));
+            }
+        }
         let id = app
             .node
             .resource_id(ResourceType::Receiver, &receiver_key(input - 1));

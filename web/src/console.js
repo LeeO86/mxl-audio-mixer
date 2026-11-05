@@ -17,18 +17,20 @@ export function channelLabels(format) {
   return [];
 }
 
-/** Whether a patch is "linked": unpatched, or input channels in order from the first one. */
+/** Whether a patch is "linked": unpatched, or channels in order from the first one on the same input
+ * (or signal at the same tap, or virtual output: D1). */
 export function isLinked(patch) {
   if (patch.every((p) => !p)) return true;
   const first = patch[0];
-  if (!first || !("input" in first)) return false;
-  return patch.every((p, i) => p && "input" in p && p.input === first.input && p.channel === first.channel + i);
+  if (!first || "talkback" in first) return false;
+  const same = (p) => JSON.stringify({ ...p, channel: 0 }) === JSON.stringify({ ...first, channel: 0 });
+  return patch.every((p, i) => p && same(p) && p.channel === first.channel + i);
 }
 
-/** The whole patch from its first channel: the others follow in order on the same input. */
+/** The whole patch from its first channel: the others follow in order on the same source. */
 export function linkedPatch(n, first) {
   if (!first) return Array(n).fill(null);
-  return Array.from({ length: n }, (_, i) => ({ input: first.input, channel: first.channel + i }));
+  return Array.from({ length: n }, (_, i) => ({ ...first, channel: first.channel + i }));
 }
 
 /** `count` names for new strips: the name as it is for one, numbered ("Guest 1", "Guest 2") for more. */

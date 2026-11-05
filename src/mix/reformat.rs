@@ -92,6 +92,27 @@ pub fn change_format(mix: &mut Mix, id: &str, format: Format) -> Result<Vec<Stri
             ));
         }
     }
+    // Strip channels that read a channel it no longer has are unpatched (D1).
+    let mut gone = Vec::new();
+    for (k, st) in mix.strips.iter().enumerate() {
+        for (ch, p) in st.patch.iter().enumerate() {
+            if let Some(Patch::Signal(sp)) = p {
+                let n = mix.tap_format(id, &sp.tap()).map_or(0, |f| f.channels());
+                if sp.signal == id && sp.channel > n {
+                    gone.push((k, ch));
+                }
+            }
+        }
+    }
+    for (k, ch) in gone {
+        let st = &mut mix.strips[k];
+        st.patch[ch] = None;
+        notes.push(format!(
+            "strip {} channel {} read a channel {id} no longer has: unpatched",
+            st.id,
+            ch + 1
+        ));
+    }
     Ok(notes)
 }
 
@@ -145,6 +166,34 @@ mod tests {
             bypass: false,
             kind,
         }
+    }
+
+    /// D1: a reader of a channel that goes away is unpatched, with a note.
+    #[test]
+    fn readers_of_a_narrowed_signal_are_unpatched() {
+        use crate::mix::model::{Mix, SignalPoint};
+        let mut mix = Mix::default();
+        mix.buses
+            .push(crate::mix::model::tests::bus("main", Format::Stereo));
+        let mut r = crate::mix::model::tests::strip("r", Format::Stereo);
+        r.polarity = vec![false; 2];
+        r.patch = (1..=2)
+            .map(|channel| {
+                Some(Patch::Signal(SignalPoint {
+                    signal: "main".into(),
+                    tap: None,
+                    channel,
+                }))
+            })
+            .collect();
+        mix.strips.push(r);
+        let notes = change_format(&mut mix, "main", Format::Mono).unwrap();
+        assert!(
+            notes.iter().any(|n| n.contains("strip r channel 2")),
+            "{notes:?}"
+        );
+        assert!(mix.strips[0].patch[0].is_some() && mix.strips[0].patch[1].is_none());
+        assert_eq!(mix.validate(2, 96), Ok(()));
     }
 
     #[test]

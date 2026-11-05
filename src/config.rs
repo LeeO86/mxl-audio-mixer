@@ -49,9 +49,13 @@ pub const SETTINGS: &[Setting] = &[
     Setting { name: "MIXER_READ_OFFSET", default: "2", description: "Read offset in ms: every input is read at t_out − (offset + its extra delay)." },
     Setting { name: "MIXER_OUTPUT_COMMIT_SAMPLES", default: "one block", description: "Samples per MXL commit of an output (a multiple of the block size)." },
     Setting { name: "MIXER_RT_PRIORITY", default: "off", description: "SCHED_FIFO priority of the DSP thread, 1–49 (needs CAP_SYS_NICE)." },
+    Setting { name: "MIXER_NUMA_LOCAL", default: "true", description: "true: the process takes a local memory policy at start, which keeps the kernel's automatic NUMA balancing from faulting and moving the DSP thread's pages (set_mempolicy; needs CAP_SYS_NICE under the default seccomp profile)." },
     Setting { name: "MIXER_INPUT_STALL_S", default: "2", description: "An input whose head index does not move for this long is stalled and re-opened." },
     Setting { name: "MIXER_INPUT_DELAY_MAX_MS", default: "150", description: "Upper limit of an input's automatic extra delay." },
     Setting { name: "MIXER_INPUT_DELAY_HOLD_S", default: "30", description: "An automatic delay goes down only after the measured need stayed at least 1 ms lower for this long, and at most once per this time; it goes up at once." },
+    Setting { name: "MIXER_INPUT_DELAY_WINDOW_S", default: "300", description: "An automatic delay covers the worst arrival lag of this window (seconds) plus MIXER_INPUT_DELAY_MARGIN_MS: after a spike it stays up this long (plus the hold time)." },
+    Setting { name: "MIXER_INPUT_DELAY_MARGIN_MS", default: "1", description: "Added to the worst arrival lag of the window for an automatic delay, with MIXER_INPUT_DELAY_MARGIN_PCT." },
+    Setting { name: "MIXER_INPUT_DELAY_MARGIN_PCT", default: "20", description: "Also added: this share of the worst arrival lag above the read offset (a long tail gets more margin, a local input about MIXER_INPUT_DELAY_MARGIN_MS only)." },
     Setting { name: "MIXER_INPUT_DELAY_CONFIRM", default: "false", description: "true: an automatic delay change waits for operator confirmation instead of applying with a fade." },
     Setting { name: "WIDGET_FRAME_ANCESTORS", default: "'self'", description: "CSP frame-ancestors of the /widget pages; /widgets answers these origins with CORS." },
     Setting { name: "TSL_ENABLE", default: "false", description: "Listen for TSL UMD 5.0 tally (audio-follows-video)." },
@@ -142,10 +146,14 @@ pub struct Config {
     pub read_offset_samples: u32,
     pub output_commit_samples: u32,
     pub rt_priority: Option<i32>,
+    pub numa_local: bool,
     pub input_stall: Duration,
     pub input_delay_max_samples: u32,
     pub input_delay_confirm: bool,
     pub input_delay_hold: Duration,
+    pub input_delay_window: Duration,
+    pub input_delay_margin_samples: u32,
+    pub input_delay_margin_pct: f64,
     /// CSP source list for the widget pages.
     pub widget_frame_ancestors: String,
     pub tsl_enable: bool,
@@ -550,8 +558,19 @@ impl Parser<'_> {
             ));
         }
         let input_delay_confirm = self.boolean("MIXER_INPUT_DELAY_CONFIRM", false)?;
+        let numa_local = self.boolean("MIXER_NUMA_LOCAL", true)?;
         let input_delay_hold =
             Duration::from_secs_f64(self.float("MIXER_INPUT_DELAY_HOLD_S", 30.0, 0.0, 3600.0)?);
+        let input_delay_window = Duration::from_secs_f64(self.float(
+            "MIXER_INPUT_DELAY_WINDOW_S",
+            300.0,
+            1.0,
+            3600.0,
+        )?);
+        let input_delay_margin_samples =
+            ms_to_samples(self.float("MIXER_INPUT_DELAY_MARGIN_MS", 1.0, 0.0, 100.0)?);
+        let input_delay_margin_pct =
+            self.float("MIXER_INPUT_DELAY_MARGIN_PCT", 20.0, 0.0, 100.0)?;
         let widget_frame_ancestors = self
             .get("WIDGET_FRAME_ANCESTORS")
             .map(|(v, _)| v)
@@ -717,10 +736,14 @@ impl Parser<'_> {
             read_offset_samples,
             output_commit_samples,
             rt_priority,
+            numa_local,
             input_stall,
             input_delay_max_samples: ms_to_samples(delay_max_ms),
             input_delay_confirm,
             input_delay_hold,
+            input_delay_window,
+            input_delay_margin_samples,
+            input_delay_margin_pct,
             widget_frame_ancestors,
             tsl_enable,
             tsl_udp_port,
@@ -801,6 +824,7 @@ impl Config {
             ),
             "MIXER_OUTPUT_COMMIT_SAMPLES" => self.output_commit_samples.to_string(),
             "MIXER_RT_PRIORITY" => opt(self.rt_priority.map(|p| p.to_string())),
+            "MIXER_NUMA_LOCAL" => self.numa_local.to_string(),
             "MIXER_INPUT_STALL_S" => format!("{}", self.input_stall.as_secs_f64()),
             "MIXER_INPUT_DELAY_MAX_MS" => format!(
                 "{}",
@@ -808,6 +832,12 @@ impl Config {
             ),
             "MIXER_INPUT_DELAY_CONFIRM" => self.input_delay_confirm.to_string(),
             "MIXER_INPUT_DELAY_HOLD_S" => format!("{}", self.input_delay_hold.as_secs_f64()),
+            "MIXER_INPUT_DELAY_WINDOW_S" => format!("{}", self.input_delay_window.as_secs_f64()),
+            "MIXER_INPUT_DELAY_MARGIN_MS" => format!(
+                "{}",
+                f64::from(self.input_delay_margin_samples) * 1000.0 / f64::from(SAMPLE_RATE)
+            ),
+            "MIXER_INPUT_DELAY_MARGIN_PCT" => format!("{}", self.input_delay_margin_pct),
             "WIDGET_FRAME_ANCESTORS" => self.widget_frame_ancestors.clone(),
             "TSL_ENABLE" => self.tsl_enable.to_string(),
             "TSL_UDP_PORT" => self.tsl_udp_port.to_string(),

@@ -81,12 +81,45 @@ pub struct TalkbackPoint {
     pub talkback: String,
 }
 
-/// One strip channel's source: an input channel or a talkback mic.
+/// Channel `channel` (from 1) of a signal of the mix (D1, 1.6.0): a bus (its
+/// bus out) or a strip (its direct out) at `tap`, default post-fader. Read in
+/// the same block, no extra delay; a route that closes a loop is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalPoint {
+    pub signal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap: Option<Tap>,
+    pub channel: usize,
+}
+
+impl SignalPoint {
+    /// The tap read: its own, or post-fader.
+    pub fn tap(&self) -> Tap {
+        self.tap.clone().unwrap_or(Tap::PostFader)
+    }
+}
+
+/// Channel `channel` (from 1) of what feeds virtual output `output` (its key,
+/// else its slot number as text; D1, 1.6.0): its source channel for channel (a
+/// signal at its tap or an input), not the flow's re-mapped format. Without a
+/// source the channel is silent; a monitor cannot feed a strip.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputPoint {
+    pub output: String,
+    pub channel: usize,
+}
+
+/// One strip channel's source: an input channel, a talkback mic, a signal of
+/// the mix or a virtual output (D1).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Patch {
     Input(PatchPoint),
     Talkback(TalkbackPoint),
+    Signal(SignalPoint),
+    Output(OutputPoint),
 }
 
 impl From<PatchPoint> for Patch {
@@ -99,7 +132,7 @@ impl Patch {
     pub fn input(&self) -> Option<PatchPoint> {
         match self {
             Patch::Input(p) => Some(*p),
-            Patch::Talkback(_) => None,
+            _ => None,
         }
     }
 }
@@ -857,6 +890,15 @@ impl Mix {
         self.outputs.iter().find(|o| o.signal == signal)
     }
 
+    /// The id of signal `id` as the mix holds it.
+    fn signal_id(&self, id: &str) -> Option<&str> {
+        self.strips
+            .iter()
+            .map(|s| s.id.as_str())
+            .chain(self.buses.iter().map(|b| b.id.as_str()))
+            .find(|x| *x == id)
+    }
+
     /// A signal's name and format.
     pub fn signal(&self, id: &str) -> Option<(&str, Format)> {
         self.strip(id)
@@ -1064,6 +1106,14 @@ impl Mix {
             for p in s.patch.iter().flatten() {
                 let p = match p {
                     Patch::Input(p) => p,
+                    Patch::Signal(p) => {
+                        self.check_signal_point(&s.id, p)?;
+                        continue;
+                    }
+                    Patch::Output(p) => {
+                        self.check_output_point(&s.id, p)?;
+                        continue;
+                    }
                     Patch::Talkback(t) => {
                         let known = t.talkback.starts_with(super::talkback::BROWSER_PREFIX)
                             || self
@@ -1552,6 +1602,66 @@ impl Mix {
     }
 
     /// Whether `id` has `tap`.
+    /// A strip channel read from a signal (D1): it exists, is not the strip
+    /// itself, has the tap and the channel.
+    fn check_signal_point(&self, strip: &str, p: &SignalPoint) -> Result<(), String> {
+        let at = |e: String| format!("strip {strip}: input {}: {e}", p.signal);
+        if p.signal == strip {
+            return Err(at("a strip cannot read itself".into()));
+        }
+        if self.kind(&p.signal).is_none() {
+            return Err(at("no such signal".into()));
+        }
+        let tap = p.tap();
+        self.check_tap(&p.signal, &tap).map_err(at)?;
+        let n = self.tap_format(&p.signal, &tap).map_or(0, |f| f.channels());
+        if p.channel == 0 || p.channel > n {
+            return Err(at(format!("channel {} is not 1 to {n}", p.channel)));
+        }
+        Ok(())
+    }
+
+    /// A strip channel read from a virtual output (D1): a key or slot, and what
+    /// feeds it can feed a strip.
+    fn check_output_point(&self, strip: &str, p: &OutputPoint) -> Result<(), String> {
+        let at = |e: String| format!("strip {strip}: virtual output {}: {e}", p.output);
+        if p.output.is_empty() || p.output.len() > 32 {
+            return Err(at("1 to 32 characters".into()));
+        }
+        if p.channel == 0 || p.channel > crate::engine::MAX_CHANNELS {
+            return Err(at(format!(
+                "channel {} is not 1 to {}",
+                p.channel,
+                crate::engine::MAX_CHANNELS
+            )));
+        }
+        match self.virtual_source(&p.output) {
+            Some(OutputSource::Monitor { monitor, .. }) => Err(at(format!(
+                "it is fed by monitor {monitor}, and a monitor cannot feed a strip (monitors come after every signal)"
+            ))),
+            Some(OutputSource::Signal { signal, .. }) if signal == strip => Err(at(format!(
+                "it is fed by strip {strip} itself: this would close a feedback loop"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// What a strip channel reads from the mix (D1): the signal and tap of a
+    /// [`Patch::Signal`], or of the source of a [`Patch::Output`]; `None` for
+    /// inputs, talkback and virtual outputs fed otherwise.
+    pub fn patch_signal(&self, p: &Patch) -> Option<(String, Tap)> {
+        match p {
+            Patch::Signal(p) => Some((p.signal.clone(), p.tap())),
+            Patch::Output(p) => match self.virtual_source(&p.output)? {
+                OutputSource::Signal { signal, tap } => {
+                    Some((signal.clone(), tap.clone().unwrap_or(Tap::PostFader)))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn check_tap(&self, id: &str, tap: &Tap) -> Result<(), String> {
         match (self.kind(id), tap) {
             (None, _) => Err(format!("signal {id} does not exist")),
@@ -1652,6 +1762,14 @@ impl Mix {
                 feeds.entry(bus).or_default().push(s.from.as_str());
             }
         }
+        // A strip reading a signal (D1) comes after it.
+        for st in &self.strips {
+            for p in st.patch.iter().flatten() {
+                if let Some(id) = self.patch_signal(p).and_then(|(x, _)| self.signal_id(&x)) {
+                    feeds.entry(st.id.as_str()).or_default().push(id);
+                }
+            }
+        }
         for (id, chain) in self.chains() {
             for key in chain
                 .iter()
@@ -1678,7 +1796,7 @@ impl Mix {
                     cycle.push(id);
                     cycle.reverse();
                     return Err(format!(
-                        "the routing has a feedback loop without a block delay: {}",
+                        "refused: this would close a feedback loop: {} (a loop is allowed only through a send with a block delay)",
                         cycle.join(" → ")
                     ));
                 }
@@ -1706,6 +1824,91 @@ impl Mix {
         Ok(order)
     }
 
+    /// Whether a published output of `signal` (or a virtual output fed as
+    /// `source`) carries input `input` (from 1): routing that input to the
+    /// output's own MXL flow would close a loop through MXL (D1). Returns the
+    /// path from the input to the output, if any. Every send counts, also one
+    /// with a block delay (through MXL the loop still feeds itself).
+    pub fn carries_input(&self, source: &OutputSource, input: usize) -> Option<Vec<String>> {
+        let reads = |p: &Patch| match p {
+            Patch::Input(p) => p.input == input,
+            Patch::Talkback(t) => self
+                .control_room
+                .talkback
+                .mics
+                .iter()
+                .any(|m| m.id == t.talkback && m.input == input),
+            Patch::Output(o) => matches!(
+                self.virtual_source(&o.output),
+                Some(OutputSource::Input { input: i, .. }) if *i == input
+            ),
+            Patch::Signal(_) => false,
+        };
+        let mut feeds: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for s in &self.sends {
+            feeds
+                .entry(s.to.as_str())
+                .or_default()
+                .push(s.from.as_str());
+        }
+        for (bus, s) in self.mirrored() {
+            feeds.entry(bus).or_default().push(s.from.as_str());
+        }
+        for st in &self.strips {
+            for p in st.patch.iter().flatten() {
+                if let Some(id) = self.patch_signal(p).and_then(|(x, _)| self.signal_id(&x)) {
+                    feeds.entry(st.id.as_str()).or_default().push(id);
+                }
+            }
+        }
+        // Depth first from the output's signal back to a strip that reads the input.
+        fn back<'a>(
+            id: &'a str,
+            mix: &'a Mix,
+            feeds: &BTreeMap<&'a str, Vec<&'a str>>,
+            reads: &dyn Fn(&Patch) -> bool,
+            seen: &mut BTreeSet<&'a str>,
+        ) -> Option<Vec<String>> {
+            if !seen.insert(id) {
+                return None;
+            }
+            if mix
+                .strip(id)
+                .is_some_and(|s| s.patch.iter().flatten().any(reads))
+            {
+                return Some(vec![id.to_string()]);
+            }
+            for from in feeds.get(id).into_iter().flatten() {
+                if let Some(mut path) = back(from, mix, feeds, reads, seen) {
+                    path.push(id.to_string());
+                    return Some(path);
+                }
+            }
+            None
+        }
+        let signal = match source {
+            OutputSource::Input { input: i, .. } => {
+                return (*i == input).then(Vec::new);
+            }
+            OutputSource::Signal { signal, .. } => signal.clone(),
+            OutputSource::Monitor { monitor, .. } => {
+                match self
+                    .control_room
+                    .monitors
+                    .iter()
+                    .find(|m| &m.id == monitor)?
+                    .source
+                    .as_ref()?
+                {
+                    super::room::Source::Input(i) => return (*i == input).then(Vec::new),
+                    super::room::Source::Signal(s) => s.clone(),
+                }
+            }
+        };
+        let id = self.signal_id(&signal)?;
+        back(id, self, &feeds, &reads, &mut BTreeSet::new())
+    }
+
     /// Remove a signal with its sends and its output, and every reference to
     /// it: mix-minus, talkback destinations and returns, monitor sources, VCAs,
     /// mute groups, the auto setup and layouts; logic blocks that name it stay
@@ -1723,6 +1926,14 @@ impl Mix {
         self.buses.retain(|b| b.id != id);
         self.sends.retain(|s| s.from != id && s.to != id);
         self.outputs.retain(|o| o.signal != id);
+        // Strip channels that read it are unpatched (D1).
+        for s in &mut self.strips {
+            for p in &mut s.patch {
+                if matches!(p, Some(Patch::Signal(x)) if x.signal == id) {
+                    *p = None;
+                }
+            }
+        }
         self.virtual_outputs
             .retain(|r| !matches!(&r.source, OutputSource::Signal { signal, .. } if signal == id));
         self.control_room
@@ -1980,6 +2191,184 @@ pub(crate) mod tests {
             tap: None,
         });
         assert_eq!(direct.validate(4, 96), Ok(()));
+    }
+
+    /// D1: outputs as strip inputs, and every loop through them is refused.
+    #[test]
+    fn a_strip_reading_an_output_must_not_close_a_loop() {
+        let signal = |signal: &str, channel| {
+            Some(Patch::Signal(SignalPoint {
+                signal: signal.into(),
+                tap: None,
+                channel,
+            }))
+        };
+        let mut mix = Mix::default();
+        mix.buses.push(bus("main", Format::Stereo));
+        mix.buses.push(Bus {
+            subgroup: true,
+            ..bus("sub", Format::Stereo)
+        });
+        let mut a = Strip {
+            patch: vec![None, None],
+            polarity: vec![false; 2],
+            ..strip("a", Format::Stereo)
+        };
+        let mut b = a.clone();
+        b.id = "b".into();
+        a.patch = vec![signal("main", 1), signal("main", 2)];
+        mix.strips.push(a);
+        mix.strips.push(b);
+        assert_eq!(mix.validate(4, 96), Ok(()));
+        // a reads main and sends to it: refused, the message names the loop.
+        mix.sends.push(send("a", "main"));
+        let err = mix.validate(4, 96).unwrap_err();
+        assert!(
+            err.contains("feedback loop") && err.contains("a → main → a"),
+            "{err}"
+        );
+        mix.sends.clear();
+        // Through a subgroup and another strip.
+        mix.sends.push(send("main", "sub"));
+        mix.sends.push(send("sub", "b"));
+        assert!(mix.validate(4, 96).is_err(), "b is no bus");
+        mix.sends.pop();
+        mix.strips[1].patch = vec![signal("sub", 1), signal("sub", 2)];
+        mix.sends.push(send("b", "main"));
+        let err = mix.validate(4, 96).unwrap_err();
+        assert!(err.contains("feedback loop"), "{err}");
+        mix.sends.clear();
+        // Through a strip's direct out at a tap, and through a key.
+        mix.strips[1].patch = vec![signal("a", 1), None];
+        mix.strips[1].patch[0] = Some(Patch::Signal(SignalPoint {
+            signal: "a".into(),
+            tap: Some(Tap::PreFader),
+            channel: 1,
+        }));
+        mix.sends.push(send("b", "main"));
+        let err = mix.validate(4, 96).unwrap_err();
+        assert!(
+            err.contains("feedback loop") && err.contains("a → b"),
+            "{err}"
+        );
+        mix.sends.clear();
+        // Itself, a missing signal, a channel it does not have, a bad tap.
+        for (p, why) in [
+            (signal("b", 1), "cannot read itself"),
+            (signal("nope", 1), "no such signal"),
+            (signal("main", 3), "channel 3 is not 1 to 2"),
+            (
+                Some(Patch::Signal(SignalPoint {
+                    signal: "main".into(),
+                    tap: Some(Tap::PostPan),
+                    channel: 1,
+                })),
+                "post-pan",
+            ),
+        ] {
+            mix.strips[1].patch[0] = p;
+            let err = mix.validate(4, 96).unwrap_err();
+            assert!(err.contains(why), "{err}");
+        }
+        mix.strips[1].patch = vec![None, None];
+        // A virtual output: resolved to its source, loops refused too (also a
+        // source set later, as a logic route or the API would).
+        mix.strips[1].patch = vec![
+            Some(Patch::Output(OutputPoint {
+                output: "pgm".into(),
+                channel: 1,
+            })),
+            None,
+        ];
+        assert_eq!(mix.validate(4, 96), Ok(()), "no source: silent");
+        mix.sends.push(send("b", "main"));
+        mix.set_virtual_source(
+            "pgm",
+            Some(OutputSource::Signal {
+                signal: "main".into(),
+                tap: None,
+            }),
+        );
+        let err = mix.validate(4, 96).unwrap_err();
+        assert!(
+            err.contains("feedback loop") && err.contains("b → main"),
+            "{err}"
+        );
+        mix.set_virtual_source(
+            "pgm",
+            Some(OutputSource::Input {
+                input: 1,
+                format: None,
+            }),
+        );
+        assert_eq!(mix.validate(4, 96), Ok(()), "an input feeds it: no loop");
+        mix.set_virtual_source(
+            "pgm",
+            Some(OutputSource::Monitor {
+                monitor: "cr".into(),
+                feed: MonitorFeed::Clean,
+            }),
+        );
+        assert!(mix
+            .validate(4, 96)
+            .unwrap_err()
+            .contains("monitor cannot feed a strip"));
+        mix.set_virtual_source("pgm", None);
+        // Removing a signal unpatches what read it.
+        mix.strips[1].patch[1] = signal("main", 2);
+        mix.remove_signal("main");
+        assert_eq!(mix.strips[1].patch[1], None);
+        assert!(mix.strips[0].patch.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn an_input_routed_to_an_own_output_that_carries_it_is_a_loop() {
+        let mut mix = Mix::default();
+        mix.buses.push(bus("main", Format::Stereo));
+        mix.buses.push(bus("aux", Format::Stereo));
+        mix.strips.push(strip("vox", Format::Mono));
+        mix.strips[0].patch[0] = Some(
+            PatchPoint {
+                input: 2,
+                channel: 1,
+            }
+            .into(),
+        );
+        mix.sends.push(send("vox", "aux"));
+        mix.sends.push(Send {
+            block_delay: true,
+            ..send("aux", "main")
+        });
+        let main = OutputSource::Signal {
+            signal: "main".into(),
+            tap: None,
+        };
+        assert_eq!(
+            mix.carries_input(&main, 2),
+            Some(vec!["vox".into(), "aux".into(), "main".into()])
+        );
+        assert_eq!(mix.carries_input(&main, 1), None);
+        let input = OutputSource::Input {
+            input: 1,
+            format: None,
+        };
+        assert_eq!(mix.carries_input(&input, 1), Some(vec![]));
+        assert_eq!(mix.carries_input(&input, 2), None);
+    }
+
+    #[test]
+    fn patch_points_round_trip_in_json() {
+        for text in [
+            r#"{"input":1,"channel":2}"#,
+            r#"{"talkback":"desk"}"#,
+            r#"{"signal":"main","channel":1}"#,
+            r#"{"signal":"vox","tap":{"after":"eq"},"channel":1}"#,
+            r#"{"output":"pgm","channel":2}"#,
+        ] {
+            let p: Patch = serde_json::from_str(text).unwrap();
+            assert_eq!(serde_json::to_string(&p).unwrap(), text);
+        }
+        assert!(serde_json::from_str::<Patch>(r#"{"signal":"x","input":1,"channel":1}"#).is_err());
     }
 
     #[test]
