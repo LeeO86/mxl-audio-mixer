@@ -344,6 +344,39 @@ rates other than 48 kHz, recording.
   It replaces the strip's stereo panner for that send (a post-pan send then reads the
   strip before its panner); for other sources and buses it is ignored. A send with a
   block delay cannot have one (the API refuses it).
+- **The strip's surround panner (1.6.0, A6–A8):** a strip's `surround` pans its
+  post-pan sends into every 5.1, 7.1, 5.1.4 or 7.1.4 bus, each in that bus's own
+  layout (height only on 5.1.4/7.1.4), read before the strip's L/R panner, as a
+  ramped matrix per send; a send with its own `pan` keeps that, other taps and a
+  block-delay send are not panned, and every other bus gets the L/R pan. A mono or
+  stereo strip has one position (position, height, spread, divergence, LFE); a wider
+  strip one per channel, a channel without one (and every LFE) maps 1:1 through the
+  width mapping. A wider strip's matrix is one ramped column per channel (a node holds
+  at most 24 values), each summed into the bus by the send. The L/R panner itself is a
+  mono pan, a stereo balance (and width), or for wider strips a balance: the left
+  channels (L, Ls, Lss, Lrs, Ltf, Ltr) and the right ones with the stereo balance law,
+  the others unchanged. Until 1.5 the surround panner was a chain node that turned the
+  post-pan tap into its layout; a show of 1.5 loads with an active node as the strip's
+  position (the layout is dropped; a bypassed node, one on a bus and a logic
+  `set-param` on it are removed, the last listed in `load_warnings`).
+- **Unfolded strips (1.6.0, A13):** a strip of two or more channels has, per channel,
+  a member with offsets `{fader_db, trim_db, mute}` (`members`, left out while empty):
+  the channel's fader is the strip's fader plus its offset (VCAs on top, at most
+  +15 dB; an offset of −∞ silences it), its trim the strip's trim plus its offset (held
+  to ±42 dB), and a member mute silences that channel alone (after the meter, like the
+  strip's mute). They are values of the existing per-channel fader, trim and mute gain
+  nodes, so moving them never changes the plan. Linked (the default, `unlinked` false)
+  the console moves the strip's own value when a member moves, so every offset stays;
+  unlinked it moves only that member's offset. The pan is never linked (the surround
+  panner has a position per channel); the chain, its order and parameters, the sends,
+  the patch and the polarity stay one per strip. A format change resizes the members
+  (a mono strip has none) and keeps the surround panner only where it still fits.
+  Snapshots keep the members (their fader, trim and mute offsets recalled by the
+  fader, trim and mute classes) and the surround panner (pan class).
+- **Saved model version (1.6.0):** a mix carries `schema` (16); one without it (1.5
+  and older) is upgraded once when it is loaded or imported, and the operator is told
+  what sounds different (one `load_warnings` entry per converted strip, starting
+  "1.5 show: "; a banner; `upgraded` in the import's answer).
 - **Width mapping:** mono→stereo (pan law selectable: −3 dB default, −4.5, −6, 0),
   stereo→mono (sum −3 dB or −6 dB), up/down-mix for 5.1/7.1. The down-mix is
   adjustable (ITU-R BS.775 style: centre, surround and LFE levels, normalisation):
@@ -366,7 +399,7 @@ across multichannel signals, parameter smoothing.
 
 | Category | Nodes |
 | --- | --- |
-| Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (mono/stereo into 5.1/7.1/5.1.4/7.1.4: position, height on 5.1.4/7.1.4, spread, divergence, LFE), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
+| Basic | gain/trim, fader, pan/balance/width, M/S encode/decode and width (0–200 %), surround panner (since 1.6.0 the strip's, not a chain node, §5: into 5.1/7.1/5.1.4/7.1.4, position, height on 5.1.4/7.1.4, spread, divergence, LFE; wider strips per channel), phase invert, delay (samples, ms, frames), mute, polarity per channel, summing |
 | EQ | parametric EQ (up to 8 bands: bell, shelf, notch, high-pass, low-pass), high-pass/low-pass (12–48 dB/oct), **dynamic EQ** (per-band threshold/ratio/attack/release) |
 | Dynamics | compressor (feed-forward, soft knee, sidechain with filter), limiter (look-ahead, true-peak option), expander, gate (with hysteresis, hold), **de-esser** (split-band and wide-band modes, frequency 2–12 kHz, threshold, range, listen/sidechain monitor), ducker (keyed by any signal or by VAD), multiband dynamics (3–5 bands, linear-phase crossover option) |
 | Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs, **leveler** for buses and streams (below) |
@@ -614,9 +647,8 @@ new ones:
   below. A click on the fader value types a level. Sends show as values (changed in
   Routing). Strips of 8 or more channels are wider; meters above 3 channels have
   narrower bars with channel labels below (not in a strip, where the meter only tells
-  whether there is signal). A strip with a surround panner shows a top view of its
-  layout with the source (drag it: left/right, front/rear) and, on 5.1.4/7.1.4, its
-  height; one sending to a surround bus offers to add one.
+  whether there is signal). (1.5.0's surround picture in the strip was replaced in
+  1.6.0, below.)
 - 1.6.0 (B1–B11): strips are selected by a click (Shift: a range, Ctrl/⌘: one more;
   per browser). Several selected are linked: every parameter change on one moves the
   others relatively (offsets kept), on/off values (processor on/off, mute, solo, PFL)
@@ -630,6 +662,19 @@ new ones:
   + Bus, the auto-mix assignment, MIDI learn, Auto, Operations and a copy of all
   settings and the processing (not the label) to another strip or the selected
   ones; an empty console shows one empty strip and bus with their menu.
+- 1.6.0 (A1–A13): the strip shows its first channel's source; a click opens every
+  channel's source side by side with the Link switch. The name is at the very bottom
+  (two lines, then … with the full name as tooltip). The format dialog has "Change to
+  …" beside Close, in its style. The pan right above PFL/AFL is L/R only, whatever the
+  format; a strip with post-pan sends into a surround bus has a surround button that
+  opens the surround panner (§5) in a dialog, a panner per channel for wider strips and
+  "Restore 1:1"; the processing view no longer offers the panner as a block. A strip in
+  an auto-mix carries the auto-mix's colour mark (a fixed colour by its place in the
+  list), and a click on its auto-mix meter takes it out of the sharing (the member's
+  `bypass`, shown grey) and back. A strip under VCAs shows a grey "VCA" cap on its
+  fader at its position with them. "Sel" beside Mute selects the strip. A strip of two
+  or more channels unfolds (the triangle left of its format) into a fader, trim, mute
+  and meter per channel under a link bar (§5).
 
 ### 12.2 Processing chain editor
 

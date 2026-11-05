@@ -27,6 +27,7 @@ pub fn change_format(mix: &mut Mix, id: &str, format: Format) -> Result<Vec<Stri
             s.patch = adapt_patch(&s.patch, format.channels());
             s.polarity.resize(format.channels(), false);
             s.format = format;
+            s.fit_to_format();
         }
         Kind::Bus => {
             let b = mix.buses.iter_mut().find(|b| b.id == id).expect("exists");

@@ -75,6 +75,17 @@ check("copy: settings and processing, not the name, patch or format", () => {
   assert.ok(!("trim_db" in toBus));
   assert.equal(toBus.colour, "", "no colour clears the other's");
 });
+check("copy: the surround panner and member offsets where the format fits (A6–A8, A13)", () => {
+  const pos = { azimuth_deg: 30, spread_pct: 0, divergence_pct: 0, lfe_db: -100 };
+  const mono = strip("a", { format: "mono", polarity: [false], surround: [pos] });
+  assert.deepEqual(copyBody(mono, strip("b", { format: "stereo", polarity: [false, false] })).surround, [pos]);
+  assert.deepEqual(copyBody(mono, strip("c", { format: "5.1", polarity: Array(6).fill(false) })).surround, []);
+  const st = strip("d", { format: "stereo", polarity: [false, false], members: [{ fader_db: -3 }, {}], unlinked: true });
+  const body = copyBody(st, strip("e", { format: "stereo", polarity: [false, false], members: [{ mute: true }, {}] }));
+  assert.deepEqual(body.members, st.members);
+  assert.equal(body.unlinked, true);
+  assert.deepEqual(copyBody(st, strip("f", { format: "mono", polarity: [false] })).members, []);
+});
 check("click, Ctrl and Shift selection", () => {
   const order = ["a", "b", "c", "d"];
   assert.deepEqual(pickIds(["a"], "a", "c", {}, order), { ids: ["c"], anchor: "c" });

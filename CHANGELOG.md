@@ -2,6 +2,20 @@
 
 ## Unreleased — 1.6.0
 
+- **Behaviour change (A5–A7): the surround panner is no processing block any more but the strip's surround pan** (`surround` on the strip; the Panner block is gone from the add list, a new `surround-pan` node is refused with 400). It pans the strip's post-pan sends into 5.1, 7.1, 5.1.4 and 7.1.4 buses, each in that bus's own layout; every other bus, a direct out and an output get the strip's L/R pan (before: the panner's layout, down-mixed). Old shows load: an active panner node becomes the strip's surround pan (its layout is dropped, its L/R pan centred), a bypassed one is removed, a logic `set-param` on it is removed with its wires; wider strips' L/R pan (unused before) is centred. What that changes is listed per strip in `load_warnings` (entries starting "1.5 show: ": the buses that now get the L/R pan instead of the down-mix, a height lost in a bus without one, post-pan outputs that are stereo now) and in a banner; the show import answers it as `upgraded`. A mix saved by 1.6.0 carries `"schema": 16`, so this runs once. Downgrade: 1.5.x loads a 1.6 `mix.json` tolerantly without `schema`, `surround`, `members` and `unlinked` (the original kept as `mix.json.newer`): the strips pan L/R only and the member offsets are gone; its show import refuses a 1.6 show file.
+- A1: the strip shows channel 1's source; a click opens every channel's source side by side, with the Link switch.
+- A2: the name sits at the very bottom of the strip; long names wrap to two lines, then … with the full name as tooltip.
+- A3: the ⋮ menu of the first strip is no longer covered at the left edge (the menus are dialogs since B10).
+- A4: in the format dialog "Change to …" sits beside Close, in the same style.
+- A5: the pan sits right above PFL/AFL and is L/R only for every format; strips wider than stereo have a balance of their left and right channels.
+- A6: a strip whose post-pan sends feed a surround bus has a surround button: the surround panner opens in a dialog.
+- A7: the surround panner is not a processing block any more (see the behaviour change above).
+- A8: on strips wider than stereo the dialog has a panner per channel (the LFE stays 1:1); "Restore 1:1" removes them.
+- A9: a strip in an auto-mix carries the auto-mix's colour mark.
+- A10: a strip under VCAs shows a second, grey "VCA" cap on its fader where it is with them.
+- A11: a click on a strip's auto-mix meter takes it out of the sharing (grey, the member's `bypass`) and back.
+- A12: "Sel" beside Mute selects the strip.
+- A13: a strip of two or more channels unfolds (triangle left of the format) into a fader, trim, mute and meter per channel under a linked/unlinked bar: linked (default) moves all and keeps the offsets, unlinked keeps an offset per member (`members`: `fader_db`, `trim_db`, `mute`; `unlinked`); pan is never linked.
 - B1: multi-select in the console (click, Shift range, Ctrl/⌘ toggle; per browser): several selected are linked, relative (offsets from the start of a move kept; −∞ counts as −80 dB) for faders, trim, width and processing parameters (an EQ band added or removed: only that band), the same on all for mute, solo/PFL, processor on/off; pan (also the surround panner) and name not linked; menu and processing-view actions (add, move, delete a node; delete) run on all selected; new `PATCH /api/v1/signals` changes, adds nodes to and deletes several strips and buses and their solos in one mix revision (all or none). Layouts named `all`, `:inputs` or `:buses` are refused.
 - B2: strips and buses are moved by their grip (drag or arrow keys); new `POST /api/v1/{strips,buses}/<id>/move` `{"position"}`; the order is the show's, in a custom view the view's.
 - B3: views "Inputs" (only strips) and "Buses" (only buses) besides "All strips"; custom views (the show's layouts) with strips, VCAs and buses in banks, made in "Edit views…"; a custom view shows only what it places.

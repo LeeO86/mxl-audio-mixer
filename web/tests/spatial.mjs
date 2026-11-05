@@ -100,23 +100,25 @@ try {
   await page.locator(".nodecard .state-tag", { hasText: "not on" }).waitFor({ state: "detached" });
   pass("back to stereo: no flag (the node stays bypassed until switched on)");
 
-  // The surround panner on vox (mono): a click on the right of its pad pans it right.
-  await page.getByLabel("Signal", { exact: true }).selectOption("vox");
-  await page.locator(".palette .pchip", { hasText: /^Surround panner/ }).click();
-  await until("a panner on vox", async () => (await chain("vox")).some((n) => n.type === "surround-pan"));
-  const pad = page.locator("svg.surroundpad").first();
+  // The surround panner is no processing block (1.6.0, A7): it is not in the palette; vox (mono) sends
+  // to the 5.1 bus, its strip's surround dialog pans it: a click on the right of the pad pans it right.
+  if (await page.locator(".palette .pchip", { hasText: /^Surround panner/ }).count()) throw new Error("the surround panner is still a block");
+  await send("PUT", "/api/v1/sends/vox/surround", {});
+  await page.goto(`${base}/#console`);
+  await page.getByLabel("Vox surround pan").click();
+  const pad = page.getByRole("dialog", { name: "Surround pan: Vox into 5.1" }).locator("svg.surroundpad");
   await pad.waitFor();
-  await pad.scrollIntoViewIfNeeded();
   const box = await pad.boundingBox();
   await pad.click({ position: { x: box.width * 0.95, y: box.height * 0.5 } });
   const az = await until("panned right", async () => {
-    const p = (await chain("vox")).find((n) => n.type === "surround-pan");
-    if (p.azimuth_deg > 80 && p.azimuth_deg < 100) return p.azimuth_deg;
-    throw new Error(`at ${p.azimuth_deg}°`);
+    const p = (await api("/api/v1/strips/vox")).surround?.[0];
+    if (p && p.azimuth_deg > 80 && p.azimuth_deg < 100) return p.azimuth_deg;
+    throw new Error(`at ${p?.azimuth_deg}°`);
   });
-  await send("PUT", "/api/v1/sends/vox/surround", {});
+  if ((await chain("vox")).some((n) => n.type === "surround-pan")) throw new Error("a panner node");
   await page.screenshot({ path: `${out}/spatial-panner.png`, fullPage: true });
-  pass(`surround panner: added to Vox, pad clicked to ${az}°`);
+  await page.keyboard.press("Escape");
+  pass(`surround panner: Vox's strip panner (no block), pad clicked to ${az}°`);
 
   // Down-mix: the global one in Settings (a draft until Apply), a bus's own in its settings.
   await page.goto(`${base}/#settings`);

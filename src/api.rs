@@ -15,7 +15,8 @@ use serde_json::{json, Value};
 use crate::control::{fade_wait, Staged};
 use crate::mix::chain::Proc;
 use crate::mix::model::{
-    Afv, Bus, Db, Kind, MixSettings, Output, Patch, Send, Strip, Tap, DEFAULT_RAMP_MS, MAX_RAMP_MS,
+    Afv, Bus, Db, Kind, Member, MixSettings, Output, Patch, Send, Strip, SurroundPos, Tap,
+    DEFAULT_RAMP_MS, MAX_RAMP_MS,
 };
 use crate::mix::{Format, Mix};
 use crate::ops::{error, App};
@@ -373,6 +374,10 @@ pub(crate) struct StripBody {
     tally_index: Option<Option<u16>>,
     #[serde(default, deserialize_with = "present")]
     afv: Option<Option<Afv>>,
+    /// `[]` removes the surround panner (1:1 again).
+    surround: Option<Vec<Option<SurroundPos>>>,
+    members: Option<Vec<Member>>,
+    unlinked: Option<bool>,
     pub(crate) ramp_ms: Option<f64>,
 }
 
@@ -444,6 +449,15 @@ impl StripBody {
         if let Some(v) = self.loudness {
             s.loudness = v;
         }
+        if let Some(v) = self.surround {
+            s.surround = v;
+        }
+        if let Some(v) = self.members {
+            s.members = v;
+        }
+        if let Some(v) = self.unlinked {
+            s.unlinked = v;
+        }
     }
 }
 
@@ -475,6 +489,9 @@ async fn create_strip(State(app): State<App>, bytes: axum::body::Bytes) -> Respo
             mute_safe: false,
             tally_index: None,
             afv: None,
+            surround: Vec::new(),
+            members: Vec::new(),
+            unlinked: false,
         };
         b.apply(&mut s);
         let errors = apply(&app, 0, |m| {

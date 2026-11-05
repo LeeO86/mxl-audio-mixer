@@ -40,6 +40,14 @@ pub struct SignalState {
     /// Every chain node as JSON (its id, type, bypass and parameters).
     #[serde(default)]
     pub chain: Vec<Value>,
+    /// A strip's surround panner (A6–A8, the pan class); absent in snapshots of
+    /// 1.5 (a recall leaves it then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surround: Option<Vec<Option<super::model::SurroundPos>>>,
+    /// A strip's member offsets (A13; recalled by the fader, trim and mute
+    /// classes); absent before 1.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<super::model::Member>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,6 +154,8 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
                 pan: Some(s.pan),
                 width: Some(s.width),
                 chain: s.chain.iter().map(node_json).collect(),
+                surround: Some(s.surround.clone()),
+                members: Some(s.members.clone()),
             },
         );
     }
@@ -160,6 +170,8 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
                 pan: None,
                 width: None,
                 chain: b.chain.iter().map(node_json).collect(),
+                surround: None,
+                members: None,
             },
         );
     }
@@ -174,6 +186,8 @@ pub fn capture(mix: &Mix, id: String, name: String, time: u64) -> Snapshot {
                 pan: None,
                 width: None,
                 chain: Vec::new(),
+                surround: None,
+                members: None,
             },
         );
     }
@@ -319,12 +333,44 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
         if filter.class(Class::Mute) {
             s.mute = st.mute;
         }
+        // The member offsets (A13) by class: fader, trim, mute.
+        if let Some(saved) = st
+            .members
+            .as_ref()
+            .filter(|m| m.is_empty() || m.len() == s.format.channels())
+        {
+            let n = s.format.channels();
+            let mut members: Vec<_> = (0..n).map(|ch| s.member(ch)).collect();
+            let from = |ch: usize| saved.get(ch).copied().unwrap_or_default();
+            for (ch, m) in members.iter_mut().enumerate() {
+                if filter.class(Class::Fader) {
+                    m.fader_db = from(ch).fader_db;
+                }
+                if filter.class(Class::Trim) {
+                    m.trim_db = from(ch).trim_db;
+                }
+                if filter.class(Class::Mute) {
+                    m.mute = from(ch).mute;
+                }
+            }
+            let none = super::model::Member::default();
+            s.members = if members.iter().all(|m| *m == none) || n < 2 {
+                Vec::new()
+            } else {
+                members
+            };
+        }
         if filter.class(Class::Pan) {
             if let Some(p) = st.pan {
                 s.pan = p;
             }
             if let Some(w) = st.width {
                 s.width = w;
+            }
+            if let Some(p) = &st.surround {
+                if p.is_empty() || p.len() == super::model::surround_entries(s.format) {
+                    s.surround = p.clone();
+                }
             }
         }
         if filter.class(Class::Chain) {
@@ -470,6 +516,9 @@ mod tests {
             mute_safe: false,
             tally_index: None,
             afv: None,
+            surround: Vec::new(),
+            members: Vec::new(),
+            unlinked: false,
         }
         };
         let mut m = Mix::default();

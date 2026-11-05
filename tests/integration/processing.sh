@@ -192,17 +192,20 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H 'content-type: applica
 [[ "$code" == 400 ]] || fail "a +3 dB centre answered $code"
 pass "down-mix: BS.775 default, per-bus override, global change, back to the global"
 
-# A mono strip with a surround panner into a 5.1 bus: Rs at 110°, L at −30° (a
-# value change, no plan swap), the LFE send.
+# A mono strip with a surround panner (the strip's, 1.6.0) into a 5.1 bus: Rs at
+# 110°, L at −30° (a value change, no plan swap), the LFE send; a panner node is
+# refused.
 api POST /api/v1/strips '{"id": "fx", "format": "mono", "patch": [{"input": 1, "channel": 1}]}' >/dev/null
-api POST /api/v1/strips/fx/chain '{"id": "pan", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 110}' >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' "$WEB/api/v1/strips/fx/chain" -d '{"id": "pan", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 110}')
+[[ "$code" == 400 ]] || fail "a surround-pan node answered $code"
+api PATCH /api/v1/strips/fx '{"surround": [{"azimuth_deg": 110}]}' >/dev/null
 api POST /api/v1/buses '{"id": "sur", "format": "5.1"}' >/dev/null
 api PUT /api/v1/sends/fx/sur >/dev/null
 publish sur
 sleep 0.3
 probe 1 1:1:0 2:1:0 3:1:0 4:1:0 5:1:0 6:1:1
 before=$(swaps)
-api PATCH /api/v1/strips/fx/chain/pan '{"azimuth_deg": -30, "lfe_db": 0, "ramp_ms": 20}' >/dev/null
+api PATCH /api/v1/strips/fx '{"surround": [{"azimuth_deg": -30, "lfe_db": 0}], "ramp_ms": 20}' >/dev/null
 sleep 0.3
 probe 1 1:1:1 2:1:0 3:1:0 4:1:1 6:1:0
 [[ "$(swaps)" == "$before" ]] || fail "moving the panner swapped the plan"

@@ -146,6 +146,101 @@ pub struct Strip {
     pub tally_index: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub afv: Option<Afv>,
+    /// The strip's surround panner (A6–A8): how its post-pan sends into a 5.1,
+    /// 7.1, 5.1.4 or 7.1.4 bus are panned (a send's own `pan` comes first).
+    /// Empty: none, every channel 1:1 (the up- or down-mix). Mono and stereo: one
+    /// position for the whole strip; wider: one per channel, `null` keeps that
+    /// channel 1:1. Left out of the JSON while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surround: Vec<Option<SurroundPos>>,
+    /// Per strip channel, its offsets from the strip's values (A13): the
+    /// members of an unfolded strip. Empty: none. Left out of the JSON while
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<Member>,
+    /// The members are moved one by one (A13); linked (the default), a change
+    /// moves them all and keeps their offsets.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlinked: bool,
+}
+
+/// One position of a strip's surround panner (A6–A8), as the surround panner
+/// node of 1.5 (D5): 0° front centre, negative left, ±180° behind; the height
+/// (0° in the bed, 90° in the top layer; height buses only), the spread over all
+/// speakers, the centre divergence into L and R, the LFE send.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurroundPos {
+    pub azimuth_deg: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub elevation_deg: f64,
+    #[serde(default)]
+    pub spread_pct: f64,
+    #[serde(default)]
+    pub divergence_pct: f64,
+    #[serde(default = "lfe_off")]
+    pub lfe_db: f64,
+}
+
+impl SurroundPos {
+    pub fn validate(&self) -> Result<(), String> {
+        SendPan {
+            azimuth_deg: self.azimuth_deg,
+            spread_pct: self.spread_pct,
+            divergence_pct: self.divergence_pct,
+            lfe_db: self.lfe_db,
+        }
+        .validate()?;
+        let e = self.elevation_deg;
+        if e.is_finite() && (0.0..=super::chain::MAX_ELEVATION_DEG).contains(&e) {
+            Ok(())
+        } else {
+            Err(format!(
+                "pan elevation_deg must be 0 to {}, not {e}",
+                super::chain::MAX_ELEVATION_DEG
+            ))
+        }
+    }
+}
+
+/// One channel of an unfolded strip (A13): what it adds to the strip's fader
+/// (−∞ silences it) and trim, and a mute of its own. The fader and trim it
+/// gets are held to the strip's ranges.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Member {
+    #[serde(default = "zero_db", skip_serializing_if = "is_zero_db")]
+    pub fader_db: Db,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub trim_db: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mute: bool,
+}
+
+impl Default for Member {
+    fn default() -> Self {
+        Self {
+            fader_db: Db(0.0),
+            trim_db: 0.0,
+            mute: false,
+        }
+    }
+}
+
+/// Largest member offset (A13), ± dB; the fader and trim it gives are held to
+/// their ranges.
+pub const MAX_MEMBER_OFFSET_DB: f64 = 100.0;
+
+fn zero_db() -> Db {
+    Db(0.0)
+}
+
+fn is_zero_db(d: &Db) -> bool {
+    d.0 == 0.0
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// Audio-follows-video (§10.3): with `enabled`, the strip is open while its tally
@@ -214,16 +309,32 @@ pub struct Minus {
 }
 
 impl Strip {
-    /// The layout of its surround panner (D5), when one is on and can run.
-    pub fn surround_layout(&self) -> Option<Format> {
-        self.chain.iter().find_map(|p| match &p.kind {
-            super::chain::ProcKind::SurroundPan { layout, .. }
-                if !p.bypass && p.kind.supports(self.format, true).is_ok() =>
-            {
-                Some(*layout)
-            }
-            _ => None,
-        })
+    /// Channel `ch`'s offsets (A13): its member's, or none.
+    pub fn member(&self, ch: usize) -> Member {
+        self.members.get(ch).copied().unwrap_or_default()
+    }
+
+    /// The strip's trim on channel `ch` with its member's offset (A13), held to
+    /// ±[`TRIM_RANGE_DB`].
+    pub fn trim_of(&self, ch: usize) -> f64 {
+        (self.trim_db + self.member(ch).trim_db).clamp(-TRIM_RANGE_DB, TRIM_RANGE_DB)
+    }
+
+    /// Fit the surround panner and the members to the strip's format after a
+    /// format change: the members are resized, the panner kept where it still
+    /// fits (mono and stereo, or as many channels), else removed.
+    pub fn fit_to_format(&mut self) {
+        let n = self.format.channels();
+        if !self.members.is_empty() {
+            self.members.resize(n, Member::default());
+        }
+        if n == 1 {
+            self.members.clear();
+            self.unlinked = false;
+        }
+        if self.surround.len() != surround_entries(self.format) {
+            self.surround.clear();
+        }
     }
 
     /// A strip with the defaults of §5: unpatched, 0 dB, unmuted, centred.
@@ -248,8 +359,28 @@ impl Strip {
             mute_safe: false,
             tally_index: None,
             afv: None,
+            surround: Vec::new(),
+            members: Vec::new(),
+            unlinked: false,
         }
     }
+}
+
+/// How many positions a strip of `format` has in its surround panner (A8): one
+/// for mono and stereo (the whole strip), else one per channel.
+pub fn surround_entries(format: Format) -> usize {
+    match format {
+        Format::Mono | Format::Stereo => 1,
+        f => f.channels(),
+    }
+}
+
+/// Whether a bus of `format` takes a surround panner (5.1, 7.1, 5.1.4, 7.1.4).
+pub fn is_surround(format: Format) -> bool {
+    matches!(
+        format,
+        Format::Surround51 | Format::Surround71 | Format::Surround514 | Format::Surround714
+    )
 }
 
 impl Bus {
@@ -570,10 +701,35 @@ impl MixSettings {
     }
 }
 
+/// The model version of a saved mix (1.6.0): 0 (left out) for a mix of 1.5 or
+/// older, which [`super::upgrade`] brings to this one; a new mix has the
+/// current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Schema(pub u32);
+
+impl Schema {
+    /// The model of 1.6.0.
+    pub const CURRENT: Schema = Schema(16);
+
+    fn old() -> Self {
+        Schema(0)
+    }
+}
+
+impl Default for Schema {
+    fn default() -> Self {
+        Self::CURRENT
+    }
+}
+
 /// The whole mix.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Mix {
+    /// The model version (1.6.0): absent in shows of 1.5 and older.
+    #[serde(default = "Schema::old")]
+    pub schema: Schema,
     #[serde(default)]
     pub settings: MixSettings,
     #[serde(default)]
@@ -659,15 +815,9 @@ impl Mix {
             .or_else(|| self.bus(id).map(|b| (b.name.as_str(), b.format)))
     }
 
-    /// The width of `id` at `tap`: a mono strip is stereo after its panner, a
-    /// strip with a surround panner (D5) its layout.
+    /// The width of `id` at `tap`: a mono strip is stereo after its panner.
     pub fn tap_format(&self, id: &str, tap: &Tap) -> Option<Format> {
         let (_, format) = self.signal(id)?;
-        if let (Some(s), Tap::PostPan) = (self.strip(id), tap) {
-            if let Some(layout) = s.surround_layout() {
-                return Some(layout);
-            }
-        }
         Some(match (self.kind(id)?, tap, format) {
             (Kind::Strip, Tap::PostPan, Format::Mono) => Format::Stereo,
             _ => format,
@@ -677,8 +827,7 @@ impl Mix {
     /// What a send's own panner (B6) pans: the source's span tap (a strip's
     /// post-pan read before its stereo panner) and its format, mono or stereo,
     /// with the bus's surround bed (5.1 or 7.1); `None` when the send has no
-    /// panner or it does not apply (a wider source, a bus narrower than 5.1, a
-    /// strip with its own surround panner at post-pan).
+    /// panner or it does not apply (a wider source, a bus narrower than 5.1).
     pub fn send_pan(&self, send: &Send) -> Option<(SendPan, Tap, Format, Format)> {
         let pan = send.pan?;
         let bed = match self.bus(&send.to)?.format {
@@ -687,11 +836,63 @@ impl Mix {
             _ => return None,
         };
         let tap = match (self.strip(&send.from), &send.tap) {
-            (Some(s), Tap::PostPan) if s.surround_layout().is_none() => Tap::PostFader,
+            (Some(_), Tap::PostPan) => Tap::PostFader,
             _ => send.tap.clone(),
         };
         let from = self.tap_format(&send.from, &tap)?;
         matches!(from, Format::Mono | Format::Stereo).then_some((pan, tap, from, bed))
+    }
+
+    /// What the strip's surround panner (A6–A8) does to `send`: the tap it
+    /// reads (post-fader: the strip before its L/R panner), the strip's format
+    /// there and the matrix (row-major, the bus's channels × the strip's) into
+    /// the bus. `None` when it does not apply: a send that is not post-pan, has
+    /// a pan of its own that applies (B6: the strip is mono or stereo) or a
+    /// block delay, a bus that is not 5.1, 7.1,
+    /// 5.1.4 or 7.1.4, a strip without a surround panner. A channel without a
+    /// position (and every LFE) maps 1:1 as without a panner.
+    pub fn strip_surround(&self, send: &Send) -> Option<(Tap, Format, Vec<f32>)> {
+        let s = self.strip(&send.from)?;
+        let bus = self.bus(&send.to)?;
+        if s.surround.is_empty()
+            || send.tap != Tap::PostPan
+            || self.send_pan(send).is_some()
+            || send.block_delay
+            || !is_surround(bus.format)
+            || s.surround.len() != surround_entries(s.format)
+        {
+            return None;
+        }
+        let pan = |p: &SurroundPos, inputs| {
+            super::spatial::surround_pan(
+                bus.format,
+                inputs,
+                p.azimuth_deg,
+                p.spread_pct,
+                p.divergence_pct,
+                p.lfe_db,
+                p.elevation_deg,
+            )
+        };
+        let m = match (s.format, s.surround[0]) {
+            (Format::Mono | Format::Stereo, Some(p)) => pan(&p, s.format.channels()),
+            (Format::Mono | Format::Stereo, None) => return None,
+            (f, _) => {
+                let cols = f.channels();
+                let rows = bus.format.channels();
+                let mut m = super::format::width_matrix(f, bus.format, self.laws_into(&bus.id));
+                for (c, p) in s.surround.iter().enumerate() {
+                    let Some(p) = p.filter(|_| f.labels()[c] != "LFE") else {
+                        continue;
+                    };
+                    for (r, g) in pan(&p, 1).into_iter().enumerate().take(rows) {
+                        m[r * cols + c] = g;
+                    }
+                }
+                m
+            }
+        };
+        Some((Tap::PostFader, s.format, m))
     }
 
     /// The laws for what arrives at bus `to` (its down-mix override, D2).
@@ -846,6 +1047,45 @@ impl Mix {
             }
             if !(0.0..=2.0).contains(&s.width) {
                 return Err(format!("strip {}: width must be 0 to 2", s.id));
+            }
+            if !s.surround.is_empty() {
+                let want = surround_entries(s.format);
+                if s.surround.len() != want {
+                    return Err(format!(
+                        "strip {}: surround needs {want} position{} for {}",
+                        s.id,
+                        if want == 1 { "" } else { "s" },
+                        serde_json::to_string(&s.format).unwrap_or_default()
+                    ));
+                }
+                if want == 1 && s.surround[0].is_none() {
+                    return Err(format!(
+                        "strip {}: a mono or stereo strip's surround position cannot be null",
+                        s.id
+                    ));
+                }
+                for p in s.surround.iter().flatten() {
+                    p.validate()
+                        .map_err(|e| format!("strip {}: surround {e}", s.id))?;
+                }
+            }
+            if !s.members.is_empty() && (s.members.len() != n || n < 2) {
+                return Err(format!(
+                    "strip {}: members need {n} entries (one per channel) and 2 or more channels",
+                    s.id
+                ));
+            }
+            for (ch, m) in s.members.iter().enumerate() {
+                let fader_ok = m.fader_db.0 == f64::NEG_INFINITY
+                    || (-MAX_MEMBER_OFFSET_DB..=MAX_MEMBER_OFFSET_DB).contains(&m.fader_db.0);
+                if !fader_ok || !(-MAX_MEMBER_OFFSET_DB..=MAX_MEMBER_OFFSET_DB).contains(&m.trim_db)
+                {
+                    return Err(format!(
+                        "strip {}: member {} offsets must be -{MAX_MEMBER_OFFSET_DB} to {MAX_MEMBER_OFFSET_DB} dB (fader_db also -inf)",
+                        s.id,
+                        ch + 1
+                    ));
+                }
             }
         }
         self.settings.downmix.validate()?;
@@ -1356,6 +1596,9 @@ pub(crate) mod tests {
             mute_safe: false,
             tally_index: None,
             afv: None,
+            surround: Vec::new(),
+            members: Vec::new(),
+            unlinked: false,
         }
     }
 

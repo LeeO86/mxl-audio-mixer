@@ -83,19 +83,24 @@ try {
   await strip(g1).waitFor();
   pass("rename in place (Enter saves, Escape cancels); the gear opens the processing");
 
-  // C3: a linked stereo patch: input 1 channel 1 → L 1·1, R 1·2; unlinked, channel by channel.
-  await page.getByLabel("Host input", { exact: true }).selectOption("1:1");
+  // C3: a linked stereo patch: input 1 channel 1 → L 1·1, R 1·2; unlinked, channel by channel (in the
+  // input dialog of 1.6.0, A1).
+  await page.getByLabel("Host input", { exact: true }).click();
+  const inputDialog = page.getByRole("dialog", { name: "Input: Host" });
+  await inputDialog.getByLabel("Host channel 1 input").selectOption("1:1");
   await until("linked patch 1·1, 1·2", async () => {
     const p = (await api(`/api/v1/strips/${g1}`)).patch.map((x) => x && `${x.input}:${x.channel}`).join();
     if (p !== "1:1,1:2") throw new Error(`patch ${p}`);
     return true;
   });
-  await page.getByLabel("Host link channels").uncheck();
+  await inputDialog.getByLabel("Host link channels").uncheck();
   await page.waitForTimeout(300);
   const kept = (await api(`/api/v1/strips/${g1}`)).patch.map((x) => `${x.input}:${x.channel}`).join();
   if (kept !== "1:1,1:2") throw new Error(`unticking Link changed the patch: ${kept}`);
-  await page.getByLabel("Host channel 2 input").selectOption("1:1");
+  await inputDialog.getByLabel("Host channel 2 input").selectOption("1:1");
   await until("unlinked: R on 1·1", async () => (await api(`/api/v1/strips/${g1}`)).patch[1]?.channel === 1);
+  await page.keyboard.press("Escape");
+  await inputDialog.waitFor({ state: "detached" });
   pass("linked input patch: the first channel chosen, R follows; unlinked per channel");
 
   // C5: phase on a 5.1 strip: one button, a dialog with a toggle per channel, partial state.

@@ -320,11 +320,23 @@ async fn restore(State(app): State<App>, Path(id): Path<String>) -> Response {
         })
         .await?;
         let mut out = json!({"restored": id});
-        if !dropped.is_empty() {
+        let (notes, newer): (Vec<_>, Vec<_>) = dropped
+            .iter()
+            .partition(|w| crate::mix::upgrade::is_note(w));
+        if !newer.is_empty() {
             tracing::warn!(
                 "show history version {id} came from a newer version; dropped: {}",
-                dropped.join(", ")
+                newer
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
+        }
+        for n in &notes {
+            tracing::warn!("show history version {id} came from an older version: {n}");
+        }
+        if !dropped.is_empty() {
             out["dropped"] = json!(dropped);
         }
         Ok(Json(with_errors(out, errors)).into_response())

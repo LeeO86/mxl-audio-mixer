@@ -146,6 +146,16 @@ export function copyBody(from, to) {
   for (const k of keys) if (k in from) out[k] = JSON.parse(JSON.stringify(from[k]));
   if (out.colour === null || out.colour === undefined) out.colour = "";
   if (Array.isArray(from.polarity) && Array.isArray(to.polarity)) out.polarity = to.polarity.length === from.polarity.length ? [...from.polarity] : to.polarity.map(() => from.polarity.every(Boolean));
+  // A strip's surround panner and member offsets (A6–A8, A13) where they fit the target's format:
+  // one position between mono and stereo strips, else the same format; else the target's go.
+  if ("trim_db" in to) {
+    const narrow = (f) => f === "mono" || f === "stereo";
+    const fits = from.format === to.format || (narrow(from.format) && narrow(to.format));
+    out.surround = fits ? JSON.parse(JSON.stringify(from.surround || [])) : [];
+    const same = Array.isArray(to.polarity) && to.polarity.length === from.polarity?.length;
+    out.members = same ? JSON.parse(JSON.stringify(from.members || [])) : [];
+    out.unlinked = same ? !!from.unlinked : false;
+  }
   return out;
 }
 
