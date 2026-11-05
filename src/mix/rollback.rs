@@ -214,13 +214,13 @@ pub fn restore(v: &mut Value) {
     if !v.is_object() {
         return;
     }
-    for s in array(v, "sends") {
-        take_exact(s, "tap");
-    }
     for s in array(v, "strips") {
         if let Some(exact) = s.as_object_mut().and_then(|o| o.remove(PATCH_EXACT)) {
             s["patch"] = exact;
         }
+    }
+    for s in array(v, "sends") {
+        take_exact(s, "tap");
     }
     for o in array(v, "outputs") {
         take_exact(o, "tap");
@@ -280,6 +280,7 @@ mod tests {
         };
         let send = |from: &str, to: &str, tap: Value| json!({"from": from, "to": to, "tap": tap, "gain_db": 0.0, "mute": false, "phase": false});
         let v = json!({
+            "schema": 16,
             "strips": [
                 strip("vox", json!([
                     {"id": "out-2", "type": "direct-out"},
@@ -296,6 +297,13 @@ mod tests {
                     {"id": "fader", "type": "fader"}
                 ])),
                 strip("bed", json!([comp])),
+                // A's 1.6 strip fields: its surround pan, members, unlinked.
+                {"id": "amb", "name": "amb", "format": "stereo", "patch": [{"input": 1, "channel": 1}, {"input": 1, "channel": 2}],
+                 "trim_db": 0.0, "polarity": [false, false], "fader_db": 0.0, "mute": false, "pan": 0.0, "width": 1.0,
+                 "surround": [{"azimuth_deg": 30.0, "spread_pct": 10.0}],
+                 "members": [{"fader_db": -3.0}, {"mute": true}], "unlinked": true,
+                 "chain": [{"id": "out", "type": "direct-out"}]},
+                // D1: channels that read the mix (a bus, a virtual output, a tap).
                 {"id": "back", "name": "back", "format": "stereo",
                  "patch": [{"signal": "main", "channel": 1}, {"output": "1", "channel": 1}],
                  "trim_db": 0.0, "polarity": [false, false], "fader_db": 0.0, "mute": false, "pan": 0.0, "width": 1.0,
@@ -377,14 +385,14 @@ mod tests {
             json!({"after": "eq-2"})
         );
         // Channels reading the mix: null for 1.5.1, the exact patch beside.
-        let back = &saved["strips"][3];
+        let back = &saved["strips"][4];
         assert_eq!(back["patch"], json!([null, null]));
         assert_eq!(
             back[PATCH_EXACT],
             json!([{"signal": "main", "channel": 1}, {"output": "1", "channel": 1}])
         );
         assert_eq!(
-            saved["strips"][4]["patch"],
+            saved["strips"][5]["patch"],
             json!([{"input": 2, "channel": 1}, null])
         );
         assert!(saved["strips"][0].get(PATCH_EXACT).is_none());
@@ -396,7 +404,7 @@ mod tests {
         // The direct outs `out` as 1.5 outputs: after the fader → post-fader;
         // right before the fader → pre-fader.
         let outs: Vec<&Value> = saved["outputs"].as_array().unwrap().iter().collect();
-        assert_eq!(outs.len(), 4);
+        assert_eq!(outs.len(), 5);
         assert_eq!(
             outs[2],
             &json!({"signal": "vox", "format": null, "commit_samples": 480})

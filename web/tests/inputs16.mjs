@@ -39,25 +39,37 @@ try {
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(`${base}/#console`);
   await page.locator("header .pill", { hasText: /^live$/ }).waitFor();
-  const input = (id, name) => page.locator(`[data-signal="${id}"]`).getByLabel(`${name} input`);
+  // A stereo strip's input dialog (A1): every channel side by side, linked by default.
+  const dialog = async (id, name) => {
+    await page.locator(`[data-signal="${id}"]`).getByLabel(`${name} input`, { exact: true }).click();
+    const d = page.getByRole("dialog", { name: `Input: ${name}` });
+    await d.getByLabel(`${name} link channels`).waitFor();
+    return d;
+  };
+  const input = (d, name) => d.getByLabel(`${name} channel 1 input`);
 
   // The bus as input of d1-back, linked: channel 2 follows.
-  await input("d1-back", "D1 Back").selectOption({ label: "D1 Main (bus)·1" });
+  let d = await dialog("d1-back", "D1 Back");
+  await input(d, "D1 Back").selectOption({ label: "D1 Main (bus)·1" });
   const patch = await until("d1-back reads d1-main", async () => {
     const p = (await api("/api/v1/strips/d1-back")).patch;
     return p[0]?.signal === "d1-main" && p[1]?.signal === "d1-main" && p[1].channel === 2 ? p : null;
   });
   pass(`a bus as a strip input, linked: ${JSON.stringify(patch)}`);
-  await page.screenshot({ path: `${out}/amx16-d1-bus-as-input.png` });
+  await d.screenshot({ path: `${out}/amx16-d1-bus-as-input.png` });
+  await page.keyboard.press("Escape");
 
   // d1-vox feeds d1-main: as d1-vox's input that would be a loop, so the entry is greyed out.
-  const disabled = await input("d1-vox", "D1 Vox").locator("option", { hasText: "D1 Main (bus)·1" }).isDisabled();
-  if (!disabled) throw new Error("the looping entry is selectable");
-  const own = await input("d1-vox", "D1 Vox").locator("option", { hasText: "D1 Vox (direct out)·1" }).isDisabled();
-  if (!own) throw new Error("the strip's own direct out is selectable");
+  d = await dialog("d1-vox", "D1 Vox");
+  // (Read from the DOM: an <option>'s own disabled flag.)
+  const greyed = await input(d, "D1 Vox").evaluate((el) => Object.fromEntries([...el.options].map((o) => [o.text, o.disabled])));
+  if (!greyed["D1 Main (bus)·1"]) throw new Error(`the looping entry is selectable: ${JSON.stringify(greyed)}`);
+  if (!greyed["D1 Vox (direct out)·1"]) throw new Error("the strip's own direct out is selectable");
+  if (greyed["1·1"]) throw new Error("an input is greyed out");
   pass("entries that would close a loop are greyed out");
-  await input("d1-vox", "D1 Vox").focus();
+  await input(d, "D1 Vox").focus();
   await page.screenshot({ path: `${out}/amx16-d1-loop-greyed.png` });
+  await page.keyboard.press("Escape");
 
   // The server refuses it anyway (a client without the check, the API).
   const r = await send("PATCH", "/api/v1/strips/d1-vox", { patch: [{ signal: "d1-main", channel: 1 }, null] });

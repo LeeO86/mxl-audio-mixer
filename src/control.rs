@@ -863,6 +863,32 @@ impl Control {
         self.compiler.solo.clear();
     }
 
+    /// Several solos at once (a multi-selection, B1): in interlock mode the ones
+    /// set here replace the others together. Returns the solos before, for
+    /// [`Control::restore_solo`] when the change is refused.
+    pub fn set_solos(
+        &mut self,
+        changes: &BTreeMap<String, Option<crate::mix::room::SoloKind>>,
+    ) -> BTreeMap<String, crate::mix::room::SoloKind> {
+        let before = self.compiler.solo.clone();
+        if self.mix.control_room.solo.mode == crate::mix::room::SoloMode::Interlock
+            && changes.values().any(Option::is_some)
+        {
+            self.compiler.solo.clear();
+        }
+        for (signal, kind) in changes {
+            match kind {
+                Some(k) => self.compiler.solo.insert(signal.clone(), *k),
+                None => self.compiler.solo.remove(signal),
+            };
+        }
+        before
+    }
+
+    pub fn restore_solo(&mut self, solo: BTreeMap<String, crate::mix::room::SoloKind>) {
+        self.compiler.solo = solo;
+    }
+
     pub fn solo(&self) -> &BTreeMap<String, crate::mix::room::SoloKind> {
         &self.compiler.solo
     }

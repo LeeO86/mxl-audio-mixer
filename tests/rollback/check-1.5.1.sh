@@ -3,8 +3,7 @@
 # released v1.5.1 in a git worktree, runs its tolerant load and validation
 # (as at its start, src/main.rs) on tests/fixtures/rollback-1.6.json and writes
 # what it made of it to tests/fixtures/rollback-1.6.loaded-by-1.5.1.json, which
-# `cargo test` (mix::rollback) then checks: valid, the same published outputs,
-# every strip kept (channels that read the mix silent, 1.6.0 D1).
+# `cargo test` (mix::rollback) then checks: valid, the same published outputs.
 #
 #   tests/rollback/check-1.5.1.sh [worktree dir]   # needs git, cargo; no libmxl
 set -euo pipefail

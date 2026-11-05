@@ -16,12 +16,16 @@ code() { curl -s -o "$WORK/answer" -w '%{http_code}' -X "$1" -H 'content-type: a
 
 # Input 1 feeds aux: reading aux's flow on input 1 is a loop.
 c=$(code PUT "$WEB/api/v1/inputs/1/route" "{\"flow_id\": \"$FLOW\", \"domain_id\": \"$DOMAIN\"}")
-[[ "$c" == 400 ]] && grep -q "feedback loop" "$WORK/answer" || fail "UI route of input 1 to aux answered $c: $(cat "$WORK/answer")"
+if [[ "$c" != 400 ]] || ! grep -q "feedback loop" "$WORK/answer"; then
+    fail "UI route of input 1 to aux answered $c: $(cat "$WORK/answer")"
+fi
 pass "UI route: $(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['error'])" "$WORK/answer")"
 receiver=$(json "$NMOS/x-nmos/node/v1.3/receivers" "[r['id'] for r in d if r['label'] == 'Input 1'][0]")
 c=$(code PATCH "$NMOS/x-nmos/connection/v1.2/single/receivers/$receiver/staged" \
     "{\"master_enable\": true, \"activation\": {\"mode\": \"activate_immediate\"}, \"transport_params\": [{\"mxl_domain_id\": \"$DOMAIN\", \"mxl_flow_id\": \"$FLOW\"}]}")
-[[ "$c" == 500 ]] && grep -q "feedback loop" "$WORK/answer" || fail "IS-05 activation of input 1 to aux answered $c: $(cat "$WORK/answer")"
+if [[ "$c" != 500 ]] || ! grep -q "feedback loop" "$WORK/answer"; then
+    fail "IS-05 activation of input 1 to aux answered $c: $(cat "$WORK/answer")"
+fi
 pass "IS-05 activation refused (500 with the loop)"
 
 # Input 3 reads aux (no loop yet); a strip on input 3 into aux then is refused.
@@ -29,6 +33,8 @@ c=$(code PUT "$WEB/api/v1/inputs/3/route" "{\"flow_id\": \"$FLOW\", \"domain_id\
 [[ "$c" == 200 ]] || fail "route of input 3 to aux answered $c: $(cat "$WORK/answer")"
 api POST /api/v1/strips '{"id": "ret", "format": "stereo", "patch": [{"input": 3, "channel": 1}, {"input": 3, "channel": 2}]}' >/dev/null
 c=$(code PUT "$WEB/api/v1/sends/ret/aux" '{}')
-[[ "$c" == 400 ]] && grep -q "feedback loop" "$WORK/answer" || fail "send ret → aux answered $c: $(cat "$WORK/answer")"
+if [[ "$c" != 400 ]] || ! grep -q "feedback loop" "$WORK/answer"; then
+    fail "send ret → aux answered $c: $(cat "$WORK/answer")"
+fi
 pass "a later mix change that makes the own flow carry its reader is refused"
 pass loops

@@ -2,7 +2,8 @@
 // A channel fader (§12.1): drag the cap (mouse, touch, pen), − / + for 0.5 dB steps (held: repeated),
 // arrow keys (shift: 0.1 dB), Home for 0 dB, End for −∞, double-click for 0 dB. While dragged, it shows
 // its own value so pushes from the server do not make it jump. A click on the value below types a level
-// (A5): 0 or -20, then Enter (Escape keeps the fader as it is).
+// (A5): 0 or -20, then Enter (Escape keeps the fader as it is). `ghost` (dB or "-inf") draws a second,
+// grey cap labelled `ghostLabel` that cannot be moved: where the fader is with its VCAs (A10).
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { parseFaderDb } from "../console.js";
 import { FADER_MARKS, FADER_MAX_DB, dbToPos, posToDb } from "../dsp.js";
@@ -12,6 +13,8 @@ const props = defineProps({
   value: { type: [Number, String], default: 0 }, // dB or "-inf"
   label: { type: String, default: "Fader" },
   colour: { type: String, default: "" },
+  ghost: { type: [Number, String], default: null },
+  ghostLabel: { type: String, default: "VCA" },
 });
 const emit = defineEmits(["change"]);
 
@@ -28,6 +31,7 @@ watch(
 );
 const db = computed(() => drag.value ?? pending.value ?? dbValue(props.value));
 const pos = computed(() => dbToPos(db.value));
+const ghostDb = computed(() => (props.ghost === null ? null : Math.min(FADER_MAX_DB, dbValue(props.ghost))));
 const toDb = (d) => (Number.isFinite(d) ? Math.round(d * 10) / 10 : -Infinity);
 const out = (d) => (Number.isFinite(d) ? Math.round(d * 10) / 10 : "-inf");
 function send(d) {
@@ -133,6 +137,14 @@ onUnmounted(() => {
     >
       <span v-for="m in FADER_MARKS" :key="m" class="mark" :class="{ zero: m === 0 }" :style="{ bottom: `${dbToPos(m) * 100}%` }">{{ m > 0 ? `+${m}` : m }}</span>
       <span class="groove"></span>
+      <span
+        v-if="ghostDb !== null"
+        class="cap ghost"
+        :style="{ bottom: `${dbToPos(ghostDb) * 100}%` }"
+        :title="`with the ${ghostLabel}s: ${fmtDb(ghostDb)} dB`"
+        :data-ghost="Number.isFinite(ghostDb) ? ghostDb.toFixed(1) : '-inf'"
+        >{{ ghostLabel }}</span
+      >
       <span class="cap" :style="{ bottom: `${pos * 100}%`, '--cap': colour || 'var(--muted)' }"></span>
     </div>
     <button class="btn secondary step" :aria-label="`${label} down`" @pointerdown="press(-1, $event)" @pointerup="release" @pointercancel="release" @contextmenu.prevent>−</button>

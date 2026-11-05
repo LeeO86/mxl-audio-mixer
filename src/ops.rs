@@ -84,6 +84,7 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/inputs/{input}", get(input).patch(patch_input))
         .route("/api/v1/inputs/{input}/delay/confirm", post(confirm_delay))
         .merge(crate::api::routes())
+        .merge(crate::console_api::routes())
         .merge(crate::show_api::routes())
         .merge(crate::room_api::routes())
         .merge(crate::preview_api::routes())
@@ -306,6 +307,17 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
             format!("show file version {} is not supported", show.version),
         );
     }
+    let mut show = show;
+    // An older version's show in this one's model (a 1.5 surround panner node
+    // becomes the strip's surround pan); what changes is in the answer.
+    let mut upgraded = Vec::new();
+    if let Some(mix) = &mut show.mix {
+        let (notes, log) = crate::mix::upgrade::upgrade(mix);
+        for n in log.iter().chain(&notes) {
+            tracing::info!("imported show: {n}");
+        }
+        upgraded = notes;
+    }
     if let Some(mix) = &show.mix {
         let inputs = app.control().inputs.len();
         if let Err(e) = mix.validate(inputs, app.config.block_samples) {
@@ -347,6 +359,7 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
         "imported": true,
         "rejected_connections": failed.iter().map(|(_, key, reason)| json!({"key": key, "reason": reason})).collect::<Vec<_>>(),
         "output_errors": output_errors,
+        "upgraded": upgraded,
     }))
     .into_response()
 }

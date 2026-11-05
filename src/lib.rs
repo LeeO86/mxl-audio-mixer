@@ -6,6 +6,7 @@ pub mod auto;
 pub mod auto_api;
 pub mod caps;
 pub mod config;
+pub mod console_api;
 pub mod control;
 pub mod dsp;
 pub mod engine;

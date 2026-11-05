@@ -60,10 +60,10 @@ try {
   await page.locator("nav button", { hasText: "Console" }).click();
   pass(`A1: tab title "${await page.title()}", follows the tab`);
 
-  // A4: the name has the whole width; gear and menu sit in the format row.
+  // A4: the name has the whole width (at the bottom since 1.6.0, A2); gear and menu sit in the format row.
   await strip("vox").locator(".sfmt .sicon.gear").waitFor();
   await strip("vox").locator(".sfmt .fmt", { hasText: "mono" }).waitFor();
-  const head = await strip("vox").locator(".shead .sname").boundingBox();
+  const head = await strip("vox").locator(":scope > .sname").boundingBox();
   const whole = await strip("vox").locator(".shead").boundingBox();
   if (head.width < whole.width - 2) throw new Error(`name ${head.width} px of ${whole.width} px`);
   pass("A4: the name has the strip's width, gear and ⋮ in the format row");
@@ -134,26 +134,29 @@ try {
   await page.locator("nav button", { hasText: "Console" }).click();
   pass(`A2, A9: 7.1.4 strip ${Math.round(bed.width)} px with a ${Math.round(track.width)} px fader; bridge bars ${barW} px, labels below`);
 
-  // A10, A8: FX sends to a 7.1.4 bus: a surround panner from the strip, moved on its picture, lifted.
-  await strip("it-fx").getByRole("button", { name: "+ Surround pan" }).click();
-  const node = await until("a 7.1.4 surround panner on FX", async () => (await api("/api/v1/strips/it-fx/chain")).find((n) => n.type === "surround-pan" && n.layout === "7.1.4"));
-  const pad = strip("it-fx").locator(".spanmini svg");
+  // A10, A8 (in the surround dialog since 1.6.0, A6): FX sends to a 7.1.4 bus: its surround panner,
+  // moved on its picture, lifted.
+  await strip("it-fx").getByLabel("FX surround pan").click();
+  const dialog = page.getByRole("dialog", { name: "Surround pan: FX into 7.1.4" });
+  const pad = dialog.locator("svg.surroundpad");
   await pad.waitFor();
   const box = await pad.boundingBox();
+  const pos = async () => (await api("/api/v1/strips/it-fx")).surround?.[0];
   await pad.click({ position: { x: 4, y: box.height / 2 } });
   await until("FX panned left", async () => {
-    const n = (await api("/api/v1/strips/it-fx/chain")).find((x) => x.id === node.id);
-    return n.azimuth_deg < -80 && n.azimuth_deg > -100 ? n : null;
+    const p = await pos();
+    return p && p.azimuth_deg < -80 && p.azimuth_deg > -100 ? p : null;
   });
   await pad.click({ position: { x: box.width / 2, y: box.height - 3 } });
-  await until("FX panned to the rear", async () => Math.abs((await api("/api/v1/strips/it-fx/chain")).find((x) => x.id === node.id).azimuth_deg) > 170);
-  await strip("it-fx").locator(".spanmini input[type=range]").fill("45");
-  await until("FX 45° up", async () => (await api("/api/v1/strips/it-fx/chain")).find((x) => x.id === node.id).elevation_deg === 45);
+  await until("FX panned to the rear", async () => Math.abs((await pos()).azimuth_deg) > 170);
+  await dialog.getByRole("slider", { name: "Height" }).fill("45");
+  await until("FX 45° up", async () => (await pos()).elevation_deg === 45);
   await page.waitForTimeout(500);
   const ready = (await api("/api/v1/status")).readiness;
   if (!ready.engine_running) throw new Error("the DSP stopped with a stereo 7.1.4 panner");
-  await strip("it-fx").screenshot({ path: `${out}/console15-surround.png` });
-  pass("A8, A10: + Surround pan into 7.1.4 from the strip, left and rear on its picture, height 45°; the DSP runs");
+  await dialog.screenshot({ path: `${out}/console15-surround.png` });
+  await page.keyboard.press("Escape");
+  pass("A8, A10: the surround panner into 7.1.4 from the strip, left and rear on its picture, height 45°; the DSP runs");
 
   await page.screenshot({ path: `${out}/console15.png` });
   if (errors.length) throw new Error(`page errors: ${errors.join("; ")}`);

@@ -279,15 +279,21 @@ async fn run(mut config: Config) -> ExitCode {
     let (saved_mix, dropped) = control::load_mix(&mix_path);
     let staged = match control.stage(saved_mix, 0) {
         Ok(s) => {
-            if !dropped.is_empty() {
+            let (notes, newer): (Vec<_>, Vec<_>) = dropped
+                .iter()
+                .partition(|w| mxl_audio_mixer::mix::upgrade::is_note(w));
+            if !newer.is_empty() {
                 let kept = control::keep_newer(&mix_path)
                     .map_or_else(|e| format!("not kept: {e}"), |p| p.display().to_string());
                 tracing::warn!(
                     "the saved mix came from a newer version; loaded without what this version does not know (original: {kept}); dropped: {}",
-                    dropped.join(", ")
+                    newer.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
                 );
-                control.load_warnings = dropped;
             }
+            for n in &notes {
+                tracing::warn!("the saved mix came from an older version: {n}");
+            }
+            control.load_warnings = dropped;
             s
         }
         Err(e) => {
