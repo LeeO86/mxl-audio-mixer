@@ -1,44 +1,63 @@
 <script setup>
-// The console (§12.1): strips in banks or in a layout's pages, the buses and the VCAs beside them, the
+// The console (§12.1): strips in banks or in a view's banks, the buses and the VCAs beside them, the
 // mute groups in the toolbar. A strip's gear or chain opens its processing; a VCA's spill shows only its
 // members. A divider between the strips and the buses sets how wide each side is (C2); each scrolls on
-// its own.
-import { computed, nextTick, onUnmounted, ref, watch } from "vue";
+// its own. 1.6.0: the view and bank choice sit next to the tabs (B4); besides "All strips" a view of only
+// the input strips, one of only the buses, and the show's custom views (B3, ViewEditor); strips and
+// buses are dragged by their grip into another place (B2: the show's order; in a custom view, the
+// view's); a click selects strips, Shift a range, Ctrl one more (B1); the strip and bus menus hold what
+// the toolbar had (B5–B9), as dialogs (B10).
+import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import AutomationPanel from "./AutomationPanel.vue";
 import AutomixPanel from "./AutomixPanel.vue";
 import GroupsPanel from "./GroupsPanel.vue";
 import MidiPanel from "./MidiPanel.vue";
+import Modal from "./Modal.vue";
 import OperationsPanel from "./OperationsPanel.vue";
 import RemoteDesk from "./RemoteDesk.vue";
 import Segmented from "./Segmented.vue";
 import Strip from "./Strip.vue";
+import StripMenu from "./StripMenu.vue";
 import VcaStrip from "./VcaStrip.vue";
-import { SCALES } from "../dsp.js";
+import ViewEditor from "./ViewEditor.vue";
 import { api } from "../api.js";
 import { numbered } from "../console.js";
+import { consoleUi } from "../consoleui.js";
 import { midi, stopLearn, targetText } from "../midi.js";
-import { act, buses, live, muteGroups, patchMuteGroup, select, spill, store, stored, strips, vcaOf, vcaSignals, vcas } from "../store.js";
+import { act, buses, clearSelection, live, muteGroups, patchMuteGroup, select, selection, spill, store, stored, strips, vcaOf, vcaSignals, vcas } from "../store.js";
 
 const emit = defineEmits(["open"]);
 
-const view = ref(stored("console.view", "all")); // "all" or a layout name
+// The view (per browser): "all", ":inputs", ":buses" or a custom view's name (the show's layouts).
+const view = ref(stored("console.view", "all"));
 const page = ref(Number(stored("console.page", 0)) || 0);
 const bankSize = ref(Number(stored("console.bank", 16)) || 16);
-const scale = ref(stored("meter.scale", "dbfs"));
 const alignment = ref(Number(stored("meter.alignment", -18)));
 watch(view, (v) => (store("console.view", v), (page.value = 0)));
 watch(page, (v) => store("console.page", v));
 watch(bankSize, (v) => (store("console.bank", v), (page.value = 0)));
-watch(scale, (v) => store("meter.scale", v));
+const scale = computed(() => consoleUi.scale);
 
 const layouts = computed(() => live.mix?.layouts || []);
 const layout = computed(() => layouts.value.find((l) => l.name === view.value) || null);
-const viewOptions = computed(() => [{ value: "all", label: "All strips" }, ...layouts.value.map((l) => ({ value: l.name, label: l.name }))]);
-const banks = computed(() => Math.max(1, Math.ceil(strips.value.length / bankSize.value)));
+const onlyBuses = computed(() => view.value === ":buses");
+const onlyInputs = computed(() => view.value === ":inputs");
+const viewOptions = computed(() => [
+  { value: "all", label: "All strips" },
+  { value: ":inputs", label: "Inputs", title: "only the input strips" },
+  { value: ":buses", label: "Buses", title: "only the buses" },
+  ...layouts.value.map((l) => ({ value: l.name, label: l.name, title: "a custom view (the show's)" })),
+]);
+// A view that is gone (deleted by another operator) falls back to all strips.
+watch(layouts, () => {
+  if (!["all", ":inputs", ":buses"].includes(view.value) && !layout.value && live.mix) view.value = "all";
+});
+const banked = computed(() => (onlyBuses.value ? buses.value : strips.value));
+const banks = computed(() => Math.max(1, Math.ceil(banked.value.length / bankSize.value)));
 const pageOptions = computed(() =>
   layout.value
     ? layout.value.pages.map((p, i) => ({ value: i, label: p.name }))
-    : Array.from({ length: banks.value }, (_, i) => ({ value: i, label: `${i * bankSize.value + 1}–${Math.min(strips.value.length, (i + 1) * bankSize.value)}` })),
+    : Array.from({ length: banks.value }, (_, i) => ({ value: i, label: banked.value.length ? `${i * bankSize.value + 1}–${Math.min(banked.value.length, (i + 1) * bankSize.value)}` : "–" })),
 );
 const byId = (id) => strips.value.find((s) => s.id === id) || buses.value.find((b) => b.id === id) || vcaOf(id);
 const isVcaId = (id) => !!vcaOf(id);
@@ -52,10 +71,68 @@ const shown = computed(() => {
     const p = layout.value.pages[Math.min(page.value, layout.value.pages.length - 1)];
     return (p?.signals || []).map(byId).filter(Boolean);
   }
-  return strips.value.slice(page.value * bankSize.value, (page.value + 1) * bankSize.value);
+  return banked.value.slice(page.value * bankSize.value, (page.value + 1) * bankSize.value);
 });
 const isBusId = (id) => buses.value.some((b) => b.id === id);
-const shownBuses = computed(() => buses.value.filter((b) => !shown.value.includes(b)));
+// The buses and VCAs beside the strips: in "All strips" only (a custom view places them itself).
+const besides = computed(() => view.value === "all");
+const shownBuses = computed(() => (besides.value && !spilled.value ? buses.value.filter((b) => !shown.value.includes(b)) : []));
+const shownVcas = computed(() => (besides.value || spilled.value ? vcas.value : []));
+// The console's order, for a Shift-click range (B1).
+watchEffect(() => (selection.order = [...shown.value, ...shownBuses.value].map((x) => x.id)));
+const selectedCount = computed(() => selection.ids.filter((id) => byId(id)).length);
+
+// Moving a strip or bus (B2) by its grip, with the mouse or a finger: dropped on another one, it takes
+// that one's place. In a custom view the view's bank changes; otherwise the show's order of the strips
+// (or buses).
+const moving = ref(null); // { id, over }
+function gripDown(e, id) {
+  moving.value = { id, over: "" };
+  e.target.setPointerCapture?.(e.pointerId);
+  e.preventDefault();
+}
+function gripMove(e) {
+  if (!moving.value) return;
+  const el = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-slot]");
+  moving.value.over = el && el.dataset.slot !== moving.value.id ? el.dataset.slot : "";
+}
+async function gripUp() {
+  const m = moving.value;
+  moving.value = null;
+  if (m?.over) await moveTo(m.id, m.over);
+}
+function gripKey(e, id) {
+  const list = (isBusId(id) && besides.value && !layout.value ? shownBuses.value : shown.value).map((x) => x.id);
+  const i = list.indexOf(id);
+  const to = e.key === "ArrowLeft" ? list[i - 1] : e.key === "ArrowRight" ? list[i + 1] : null;
+  if (!to) return;
+  e.preventDefault();
+  moveTo(id, to);
+}
+async function moveTo(id, over) {
+  if (layout.value) {
+    const layoutsNew = JSON.parse(JSON.stringify(layouts.value));
+    const l = layoutsNew.find((x) => x.name === layout.value.name);
+    const p = l.pages[Math.min(page.value, l.pages.length - 1)];
+    const from = p.signals.indexOf(id);
+    const to = p.signals.indexOf(over);
+    if (from < 0 || to < 0) return;
+    p.signals.splice(from, 1);
+    p.signals.splice(to, 0, id);
+    await act(() => api.put("/api/v1/layouts", layoutsNew));
+    return;
+  }
+  const bus = isBusId(id);
+  if (bus !== isBusId(over)) return (live.notice = "A strip moves among the strips, a bus among the buses.");
+  const list = bus ? buses.value : strips.value;
+  const position = list.findIndex((x) => x.id === over);
+  if (position >= 0) await act(() => api.post(`/api/v1/${bus ? "buses" : "strips"}/${encodeURIComponent(id)}/move`, { position }));
+}
+onUnmounted(() => {
+  moving.value = null;
+  consoleUi.panel = "";
+});
+const editingViews = ref(false);
 
 // New strips or buses: several at once get numbered names and ids (C6); the first new one is selected
 // and shown (C4).
@@ -90,8 +167,8 @@ async function add() {
 }
 /** Shows a signal: the bank with a new strip (in "All strips"), then scrolls it into view. */
 async function reveal(id) {
-  if (kind(id) === "strip" && !layout.value && !spilled.value) {
-    const at = strips.value.findIndex((s) => s.id === id);
+  if (!layout.value && !spilled.value && (kind(id) === "bus") === onlyBuses.value) {
+    const at = banked.value.findIndex((s) => s.id === id);
     if (at >= 0) page.value = Math.floor(at / bankSize.value);
   }
   // The mix with the new signal comes on the WebSocket: wait for it to be drawn.
@@ -137,41 +214,43 @@ function dragKey(e) {
 }
 onUnmounted(dragEnd);
 const FORMATS = ["mono", "stereo", "3.0", "5.1", "7.1", "5.1.4", "7.1.4"];
-const editingGroups = ref(false);
-const operating = ref(false);
-const automating = ref(false);
-const automixing = ref(false);
-const midiOpen = ref(false);
+// The dialogs a menu opens (B6–B9): consoleUi.add for a new strip or bus, consoleUi.panel for the rest.
+watch(
+  () => consoleUi.add,
+  (k) => k && startAdd(k),
+);
+watch(adding, (k) => (consoleUi.add = k));
+const panelOpen = (p) => consoleUi.panel === p;
+const togglePanel = (p) => (consoleUi.panel = consoleUi.panel === p ? "" : p);
+const closePanel = () => (consoleUi.panel = "");
+// The menu of an empty side (B6): a placeholder strip with its menu.
+const emptyMenu = ref(""); // "strip" or "bus"
 </script>
 
 <template>
-  <div class="toolbar">
+  <Teleport to="#tabtools" defer>
     <div class="group">
       <span class="caption">View</span>
       <Segmented v-model="view" :options="viewOptions" label="Console view" />
+      <button class="btn small secondary" title="custom views: strips, VCAs and buses in banks" data-edit-views @click="editingViews = true">Edit views…</button>
     </div>
     <div class="group">
-      <span class="caption">{{ layout ? "Page" : "Bank" }}</span>
-      <Segmented v-model="page" :options="pageOptions" label="Page" />
+      <span class="caption">Bank</span>
+      <Segmented v-model="page" :options="pageOptions" label="Bank" />
       <select v-if="!layout" v-model.number="bankSize" aria-label="Strips per bank" style="width: auto">
         <option v-for="n in [8, 12, 16, 24, 32, 64]" :key="n" :value="n">{{ n }} per bank</option>
       </select>
     </div>
+  </Teleport>
+  <div class="toolbar">
+    <div v-if="selectedCount > 1" class="group selinfo" data-selection>
+      <span><strong>{{ selectedCount }}</strong> selected: linked</span>
+      <button class="btn small secondary" title="keep only the strip of the processing view" @click="clearSelection">Clear</button>
+    </div>
     <span class="spacer"></span>
     <div class="group">
-      <span class="caption">Meters</span>
-      <select v-model="scale" aria-label="Meter scale" style="width: auto">
-        <option v-for="(s, k) in SCALES" :key="k" :value="k">{{ s.label }}</option>
-      </select>
-    </div>
-    <div class="group">
-      <button class="btn secondary" @click="startAdd('strip')">+ Strip</button>
-      <button class="btn secondary" @click="startAdd('bus')">+ Bus</button>
-      <button class="btn secondary" :aria-pressed="editingGroups" @click="editingGroups = !editingGroups">VCAs &amp; groups</button>
-      <button class="btn secondary" :aria-pressed="operating" title="group, N-1, link, mix-minus" @click="operating = !operating">Operations</button>
-      <button class="btn secondary" :aria-pressed="automixing" title="gain-sharing auto-mixes" @click="automixing = !automixing">Auto-mix</button>
-      <button class="btn secondary" :aria-pressed="automating" title="auto-level, ducking, voice detection" @click="automating = !automating">Auto</button>
-      <button class="btn secondary" :aria-pressed="midiOpen" :class="{ on: midi.state === 'ready' }" title="MIDI control surfaces: Mackie Control, MIDI learn" @click="midiOpen = !midiOpen">MIDI</button>
+      <button class="btn secondary" :aria-pressed="panelOpen('groups')" @click="togglePanel('groups')">VCAs &amp; groups</button>
+      <button class="btn secondary" :aria-pressed="panelOpen('midi')" :class="{ on: midi.state === 'ready' }" title="MIDI control surfaces: Mackie Control, MIDI learn" @click="togglePanel('midi')">MIDI</button>
     </div>
   </div>
   <div v-if="muteGroups.length" class="toolbar mutegroups">
@@ -188,11 +267,13 @@ const midiOpen = ref(false);
       {{ g.name }}
     </button>
   </div>
-  <GroupsPanel v-if="editingGroups" @close="editingGroups = false" />
-  <OperationsPanel v-if="operating" @close="operating = false" />
-  <AutomationPanel v-if="automating" @close="automating = false" />
-  <AutomixPanel v-if="automixing" @close="automixing = false" />
-  <MidiPanel v-if="midiOpen" @close="midiOpen = false" />
+  <!-- The groups panel stays beside the console: its VCAs are spilled and tried while it is open. -->
+  <GroupsPanel v-if="panelOpen('groups')" @close="closePanel" />
+  <Modal v-if="panelOpen('operations')" title="Operations" wide @close="closePanel"><OperationsPanel @close="closePanel" /></Modal>
+  <Modal v-if="panelOpen('auto')" title="Auto-level, ducking and voice detection" wide @close="closePanel"><AutomationPanel @close="closePanel" /></Modal>
+  <AutomixPanel v-if="panelOpen('automix')" @close="closePanel" />
+  <MidiPanel v-if="panelOpen('midi')" @close="closePanel" />
+  <ViewEditor v-if="editingViews" :view="layout?.name || ''" @close="editingViews = false" @saved="(n) => n && (view = n)" />
   <div v-if="midi.learning" class="banner info midilearn" data-midi-learn>
     <span>
       MIDI learn:
@@ -208,9 +289,8 @@ const midiOpen = ref(false);
     <button class="btn small secondary" @click="spill.vca = null">Show all</button>
   </div>
 
-  <div v-if="adding" class="panel addform">
-    <h3>New {{ adding }}</h3>
-    <div class="row">
+  <Modal v-if="adding" :title="`New ${adding}`" @close="adding = ''">
+    <div class="row addform">
       <div><label>Id (a-z, 0-9, -; empty: automatic)</label><input v-model="form.id" placeholder="automatic" /></div>
       <div><label>Name</label><input v-model="form.name" placeholder="the id" /></div>
       <div>
@@ -228,19 +308,38 @@ const midiOpen = ref(false);
       <button class="btn secondary" @click="adding = ''">Cancel</button>
       <button class="btn" @click="add">Add</button>
     </div>
-  </div>
+  </Modal>
+  <StripMenu v-if="emptyMenu" :bus="emptyMenu === 'bus'" @close="emptyMenu = ''" />
 
   <div v-if="!live.mix" class="empty">Loading the mix…</div>
-  <div v-else-if="!strips.length && !buses.length" class="empty">No strips or buses yet. Add one above, or import a show in Settings.</div>
-  <div v-else ref="consoleEl" class="console">
+  <div v-else ref="consoleEl" class="console" :class="{ moving: !!moving }" @pointermove="gripMove" @pointerup="gripUp" @pointercancel="moving = null">
     <div class="strips">
-      <template v-for="s in shown" :key="s.id">
+      <div v-if="!(onlyBuses ? buses : strips).length && !layout && !spilled" class="slot">
+        <section class="strip placeholder" :class="{ bus: onlyBuses }" :data-placeholder="onlyBuses ? 'bus' : 'strip'">
+          <div class="shead">
+            <span class="sname muted">{{ onlyBuses ? "No bus" : "No strip" }}</span>
+            <button class="btn small secondary" :aria-label="onlyBuses ? 'Bus menu' : 'Strip menu'" @click="emptyMenu = onlyBuses ? 'bus' : 'strip'">Menu…</button>
+          </div>
+          <p class="muted small">Its menu adds one.</p>
+        </section>
+      </div>
+      <div v-for="s in shown" :key="s.id" class="slot" :class="{ over: moving?.over === s.id, lifted: moving?.id === s.id }" :data-slot="s.id">
+        <div
+          v-if="!spilled"
+          class="grip"
+          role="button"
+          tabindex="0"
+          :aria-label="`Move ${s.name}`"
+          title="drag to move (arrow keys too)"
+          @pointerdown="gripDown($event, s.id)"
+          @keydown="gripKey($event, s.id)"
+        ></div>
         <VcaStrip v-if="isVcaId(s.id)" :vca="s" />
         <Strip v-else :signal="s" :bus="isBusId(s.id)" :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
-      </template>
-      <div v-if="!shown.length" class="empty">This page is empty.</div>
+      </div>
+      <div v-if="!shown.length && (layout || spilled)" class="empty">This bank is empty.</div>
     </div>
-    <template v-if="(shownBuses.length && !spilled) || vcas.length">
+    <template v-if="shownBuses.length || shownVcas.length || (besides && !buses.length && !spilled)">
       <div
         class="cdivider"
         role="separator"
@@ -253,11 +352,25 @@ const midiOpen = ref(false);
         @keydown="dragKey"
       ></div>
       <div ref="mastersEl" class="masters" :style="busWidth ? { flex: `0 0 ${busWidth}px`, width: `${busWidth}px` } : null">
-        <div v-if="shownBuses.length && !spilled" class="busesec">
-          <Strip v-for="b in shownBuses" :key="b.id" :signal="b" bus :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+        <div v-if="shownBuses.length" class="busesec">
+          <div v-for="b in shownBuses" :key="b.id" class="slot" :class="{ over: moving?.over === b.id, lifted: moving?.id === b.id }" :data-slot="b.id">
+            <div class="grip" role="button" tabindex="0" :aria-label="`Move ${b.name}`" title="drag to move (arrow keys too)" @pointerdown="gripDown($event, b.id)" @keydown="gripKey($event, b.id)"></div>
+            <Strip :signal="b" bus :scale="scale" :alignment="alignment" @open="emit('open', $event)" />
+          </div>
         </div>
-        <div v-if="vcas.length" class="vcasec">
-          <VcaStrip v-for="v in vcas" :key="v.id" :vca="v" />
+        <div v-else-if="besides && !buses.length && !spilled" class="busesec">
+          <div class="slot">
+            <section class="strip bus placeholder" data-placeholder="bus">
+              <div class="shead">
+                <span class="sname muted">No bus</span>
+                <button class="btn small secondary" aria-label="Bus menu" @click="emptyMenu = 'bus'">Menu…</button>
+              </div>
+              <p class="muted small">Its menu adds one.</p>
+            </section>
+          </div>
+        </div>
+        <div v-if="shownVcas.length" class="vcasec">
+          <VcaStrip v-for="v in shownVcas" :key="v.id" :vca="v" />
         </div>
       </div>
     </template>

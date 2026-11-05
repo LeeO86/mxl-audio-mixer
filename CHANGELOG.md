@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — 1.6.0
+
+- B1: multi-select in the console (click, Shift range, Ctrl/⌘ toggle; per browser): several selected are linked, relative (offsets from the start of a move kept; −∞ counts as −80 dB) for faders, trim, width and processing parameters (an EQ band added or removed: only that band), the same on all for mute, solo/PFL, processor on/off; pan (also the surround panner) and name not linked; menu and processing-view actions (add, move, delete a node; delete) run on all selected; new `PATCH /api/v1/signals` changes, adds nodes to and deletes several strips and buses and their solos in one mix revision (all or none). Layouts named `all`, `:inputs` or `:buses` are refused.
+- B2: strips and buses are moved by their grip (drag or arrow keys); new `POST /api/v1/{strips,buses}/<id>/move` `{"position"}`; the order is the show's, in a custom view the view's.
+- B3: views "Inputs" (only strips) and "Buses" (only buses) besides "All strips"; custom views (the show's layouts) with strips, VCAs and buses in banks, made in "Edit views…"; a custom view shows only what it places.
+- B4: the view and bank choice moved next to the tabs, right aligned.
+- B5: the meter scale ("Meters") moved into the strip and bus menu.
+- B6: "+ Strip" in the strip menu, "+ Bus" in the bus menu; an empty console shows an empty strip and bus with their menu.
+- B7: "Auto-mix…" in the strip menu assigns the strip (or the selected ones) to an auto-mix or none; "Add auto-mix…" opens the auto-mixes.
+- B8: "MIDI learn" in the strip and bus menu starts learn mode with its fader picked.
+- B9: "Auto…" and "Operations…" moved from the toolbar into the strip and bus menu (Operations starts with the selected strips).
+- B10: the strip and bus menus, the new strip/bus form, Operations and Auto open as dialogs over the mixer.
+- B11: "Copy settings…" in the strip and bus menu copies all settings and the processing (not the name, input, format or sends) to another strip or bus, or to all selected.
+
 ## 1.5.1 (2026-10-31)
 
 - **Behaviour change for the platform: outputs keep the input timestamps.** A sample read from an input at MXL index i leaves on every output (bus, direct out, monitor, published and virtual output) at index i, not at the mixer's block clock ("now"). Before, every output was re-stamped by the read offset plus the input's extra delay: an AV-sync signal through an input straight to a virtual output was +39 ms (37.0–41.2) late against its video on the test platform; in the lab (a ramp whose samples tell their index) +41.1 ms for a writer that commits a 25 fps video frame of audio at once, +39.0 ms for the same 25 ms early, +5.0 ms and +2.0 ms for writers per block on time and 25 ms early; now 0 samples in every case. The old shift was the read offset plus the input's automatic delay, so it depended on how the source commits. An output that mixes inputs of different delays takes the largest of them. Look-ahead (limiter, leveler) is taken off the index too. When samples are written is unchanged, so listening latency is unchanged.

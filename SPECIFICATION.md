@@ -607,7 +607,7 @@ new ones:
 - Channel strips with: input select/patch, trim, phase, processing chain overview
   (miniature EQ curve, gain-reduction meters per dynamics node), aux sends, pan, fader,
   mute, PFL/AFL, VCA assignment, meter, name/colour. Strip layers/banks; custom
-  layouts (user-defined strip order and pages); group/bus/VCA/master sections.
+  views (layouts: user-defined order and banks); group/bus/VCA/master sections.
 - Touch-friendly, works on tablets; multiple simultaneous clients stay in sync.
 - 1.5.0 (A1–A10): the browser tab's title names the tab ("Console – <label> – MXL
   Audio Mixer"). The name has the strip's width; format, gear and menu share the row
@@ -617,6 +617,19 @@ new ones:
   whether there is signal). A strip with a surround panner shows a top view of its
   layout with the source (drag it: left/right, front/rear) and, on 5.1.4/7.1.4, its
   height; one sending to a surround bus offers to add one.
+- 1.6.0 (B1–B11): strips are selected by a click (Shift: a range, Ctrl/⌘: one more;
+  per browser). Several selected are linked: every parameter change on one moves the
+  others relatively (offsets kept), on/off values (processor on/off, mute, solo, PFL)
+  are set the same on all, pan and the label are never linked; menu and processing
+  view actions run on all selected. The linked change is one API call
+  (`PATCH /api/v1/signals`, one mix revision). Strips and buses are reordered by
+  drag (the show's order, shared by every operator). Views: "All strips", only the
+  input strips, only the buses, and the show's custom views (banks of strips, VCAs
+  and buses placed freely). The view and bank choice sit next to the tabs. The strip
+  and bus menus open as dialogs over the mixer and hold the meter scale, + Strip /
+  + Bus, the auto-mix assignment, MIDI learn, Auto, Operations and a copy of all
+  settings and the processing (not the label) to another strip or the selected
+  ones; an empty console shows one empty strip and bus with their menu.
 
 ### 12.2 Processing chain editor
 

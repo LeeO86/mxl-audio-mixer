@@ -351,10 +351,10 @@ async fn strip(State(app): State<App>, Path(id): Path<String>) -> Response {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct StripBody {
-    id: Option<String>,
+pub(crate) struct StripBody {
+    pub(crate) id: Option<String>,
     name: Option<String>,
-    format: Option<Format>,
+    pub(crate) format: Option<Format>,
     patch: Option<Vec<Option<Patch>>>,
     trim_db: Option<f64>,
     polarity: Option<Vec<bool>>,
@@ -373,7 +373,7 @@ struct StripBody {
     tally_index: Option<Option<u16>>,
     #[serde(default, deserialize_with = "present")]
     afv: Option<Option<Afv>>,
-    ramp_ms: Option<f64>,
+    pub(crate) ramp_ms: Option<f64>,
 }
 
 /// A field that is present (`Some`, perhaps `Some(None)` for `null`) or absent.
@@ -389,7 +389,7 @@ fn colour(v: String) -> Option<String> {
 }
 
 impl StripBody {
-    fn apply(self, s: &mut Strip) {
+    pub(crate) fn apply(self, s: &mut Strip) {
         if let Some(v) = self.tally_index {
             s.tally_index = v;
         }
@@ -556,10 +556,10 @@ async fn bus(State(app): State<App>, Path(id): Path<String>) -> Response {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct BusBody {
-    id: Option<String>,
+pub(crate) struct BusBody {
+    pub(crate) id: Option<String>,
     name: Option<String>,
-    format: Option<Format>,
+    pub(crate) format: Option<Format>,
     fader_db: Option<Db>,
     mute: Option<bool>,
     chain: Option<Vec<Proc>>,
@@ -577,11 +577,11 @@ struct BusBody {
     /// The bus's own down-mix (`null`: the mix's, D2).
     #[serde(default, deserialize_with = "present")]
     downmix: Option<Option<crate::mix::format::Downmix>>,
-    ramp_ms: Option<f64>,
+    pub(crate) ramp_ms: Option<f64>,
 }
 
 impl BusBody {
-    fn apply(self, b: &mut Bus) {
+    pub(crate) fn apply(self, b: &mut Bus) {
         if let Some(v) = self.minus {
             b.minus = v;
         }
@@ -971,7 +971,7 @@ async fn chain_get(
 }
 
 /// Take `key` out of a JSON object body.
-fn take(body: &mut Value, key: &str) -> Option<Value> {
+pub(crate) fn take(body: &mut Value, key: &str) -> Option<Value> {
     body.as_object_mut().and_then(|o| o.remove(key))
 }
 
@@ -1012,7 +1012,7 @@ async fn chain_add(
 }
 
 /// RFC 7396 merge patch.
-fn merge(target: &mut Value, patch: Value) {
+pub(crate) fn merge(target: &mut Value, patch: Value) {
     match patch {
         Value::Object(p) => {
             if !target.is_object() {

@@ -84,6 +84,7 @@ pub fn router(app: App) -> Router {
         .route("/api/v1/inputs/{input}", get(input).patch(patch_input))
         .route("/api/v1/inputs/{input}/delay/confirm", post(confirm_delay))
         .merge(crate::api::routes())
+        .merge(crate::console_api::routes())
         .merge(crate::show_api::routes())
         .merge(crate::room_api::routes())
         .merge(crate::preview_api::routes())
