@@ -3,6 +3,7 @@
 pub mod auto;
 pub mod chain;
 pub mod compile;
+pub mod downmix;
 pub mod format;
 pub mod logic;
 pub mod model;

@@ -158,7 +158,7 @@ fn build_solo_bus(
             continue;
         };
         let src = t.get(&tap).0;
-        let w = width_matrix(from, Format::Stereo, laws);
+        let w = width_matrix(from, Format::Stereo, &laws);
         let coefficients = c.b.coefficients(&w);
         let gain = match kind {
             SoloKind::Pfl => Db(pfl_trim_db).gain() as f32,
@@ -509,7 +509,7 @@ impl Build<'_> {
         let out = self.b.buffers(n);
         let coefficients = self
             .b
-            .coefficients(&width_matrix(format, format, Laws::default()));
+            .coefficients(&width_matrix(format, format, &Laws::default()));
         for (k, from) in [("dryin", dry), ("wetin", wet)] {
             let node = self.node(format!("{base}/{k}"), shape, vec![1.0]);
             self.b.step(Step::Send {
@@ -1017,7 +1017,9 @@ impl Compiler {
                     c.b.step(Step::Clear { dst: sum });
                     let into: Vec<_> = all_sends.iter().filter(|s| s.to == bus.id).collect();
                     // The bus's own down-mix, if it has one (D2).
-                    let into_laws = laws.with_downmix(bus.downmix);
+                    let into_laws =
+                        mix.settings
+                            .laws_with(&laws, bus.downmix_set.as_deref(), bus.downmix);
                     let source = |s: &super::model::Send| -> Option<(Span, usize, u64)> {
                         if s.block_delay {
                             return held
@@ -1097,7 +1099,7 @@ impl Compiler {
                             src = dst;
                             from = bed;
                         }
-                        let w = width_matrix(from, bus.format, into_laws);
+                        let w = width_matrix(from, bus.format, &into_laws);
                         let coefficients = c.b.coefficients(&w);
                         let mut gain = if send.mute {
                             0.0
@@ -1182,7 +1184,7 @@ impl Compiler {
                             dst: out,
                         });
                         let coefficients =
-                            c.b.coefficients(&width_matrix(Format::Mono, bus.format, laws));
+                            c.b.coefficients(&width_matrix(Format::Mono, bus.format, &laws));
                         for (m, g) in mics.iter().zip(gains) {
                             let node = c.node(
                                 format!("talkback/{}/{}", d.id, m.info.id),
@@ -1287,7 +1289,9 @@ impl Compiler {
             let n = m.format.channels();
             let key = m.key();
             // The monitor's own down-mix, if it has one (D2).
-            let laws = laws.with_downmix(m.downmix);
+            let laws = mix
+                .settings
+                .laws_with(&laws, m.downmix_set.as_deref(), m.downmix);
             let mon = c.b.buffers(n);
             c.b.step(Step::Clear { dst: mon });
             let under_solo = solo_bus.is_some() && m.follows_solo;
@@ -1325,7 +1329,7 @@ impl Compiler {
                 None => None,
             };
             if let Some((src, from, name, chain)) = source {
-                let w = width_matrix(from, m.format, laws);
+                let w = width_matrix(from, m.format, &laws);
                 let coefficients = c.b.coefficients(&w);
                 let node = c.node(
                     format!("{key}/source"),
@@ -1347,7 +1351,7 @@ impl Compiler {
                 });
             }
             if let (Some(bus), true) = (solo_bus, m.follows_solo) {
-                let w = width_matrix(Format::Stereo, m.format, laws);
+                let w = width_matrix(Format::Stereo, m.format, &laws);
                 let coefficients = c.b.coefficients(&w);
                 let node = c.node(
                     format!("{key}/solo"),
@@ -1451,7 +1455,7 @@ impl Compiler {
                 } else {
                     let st = c.b.buffers(2);
                     c.b.step(Step::Clear { dst: st });
-                    let w = width_matrix(m.format, Format::Stereo, laws);
+                    let w = width_matrix(m.format, Format::Stereo, &laws);
                     let coefficients = c.b.coefficients(&w);
                     let node = c.node(
                         format!("{key}/stream"),
@@ -1516,7 +1520,7 @@ impl Compiler {
             let to = e.to.unwrap_or(e.from);
             let out = c.b.buffers(to.channels());
             c.b.step(Step::Clear { dst: out });
-            let w = width_matrix(e.from, to, laws);
+            let w = width_matrix(e.from, to, &laws);
             let coefficients = c.b.coefficients(&w);
             let node = c.node(
                 format!("output/{}", e.key),
@@ -1588,8 +1592,10 @@ impl Compiler {
                         Some((m, room_source(&mut c, mix, &taps, m.source.as_ref()?)?))
                     });
                     src.map(|(m, (span, from, name, chain))| {
-                        let laws = laws.with_downmix(m.downmix);
-                        let w = width_matrix(from, m.format, laws);
+                        let laws =
+                            mix.settings
+                                .laws_with(&laws, m.downmix_set.as_deref(), m.downmix);
+                        let w = width_matrix(from, m.format, &laws);
                         let coefficients = c.b.coefficients(&w);
                         let dst = c.b.buffers(m.format.channels());
                         c.b.step(Step::Clear { dst });
@@ -1629,7 +1635,7 @@ impl Compiler {
                 None => None,
             };
             if let Some((src, from, name, chain)) = source {
-                let w = width_matrix(from, to, laws);
+                let w = width_matrix(from, to, &laws);
                 let coefficients = c.b.coefficients(&w);
                 let node = c.node(
                     format!("vout/{n}"),
@@ -1766,6 +1772,7 @@ mod tests {
             minus: None,
             subgroup: false,
             downmix: None,
+            downmix_set: None,
         }
     }
 
@@ -3798,5 +3805,61 @@ mod tests {
             *return_input = Some(3);
         }
         assert!(m.validate(2, 48).is_err());
+    }
+
+    #[test]
+    fn named_down_mixes_for_the_mix_and_a_bus() {
+        use crate::mix::downmix::{DownmixSet, Matrix, Rules};
+        let mut m = Mix::fresh();
+        m.strips.push(strip("film", Format::Surround51, 1));
+        m.buses.push(bus("main", Format::Stereo));
+        m.buses.push(bus("own", Format::Stereo));
+        m.buses.push(bus("wide", Format::Surround71));
+        for b in ["main", "own", "wide"] {
+            m.sends.push(send("film", b, Tap::PostFader));
+            m.outputs.push(Output {
+                signal: b.into(),
+                format: None,
+                commit_samples: None,
+                tap: None,
+            });
+        }
+        let mut side = DownmixSet {
+            id: "side".into(),
+            name: "Side".into(),
+            rules: Rules::SurroundToSide,
+            ..DownmixSet::reference()
+        };
+        let mut g = crate::mix::downmix::matrix_db(&side, Format::Surround51, Format::Stereo);
+        g[0][2] = Db(0.0); // C fully into L
+        side.matrices.push(Matrix {
+            from: Format::Surround51,
+            to: Format::Stereo,
+            gains_db: g,
+        });
+        m.settings.downmixes.push(side);
+        m.buses[1].downmix_set = Some("side".into());
+        m.buses[2].downmix_set = Some("side".into());
+        assert_eq!(m.validate(1, 48), Ok(()));
+        let slots = HashMap::from([
+            ("main".to_string(), 0),
+            ("own".to_string(), 1),
+            ("wide".to_string(), 2),
+        ]);
+        let mut c = Compiler::default().compile(&m, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut c, &surround_inputs(), 1);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // main: the reference (C −3, Ls −6.02, LFE −3 into L and R).
+        let want = 0.1 + 0.4 * h + 0.8 * h + 0.05 * 0.5;
+        assert!((out.0[&0][0][0] - want).abs() < 1e-5, "{}", out.0[&0][0][0]);
+        // own: C at 0 dB into L (edited).
+        let want = 0.1 + 0.4 + 0.8 * h + 0.05 * 0.5;
+        assert!((out.0[&1][0][0] - want).abs() < 1e-5, "{}", out.0[&1][0][0]);
+        // wide: the 5.1 surrounds to the sides of 7.1.
+        assert_eq!(out.0[&2][4][0], 0.05);
+        assert_eq!(out.0[&2][6][0], 0.0);
+        // An unknown set is refused.
+        m.buses[1].downmix_set = Some("nope".into());
+        assert!(m.validate(1, 48).is_err());
     }
 }

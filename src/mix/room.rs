@@ -122,6 +122,9 @@ pub struct Monitor {
     /// solo bus is folded to stereo with the mix's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downmix: Option<super::format::Downmix>,
+    /// Its own named down-mix (C8, 1.6.0); wins over `downmix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downmix_set: Option<String>,
 }
 
 /// Bass management: the lows of every main channel to the LFE (sub) channel.

@@ -1632,7 +1632,7 @@ mod tests {
         matrix(
             "send 5.1 → stereo (down-mix)",
             6,
-            crate::mix::format::width_matrix(Format::Surround51, Format::Stereo, laws),
+            crate::mix::format::width_matrix(Format::Surround51, Format::Stereo, &laws),
             true,
         );
         // A metered channel on the meter thread: peak, energy, true peak, PPM.

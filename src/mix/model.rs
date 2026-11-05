@@ -203,6 +203,9 @@ pub struct Bus {
     /// `None`: the mix's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downmix: Option<Downmix>,
+    /// Its own named down-mix (C8, 1.6.0); wins over `downmix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downmix_set: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +274,7 @@ impl Bus {
             minus: None,
             subgroup: false,
             downmix: None,
+            downmix_set: None,
         }
     }
 }
@@ -532,7 +536,7 @@ pub struct VirtualRoute {
 }
 
 /// Mix-wide laws and the loudness target.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MixSettings {
     #[serde(default)]
@@ -551,6 +555,14 @@ pub struct MixSettings {
     /// loads in 1.3 (a rollback).
     #[serde(default, skip_serializing_if = "Downmix::is_default")]
     pub downmix: Downmix,
+    /// Named down-mix settings (C8, 1.6.0), each a matrix for every pair of
+    /// formats from the `downmix.json` reference.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downmixes: Vec<super::downmix::DownmixSet>,
+    /// The mix-wide one of them; `null`: the parametric `downmix` (a show of
+    /// 1.5 and earlier). A new show starts with the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downmix_set: Option<String>,
 }
 
 fn default_target() -> f64 {
@@ -569,6 +581,8 @@ impl Default for MixSettings {
             loudness_target_lufs: default_target(),
             loudness_tolerance_lu: default_tolerance(),
             downmix: Downmix::default(),
+            downmixes: Vec::new(),
+            downmix_set: None,
         }
     }
 }
@@ -579,6 +593,28 @@ impl MixSettings {
             pan: self.pan_law_db,
             mono_sum: self.mono_sum_db,
             downmix: self.downmix,
+            set: self.downmix_set(self.downmix_set.as_deref()),
+        }
+    }
+
+    /// The named down-mix `id` (C8).
+    pub fn downmix_set(
+        &self,
+        id: Option<&str>,
+    ) -> Option<std::sync::Arc<super::downmix::DownmixSet>> {
+        let id = id?;
+        self.downmixes
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| std::sync::Arc::new(d.clone()))
+    }
+
+    /// The laws into a target (bus or monitor) with its own named down-mix or
+    /// parametric override, if any (D2, C8).
+    pub fn laws_with(&self, base: &Laws, set: Option<&str>, downmix: Option<Downmix>) -> Laws {
+        match self.downmix_set(set) {
+            Some(s) => base.with_set(Some(s)),
+            None => base.with_downmix(downmix),
         }
     }
 }
@@ -709,9 +745,21 @@ impl Mix {
 
     /// The laws for what arrives at bus `to` (its down-mix override, D2).
     pub fn laws_into(&self, to: &str) -> Laws {
-        self.settings
-            .laws()
-            .with_downmix(self.bus(to).and_then(|b| b.downmix))
+        let b = self.bus(to);
+        self.settings.laws_with(
+            &self.settings.laws(),
+            b.and_then(|b| b.downmix_set.as_deref()),
+            b.and_then(|b| b.downmix),
+        )
+    }
+
+    /// A new show: empty, with the `downmix.json` reference as its down-mix (C8).
+    pub fn fresh() -> Self {
+        let mut m = Self::default();
+        let set = super::downmix::DownmixSet::reference();
+        m.settings.downmix_set = Some(set.id.clone());
+        m.settings.downmixes.push(set);
+        m
     }
 
     /// The nodes of `id`'s chain that cannot run on its format (C10): they pass
@@ -862,6 +910,26 @@ impl Mix {
             }
         }
         self.settings.downmix.validate()?;
+        let mut sets = BTreeSet::new();
+        for d in &self.settings.downmixes {
+            d.validate()?;
+            if !sets.insert(d.id.as_str()) {
+                return Err(format!("downmix {} exists twice", d.id));
+            }
+        }
+        let known = |what: &str, id: &Option<String>| match id {
+            Some(id) if !sets.contains(id.as_str()) => {
+                Err(format!("{what}: downmix {id} does not exist"))
+            }
+            _ => Ok(()),
+        };
+        known("settings", &self.settings.downmix_set)?;
+        for b in &self.buses {
+            known(&format!("bus {}", b.id), &b.downmix_set)?;
+        }
+        for m in &self.control_room.monitors {
+            known(&format!("monitor {}", m.id), &m.downmix_set)?;
+        }
         for b in &self.buses {
             check_name(&b.name)?;
             check_fader(&format!("bus {}: fader_db", b.id), b.fader_db)?;
@@ -1493,7 +1561,7 @@ impl Mix {
     }
 }
 
-fn check_id(id: &str) -> Result<(), String> {
+pub(crate) fn check_id(id: &str) -> Result<(), String> {
     let ok = !id.is_empty()
         && id.len() <= 32
         && id
@@ -1578,6 +1646,7 @@ pub(crate) mod tests {
             minus: None,
             subgroup: false,
             downmix: None,
+            downmix_set: None,
         }
     }
 

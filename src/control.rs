@@ -1492,7 +1492,8 @@ fn apply_value_act(mix: &mut Mix, act: crate::logic::Act) {
 /// overwritten.
 pub fn load_mix(path: &std::path::Path) -> (Mix, Vec<String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return (Mix::default(), Vec::new());
+        // A new show: the downmix.json reference as its down-mix (C8).
+        return (Mix::fresh(), Vec::new());
     };
     let parsed = serde_json::from_str::<serde_json::Value>(&text)
         .map_err(|e| e.to_string())
@@ -1507,7 +1508,7 @@ pub fn load_mix(path: &std::path::Path) -> (Mix, Vec<String>) {
                 bad.display()
             );
             let _ = std::fs::rename(path, &bad);
-            (Mix::default(), Vec::new())
+            (Mix::fresh(), Vec::new())
         }
     }
 }
@@ -1750,7 +1751,7 @@ mod tests {
         // A wrong type: aside, empty.
         v["mix"]["strips"][0]["fader_db"] = json!(true);
         std::fs::write(&path, v.to_string()).unwrap();
-        assert_eq!(load_mix(&path), (crate::mix::Mix::default(), vec![]));
+        assert_eq!(load_mix(&path), (crate::mix::Mix::fresh(), vec![]));
         assert!(!path.exists() && dir.join("mix.json.bad").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
