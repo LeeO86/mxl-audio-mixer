@@ -210,7 +210,8 @@ rates other than 48 kHz, recording.
   direct out at any tap, a virtual output (its source). A patch that closes a loop
   (sends, subgroups, mix-minus, keys, direct outs, virtual outputs, a logic route) is
   refused with the loop named; so is an input routed to an own output flow that
-  carries that input. A flow format change (channel count)
+  carries that input (UI route, IS-05 activation and later mix changes). Channels of
+  one strip that arrive with different latencies are aligned to the latest. A flow format change (channel count)
   is handled without restart; unpatched channels are ignored, missing ones are silent
   and flagged.
 - **Alignment and latency:** each input is read at

@@ -244,7 +244,15 @@ async fn run(mut config: Config) -> ExitCode {
     let configs = inputs.configs();
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::unbounded_channel::<RouteRequest>();
-    let node = match nmos::build(&config, &configs, route_tx, connections_path.clone()) {
+    // The control side, once it exists: IS-05 activations are checked against it (D1).
+    let loop_check = Arc::new(std::sync::OnceLock::new());
+    let node = match nmos::build(
+        &config,
+        &configs,
+        route_tx,
+        connections_path.clone(),
+        loop_check.clone(),
+    ) {
         Ok(node) => node,
         Err(e) => return abort(created, &config, EX_CONFIG, format!("NMOS: {e}")),
     };
@@ -319,6 +327,7 @@ async fn run(mut config: Config) -> ExitCode {
     // One change lock for the API and the logic's plan changes (D167).
     let changes = control.changes.clone();
     let control = Arc::new(Mutex::new(control));
+    let _ = loop_check.set(control.clone());
     let link_peers = Arc::new(tokio::sync::Mutex::new(
         mxl_audio_mixer::link::Peers::default(),
     ));

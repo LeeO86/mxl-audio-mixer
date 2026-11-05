@@ -3,7 +3,8 @@
 # released v1.5.1 in a git worktree, runs its tolerant load and validation
 # (as at its start, src/main.rs) on tests/fixtures/rollback-1.6.json and writes
 # what it made of it to tests/fixtures/rollback-1.6.loaded-by-1.5.1.json, which
-# `cargo test` (mix::rollback) then checks: valid, the same published outputs.
+# `cargo test` (mix::rollback) then checks: valid, the same published outputs,
+# every strip kept (channels that read the mix silent, 1.6.0 D1).
 #
 #   tests/rollback/check-1.5.1.sh [worktree dir]   # needs git, cargo; no libmxl
 set -euo pipefail
@@ -27,6 +28,7 @@ fn load() {
                 "sends": mix.sends,
                 "chains": mix.chains().map(|(id, c)| (id.to_string(), c.iter().map(|p| p.id.clone()).collect::<Vec<_>>())).collect::<std::collections::BTreeMap<_, _>>(),
                 "virtual_outputs": mix.virtual_outputs,
+                "strips": mix.strips.iter().map(|s| (s.id.clone(), serde_json::to_value(&s.patch).unwrap())).collect::<std::collections::BTreeMap<_, _>>(),
             })
         }
         Err(e) => serde_json::json!({"valid": false, "error": e}),

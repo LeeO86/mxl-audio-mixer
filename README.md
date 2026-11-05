@@ -554,10 +554,17 @@ an id gets `strip-<n>` or `bus-<n>`.
   latency. A patch that would close a feedback loop (through sends, subgroups,
   mix-minus, keys, direct outs, virtual outputs, also one a logic route sets) is
   refused with the loop: `refused: this would close a feedback loop: a → main → a`;
-  only a send with a block delay may close one. Routing an input (`PUT
-  /api/v1/inputs/<n>/route`) to one of the mixer's own output flows that carries that
-  input is refused the same way. Deleting a signal unpatches what read it. 1.5 does
-  not load a show with such patches (`mix.json.bad`). `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
+  only a send with a block delay may close one. An input that reads one of the mixer's own output
+  flows (a published output, direct out, monitor or virtual output; an insert's send
+  excepted) must not come to carry itself: such a route is refused at `PUT
+  /api/v1/inputs/<n>/route` (400), at an IS-05 activation (500 with the reason) and
+  at a later mix change (400). A strip whose channels arrive with different latencies
+  (an input beside a signal read after a look-ahead) delays the earlier ones, so they
+  stay aligned. Deleting a signal unpatches what read it; linking or splitting strips
+  moves the reads to the new strips' channels; a format change unpatches reads of
+  channels that go away (with a note). Saved for a rollback
+  to 1.5.1, such channels are `null` (silent there) with the exact patch in
+  `patch_exact`, which 1.6 puts back. `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
   position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
   (measure it). A mono strip is stereo after its panner; with a surround panner
   (below) a mono or stereo strip is 5.1 or 7.1 there.

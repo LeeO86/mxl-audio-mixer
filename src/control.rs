@@ -1130,6 +1130,41 @@ impl Control {
     /// Check `next` and start applying it. Parameter-only changes ramp over `ramp`
     /// samples and are done; anything else fades the affected nodes out and needs
     /// [`Control::swap`] after [`fade_wait`].
+    /// Why input `input` (from 1) reading `flow` closes a loop through MXL in
+    /// `mix` (D1): the flow is one of the mixer's own outputs (published, a
+    /// direct-out block, a monitor or a virtual output) and carries that input.
+    /// An insert's send is no loop: its return is meant to come back (C4).
+    pub fn own_loop(&self, mix: &Mix, input: usize, flow: uuid::Uuid) -> Option<String> {
+        use crate::mix::model::{OutputSource, Tap};
+        let o = self
+            .output_status()
+            .into_iter()
+            .find(|o| o.mxl_flow_id == flow)?;
+        let source = if let Some(key) = o.signal.strip_prefix("vout:") {
+            mix.virtual_source(key)?.clone()
+        } else if let Some(monitor) = o.signal.strip_prefix("monitor:") {
+            OutputSource::Monitor {
+                monitor: monitor.to_string(),
+                feed: Default::default(),
+            }
+        } else if o.kind == Some("insert") {
+            return None;
+        } else {
+            OutputSource::Signal {
+                signal: o.source.clone().unwrap_or_else(|| o.signal.clone()),
+                tap: o.node.clone().map(Tap::After),
+            }
+        };
+        let mut path = mix.carries_input(&source, input)?;
+        // The last one is the output's own signal, named below.
+        path.pop();
+        let via: String = path.iter().map(|p| format!(" → {p}")).collect();
+        Some(format!(
+            "refused: input {input} reads {name}: this would close a feedback loop (input {input}{via} → {name} → input {input}); take the output itself as the strip's input instead (no MXL round trip)",
+            name = o.name
+        ))
+    }
+
     pub fn stage(&mut self, mut next: Mix, ramp: u32) -> Result<Staged, String> {
         if self.link.refuses() {
             return Err("the master is disconnected and local takeover is denied".into());
@@ -1140,6 +1175,15 @@ impl Control {
         // Pre-1.6 direct outs become blocks of the strip's flow (C5).
         next.lift_direct_outs();
         next.validate_except_logic(self.input_count, self.block)?;
+        // An input routed to an own output flow must not come to carry itself (D1).
+        for (i, route) in self.inputs.routes().iter().enumerate() {
+            if let Some(why) = route
+                .as_ref()
+                .and_then(|r| self.own_loop(&next, i + 1, r.flow))
+            {
+                return Err(why);
+            }
+        }
         // The virtual outputs hold their slots: the published outputs and
         // monitors share the rest (D267).
         let free = crate::engine::MAX_OUTPUTS - self.virtual_outputs.len();

@@ -56,6 +56,10 @@ pub fn receiver(input: &InputConfig) -> Receiver {
     r
 }
 
+/// The control side for the IS-05 loop check (D1), set once it exists.
+pub type LoopCheck =
+    std::sync::Arc<std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<crate::control::Control>>>>;
+
 /// Build the node. Activations of receivers go to `routes`; the callback accepts
 /// at once and never waits for media (§3.1).
 pub fn build(
@@ -63,14 +67,28 @@ pub fn build(
     inputs: &[InputConfig],
     routes: UnboundedSender<RouteRequest>,
     connections_path: PathBuf,
+    loop_check: LoopCheck,
 ) -> Result<Node, mxl_nmos::Error> {
     let scan = config.scan_path.clone();
     let own = config.output_domain_dir.clone();
     let implementation = NodeImplementation::new(move |activation| {
         let routes = routes.clone();
+        let loop_check = loop_check.clone();
         Box::pin(async move {
             if activation.role == Role::Receiver {
                 if let Some(index) = input_index(&activation.key) {
+                    // A route to an own output flow that carries this input would
+                    // close a loop through MXL (D1): IS-05 answers 500 with why.
+                    if let (true, Some(flow), Some(control)) = (
+                        activation.master_enable,
+                        activation.mxl_flow_id,
+                        loop_check.get(),
+                    ) {
+                        let c = control.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(why) = c.own_loop(&c.mix, index + 1, flow) {
+                            return Err(mxl_nmos::Rejected(why));
+                        }
+                    }
                     let route = match (
                         activation.master_enable,
                         activation.domain_path,

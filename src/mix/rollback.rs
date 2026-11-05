@@ -9,10 +9,15 @@
 //!   nearest point 1.5.1 has ([`legacy_at`]): same key, flow and sender;
 //! - every tap (sends, outputs, chain keys, virtual outputs) that 1.5.1 cannot
 //!   take or that sits after the fader as the nearest 1.5.1 tap in `tap`, and the
-//!   exact one in `tap_exact` (next to it; for a virtual output beside `source`).
+//!   exact one in `tap_exact` (next to it; for a virtual output beside `source`);
+//! - a strip channel that reads a signal or a virtual output (D1, 1.6.0) as
+//!   `null` in `patch` (silent in 1.5.1: its patch is an untagged enum that cannot
+//!   be repaired, the whole mix would go to `mix.json.bad`), and the strip's
+//!   exact patch in `patch_exact` beside it.
 //!
 //! [`restore`] undoes that on the JSON before it is parsed (load, history,
-//! import): `tap_exact` back into `tap`, the legacy entries of `out` dropped.
+//! import): `tap_exact` back into `tap`, `patch_exact` back into `patch`, the
+//! legacy entries of `out` dropped.
 //! In 1.5.1 a tap after the fader or a new node is approximate (the nodes after
 //! the fader run before it there); the other direct outs and insert sends are
 //! not published there.
@@ -24,6 +29,8 @@ use super::model::{Mix, Tap};
 
 /// The field beside a rewritten tap with the exact one.
 pub const TAP_EXACT: &str = "tap_exact";
+/// The field beside a strip's `patch` with its exact entries (D1).
+pub const PATCH_EXACT: &str = "patch_exact";
 
 /// A node 1.5.1 knows.
 fn known(p: &Proc) -> bool {
@@ -150,6 +157,21 @@ pub fn for_saving(mix: &Mix) -> Value {
         }
     }
     chains(&mut v, |c| rewrite_keys(mix, c));
+    // Channels that read the mix (D1): silent in 1.5.1, exact beside.
+    for (k, s) in mix.strips.iter().enumerate() {
+        use super::model::Patch;
+        let reads = |p: &Option<Patch>| matches!(p, Some(Patch::Signal(_) | Patch::Output(_)));
+        if !s.patch.iter().any(reads) {
+            continue;
+        }
+        let strip = &mut v["strips"][k];
+        strip[PATCH_EXACT] = strip["patch"].clone();
+        for (i, p) in s.patch.iter().enumerate() {
+            if reads(p) {
+                strip["patch"][i] = Value::Null;
+            }
+        }
+    }
     // The direct out `out` as the strip's published output of 1.5.
     for s in &mix.strips {
         let Some((
@@ -194,6 +216,11 @@ pub fn restore(v: &mut Value) {
     }
     for s in array(v, "sends") {
         take_exact(s, "tap");
+    }
+    for s in array(v, "strips") {
+        if let Some(exact) = s.as_object_mut().and_then(|o| o.remove(PATCH_EXACT)) {
+            s["patch"] = exact;
+        }
     }
     for o in array(v, "outputs") {
         take_exact(o, "tap");
@@ -268,7 +295,15 @@ mod tests {
                     {"id": "out", "type": "direct-out", "format": "stereo"},
                     {"id": "fader", "type": "fader"}
                 ])),
-                strip("bed", json!([comp]))
+                strip("bed", json!([comp])),
+                {"id": "back", "name": "back", "format": "stereo",
+                 "patch": [{"signal": "main", "channel": 1}, {"output": "1", "channel": 1}],
+                 "trim_db": 0.0, "polarity": [false, false], "fader_db": 0.0, "mute": false, "pan": 0.0, "width": 1.0,
+                 "chain": []},
+                {"id": "mixed", "name": "mixed", "format": "stereo",
+                 "patch": [{"input": 2, "channel": 1}, {"signal": "vox", "tap": {"after": "eq-1"}, "channel": 1}],
+                 "trim_db": 0.0, "polarity": [false, false], "fader_db": 0.0, "mute": false, "pan": 0.0, "width": 1.0,
+                 "chain": []}
             ],
             "buses": [
                 {"id": "main", "name": "Main", "format": "stereo", "fader_db": 0.0, "mute": false, "compensate": true,
@@ -341,6 +376,18 @@ mod tests {
             saved["virtual_outputs"][0][TAP_EXACT],
             json!({"after": "eq-2"})
         );
+        // Channels reading the mix: null for 1.5.1, the exact patch beside.
+        let back = &saved["strips"][3];
+        assert_eq!(back["patch"], json!([null, null]));
+        assert_eq!(
+            back[PATCH_EXACT],
+            json!([{"signal": "main", "channel": 1}, {"output": "1", "channel": 1}])
+        );
+        assert_eq!(
+            saved["strips"][4]["patch"],
+            json!([{"input": 2, "channel": 1}, null])
+        );
+        assert!(saved["strips"][0].get(PATCH_EXACT).is_none());
         let key = &saved["strips"][2]["chain"][0]["key"];
         assert_eq!(
             (&key["tap"], &key[TAP_EXACT]),
@@ -380,6 +427,14 @@ mod tests {
         );
         let loaded: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(loaded["valid"], true, "{}", loaded["error"]);
+        // Every strip is there; channels that read the mix (D1) are silent.
+        let strips = &loaded["strips"];
+        assert_eq!(
+            strips.as_object().map(|o| o.len()),
+            Some(show().strips.len())
+        );
+        assert_eq!(strips["back"], json!([null, null]));
+        assert_eq!(strips["mixed"], json!([{"input": 2, "channel": 1}, null]));
         let mut outputs: Vec<&str> = loaded["outputs"]
             .as_array()
             .unwrap()

@@ -857,6 +857,8 @@ impl Compiler {
                     // highest latency among them (the strip's taps start there).
                     let mut from_signals = Vec::with_capacity(n);
                     let mut input_latency = 0;
+                    // Per channel the latency it arrives with (`None`: silent).
+                    let mut arrives: Vec<Option<usize>> = Vec::with_capacity(n);
                     for (ch, point) in s.patch.iter().enumerate() {
                         let at = match point {
                             Some(Patch::Input(p)) => {
@@ -896,6 +898,7 @@ impl Compiler {
                         from_signals.push(signal.as_ref().map(|x| x.2.clone()));
                         match (at, signal) {
                             (Some((input_index, channel)), _) => {
+                                arrives.push(Some(0));
                                 let dst = c.b.buffer(input, ch);
                                 c.b.step(Step::Patch {
                                     input: input_index,
@@ -904,6 +907,7 @@ impl Compiler {
                                 });
                             }
                             (None, Some((src, lat, _))) => {
+                                arrives.push(Some(lat));
                                 input_latency = input_latency.max(lat);
                                 let node = c.node(
                                     format!("strip/{}/in/{ch}", s.id),
@@ -914,10 +918,46 @@ impl Compiler {
                                 c.b.step(Step::Gain { node, src, dst });
                             }
                             (None, None) => {
+                                arrives.push(None);
                                 let dst = c.single(input, ch);
                                 c.b.step(Step::Clear { dst });
                             }
                         }
+                    }
+                    // Channels that arrive earlier than the latest wait for it, so
+                    // the strip's channels stay aligned (an input channel beside
+                    // one read after a look-ahead, D1).
+                    for (ch, lat) in arrives.iter().enumerate() {
+                        let Some(lat) = lat.filter(|&l| l < input_latency) else {
+                            continue;
+                        };
+                        let comp = input_latency - lat;
+                        let kind = ProcKind::Delay {
+                            time: comp as f64,
+                            unit: super::chain::DelayUnit::Samples,
+                            frame_rate: None,
+                        };
+                        let proc = c.processor(
+                            format!("strip/{}/align/{ch}", s.id),
+                            &kind,
+                            vec![1.0],
+                            1,
+                            usize::MAX,
+                        );
+                        let here = c.single(input, ch);
+                        let tmp = c.b.buffers(1);
+                        c.b.step(Step::Process {
+                            proc,
+                            src: here,
+                            dst: tmp,
+                            key: Span::default(),
+                        });
+                        let node = c.node(format!("strip/{}/align/{ch}", s.id), comp, vec![1.0]);
+                        c.b.step(Step::Gain {
+                            node,
+                            src: tmp,
+                            dst: here,
+                        });
                     }
                     let trim = Db(s.trim_db).gain() as f32;
                     let values = s
@@ -1932,7 +1972,15 @@ mod tests {
             channel: 2,
         }));
         mix.strips.push(dry);
-        for signal in ["back", "dry"] {
+        // Input 2's R beside main's L (72 samples of look-ahead): aligned.
+        let mut mixed = strip("mixed", Format::Stereo, 2);
+        mixed.patch[0] = Some(Patch::Signal(SignalPoint {
+            signal: "main".into(),
+            tap: None,
+            channel: 1,
+        }));
+        mix.strips.push(mixed);
+        for signal in ["back", "dry", "mixed"] {
             mix.outputs.push(Output {
                 signal: signal.into(),
                 format: None,
@@ -1949,6 +1997,7 @@ mod tests {
             ("main".to_string(), 3),
             ("back".to_string(), 4),
             ("dry".to_string(), 5),
+            ("mixed".to_string(), 6),
         ]);
         let mut c = compiler.compile(&mix, 48, 0, &outputs, &HashMap::new());
         assert_eq!(c.latency["back"], c.latency["main"], "{:?}", c.latency);
@@ -1971,6 +2020,10 @@ mod tests {
             (out.0[&5][0][last] - 0.02).abs() < 1e-6,
             "music R, pre-fader"
         );
+        // The input channel waits for the look-ahead: it starts 72 samples late.
+        assert_eq!(c.latency["mixed"], 72);
+        let first = out.0[&6][1].iter().position(|v| v.abs() > 1e-6).unwrap();
+        assert_eq!(first, 72, "input channel delayed by the look-ahead");
     }
 
     #[test]

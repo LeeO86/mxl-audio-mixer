@@ -237,6 +237,18 @@
           "fader_db": 0.0,
           "mute": false
         },
+        "back": {
+          "chain": [],
+          "fader_db": 0.0,
+          "mute": false,
+          "pan": 0.0,
+          "polarity": [
+            false,
+            false
+          ],
+          "trim_db": 0.0,
+          "width": 1.0
+        },
         "bed": {
           "chain": [
             {
@@ -283,6 +295,18 @@
           ],
           "fader_db": 0.0,
           "mute": false
+        },
+        "mixed": {
+          "chain": [],
+          "fader_db": 0.0,
+          "mute": false,
+          "pan": 0.0,
+          "polarity": [
+            false,
+            false
+          ],
+          "trim_db": 0.0,
+          "width": 1.0
         },
         "pre": {
           "chain": [
@@ -561,6 +585,78 @@
         }
       ],
       "polarity": [
+        false
+      ],
+      "recall_safe": false,
+      "solo_safe": false,
+      "trim_db": 0.0,
+      "width": 1.0
+    },
+    {
+      "chain": [],
+      "fader_db": 0.0,
+      "format": "stereo",
+      "id": "back",
+      "loudness": false,
+      "mute": false,
+      "mute_safe": false,
+      "name": "back",
+      "pan": 0.0,
+      "patch": [
+        null,
+        null
+      ],
+      "patch_exact": [
+        {
+          "channel": 1,
+          "signal": "main"
+        },
+        {
+          "channel": 1,
+          "output": "1"
+        }
+      ],
+      "polarity": [
+        false,
+        false
+      ],
+      "recall_safe": false,
+      "solo_safe": false,
+      "trim_db": 0.0,
+      "width": 1.0
+    },
+    {
+      "chain": [],
+      "fader_db": 0.0,
+      "format": "stereo",
+      "id": "mixed",
+      "loudness": false,
+      "mute": false,
+      "mute_safe": false,
+      "name": "mixed",
+      "pan": 0.0,
+      "patch": [
+        {
+          "channel": 1,
+          "input": 2
+        },
+        null
+      ],
+      "patch_exact": [
+        {
+          "channel": 1,
+          "input": 2
+        },
+        {
+          "channel": 1,
+          "signal": "vox",
+          "tap": {
+            "after": "eq-1"
+          }
+        }
+      ],
+      "polarity": [
+        false,
         false
       ],
       "recall_safe": false,
