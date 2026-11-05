@@ -16,6 +16,7 @@ import SurroundPad from "./SurroundPad.vue";
 import VFader from "./VFader.vue";
 import { api, dbValue, fmtPan, fmtSigned } from "../api.js";
 import { channelLabels, isLinked, linkedPatch } from "../console.js";
+import { signalPatchKey, signalPatchOf, signalPatchText, signalSources } from "../patchsources.js";
 import { DYNAMICS, HEIGHT_LAYOUTS, NODE_TYPES } from "../nodes.js";
 import {
   act,
@@ -194,11 +195,13 @@ async function remove() {
 const inputs = computed(() => live.status?.inputs || []);
 function patchValue(p) {
   if (!p) return "";
+  if ("signal" in p || "output" in p) return signalPatchKey(p);
   return "talkback" in p ? `t:${p.talkback}` : `${p.input}:${p.channel}`;
 }
 function setPatch(ch, value) {
   const patch = [...s.value.patch];
   if (!value) patch[ch] = null;
+  else if (signalPatchOf(value)) patch[ch] = signalPatchOf(value);
   else if (value.startsWith("t:")) patch[ch] = { talkback: value.slice(2) };
   else {
     const [input, channel] = value.split(":").map(Number);
@@ -221,6 +224,8 @@ const patchOptions = computed(() =>
     Array.from({ length: Math.max(i.channels || 0, 2) }, (_, c) => ({ value: `${i.input}:${c + 1}`, text: `${i.input}·${c + 1}`, dim: !i.channels || c >= i.channels })),
   ),
 );
+// Buses, direct outs and virtual outputs as inputs (D1); a loop is refused by the server.
+const signalGroups = computed(() => signalSources(s.value.id));
 const patchState = (ch) => s.value.patch_state?.[ch] || (s.value.patch?.[ch] ? "ok" : "unpatched");
 
 // The input patch, linked (C3): only the first channel is chosen, the others follow in order on the same
@@ -240,12 +245,17 @@ function setLinkedFirst(value) {
     patchSignal(s.value.id, { patch: [{ talkback: value.slice(2) }, ...Array(n - 1).fill(null)] });
     return;
   }
+  const point = signalPatchOf(value);
+  if (point) {
+    patchSignal(s.value.id, { patch: linkedPatch(n, point) });
+    return;
+  }
   const [input, channel] = value ? value.split(":").map(Number) : [];
   patchSignal(s.value.id, { patch: linkedPatch(n, value ? { input, channel } : null) });
 }
 const labels = computed(() => channelLabels(s.value.format));
 const chLabel = (ch) => labels.value[ch] || String(ch + 1);
-const patchText = (p) => (!p ? "—" : "talkback" in p ? `TB ${p.talkback}` : `${p.input}·${p.channel}`);
+const patchText = (p) => (!p ? "—" : "talkback" in p ? `TB ${p.talkback}` : "input" in p ? `${p.input}·${p.channel}` : signalPatchText(p));
 
 function togglePolarity(ch) {
   const polarity = [...s.value.polarity];
@@ -337,6 +347,9 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
           <option value="">—</option>
           <option v-for="o in patchOptions" :key="o.value" :value="o.value">{{ o.text }}</option>
           <option v-for="o in talkOptions" :key="o.value" :value="o.value">{{ o.text }}</option>
+          <optgroup v-for="g in signalGroups" :key="g.label" :label="g.label">
+            <option v-for="o in g.points" :key="o.value" :value="o.value" :disabled="o.disabled" :title="o.title">{{ o.text }}</option>
+          </optgroup>
         </select>
         <span v-for="(p, ch) in s.patch.slice(1)" :key="ch" class="pchip" :class="patchState(ch + 1)" :title="`${chLabel(ch + 1)}: ${patchState(ch + 1)}`">{{ chLabel(ch + 1) }} {{ patchText(p) }}</span>
       </template>
@@ -353,6 +366,9 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
           <option value="">—</option>
           <option v-for="o in patchOptions" :key="o.value" :value="o.value">{{ o.text }}</option>
           <option v-for="o in talkOptions" :key="o.value" :value="o.value">{{ o.text }}</option>
+          <optgroup v-for="g in signalGroups" :key="g.label" :label="g.label">
+            <option v-for="o in g.points" :key="o.value" :value="o.value" :disabled="o.disabled" :title="o.title">{{ o.text }}</option>
+          </optgroup>
         </select>
       </template>
     </div>

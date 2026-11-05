@@ -1368,6 +1368,17 @@ impl Control {
                 {
                     PatchState::Ok
                 }
+                // A signal of the mix (D1) is there once the mix is valid.
+                Some(Patch::Signal(_)) => PatchState::Ok,
+                Some(Patch::Output(o)) => match self.mix.virtual_source(&o.output) {
+                    Some(crate::mix::model::OutputSource::Signal { .. }) => PatchState::Ok,
+                    Some(crate::mix::model::OutputSource::Input { input, .. })
+                        if self.inputs.has_channels(input - 1, o.channel) =>
+                    {
+                        PatchState::Ok
+                    }
+                    _ => PatchState::Missing,
+                },
                 Some(_) => PatchState::Missing,
             })
             .collect()

@@ -481,9 +481,51 @@ async fn metrics(State(app): State<App>) -> Response {
     metric(
         "dsp_deadline_misses_total",
         "counter",
-        "Blocks woken later than one block period, plus blocks skipped after a late one.",
+        "Blocks skipped (silence) because the DSP thread was still busy or not yet awake at their end (1.6.0: once per block lost).",
         vec![format!(" {}", c.deadline_misses.load(Ordering::Relaxed))],
     );
+    let mut cumulative = 0u64;
+    let mut lines = Vec::new();
+    for (i, bound) in BLOCK_BUCKETS_US.iter().enumerate() {
+        cumulative += c.wake_late_buckets[i].load(Ordering::Relaxed);
+        lines.push(format!(
+            "_bucket{{le=\"{}\"}} {cumulative}",
+            *bound as f64 / 1e6
+        ));
+    }
+    cumulative += c.wake_late_buckets[BLOCK_BUCKETS_US.len()].load(Ordering::Relaxed);
+    lines.push(format!("_bucket{{le=\"+Inf\"}} {cumulative}"));
+    lines.push(format!(
+        "_sum {}",
+        c.wake_late_sum_ns.load(Ordering::Relaxed) as f64 / 1e9
+    ));
+    lines.push(format!("_count {cumulative}"));
+    metric(
+        "dsp_wake_late_seconds",
+        "histogram",
+        "How late the DSP thread woke after a block's deadline (the scheduler's part of a miss).",
+        lines,
+    );
+    if let Some(t) = timing::thread_counters(c.dsp_tid.load(Ordering::Relaxed)) {
+        metric(
+            "dsp_thread_page_faults_total",
+            "counter",
+            "Page faults of the DSP thread; a major one waited for a page from disk.",
+            vec![
+                format!("{{kind=\"minor\"}} {}", t.minor_faults),
+                format!("{{kind=\"major\"}} {}", t.major_faults),
+            ],
+        );
+        metric(
+            "dsp_thread_context_switches_total",
+            "counter",
+            "Context switches of the DSP thread; an involuntary one is a preemption.",
+            vec![
+                format!("{{kind=\"voluntary\"}} {}", t.voluntary_switches),
+                format!("{{kind=\"involuntary\"}} {}", t.involuntary_switches),
+            ],
+        );
+    }
     metric(
         "dsp_load_ratio",
         "gauge",
@@ -732,6 +774,27 @@ async fn metrics(State(app): State<App>) -> Response {
         "gauge",
         "Read offset plus the input's extra delay.",
         per(&|s| s.effective_delay_ms.to_string()),
+    );
+    metric(
+        "input_worst_lag_ms",
+        "gauge",
+        "Worst arrival lag of MIXER_INPUT_DELAY_WINDOW_S: what the automatic delay covers (with the margin).",
+        status
+            .iter()
+            .filter_map(|s| Some(format!("{{input=\"{}\"}} {}", s.input, s.worst_lag_ms?)))
+            .collect(),
+    );
+    metric(
+        "input_delay_changes_total",
+        "counter",
+        "Automatic delay changes (each one a fade).",
+        per(&|s| s.delay_changes.to_string()),
+    );
+    metric(
+        "input_late_events_total",
+        "counter",
+        "Late events: 100 ms control ticks with a late block after one without (about the dropouts heard).",
+        per(&|s| s.late_events.to_string()),
     );
     metric(
         "input_state",

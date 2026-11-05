@@ -354,6 +354,17 @@ fn record_block_time(counters: &EngineCounters, ns: u64, period_ns: u64) {
     );
 }
 
+/// How late the thread woke after the deadline (D311).
+fn record_wake_late(counters: &EngineCounters, ns: u64) {
+    let us = ns / 1_000;
+    let bucket = BLOCK_BUCKETS_US
+        .iter()
+        .position(|b| us <= *b)
+        .unwrap_or(BLOCK_BUCKETS_US.len());
+    counters.wake_late_buckets[bucket].fetch_add(1, Ordering::Relaxed);
+    counters.wake_late_sum_ns.fetch_add(ns, Ordering::Relaxed);
+}
+
 pub(super) fn run(
     config: EngineConfig,
     counters: Arc<EngineCounters>,
@@ -370,6 +381,10 @@ pub(super) fn run(
     } = taps;
     let (notes, realtime) = crate::timing::set_up_dsp_thread(config.rt_priority, config.cpu);
     counters.realtime.store(realtime, Ordering::Relaxed);
+    // SAFETY: gettid has no preconditions.
+    counters
+        .dsp_tid
+        .store(unsafe { libc::gettid() } as u32, Ordering::Relaxed);
     tracing::info!("DSP thread: {notes}");
     if let Ok(mut s) = scheduling.lock() {
         *s = notes;
@@ -417,9 +432,10 @@ pub(super) fn run(
         if woke < deadline {
             continue;
         }
-        if woke - deadline > period_ns {
-            counters.deadline_misses.fetch_add(1, Ordering::Relaxed);
-        }
+        // A wake more than a block late is no miss of its own: this block is
+        // still processed and written at its index; the block after it is
+        // skipped and counted below (D311: 1.5 counted both, two per stall).
+        record_wake_late(&counters, woke - deadline);
 
         while let Ok(command) = commands.pop() {
             match command {

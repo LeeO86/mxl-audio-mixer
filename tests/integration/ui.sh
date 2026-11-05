@@ -36,6 +36,7 @@ node "$ROOT/web/tests/spatial.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/spatia
 node "$ROOT/web/tests/console15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/console15.mjs"
 node "$ROOT/web/tests/midi.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/midi.mjs"
 node "$ROOT/web/tests/dsp15.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/dsp15.mjs"
+node "$ROOT/web/tests/inputs16.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/inputs16.mjs"
 node "$ROOT/web/tests/graph.mjs" "$WEB" "$IT_OUT/ui" || fail "web/tests/graph.mjs"
 
 rc=0

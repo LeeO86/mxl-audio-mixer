@@ -134,6 +134,16 @@ fn main() -> ExitCode {
         Ok(n) => tracing::info!("open files limit {n}"),
         Err(e) => tracing::warn!("open files limit not raised: {e}"),
     }
+    if config.numa_local {
+        match timing::leave_numa_balancing() {
+            Ok(()) => tracing::info!("memory policy local: no automatic NUMA balancing"),
+            // Worth a warning only where the DSP thread is meant to be real time.
+            Err(e) if config.rt_priority.is_some() => tracing::warn!(
+                "memory policy not set ({e}): automatic NUMA balancing may fault and move the DSP thread's pages (the container needs SYS_NICE for set_mempolicy)"
+            ),
+            Err(e) => tracing::info!("memory policy not set ({e})"),
+        }
+    }
     let workers = timing::worker_threads();
     timing::reserve_dsp_core();
     let runtime = match tokio::runtime::Builder::new_multi_thread()

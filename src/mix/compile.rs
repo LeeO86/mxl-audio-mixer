@@ -214,6 +214,8 @@ impl Compiler {
 #[derive(Clone)]
 struct Taps {
     input: Span,
+    /// The latency at the input: a strip read from signals of the mix (D1).
+    input_latency: usize,
     chain_in: Span,
     after: Vec<(String, Span, usize)>,
     pre_eq: (Span, usize),
@@ -234,7 +236,7 @@ impl Taps {
     fn get(&self, tap: &Tap) -> (Span, usize) {
         let total = self.pre_fader.1;
         match tap {
-            Tap::Input => (self.input, 0),
+            Tap::Input => (self.input, self.input_latency),
             Tap::PreEq => self.pre_eq,
             Tap::PostEq => self.post_eq,
             Tap::PreDynamics => self.pre_dynamics,
@@ -247,7 +249,7 @@ impl Taps {
                 .iter()
                 .find(|(n, _, _)| n == id)
                 .map(|(_, s, l)| (*s, *l))
-                .unwrap_or((self.chain_in, 0)),
+                .unwrap_or((self.chain_in, self.input_latency)),
         }
     }
 }
@@ -640,6 +642,10 @@ impl Compiler {
                     let n = s.format.channels();
                     let input = c.b.buffers(n);
                     let mut resolved = Vec::with_capacity(n);
+                    // Channels read from a signal of the mix (D1): which, and the
+                    // highest latency among them (the strip's taps start there).
+                    let mut from_signals = Vec::with_capacity(n);
+                    let mut input_latency = 0;
                     for (ch, point) in s.patch.iter().enumerate() {
                         let at = match point {
                             Some(Patch::Input(p)) => {
@@ -649,11 +655,36 @@ impl Compiler {
                                 .iter()
                                 .find(|m| m.info.id == t.talkback)
                                 .map(|m| (m.input, m.channel)),
-                            None => None,
+                            Some(Patch::Output(o)) => match mix.virtual_source(&o.output) {
+                                Some(OutputSource::Input { input, .. }) => {
+                                    Some(((input - 1) as u32, (o.channel - 1) as u32))
+                                }
+                                _ => None,
+                            },
+                            Some(Patch::Signal(_)) | None => None,
                         };
                         resolved.push(at);
-                        match at {
-                            Some((input_index, channel)) => {
+                        // The signal's channel at its tap, compiled before this
+                        // strip (signal order).
+                        let channel = match point {
+                            Some(Patch::Signal(p)) => Some(p.channel),
+                            Some(Patch::Output(o)) => Some(o.channel),
+                            _ => None,
+                        };
+                        let signal = point
+                            .as_ref()
+                            .and_then(|p| mix.patch_signal(p))
+                            .zip(channel)
+                            .and_then(|((signal, tap), k)| {
+                                let t = taps.get(&signal)?;
+                                let (span, lat) = t.get(&tap);
+                                (k >= 1 && k as u32 <= span.len).then(|| {
+                                    (c.single(span, k - 1), lat, (signal, tap, k, t.chain))
+                                })
+                            });
+                        from_signals.push(signal.as_ref().map(|x| x.2.clone()));
+                        match (at, signal) {
+                            (Some((input_index, channel)), _) => {
                                 let dst = c.b.buffer(input, ch);
                                 c.b.step(Step::Patch {
                                     input: input_index,
@@ -661,7 +692,17 @@ impl Compiler {
                                     dst,
                                 });
                             }
-                            None => {
+                            (None, Some((src, lat, _))) => {
+                                input_latency = input_latency.max(lat);
+                                let node = c.node(
+                                    format!("strip/{}/in/{ch}", s.id),
+                                    &from_signals[ch],
+                                    vec![1.0],
+                                );
+                                let dst = c.single(input, ch);
+                                c.b.step(Step::Gain { node, src, dst });
+                            }
+                            (None, None) => {
                                 let dst = c.single(input, ch);
                                 c.b.step(Step::Clear { dst });
                             }
@@ -675,7 +716,7 @@ impl Compiler {
                         .collect();
                     let node = c.node(
                         format!("strip/{}/trim", s.id),
-                        (format_name(s.format), &resolved),
+                        (format_name(s.format), &resolved, &from_signals),
                         values,
                     );
                     let chain_in = c.b.buffers(n);
@@ -803,15 +844,21 @@ impl Compiler {
                         }
                         None => post,
                     };
+                    // A strip read from signals starts at their latency (D1).
+                    let shift = |(s, l): (Span, usize)| (s, l + input_latency);
                     Taps {
                         input,
+                        input_latency,
                         chain_in,
-                        after,
-                        pre_eq: named[0],
-                        post_eq: named[1],
-                        pre_dynamics: named[2],
-                        post_dynamics: named[3],
-                        pre_fader: pre,
+                        after: after
+                            .into_iter()
+                            .map(|(i, s, l)| (i, s, l + input_latency))
+                            .collect(),
+                        pre_eq: shift(named[0]),
+                        post_eq: shift(named[1]),
+                        pre_dynamics: shift(named[2]),
+                        post_dynamics: shift(named[3]),
+                        pre_fader: shift(pre),
                         post,
                         pan,
                         meter: level,
@@ -1003,6 +1050,7 @@ impl Compiler {
                     }
                     Taps {
                         input: sum,
+                        input_latency: 0,
                         chain_in: sum,
                         after: after
                             .into_iter()
@@ -1612,6 +1660,72 @@ mod tests {
         assert_eq!(c.meters.len(), 3);
         let kinds: Vec<&str> = c.plan.steps.iter().map(|s| s.kind()).collect();
         assert_eq!(kinds.iter().filter(|k| **k == "send").count(), 3);
+    }
+
+    /// D1: a strip reads a bus (its bus out) and a strip's direct out in the
+    /// same block, and starts at their latency.
+    #[test]
+    fn a_strip_reads_a_bus_and_a_direct_out() {
+        use crate::mix::model::SignalPoint;
+        let mut mix = mix();
+        mix.buses[0].chain = vec![limiter()];
+        let mut back = strip("back", Format::Stereo, 1);
+        back.patch = (1..=2)
+            .map(|channel| {
+                Some(Patch::Signal(SignalPoint {
+                    signal: "main".into(),
+                    tap: None,
+                    channel,
+                }))
+            })
+            .collect();
+        mix.strips.push(back);
+        let mut dry = strip("dry", Format::Mono, 1);
+        dry.patch[0] = Some(Patch::Signal(SignalPoint {
+            signal: "music".into(),
+            tap: Some(Tap::PreFader),
+            channel: 2,
+        }));
+        mix.strips.push(dry);
+        for signal in ["back", "dry"] {
+            mix.outputs.push(Output {
+                signal: signal.into(),
+                format: None,
+                commit_samples: None,
+                tap: None,
+            });
+        }
+        assert_eq!(mix.validate(4, 48), Ok(()));
+        let order = mix.signal_order().unwrap();
+        let at = |id: &str| order.iter().position(|x| *x == id).unwrap();
+        assert!(at("main") < at("back") && at("music") < at("dry"));
+        let mut compiler = Compiler::default();
+        let outputs = HashMap::from([
+            ("main".to_string(), 3),
+            ("back".to_string(), 4),
+            ("dry".to_string(), 5),
+        ]);
+        let mut c = compiler.compile(&mix, 48, 0, &outputs, &HashMap::new());
+        assert_eq!(c.latency["back"], c.latency["main"], "{:?}", c.latency);
+        assert!(c.latency["main"] > 0);
+        let inputs = Inputs(vec![
+            vec![vec![0.05; 48]],
+            vec![vec![0.01; 48], vec![0.02; 48]],
+        ]);
+        let out = run(&mut c, &inputs, 200);
+        let (main, back) = (&out.0[&3], &out.0[&4]);
+        let last = 200 * 48 - 1;
+        for ch in 0..2 {
+            assert!(
+                (main[ch][last] - back[ch][last]).abs() < 1e-6,
+                "channel {ch}"
+            );
+            assert!(main[ch][last].abs() > 1e-3);
+        }
+        assert!(
+            (out.0[&5][0][last] - 0.02).abs() < 1e-6,
+            "music R, pre-fader"
+        );
     }
 
     #[test]

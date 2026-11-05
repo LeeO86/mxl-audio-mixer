@@ -417,6 +417,8 @@ fn patch_label(patch: &Option<Patch>) -> String {
     match patch {
         Some(Patch::Input(p)) => format!("{}.{}", p.input, p.channel),
         Some(Patch::Talkback(t)) => format!("tb:{}", t.talkback),
+        Some(Patch::Signal(p)) => format!("{}.{}", p.signal, p.channel),
+        Some(Patch::Output(p)) => format!("out:{}.{}", p.output, p.channel),
         None => String::new(),
     }
 }

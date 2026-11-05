@@ -217,6 +217,13 @@ pub struct EngineCounters {
     pub deadline_misses: AtomicU64,
     pub block_time_buckets: [AtomicU64; BLOCK_BUCKETS_US.len() + 1],
     pub block_time_sum_ns: AtomicU64,
+    /// How late the DSP thread woke after a block's deadline (D311), in the
+    /// buckets of [`BLOCK_BUCKETS_US`]: the scheduler's part of a miss.
+    pub wake_late_buckets: [AtomicU64; BLOCK_BUCKETS_US.len() + 1],
+    pub wake_late_sum_ns: AtomicU64,
+    /// The DSP thread's id (`gettid`), 0 before it runs: its page faults and
+    /// context switches are read from `/proc/self/task/<tid>`.
+    pub dsp_tid: AtomicU32,
     /// Block time / block period of the last block, in parts per million.
     pub load_ppm: AtomicU32,
     pub output_blocks: AtomicU64,
@@ -241,6 +248,9 @@ impl EngineCounters {
             deadline_misses: AtomicU64::new(0),
             block_time_buckets: Default::default(),
             block_time_sum_ns: AtomicU64::new(0),
+            wake_late_buckets: Default::default(),
+            wake_late_sum_ns: AtomicU64::new(0),
+            dsp_tid: AtomicU32::new(0),
             load_ppm: AtomicU32::new(0),
             output_blocks: AtomicU64::new(0),
             plan_swaps: AtomicU64::new(0),

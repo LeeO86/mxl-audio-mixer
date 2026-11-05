@@ -41,7 +41,10 @@ format change of the Processing view, confirmed by a second press), and "Delete�
 a confirmation listing what goes with it). "+ Strip" and "+ Bus" add several at
 once with numbered names; the first new one is selected. A stereo or wider strip's
 input patch is linked by default: choose the first channel and the others follow
-in order on the same input (untick "Link" to choose each). Wider strips have one
+in order on the same input (untick "Link" to choose each). Besides the inputs and
+talkback mics the list has every bus, every strip's direct out and every virtual
+output (1.6.0); an entry that would close a feedback loop is greyed out, and the
+server refuses one with the loop in the message. Wider strips have one
 polarity button that opens a toggle per channel and shows how many are inverted.
 "Auto-mix" opens the gain-sharing auto-mixes, every strip a tile. The name has the
 strip's width; the format, the gear and the ⋮ menu share the row below it. A click
@@ -351,6 +354,18 @@ is then 0. The file capability makes glibc run the binary in secure mode:
 `LD_LIBRARY_PATH` and `LD_PRELOAD` are ignored (the image finds libmxl through
 `ldconfig`, in `/usr/local/lib`).
 
+**Deadline misses** (`dsp_deadline_misses_total`, 1.6.0: one per block that went out
+as silence) come from the DSP thread waking late or working long. Read them with
+`dsp_wake_late_seconds` (woke more than a block late: the scheduler did not run it,
+e.g. a busy SMT sibling, a kernel thread or an interrupt on its CPU) against
+`dsp_block_seconds` (worked longer than a block), and the DSP thread's
+`dsp_thread_context_switches_total{kind="involuntary"}` (preempted) and
+`dsp_thread_page_faults_total{kind="major"}` (waited for a page from disk). At start
+the mixer takes a local memory policy (`MIXER_NUMA_LOCAL`), so the kernel's automatic
+NUMA balancing does not unmap and move the DSP thread's pages (in the lab: 12 000
+hinting faults and 79 page moves on the DSP thread in its first minutes without it,
+none with it).
+
 **Network.** The API has no authentication: keep the web and NMOS ports on the pod
 network (the platform's ingress in front of the UI). The logic editor's webhook
 block posts only to `http://` and `https://` URLs; a failed post is a warning in
@@ -403,9 +418,13 @@ token.
 | `MIXER_READ_OFFSET` | 2 | Read offset in ms: every input is read at t_out − (offset + its extra delay). |
 | `MIXER_OUTPUT_COMMIT_SAMPLES` | one block | Samples per MXL commit of an output (a multiple of the block size). |
 | `MIXER_RT_PRIORITY` | off | SCHED_FIFO priority of the DSP thread, 1–49 (needs CAP_SYS_NICE). |
+| `MIXER_NUMA_LOCAL` | true | true: the process takes a local memory policy at start, which keeps the kernel's automatic NUMA balancing from faulting and moving the DSP thread's pages (set_mempolicy; needs CAP_SYS_NICE under the default seccomp profile). |
 | `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move for this long is stalled and re-opened. |
 | `MIXER_INPUT_DELAY_MAX_MS` | 150 | Upper limit of an input's automatic extra delay. |
 | `MIXER_INPUT_DELAY_HOLD_S` | 30 | An automatic delay goes down only after the measured need stayed at least 1 ms lower for this long, and at most once per this time; it goes up at once. |
+| `MIXER_INPUT_DELAY_WINDOW_S` | 300 | An automatic delay covers the worst arrival lag of this window (seconds) plus MIXER_INPUT_DELAY_MARGIN_MS: after a spike it stays up this long (plus the hold time). |
+| `MIXER_INPUT_DELAY_MARGIN_MS` | 1 | Added to the worst arrival lag of the window for an automatic delay, with MIXER_INPUT_DELAY_MARGIN_PCT. |
+| `MIXER_INPUT_DELAY_MARGIN_PCT` | 20 | Also added: this share of the worst arrival lag above the read offset (a long tail gets more margin, a local input about MIXER_INPUT_DELAY_MARGIN_MS only). |
 | `MIXER_INPUT_DELAY_CONFIRM` | false | true: an automatic delay change waits for operator confirmation instead of applying with a fade. |
 | `WIDGET_FRAME_ANCESTORS` | 'self' | CSP frame-ancestors of the /widget pages; /widgets answers these origins with CORS. |
 | `TSL_ENABLE` | false | Listen for TSL UMD 5.0 tally (audio-follows-video). |
@@ -438,23 +457,29 @@ nothing count too: a writer that commits in batches (a video frame of audio, a b
 packets) is furthest behind just before its next commit. A head that stands still for
 longer than the read offset plus `MIXER_INPUT_DELAY_MAX_MS` is a stall, not a lag. A
 block is late exactly when its lag is above the read offset plus the extra delay, so
-the arrival lag and `late_samples` agree. The extra delay is the 99.9th percentile plus
-1 ms, minus the read offset, within `MIXER_INPUT_DELAY_MAX_MS`. It goes up at once
-when the 99.9th percentile comes within 0.5 ms of the delay, and at once when a block
-was late (its lag above the read offset plus the delay: a rare outlier the percentile
-does not show), to that lag plus 1 ms. It goes down only after the need stayed at
+the arrival lag and `late_samples` agree. The extra delay (1.6.0, D310) covers the
+worst lag of the last `MIXER_INPUT_DELAY_WINDOW_S` (5 min) plus a margin of
+`MIXER_INPUT_DELAY_MARGIN_MS` (1 ms) and `MIXER_INPUT_DELAY_MARGIN_PCT` (20 %) of that
+lag above the read offset, minus the read offset, within `MIXER_INPUT_DELAY_MAX_MS`. It
+goes up at once when less than half the margin is left above a block's lag, and at once
+when a block was late. It goes down only when the worst lag of the window has been at
 least 1 ms lower for `MIXER_INPUT_DELAY_HOLD_S` (30 s), to the highest need of that
-time, and at most once per hold time; the need of a late block counts for one hold
-time, and for ten (5 min, renewed each time) once the outlier comes again within
-them. The catch-up of a writer after a stall or a re-open is no lag. Lags beyond the
+time, and at most once per hold time: after a spike it stays up for the window plus a
+hold time, and a tail that keeps coming keeps it up, so a remote input with a long tail
+(a flow replicated from another node) loses a block only for a spike higher than any of
+the last minutes. A local input with a short, steady lag keeps about the delay it had
+(its worst lag is about its 99.9th percentile; the margin is about 1 ms). The catch-up
+of a writer after a stall or a re-open is no lag. Lags beyond the
 read offset plus `MIXER_INPUT_DELAY_MAX_MS` never move the delay; they are shown, but
 the percentiles of a writer always that late read the edge of the measured range
 (`lag_ms`, the last lag, is exact). An input starts at the automatic delay its flow
 had last (`MIXER_STATE_DIR/input-delays.json`, per flow id), which holds for a hold
-time and covers outliers of that size; in its first minute (the start-up phase) a
-late block's floor and the period of lower need last 5 s instead of the hold time, so
-a backlog at the start (a mirror still filling) does not keep a large delay for
-minutes. A change is applied with a
+time; in its first minute (the start-up phase) the window and the hold are 5 s, so a
+backlog at the start (a mirror still filling) does not keep a large delay for
+minutes; a second late block, or a lag about the last run's delay, ends that phase.
+`worst_lag_ms` (the window's worst lag), `delay_changes` and `late_events` (100 ms
+ticks with a late block after one without: about the dropouts heard) are in the
+input's status. minutes. A change is applied with a
 fade, or waits for `POST /api/v1/inputs/<n>/delay/confirm` with
 `MIXER_INPUT_DELAY_CONFIRM=true`. A writer that commits N samples at once needs about
 N samples of read offset plus extra delay: with the 2 ms default, a browser source that
@@ -512,7 +537,19 @@ an id gets `strip-<n>` or `bus-<n>`.
 - **Strip:** patch → trim and polarity → `chain` → fader and mute → panner.
   `patch` has one entry per strip channel: `{"input": n, "channel": c}` (both from
   1) or `null`. A channel the input does not have is silent and shows `missing` in
-  `patch_state`. `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
+  `patch_state`. Outputs of the mix are inputs too (D1, 1.6.0), read in the same
+  block without extra delay: `{"signal": "<bus or strip>", "tap"?: <tap>, "channel":
+  c}` (a bus's bus out or a strip's direct out, default post-fader; any tap of the
+  signal, also `{"after": "<node id>"}`) and `{"output": "<key or slot>", "channel":
+  c}` (a virtual output: what feeds it, channel for channel; silent without a source;
+  one fed by a monitor cannot feed a strip). The strip's taps start at that signal's
+  latency. A patch that would close a feedback loop (through sends, subgroups,
+  mix-minus, keys, direct outs, virtual outputs, also one a logic route sets) is
+  refused with the loop: `refused: this would close a feedback loop: a → main → a`;
+  only a send with a block delay may close one. Routing an input (`PUT
+  /api/v1/inputs/<n>/route`) to one of the mixer's own output flows that carries that
+  input is refused the same way. Deleting a signal unpatches what read it. 1.5 does
+  not load a show with such patches (`mix.json.bad`). `trim_db` ±42, `fader_db` `"-inf"` … +15, `pan` −1 … +1 (mono:
   position; stereo: balance), `width` 0 … 2 (stereo; 1 unchanged), `loudness`
   (measure it). A mono strip is stereo after its panner; with a surround panner
   (below) a mono or stereo strip is 5.1 or 7.1 there.
@@ -1096,7 +1133,12 @@ their answers at once.
 
 ## Metrics
 
-`dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`,
+`dsp_block_seconds` (histogram), `dsp_deadline_misses_total` (blocks skipped, as
+silence; 1.6.0 counts each once, 1.5 counted a late wake and its skipped block, two per
+stall), `dsp_wake_late_seconds` (histogram: how late the DSP thread woke after a
+block's deadline, the scheduler's part of a miss), `dsp_thread_page_faults_total{kind}`
+(`minor`, `major`) and `dsp_thread_context_switches_total{kind}` (`voluntary`,
+`involuntary`: preemptions) of the DSP thread, `dsp_load_ratio`,
 `dsp_realtime` (1 when the DSP thread runs `SCHED_FIFO`), `plan_swaps_total`, `plan_compile_seconds` (last compile), `meter_drops_total`
 (metered blocks the meter thread did not get), `vad_drops_total` (tapped blocks
 the control engine did not get), `signals`,
@@ -1109,7 +1151,9 @@ the control engine did not get), `signals`,
 connecting, 2 publishing), `preview_readers{path}`, `preview_child_restarts_total`,
 and per input: `input_state`,
 `input_lag_ms`, `input_arrival_lag_ms` (quantiles 0.5, 0.99, 0.999),
-`input_effective_delay_ms`, `input_late_samples_total`
+`input_effective_delay_ms`, `input_worst_lag_ms` (the window's worst lag the
+automatic delay covers), `input_delay_changes_total`, `input_late_events_total`
+(100 ms ticks with a late block after one without), `input_late_samples_total`
 (the source had not written the samples yet), `input_overrun_samples_total`
 (the ring had already overwritten them), `input_missing_samples_total`
 (both, and any other failed read), `input_reopens_total`; `logic_ticks_total`,

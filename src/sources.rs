@@ -304,6 +304,11 @@ async fn route_input(
             (Some(_), None) => return Err(bad("a flow_id needs its domain_id")),
             (None, _) => None,
         };
+        if let Some((_, flow)) = route {
+            if let Some(why) = own_loop(&app.control(), input, flow) {
+                return Err(bad(why));
+            }
+        }
         let id = app
             .node
             .resource_id(ResourceType::Receiver, &receiver_key(input - 1));
@@ -331,6 +336,33 @@ async fn route_input(
         Ok(Json(json!(app.control().inputs.status()[input - 1])).into_response())
     };
     run.await.unwrap_or_else(|r| *r)
+}
+
+/// Why routing input `input` (from 1) to `flow` would close a loop through
+/// MXL (D1): the flow is one of the mixer's own outputs and carries that input.
+fn own_loop(control: &crate::control::Control, input: usize, flow: Uuid) -> Option<String> {
+    use crate::mix::model::OutputSource;
+    let o = control
+        .output_status()
+        .into_iter()
+        .find(|o| o.mxl_flow_id == flow)?;
+    let source = match o.signal.strip_prefix("vout:") {
+        Some(key) => control.mix.virtual_source(key)?.clone(),
+        None => OutputSource::Signal {
+            signal: o.signal.clone(),
+            tap: None,
+        },
+    };
+    let path = control.mix.carries_input(&source, input)?;
+    let via = if path.is_empty() {
+        String::new()
+    } else {
+        format!(" → {}", path.join(" → "))
+    };
+    Some(format!(
+        "refused: input {input} → {name}: this would close a feedback loop (input {input}{via} → {name} → input {input}); pick the output itself as the strip's input instead (no MXL round trip)",
+        name = o.name
+    ))
 }
 
 #[cfg(test)]

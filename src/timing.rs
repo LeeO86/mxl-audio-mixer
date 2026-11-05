@@ -302,6 +302,68 @@ pub fn set_up_dsp_thread(rt_priority: Option<i32>, cpu: Option<usize>) -> (Strin
     (notes.join(", "), realtime)
 }
 
+/// Take the process out of the kernel's automatic NUMA balancing (D311): a
+/// memory policy of its own (`MPOL_LOCAL`: allocate on the node of the CPU
+/// that allocates, as without one) has no "migrate on fault", so the balancer
+/// neither unmaps the process's pages to sample their use (hinting faults,
+/// thousands per scan on the DSP thread) nor migrates them under the DSP
+/// thread. Call before any thread starts: threads inherit the policy.
+pub fn leave_numa_balancing() -> Result<(), String> {
+    const MPOL_LOCAL: libc::c_long = 4;
+    // SAFETY: set_mempolicy with an empty node mask.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_set_mempolicy,
+            MPOL_LOCAL,
+            std::ptr::null::<libc::c_ulong>(),
+            0 as libc::c_ulong,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().to_string())
+    }
+}
+
+/// Counters of one thread of this process, from `/proc/self/task/<tid>`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ThreadCounters {
+    pub minor_faults: u64,
+    pub major_faults: u64,
+    pub voluntary_switches: u64,
+    pub involuntary_switches: u64,
+}
+
+/// The counters of thread `tid` (`None`: 0, gone or unreadable).
+pub fn thread_counters(tid: u32) -> Option<ThreadCounters> {
+    if tid == 0 {
+        return None;
+    }
+    let dir = format!("/proc/self/task/{tid}");
+    let stat = std::fs::read_to_string(format!("{dir}/stat")).ok()?;
+    let status = std::fs::read_to_string(format!("{dir}/status")).ok()?;
+    parse_thread_counters(&stat, &status)
+}
+
+fn parse_thread_counters(stat: &str, status: &str) -> Option<ThreadCounters> {
+    // After the command in parentheses (which may hold spaces): field 3 on.
+    let fields: Vec<&str> = stat.get(stat.rfind(')')? + 2..)?.split(' ').collect();
+    let field = |n: usize| fields.get(n - 3)?.parse::<u64>().ok();
+    let line = |name: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    };
+    Some(ThreadCounters {
+        minor_faults: field(10)?,
+        major_faults: field(12)?,
+        voluntary_switches: line("voluntary_ctxt_switches:")?,
+        involuntary_switches: line("nonvoluntary_ctxt_switches:")?,
+    })
+}
+
 /// CPU time of this process in seconds.
 pub fn process_cpu_seconds() -> f64 {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -327,6 +389,26 @@ pub fn process_resident_bytes() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_counters_from_proc() {
+        let stat = "4242 (dsp a) S 1 10 10 0 -1 4194624 26 0 3 0 120 40 0 0 -50 0 1 0";
+        let status =
+            "Name:\tdsp\nvoluntary_ctxt_switches:\t64259\nnonvoluntary_ctxt_switches:\t7\n";
+        assert_eq!(
+            parse_thread_counters(stat, status),
+            Some(ThreadCounters {
+                minor_faults: 26,
+                major_faults: 3,
+                voluntary_switches: 64259,
+                involuntary_switches: 7,
+            })
+        );
+        // This thread's own counters are readable.
+        let tid = unsafe { libc::gettid() } as u32;
+        assert!(thread_counters(tid).is_some());
+        assert_eq!(thread_counters(0), None);
+    }
 
     #[test]
     fn index_and_time_round_trip() {

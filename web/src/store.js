@@ -155,16 +155,20 @@ export function patchNode(id, node, body) {
 }
 
 // ---- routing from the console (C11) and subgroups (C12) ---------------------------------
-/** Whether signal `a` reaches signal `b` through sends (a send b → a would close a loop). */
+/** Whether signal `a` reaches signal `b` through sends or strips reading it (D1): a send b → a would close a loop. */
 export function reaches(a, b) {
   const seen = new Set();
   const todo = [a];
+  const vouts = live.status?.virtual_outputs || [];
+  const reads = (p, x) =>
+    p && (p.signal === x || ("output" in p && vouts.find((v) => (v.key || String(v.slot)) === p.output)?.source?.signal === x));
   while (todo.length) {
     const x = todo.pop();
     if (x === b) return true;
     if (seen.has(x)) continue;
     seen.add(x);
     for (const s of sends.value) if (s.from === x && !s.block_delay) todo.push(s.to);
+    for (const s of strips.value) if (s.patch?.some((p) => reads(p, x))) todo.push(s.id);
   }
   return false;
 }

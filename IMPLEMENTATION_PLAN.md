@@ -2463,3 +2463,34 @@ moved it to `mix.json.bad` and the mixer started with an empty mix.
 | ID | Decision | Reason |
 | --- | --- | --- |
 | D279 | Saved show state (`mix.json`, show-history versions) is parsed strictly first; only when that fails it is repaired on the JSON at the path of each error: an unknown field is removed (inside a `flatten`ed part, where the path stops at the node or block, the first key of that name at or below it); an unknown variant removes the array element it is in (a chain node, a logic block with its wires, a list entry), or the field when it is not in an array; anything else (a wrong type, a missing field, an untagged enum that matches no variant) is not repaired and the file goes to `mix.json.bad` as before. Then the normal validation runs; a mix that is not valid without the dropped parts (e.g. a logic `set-param` on a dropped node) is not repaired further (no reference cleaner besides the wires of a dropped block). The original stays as `mix.json.newer` (`mix.json.newer-<seconds>` when that exists); one WARN lists the dropped paths; `load_warnings` in the status and a banner in the UI show them. The API (and the show import) stays strict (`deny_unknown_fields`). | A rollback keeps what this version understands; a typo in an API call is still an error. Strict first, so a mix of this version never takes the repair path. |
+
+## 1.6.0: outputs as inputs, input delay, deadline misses (D1–D3)
+
+#### What exists
+
+- `src/mix/model.rs`: `Patch::Signal` (`{"signal", "tap"?, "channel"}`) and
+  `Patch::Output` (`{"output", "channel"}`); a strip reading a signal comes after it in
+  `signal_order`, so a loop through sends, subgroups, mix-minus, keys, direct outs or
+  virtual outputs is the existing loop error (also for a logic route: it is validated
+  like every change); `carries_input` for a route to an own flow
+  (`PUT /api/v1/inputs/<n>/route`, `src/sources.rs`).
+- `src/mix/compile.rs`: the strip's channel is a unity gain from the signal's tap
+  buffer in the same block; its taps start at the highest latency it reads.
+- UI: `web/src/patchsources.js` lists buses, direct outs (post-fader, the published
+  tap, `direct-out` blocks by id) and virtual outputs per channel; `reaches` follows
+  patches.
+- `src/inputs.rs`: `DelayHold` over a window of per-second peaks; `DelayPolicy`
+  (window, margin, hold); status and metrics `worst_lag_ms`, `delay_changes`,
+  `late_events`; the D-347 simulation (`d347_replicated_flow`, ignored) and
+  `mxl-mixer-tone --jitter-ms` for the lab.
+- `src/engine/dsp.rs`, `src/timing.rs`, `src/ops.rs`: one miss per skipped block,
+  `dsp_wake_late_seconds`, the DSP thread's page faults and context switches;
+  `timing::leave_numa_balancing` in `main`.
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D310 | The automatic delay covers the worst arrival lag of the last `MIXER_INPUT_DELAY_WINDOW_S` (300 s, per-second peaks) plus `MIXER_INPUT_DELAY_MARGIN_MS` (1 ms) and `MIXER_INPUT_DELAY_MARGIN_PCT` (20 %) of that lag above the read offset. Up at once when less than half the margin is left or a block was late; down when the window's worst stayed 1 ms lower for a hold time, at most once per hold time. Start-up: 5 s window and hold for 60 s, ended by a second late event or a lag that needs about the seeded delay. Replaces the short/recurring floors of D235/D236. | D-347: a replicated flow with a long tail (p50 11, p99 20, p99.9 25 ms) lost a block for every new spike above p99.9 + 1 ms (lab and simulation: about 30 per hour at 33 ms). The worst of 5 min with a margin that grows with the lag loses under one per hour at about +9 ms (curve in the 1.6.0 notes); a local input's worst is about its p99.9 and its margin about 1 ms, so its delay stays. |
+| D311 | `dsp_deadline_misses_total` counts the blocks skipped (silence), once each; how late the thread woke is a histogram of its own. The process takes a local memory policy at start (`MIXER_NUMA_LOCAL`). | A wake more than a block late always skips the next block, which was counted too: every stall counted twice (the "pairs" of the 1.5.0 lab). The mixer's block takes ≤ 1 ms of the 2 ms in the lab: misses are the DSP thread not run in time; the new metrics tell scheduling from work, preemptions and page faults. Automatic NUMA balancing gave the DSP thread 12 000 hinting faults and moved 79 of its pages in its first minutes; with the policy none. |
+| D312 | Outputs are strip inputs inside the mix (no MXL round trip, no extra delay); a virtual output as input reads its source channel for channel (a monitor cannot feed a strip: monitors come after every signal). Loops are refused, never delayed (the owner). An input routed by the UI to an own flow that carries it is refused too; an IS-05 activation from a controller is not checked (it cannot be refused after the fact). An insert (C4) send → outside device → return input is never refused: the return is an MXL input, no edge of the mix, and an insert send flow is no signal of the mix. | The owner wants every output available as an input "directly"; through MXL the 1.5.1 timestamps would make such a loop raise its own delay up to the maximum. |

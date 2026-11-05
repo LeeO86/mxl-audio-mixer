@@ -205,7 +205,12 @@ rates other than 48 kHz, recording.
   staged endpoint on the loopback), as a controller would, so registry, saved
   connections and UI agree.
 - **Input patch:** channels of input flows are patched to input strips (any channel to
-  any strip, with linked groups for stereo/5.1). A flow format change (channel count)
+  any strip, with linked groups for stereo/5.1). 1.6.0 (D1): the mix's own outputs
+  are inputs too, read in the same block without extra delay: a bus out, a strip's
+  direct out at any tap, a virtual output (its source). A patch that closes a loop
+  (sends, subgroups, mix-minus, keys, direct outs, virtual outputs, a logic route) is
+  refused with the loop named; so is an input routed to an own output flow that
+  carries that input. A flow format change (channel count)
   is handled without restart; unpatched channels are ignored, missing ones are silent
   and flagged.
 - **Alignment and latency:** each input is read at
@@ -219,13 +224,15 @@ rates other than 48 kHz, recording.
     (every block, also those without a commit: a writer that commits in batches is
     furthest behind just before its next commit), as a distribution, with the 99.9th
     percentile over a sliding window. A block is late exactly when its lag exceeds the
-    read offset plus the extra delay. It sets the delay to that value plus a margin,
-    within a configurable maximum, and changes it only with a fade (or only on operator
-    confirmation, configurable): up at once (also when a single block was late: its
-    need then stays a floor for a hold time, for ten when the outlier recurs), down
-    only after a hold time of lower need (5 s in an input's first minute; it starts at
-    its flow's last delay)
-    (`MIXER_INPUT_DELAY_HOLD_S`), so it does not follow every outlier.
+    read offset plus the extra delay. 1.6.0 (D-347, D310): the delay covers the **worst
+    lag of the last minutes** (`MIXER_INPUT_DELAY_WINDOW_S`, 5 min) plus a margin
+    (`MIXER_INPUT_DELAY_MARGIN_MS` 1 ms + `MIXER_INPUT_DELAY_MARGIN_PCT` 20 % of that lag
+    above the read offset), within a configurable maximum, and changes only with a fade
+    (or only on operator confirmation, configurable): up at once (also when a single
+    block was late), down only when the worst lag of the window stayed lower for a hold
+    time (`MIXER_INPUT_DELAY_HOLD_S`; 5 s window and hold in an input's first minute;
+    it starts at its flow's last delay), so it does not follow every outlier and a long
+    tail does not cost a block per new spike. Local inputs keep about the same delay.
   - Manual stays possible. The lag is exported per input (§15), so the right value can
     be read off.
   - **Measured on the platform:**
@@ -784,6 +791,10 @@ README's Settings table is the complete list, with every default):
 | `MIXER_INPUT_STALL_S` | 2 | An input whose head index does not move this long is stalled and re-opened (§4.2). |
 | `MIXER_INPUT_DELAY_MAX_MS` | 150 | Upper limit of an input's automatic extra delay (§4.2). |
 | `MIXER_INPUT_DELAY_HOLD_S` | 30 | An automatic delay goes down only after the need stayed at least 1 ms lower this long, at most once per this time; up at once (§4.2). |
+| `MIXER_INPUT_DELAY_WINDOW_S` | 300 | The automatic delay covers the worst arrival lag of this window plus the margin (§4.2, 1.6.0). |
+| `MIXER_INPUT_DELAY_MARGIN_MS` | 1 | Fixed part of that margin. |
+| `MIXER_INPUT_DELAY_MARGIN_PCT` | 20 | Share of the worst lag above the read offset added to the margin. |
+| `MIXER_NUMA_LOCAL` | true | A local memory policy at start: no automatic NUMA balancing faults or page moves under the DSP thread (§4.4, 1.6.0). |
 | `MIXER_INPUT_DELAY_CONFIRM` | false | An automatic delay change waits for the operator instead of applying with a fade. |
 | `MEDIAMTX_BIN` | `mediamtx` | The built-in MediaMTX executable (Appendix B.1). |
 | `MIXER_LINK_ROLE` | `off` | Remote link (§13): `off`, `master` or `slave`. |
@@ -799,7 +810,10 @@ README's Settings table is the complete list, with every default):
 
 ## 15. Metrics (prefix `mxl_audio_mixer_`)
 
-`dsp_block_seconds` (histogram), `dsp_deadline_misses_total`, `dsp_load_ratio`
+`dsp_block_seconds` (histogram), `dsp_deadline_misses_total` (blocks skipped as
+silence, each once; 1.5 also counted the late wake before them), `dsp_wake_late_seconds`
+(histogram, 1.6.0), `dsp_thread_page_faults_total{kind}`,
+`dsp_thread_context_switches_total{kind}` (1.6.0), `dsp_load_ratio`
 (block time / block period), `plan_swaps_total`, `plan_compile_seconds`,
 `input_late_samples_total{input}`, `input_lag_ms{input}`, `output_blocks_total`,
 `signals`, `nodes{type}`, `loudness_lufs{signal,window}`, `true_peak_dbtp{signal}`,
@@ -812,7 +826,8 @@ MediaMTX's API (the built-in one runs with its API off).
 
 Also:
 - `input_arrival_lag_ms{input}` (histogram or p50/p99/p999 gauges);
-- `input_effective_delay_ms{input}`;
+- `input_effective_delay_ms{input}`; `input_worst_lag_ms{input}`,
+  `input_delay_changes_total{input}`, `input_late_events_total{input}` (1.6.0);
 - `input_state{input}` (0 unrouted, 1 waiting, 2 running, 3 stalled);
 - `input_reopens_total{input}`, `input_missing_samples_total{input}`,
   `input_overrun_samples_total{input}` (the ring had already overwritten the
