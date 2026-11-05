@@ -30,20 +30,38 @@ logic graphs; master/slave remote production.
 ## Web UI
 
 `http://<host>:8190/`: one page built into the binary (no CDN, no other files). Tabs
-(the URL hash addresses them): **Console** (strips in banks or in a layout's pages:
+(the URL hash addresses them): **Console** (strips in banks or in a view's banks:
 patch, trim, polarity, the chain overview with its response and gain reduction,
 sends, pan and width, mute, fader, meter; the buses and VCAs beside them, behind a
 divider that sets how wide each side is (drag it or use the arrow keys; double-click
 or Home: automatic), each side scrolling on its own. A click on a strip's name
-renames it, the gear opens its processing, and its ⋮ menu has "Send to…" (a new
-send at 0 dB to a bus), on a bus "Add source…" and "Subgroup…", "Format…" (the
-format change of the Processing view, confirmed by a second press), and "Delete…" (with
-a confirmation listing what goes with it). "+ Strip" and "+ Bus" add several at
-once with numbered names; the first new one is selected. A stereo or wider strip's
+renames it, the gear opens its processing, and its ⋮ menu (a dialog over the
+mixer) has "Processing…", "Format…" (the format change of the Processing view,
+confirmed by a second press), "Send to…" (a new send at 0 dB to a bus), on a bus
+"Add source…" and "Subgroup…", "Copy settings…" (every setting and the processing,
+not the name, input, format or sends, to another strip or bus of its kind or to the
+selected ones), on a strip "Auto-mix…" (join a gain-sharing auto-mix or none; "Add
+auto-mix…" opens the auto-mixes), "MIDI learn" (picks its fader), the meter scale
+("Meters"), "Auto…" (auto-level, ducking, voice detection), "Operations…" (group,
+N-1, link, mix-minus), "+ Strip…" or "+ Bus…" (several at once with numbered names;
+the first new one is selected) and "Delete…" (with a confirmation listing what goes
+with it). An empty console shows one empty strip and one empty bus with their menu.
+A click on a strip outside its controls selects it, Shift+click a range,
+Ctrl+click (⌘) one more: while several are selected they are linked: a fader, trim
+or width move, any processing parameter, moves the others by the same amount (each
+keeps its offset; a frequency, Q, ratio or time by the same factor; −∞ counts as
+−80 dB), mute, PFL/AFL, a bypass or a choice is set the same on all, pan and the
+name stay on the strip; the menu's actions and the Processing view's (add, move,
+delete a node) run on all selected. The selection is per browser. The strip's grip
+(the bar on top) moves it: drag it onto another strip or bus, or focus it and use
+the arrow keys; the order of strips and buses is the show's (every operator sees
+it), in a custom view the view's. The view and bank choice sit beside the tabs:
+"All strips", "Inputs" (only strips), "Buses" (only buses) and the show's custom
+views ("Edit views…": banks of strips, VCAs and buses in any order). A stereo or wider strip's
 input patch is linked by default: choose the first channel and the others follow
 in order on the same input (untick "Link" to choose each). Wider strips have one
 polarity button that opens a toggle per channel and shows how many are inverted.
-"Auto-mix" opens the gain-sharing auto-mixes, every strip a tile. The name has the
+The auto-mixes dialog shows every strip as a tile. The name has the
 strip's width; the format, the gear and the ⋮ menu share the row below it. A click
 on the fader value types a level (`0`, `-20`, `-inf`; Enter applies, Escape keeps
 it). The sends show their levels; a click opens Routing. A muted strip's meter still
@@ -631,7 +649,8 @@ an id gets `strip-<n>` or `bus-<n>`.
   audio-follows-video").
 - **Console:** `colour` (`#rrggbb`), `recall_safe`, `solo_safe` and `mute_safe`
   on strips and buses;
-  `layouts`: `[{"name", "pages": [{"name", "signals": [ids]}]}]`.
+  `layouts` (the console's custom views; a page is a bank): `[{"name", "pages": [{"name", "signals": [ids]}]}]`;
+  the order of `strips` and `buses` is the console's order.
 - **VCAs** (§9, `vcas`): `{"id", "name", "fader_db", "mute", "members",
   "colour", "recall_safe"}`; members are strips, buses or other VCAs (nested; a
   cycle is refused). A VCA sums no audio: a member's fader gets the `fader_db`
@@ -1024,6 +1043,8 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET`, `POST /api/v1/{strips,buses}/<id>/chain` | the chain; add a node (its JSON, `id` optional, `position` optional) |
 | `GET`, `PATCH`, `DELETE /api/v1/{strips,buses}/<id>/chain/<node>` | a node; change it with a JSON merge patch (RFC 7396) plus `ramp_ms` |
 | `POST /api/v1/{strips,buses}/<id>/chain/<node>/move` | `{"position": n}` |
+| `POST /api/v1/{strips,buses}/<id>/move` | `{"position": n}` (0 = first): the console order of the strips (or the buses), part of the show; answers the new order of ids |
+| `PATCH /api/v1/signals` | several strips and buses in one change (one mix revision; all or none): `{"signals": {"<id>": {…its PATCH fields…}}, "nodes": {"<id>": {"<node>": {…merge patch…}}}, "solo": {"<id>": "pfl" \| "afl" \| null}, "ramp_ms"?}`; a multi-selection's linked changes and a copy of settings use it; answers `signals`, `soloed`, `warnings` (format changes) |
 | `GET /api/v1/loudness` | per measured signal: `momentary_lufs`, `short_term_lufs`, `integrated_lufs`, `range_lu`, `max_true_peak_dbtp`, `running`, `in_tolerance` |
 | `POST /api/v1/loudness/<id>/{start,stop,reset}` | control the integration |
 | `GET /api/v1/meters` | per strip and bus (post-fader), per channel: `peak_dbfs` (since the last 40 ms update), `peak_hold_dbfs` (highest peak until cleared), `true_peak_dbtp`, `rms_dbfs` (300 ms), `ppm_type1_dbfs`, `ppm_type2_dbfs`; `correlation` (two or more channels); `nodes`: per node `gain_reduction_db`, `in_peak_dbfs`, `out_peak_dbfs`, `band_reduction_db` (multiband, dynamic EQ: per band), `leveler_gain_db` (leveler) |
@@ -1032,7 +1053,7 @@ its `graph` or `macro`, `block`, `port`, `wire` and `message`.
 | `GET`, `POST /api/v1/snapshots` | list; take one (`{"id"?, "name"?}`) |
 | `GET`, `PUT`, `PATCH`, `DELETE /api/v1/snapshots/<id>` | one snapshot; PUT takes it again from the current mix; PATCH `{"name"}` |
 | `POST /api/v1/snapshots/<id>/recall` | `{"signals"?, "sections"?, "classes"?, "crossfade_ms"?}` |
-| `GET`, `PUT /api/v1/layouts` | the console layouts (the whole list) |
+| `GET`, `PUT /api/v1/layouts` | the console's custom views (the whole list) |
 | `GET`, `POST /api/v1/shows/history` | versions, newest first (`id`, `time_ms`, `name`, sizes); keep the current show as a named version (`{"name"}`) |
 | `GET`, `DELETE /api/v1/shows/history/<id>`, `POST …/<id>/restore` | a version's mix; delete; restore it as the show |
 | `GET`, `PATCH /api/v1/control-room` | the control room (with `soloed`); change `sources`, `solo` (`mode`, `pfl_trim_db`, `programme_db`, `sip`), `reference_spl` |

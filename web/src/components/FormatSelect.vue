@@ -9,7 +9,8 @@ import { api } from "../api.js";
 import { act, isBus, live, signalPath } from "../store.js";
 import { FORMATS, channelsOf, unsupported } from "../nodes.js";
 
-const props = defineProps({ signal: { type: Object, required: true } });
+// `ids`: with several selected (B1) the change goes to all of them in one request.
+const props = defineProps({ signal: { type: Object, required: true }, ids: { type: Array, default: () => [] } });
 const picked = ref(props.signal.format);
 watch(
   () => [props.signal.id, props.signal.format],
@@ -24,9 +25,13 @@ const flagged = computed(() =>
 async function apply() {
   const id = props.signal.id;
   const format = picked.value;
-  const answer = await act(() => api.patch(signalPath(id), { format }));
-  if (answer?.warnings?.length) live.notice = `${props.signal.name} is ${format} now: ${answer.warnings.join("; ")}.`;
-  else if (answer) live.notice = `${props.signal.name} is ${format} now.`;
+  const many = props.ids.length > 1;
+  const answer = many
+    ? await act(() => api.patch("/api/v1/signals", { signals: Object.fromEntries(props.ids.map((x) => [x, { format }])) }))
+    : await act(() => api.patch(signalPath(id), { format }));
+  const what = many ? `${props.ids.length} selected are` : `${props.signal.name} is`;
+  if (answer?.warnings?.length) live.notice = `${what} ${format} now: ${answer.warnings.join("; ")}.`;
+  else if (answer) live.notice = `${what} ${format} now.`;
   else picked.value = props.signal.format;
 }
 </script>
@@ -38,7 +43,7 @@ async function apply() {
       <select v-model="picked" :aria-label="`${signal.name} format`">
         <option v-for="f in FORMATS" :key="f" :value="f">{{ f }} ({{ channelsOf(f) }} ch)</option>
       </select>
-      <ConfirmButton v-if="changed" small :label="`Change to ${picked}`" @confirm="apply" />
+      <ConfirmButton v-if="changed" small :label="ids.length > 1 ? `Change ${ids.length} to ${picked}` : `Change to ${picked}`" @confirm="apply" />
     </div>
     <p v-if="changed" class="note">
       The chain and the sends stay; the signal fades out and in.

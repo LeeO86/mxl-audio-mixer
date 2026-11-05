@@ -44,6 +44,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Web UI build
         run: cd web && npm ci --no-audit --no-fund && npm run build
+      - name: Web UI unit checks (no browser)
+        run: node web/tests/link.mjs
 
   test:
     runs-on: ubuntu-24.04

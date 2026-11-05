@@ -18,7 +18,8 @@ import FlowView from "./FlowView.vue";
 import { clear, clipboard, copy, forget, latestOf, replacePatch } from "../clipboard.js";
 import { NODE_TYPES, DYNAMICS, unsupported } from "../nodes.js";
 import { api } from "../api.js";
-import { act, flush, isBus, live, patchNode, select, signalOf, signalPath, signals } from "../store.js";
+import { act, flush, isBus, linkedWith, live, patchBatch, patchNode, select, signalOf, signalPath, signals } from "../store.js";
+import { matchNode } from "../link.js";
 
 const sig = computed(() => signalOf(live.selected) || signals.value[0] || null);
 const chain = computed(() => sig.value?.chain || []);
@@ -50,18 +51,48 @@ onUnmounted(() => {
   endDrag();
 });
 
+// With several selected in the console (1.6.0 B1) a new node, a move and a delete go to each of them: the
+// matching node (the same id, else the same place among its type); a move and a delete in one request.
+const group = computed(() => (sig.value ? linkedWith(sig.value.id) : []));
 async function add(type, position) {
   if (!sig.value) return;
-  const others = signals.value.filter((s) => s.id !== sig.value.id).map((s) => s.id);
-  const body = NODE_TYPES[type].make(others);
-  if (position !== undefined) body.position = position;
-  await act(() => api.post(`${signalPath(sig.value.id)}/chain`, body));
+  for (const id of group.value) {
+    const others = signals.value.filter((s) => s.id !== id).map((s) => s.id);
+    const body = NODE_TYPES[type].make(others);
+    if (position !== undefined) body.position = position;
+    if (!(await act(() => api.post(`${signalPath(id)}/chain`, body)))) return;
+  }
+}
+// The new chains of the selected others after `change(chain, node)` of their matching node.
+function linkedChains(node, change) {
+  const signals = {};
+  for (const id of group.value) {
+    const o = id !== sig.value.id && signalOf(id);
+    const n = o && matchNode(sig.value, node, o);
+    if (n) signals[id] = { chain: change([...o.chain], n) };
+  }
+  return signals;
 }
 async function move(node, position) {
   flush();
+  const others = linkedChains(node, (c, n) => {
+    c.splice(c.indexOf(n), 1);
+    c.splice(Math.min(position, c.length), 0, n);
+    return c;
+  });
+  if (Object.keys(others).length) {
+    const mine = [...chain.value];
+    const n = mine.find((x) => x.id === node);
+    mine.splice(mine.indexOf(n), 1);
+    mine.splice(Math.min(position, mine.length), 0, n);
+    patchBatch({ signals: { ...others, [sig.value.id]: { chain: mine } } });
+    return;
+  }
   await act(() => api.post(`${signalPath(sig.value.id)}/chain/${encodeURIComponent(node)}/move`, { position }));
 }
 async function remove(node) {
+  const others = linkedChains(node, (c, n) => c.filter((x) => x !== n));
+  if (Object.keys(others).length) return patchBatch({ signals: { ...others, [sig.value.id]: { chain: chain.value.filter((x) => x.id !== node) } } });
   await act(() => api.del(`${signalPath(sig.value.id)}/chain/${encodeURIComponent(node)}`));
 }
 const bypass = (n) => patchNode(sig.value.id, n.id, { bypass: !n.bypass });
@@ -201,7 +232,8 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
 
 <template>
   <div v-if="!signals.length" class="empty">No strips or buses yet.</div>
-  <div v-else class="chainlayout">
+  <div v-if="group.length > 1" class="banner info" data-linked>{{ group.length }} selected in the console: every change here goes to all of them (relative; on/off the same).</div>
+  <div v-if="signals.length" class="chainlayout">
     <div class="chainside">
       <div class="panel palette">
         <h3>Add</h3>
@@ -228,7 +260,7 @@ const chainCurve = computed(() => chain.value.filter((n) => !n.bypass && ["eq", 
         </select>
         <button class="btn secondary" :disabled="!next" :title="next ? `${next.name} ( ] )` : ''" aria-label="Next strip or bus" @click="step(next)">▶</button>
         <span class="note">{{ chain.length }} of 32 nodes · latency {{ (live.latency[sig?.id] || 0).toFixed(2) }} ms</span>
-        <FormatSelect v-if="sig" :signal="sig" />
+        <FormatSelect v-if="sig" :signal="sig" :ids="group" />
         <span class="spacer"></span>
         <span class="muted small">[ and ]: previous, next</span>
       </div>

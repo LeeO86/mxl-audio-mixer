@@ -128,6 +128,8 @@ onUnmounted(() => {
     <button v-for="t in tabs" :key="t.id" :class="{ active: current === t.id }" :aria-current="current === t.id ? 'page' : undefined" @click="go(t.id)">
       {{ t.label }}
     </button>
+    <!-- A tab's own controls, right aligned beside the tabs (the console's view and bank, B4). -->
+    <div id="tabtools" class="tabtools"></div>
   </nav>
   <main :class="{ full: tab.full }">
     <!-- The graph keeps its zoom, pan and panels across a tab switch (C5). -->

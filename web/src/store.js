@@ -3,6 +3,7 @@
 // mix comes back on the WebSocket after a change from any client.
 import { computed, reactive } from "vue";
 import { api, exchange } from "./api.js";
+import { linkNode, linkSignal, matchNode, pickIds } from "./link.js";
 
 const PREFIX = "mxl-audio-mixer.";
 export function stored(key, fallback) {
@@ -55,6 +56,40 @@ export const settingValue = (key) => live.config?.settings?.find((s) => s.key ==
 export function select(id) {
   live.selected = id;
   store("selected", id);
+  // The processing of a strip outside the multi-selection: that strip alone (B1).
+  if (id && !selection.ids.includes(id)) setSelection([id], id);
+}
+
+// ---- the multi-selection (1.6.0 B1) --------------------------------------------------------
+// Per browser (each operator selects for themself). A click selects one strip, Shift a range in the
+// console's order, Ctrl (or ⌘) toggles one; while several are selected their changes are linked.
+function storedSelection() {
+  try {
+    const ids = JSON.parse(stored("selection", "[]"));
+    if (Array.isArray(ids) && ids.length) return ids.map(String);
+  } catch {
+    /* none */
+  }
+  return live.selected ? [live.selected] : [];
+}
+export const selection = reactive({ ids: storedSelection(), anchor: live.selected, order: [] });
+function setSelection(ids, anchor = selection.anchor) {
+  selection.ids = ids;
+  selection.anchor = anchor;
+  store("selection", JSON.stringify(ids));
+}
+/** A click on a strip (or its select button, A12): `e` gives the keys held. */
+export function pickSignal(id, e = {}) {
+  const r = pickIds(selection.ids, selection.anchor, id, { ctrl: !!(e.ctrlKey || e.metaKey), shift: !!e.shiftKey }, selection.order);
+  setSelection(r.ids, r.anchor);
+  if (r.ids.includes(id)) select(id);
+  else if (live.selected === id) select(r.ids[r.ids.length - 1] || "");
+}
+export const clearSelection = () => setSelection(live.selected ? [live.selected] : []);
+/** The signals a change of `id` applies to: the selection when `id` is one of several selected, else `id`. */
+export function linkedWith(id) {
+  const ids = selection.ids.filter((x) => signalOf(x));
+  return ids.length > 1 && ids.includes(id) ? ids : [id];
 }
 
 /** Runs an action; a failure goes to the error banner. Returns the result (true for an empty answer), or undefined. */
@@ -125,8 +160,15 @@ async function refreshMix() {
 /** PATCH (or PUT) `path` with `body`, rate-limited and merged per path. */
 export function patch(path, body, method = "PATCH") {
   const key = `${method} ${path}`;
-  pending.set(key, { ...(pending.get(key) || {}), ...body });
+  pending.set(key, key === BATCH ? deepMerge(pending.get(key) || {}, body) : { ...(pending.get(key) || {}), ...body });
   schedule(key);
+}
+const BATCH = "PATCH /api/v1/signals";
+const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
+function deepMerge(a, b) {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) out[k] = plain(v) && plain(a[k]) ? deepMerge(a[k], v) : v;
+  return out;
 }
 
 // Changes show at once in this client and stay over pushed mixes until one has them, so a toggle
@@ -139,18 +181,73 @@ function local(key, target, body) {
   assign(target(), body);
   unacked.set(key, { target, body: { ...(unacked.get(key)?.body || {}), ...body }, until: Infinity });
 }
+// The local changes of a batch: one entry per target ("signal" or "signal node").
+function localBatch(parts) {
+  const u = unacked.get(BATCH) || { parts: new Map(), until: Infinity };
+  for (const [part, target, body] of parts) {
+    assign(target(), body);
+    u.parts.set(part, { target, body: { ...(u.parts.get(part)?.body || {}), ...body } });
+  }
+  u.until = Infinity;
+  unacked.set(BATCH, u);
+}
+function reassign(u) {
+  if (u.parts) for (const p of u.parts.values()) assign(p.target(), p.body);
+  else assign(u.target(), u.body);
+}
+/** Changes of several signals and nodes (and solos) as one request: `signals` {id: body}, `nodes`
+ * {id: {node: body}}, `solo` {id: kind or null}. Shown at once here; one mix revision on the server. */
+export function patchBatch({ signals = {}, nodes = {}, solo = null }) {
+  const parts = [];
+  for (const [id, body] of Object.entries(signals)) parts.push([id, () => signalOf(id), body]);
+  for (const [id, ns] of Object.entries(nodes))
+    for (const [node, body] of Object.entries(ns)) parts.push([`${id} ${node}`, () => signalOf(id)?.chain?.find((n) => n.id === node), body]);
+  localBatch(parts);
+  const body = { signals, nodes };
+  if (solo) {
+    body.solo = solo;
+    if (live.status) live.status.solo = Object.fromEntries(Object.entries({ ...soloed.value, ...solo }).filter(([, k]) => k));
+  }
+  patch("/api/v1/signals", body);
+}
 function changeLocally(target, path, body, method = "PATCH") {
   local(`${method} ${path}`, target, body);
   patch(path, body, method);
 }
 export const signalPath = (id) => `/api/v1/${isBus(id) ? "buses" : "strips"}/${encodeURIComponent(id)}`;
 export function patchSignal(id, body) {
+  const group = linkedWith(id);
+  if (group.length > 1) return patchLinkedSignal(id, body, group);
   changeLocally(() => signalOf(id), signalPath(id), body);
+}
+function patchLinkedSignal(id, body, group) {
+  const src = signalOf(id);
+  const signals = { [id]: body };
+  for (const other of group) {
+    const o = other !== id && signalOf(other);
+    const b = o && linkSignal(src, body, o);
+    if (b) signals[other] = b;
+  }
+  if (Object.keys(signals).length === 1) return changeLocally(() => signalOf(id), signalPath(id), body);
+  patchBatch({ signals });
 }
 export function patchSend(from, to, body) {
   changeLocally(() => sendOf(from, to), `/api/v1/sends/${encodeURIComponent(from)}/${encodeURIComponent(to)}`, body, "PUT");
 }
 export function patchNode(id, node, body) {
+  const group = linkedWith(id);
+  const src = signalOf(id);
+  const srcNode = src?.chain?.find((n) => n.id === node);
+  if (group.length > 1 && srcNode) {
+    const nodes = { [id]: { [node]: body } };
+    for (const other of group) {
+      const o = other !== id && signalOf(other);
+      const n = o && matchNode(src, node, o);
+      const b = n && linkNode(srcNode, body, n);
+      if (b) nodes[other] = { [n.id]: b };
+    }
+    if (Object.keys(nodes).length > 1) return patchBatch({ nodes });
+  }
   changeLocally(() => signalOf(id)?.chain?.find((n) => n.id === node), `${signalPath(id)}/chain/${encodeURIComponent(node)}`, body);
 }
 
@@ -205,6 +302,9 @@ export const soloed = computed(() => live.status?.solo || {});
 /** Solo `id` (kind "pfl" or "afl"), or end its solo when it already is soloed so. */
 export function toggleSolo(id, kind) {
   const on = soloed.value[id] === kind;
+  const group = linkedWith(id);
+  // Several selected: the same solo on all of them, in one request (B1).
+  if (group.length > 1) return patchBatch({ solo: Object.fromEntries(group.map((x) => [x, on ? null : kind])) });
   if (live.status) live.status.solo = { ...soloed.value, [id]: on ? undefined : kind };
   return act(() => (on ? api.del(`/api/v1/solo/${encodeURIComponent(id)}`) : api.put(`/api/v1/solo/${encodeURIComponent(id)}`, { kind })));
 }
@@ -321,7 +421,7 @@ function onMessage(m) {
     live.revision = m.revision;
     for (const [key, u] of unacked) {
       if (m.revision >= u.until) unacked.delete(key);
-      else assign(u.target(), u.body);
+      else reassign(u);
     }
     live.latency = m.latency_ms || {};
   } else if (m.type === "meters") {
