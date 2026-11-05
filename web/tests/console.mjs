@@ -43,17 +43,20 @@ try {
   await page.locator("header .pill", { hasText: /^live$/ }).waitFor();
   const strip = (id) => page.locator(`[data-signal="${id}"]`);
   const menuItem = async (id, name) => {
+    // The menu is a dialog over the mixer (1.6.0 B10).
     await strip(id).getByRole("button", { name: /menu$/ }).click();
-    await strip(id).getByRole("menuitem", { name }).click();
+    await page.getByRole("menuitem", { name }).click();
   };
 
   // C6, C4: three stereo strips at once, numbered; the first is selected.
   const before = new Set((await api("/api/v1/strips")).map((s) => s.id));
-  await page.getByRole("button", { name: "+ Strip" }).click();
+  // "+ Strip" is in a strip's menu (1.6.0 B6).
+  await page.locator("[data-signal] button[aria-label$=' menu']").first().click();
+  await page.getByRole("menuitem", { name: "+ Strip…" }).click();
   await page.locator(".addform input").nth(1).fill("Guest");
   await page.locator(".addform select").selectOption("stereo");
   await page.getByLabel("Number of new strips").fill("3");
-  await page.locator(".addform").getByRole("button", { name: "Add" }).click();
+  await page.getByRole("dialog", { name: "New strip" }).getByRole("button", { name: "Add", exact: true }).click();
   const guests = await until("three new strips", async () => {
     const n = (await api("/api/v1/strips")).filter((s) => !before.has(s.id));
     return n.length === 3 ? n : null;

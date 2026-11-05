@@ -245,6 +245,13 @@ async fn layouts(State(app): State<App>) -> Json<Value> {
 async fn put_layouts(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
     run(async {
         let layouts: Vec<Layout> = body(&bytes)?;
+        // The console's built-in views (1.6.0 B3) have these names.
+        if let Some(l) = layouts
+            .iter()
+            .find(|l| ["all", ":inputs", ":buses"].contains(&l.name.trim()))
+        {
+            return Err(bad(format!("layout name {:?} is a built-in view", l.name)));
+        }
         apply(&app, 0, |m| {
             m.layouts = layouts;
             Ok(())

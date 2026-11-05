@@ -449,10 +449,6 @@ button.btn.mute.othermute { box-shadow: inset 0 0 0 2px var(--bad); }
 .sicon:hover { color: var(--text); background: var(--chip); }
 .sicon svg { display: block; width: 13px; height: 13px; fill: currentColor; }
 .mclose svg { display: block; width: 12px; height: 12px; stroke: currentColor; stroke-width: 2.5; fill: none; }
-.smenu { position: absolute; z-index: 20; top: 1.5rem; right: 0; display: flex; flex-direction: column; min-width: 9rem; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 14px rgba(0, 0, 0, .35); padding: .2rem; }
-.smenu button { background: none; border: 0; color: var(--text); text-align: left; padding: .35rem .55rem; font-size: .8rem; cursor: pointer; border-radius: 4px; font-family: inherit; }
-.smenu button:hover, .smenu button:focus-visible { background: var(--chip); }
-.smenu button.danger { color: var(--bad); }
 .sname .sub { color: var(--accent); font-weight: 700; }
 .patch .linkck { flex: 0 0 100%; margin: 0; font-size: .68rem; gap: .25rem; }
 .patch.linked select { flex: 1 1 100%; }
@@ -566,3 +562,47 @@ button.autogain.off .gr span { background: var(--muted); width: 0 !important; }
 .midilearn { position: sticky; top: 0; z-index: 15; }
 body.midi-learning [data-signal] [data-learn] { outline: 1px dashed var(--accent); outline-offset: 1px; cursor: crosshair; }
 body.midi-learning [data-signal] [data-learn].midi-target { outline: 2px solid var(--accent); }
+
+/* 1.6.0 console (B1–B10). The view and bank beside the tabs (B4). */
+nav .tabtools { margin-left: auto; display: flex; align-items: center; gap: .4rem 1rem; flex-wrap: wrap; padding-bottom: .25rem; }
+nav .tabtools .group { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+nav .tabtools .caption { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+nav .tabtools button { border-bottom: 0; }
+nav .tabtools .seg button { padding: .25rem .55rem; font-size: .78rem; }
+/* A strip in its slot, with the grip to move it (B2). */
+.slot { display: flex; flex-direction: column; flex: 0 0 auto; gap: 2px; border-radius: 6px; }
+.slot > .strip { flex: 1 1 auto; }
+.slot .grip { height: 8px; border-radius: 4px; cursor: grab; touch-action: none; background: repeating-linear-gradient(90deg, var(--border) 0 2px, transparent 2px 5px); opacity: .7; }
+.slot .grip:hover, .slot .grip:focus-visible { opacity: 1; background: repeating-linear-gradient(90deg, var(--accent) 0 2px, transparent 2px 5px); }
+.console.moving, .console.moving * { cursor: grabbing; user-select: none; }
+.slot.lifted { opacity: .5; }
+.slot.over { box-shadow: -3px 0 0 var(--accent); }
+.strip.placeholder { border-style: dashed; justify-content: flex-start; min-height: 12rem; }
+.strip.placeholder .shead { display: flex; flex-direction: column; align-items: flex-start; gap: .4rem; }
+.selinfo { font-size: .85rem; }
+/* The strip and bus menu as a dialog (B10). */
+.menulist { display: flex; flex-direction: column; gap: .15rem; min-width: 16rem; }
+.menulist > button { background: none; border: 0; color: var(--text); text-align: left; padding: .5rem .6rem; font-size: .9rem; cursor: pointer; border-radius: 4px; font-family: inherit; }
+.menulist > button:hover, .menulist > button:focus-visible { background: var(--chip); }
+.menulist > button:disabled { color: var(--muted); cursor: default; background: none; }
+.menulist > button.danger { color: var(--bad); }
+.menulist .menurow { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .3rem .6rem; font-size: .9rem; }
+.menulist .menurow select { width: auto; }
+/* Panels shown in a dialog: the dialog has the title and the close button. */
+.modal > .panel { border: 0; padding: 0; background: none; box-shadow: none; margin: 0; }
+.modal > .panel > h3:first-child { display: none; }
+/* The view editor (B3). */
+.viewpick { align-items: center; flex-wrap: wrap; gap: .4rem; }
+.viewpick select, .viewpick input { width: auto; }
+.viewbanks { display: flex; flex-direction: column; gap: .4rem; margin: .6rem 0; }
+.viewbank { border: 1px solid var(--border); border-radius: 6px; padding: .35rem .45rem; background: var(--panel2); }
+.viewbank.picked { border-color: var(--accent); }
+.viewbank input { width: 12rem; }
+.viewitems { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .3rem; min-height: 1.6rem; }
+.viewitem { display: inline-flex; align-items: center; gap: .2rem; padding: .1rem .2rem .1rem .45rem; border-radius: 4px; background: var(--chip); font-size: .8rem; cursor: grab; border-left: 3px solid var(--accent); }
+.viewitem.k-bus { border-left-color: var(--ok); }
+.viewitem.k-vca { border-left-color: var(--warn); }
+.viewitem .x { width: auto; flex: 0 0 auto; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 .2rem; font-size: .9rem; }
+.viewpalette { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; margin: .3rem 0; }
+.viewpalette .caption { width: 4rem; font-size: .7rem; color: var(--muted); text-transform: uppercase; }
+.viewpalette .btn.placed { opacity: .55; }

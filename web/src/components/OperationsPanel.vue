@@ -4,10 +4,11 @@
 // one), a mix-minus of a bus. Each makes ordinary buses and sends, editable afterwards.
 import { computed, ref } from "vue";
 import { api } from "../api.js";
-import { act, buses, strips } from "../store.js";
+import { act, buses, selection, strips } from "../store.js";
 
 const emit = defineEmits(["close"]);
-const selected = ref([]);
+// Starts with the console's selected strips (B1).
+const selected = ref(selection.ids.filter((id) => strips.value.some((s) => s.id === id)));
 const name = ref("");
 const n1Of = ref("");
 const n1Mode = ref("per-participant");

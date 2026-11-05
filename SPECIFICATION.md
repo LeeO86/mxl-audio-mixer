@@ -640,7 +640,7 @@ new ones:
 - Channel strips with: input select/patch, trim, phase, processing chain overview
   (miniature EQ curve, gain-reduction meters per dynamics node), aux sends, pan, fader,
   mute, PFL/AFL, VCA assignment, meter, name/colour. Strip layers/banks; custom
-  layouts (user-defined strip order and pages); group/bus/VCA/master sections.
+  views (layouts: user-defined order and banks); group/bus/VCA/master sections.
 - Touch-friendly, works on tablets; multiple simultaneous clients stay in sync.
 - 1.5.0 (A1–A10): the browser tab's title names the tab ("Console – <label> – MXL
   Audio Mixer"). The name has the strip's width; format, gear and menu share the row
@@ -649,10 +649,22 @@ new ones:
   narrower bars with channel labels below (not in a strip, where the meter only tells
   whether there is signal). (1.5.0's surround picture in the strip was replaced in
   1.6.0, below.)
+- 1.6.0 (B1–B11): strips are selected by a click (Shift: a range, Ctrl/⌘: one more;
+  per browser). Several selected are linked: every parameter change on one moves the
+  others relatively (offsets kept), on/off values (processor on/off, mute, solo, PFL)
+  are set the same on all, pan and the label are never linked; menu and processing
+  view actions run on all selected. The linked change is one API call
+  (`PATCH /api/v1/signals`, one mix revision). Strips and buses are reordered by
+  drag (the show's order, shared by every operator). Views: "All strips", only the
+  input strips, only the buses, and the show's custom views (banks of strips, VCAs
+  and buses placed freely). The view and bank choice sit next to the tabs. The strip
+  and bus menus open as dialogs over the mixer and hold the meter scale, + Strip /
+  + Bus, the auto-mix assignment, MIDI learn, Auto, Operations and a copy of all
+  settings and the processing (not the label) to another strip or the selected
+  ones; an empty console shows one empty strip and bus with their menu.
 - 1.6.0 (A1–A13): the strip shows its first channel's source; a click opens every
   channel's source side by side with the Link switch. The name is at the very bottom
-  (two lines, then … with the full name as tooltip). The ⋮ menu opens as a fixed layer
-  inside the window (the first strip's was cut off). The format dialog has "Change to
+  (two lines, then … with the full name as tooltip). The format dialog has "Change to
   …" beside Close, in its style. The pan right above PFL/AFL is L/R only, whatever the
   format; a strip with post-pan sends into a surround bus has a surround button that
   opens the surround panner (§5) in a dialog, a panner per channel for wider strips and

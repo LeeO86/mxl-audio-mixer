@@ -13,13 +13,14 @@
 // carries the auto-mix's colour mark, and a click on its auto-mix meter takes it out of the sharing (grey)
 // and back; a strip under VCAs shows a grey "VCA" cap where its fader is with them; a strip of two or more
 // channels unfolds (the triangle) into a fader per channel (StripMembers).
-import { computed, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import Meter from "./Meter.vue";
 import MiniCurve from "./MiniCurve.vue";
 import MiniPot from "./MiniPot.vue";
 import FormatSelect from "./FormatSelect.vue";
 import Modal from "./Modal.vue";
 import StripMembers from "./StripMembers.vue";
+import StripMenu from "./StripMenu.vue";
 import StripPan from "./StripPan.vue";
 import StripPatch from "./StripPatch.vue";
 import VFader from "./VFader.vue";
@@ -36,11 +37,14 @@ import {
   groupMuted,
   isBus,
   isSubgroup,
+  linkedWith,
   live,
   patchAutomix,
   patchSend,
   patchSignal,
+  pickSignal,
   select,
+  selection,
   sendSources,
   sendTargets,
   sends,
@@ -69,7 +73,7 @@ const s = computed(() => props.signal);
 const channels = computed(() => ({ mono: 1, stereo: 2, "3.0": 3, "5.1": 6, "7.1": 8, "5.1.4": 10, "7.1.4": 12 })[s.value.format] || (Array.isArray(s.value.format?.custom) ? s.value.format.custom.length : 2));
 const meters = computed(() => live.meters[s.value.id] || null);
 const colour = computed(() => s.value.colour || "");
-const selected = computed(() => live.selected === s.value.id);
+const selected = computed(() => selection.ids.includes(s.value.id));
 const mySends = computed(() => sends.value.filter((x) => x.from === s.value.id));
 const latency = computed(() => live.latency[s.value.id] || 0);
 const tally = computed(() => tallyOf(s.value.id));
@@ -116,8 +120,6 @@ function toggleUnfold() {
   unfolded.value = !unfolded.value;
   store(unfoldKey.value, unfolded.value ? "1" : "");
 }
-// Select (A12): the strip the processing view edits.
-const toggleSelect = () => select(selected.value ? "" : s.value.id);
 function open() {
   if (props.compact) return;
   select(s.value.id);
@@ -142,27 +144,15 @@ function endRename(save) {
   if (save && name && name !== s.value.name) patchSignal(s.value.id, { name });
 }
 
-// The strip menu.
+// The strip menu: a dialog over the mixer (B10, StripMenu).
 const menu = ref(false);
-const menuEl = ref(null);
-const menuBtn = ref(null);
-// The menu opens below its button, as a fixed layer kept inside the window: the strips' scroll area
-// does not cut it off (A3: the first strip's menu was covered at the left edge).
-const menuPos = ref({});
-const MENU_W = 160;
-function toggleMenu() {
-  menu.value = !menu.value;
-  if (!menu.value) return;
-  const r = menuBtn.value?.getBoundingClientRect();
-  if (!r) return;
-  const left = Math.max(4, Math.min(window.innerWidth - MENU_W - 4, r.right - MENU_W));
-  menuPos.value = { position: "fixed", top: `${r.bottom + 2}px`, left: `${left}px`, right: "auto", minWidth: `${MENU_W}px` };
+// A click on the strip outside its controls selects it (B1): Shift a range, Ctrl (⌘) one more.
+function onPick(e) {
+  if (props.compact || e.target.closest("button, input, select, textarea, a, label, [role=slider], .vfader, .meter, .members")) return;
+  pickSignal(s.value.id, e);
 }
-const closeMenu = (e) => {
-  if (!menuEl.value?.contains(e.target)) menu.value = false;
-};
-watch(menu, (on) => (on ? window.addEventListener("mousedown", closeMenu) : window.removeEventListener("mousedown", closeMenu)));
-onUnmounted(() => window.removeEventListener("mousedown", closeMenu));
+// The signals a menu action runs on: every selected one of its kind, when it is one of them (B1).
+const group = computed(() => linkedWith(s.value.id).filter((id) => isBus(id) === props.bus));
 const dialog = ref(""); // "send-to", "add-source", "subgroup", "format", "delete", "polarity"
 function choose(what) {
   menu.value = false;
@@ -174,7 +164,11 @@ function choose(what) {
 const targets = computed(() => (dialog.value === "send-to" ? sendTargets(s.value.id) : []));
 const sources = computed(() => (dialog.value === "add-source" ? sendSources(s.value.id) : []));
 async function route(from, to) {
-  if (await addSend(from, to)) dialog.value = "";
+  // "Send to" from several selected: each of them gets the send (those that can).
+  const froms = from === s.value.id ? group.value.filter((id) => id === from || sendTargets(id).some((b) => b.id === to)) : [from];
+  let ok = true;
+  for (const f of froms) ok = (await addSend(f, to)) && ok;
+  if (ok) dialog.value = "";
 }
 
 // Subgroup (C12): every send into the bus post-fader at 0 dB.
@@ -224,11 +218,14 @@ const talkRefs = computed(() => {
   return (t?.destinations || []).filter((d) => d.bus === id).map((d) => d.name);
 });
 async function remove() {
-  const id = s.value.id;
-  if (await act(() => api.del(signalPath(id)), `${kind.value === "bus" ? "Bus" : "Strip"} ${s.value.name} deleted.`)) {
-    dialog.value = "";
-    if (live.selected === id) select("");
-  }
+  const ids = group.value;
+  const names = ids.map((id) => signalOf(id)?.name || id).join(", ");
+  const what = kind.value === "bus" ? (ids.length > 1 ? "Buses" : "Bus") : ids.length > 1 ? "Strips" : "Strip";
+  // Several selected: deleted together, all or none (one request).
+  const done = await act(() => (ids.length > 1 ? api.patch("/api/v1/signals", { delete: ids }) : api.del(signalPath(ids[0]))), `${what} ${names} deleted.`);
+  if (!done) return;
+  if (ids.includes(live.selected)) select("");
+  dialog.value = "";
 }
 
 const labels = computed(() => channelLabels(s.value.format));
@@ -261,6 +258,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
     :class="{ bus, compact, wide: channels >= 8, unfolded: unfolded && canUnfold, selected: selected && !compact, muted: s.mute || !!otherMute, onair: tally?.on_air, preview: tally?.preview && !tally?.on_air }"
     :style="{ '--colour': colour || 'var(--border)' }"
     :data-signal="s.id"
+    @click="onPick"
   >
     <div class="shead">
       <div class="sfmt">
@@ -281,21 +279,14 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
           ><span v-if="vad" class="vad" :class="{ on: vad.active }" :title="`voice activity: ${vad.active ? 'speech' : 'no speech'}, probability ${vad.probability.toFixed(2)}`" :data-vad="vad.active ? 'speech' : 'quiet'"> ●</span></span
         >
         <span v-if="automixColour" class="ammark" :style="{ background: automixColour }" :data-automix="myAutomix.id" :title="`auto-mix ${myAutomix.name}`"></span>
-        <div v-if="!compact" ref="menuEl" class="sicons">
+        <div v-if="!compact" class="sicons">
           <button class="sicon gear" :aria-label="`${s.name} processing`" title="open its processing" @click="open">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L4.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" /></svg>
           </button>
-          <button ref="menuBtn" class="sicon" :aria-label="`${s.name} menu`" :aria-expanded="menu" title="routing, delete" @click="toggleMenu">
+          <button class="sicon" :aria-label="`${s.name} menu`" :aria-expanded="menu" title="routing, copy, auto-mix, MIDI learn, delete" @click="menu = !menu">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="12" cy="19" r="2" /></svg>
           </button>
-          <div v-if="menu" class="smenu" role="menu" :style="menuPos">
-            <button role="menuitem" @click="choose('processing')">Processing…</button>
-            <button role="menuitem" @click="choose('format')">Format…</button>
-            <button role="menuitem" @click="choose('send-to')">Send to…</button>
-            <button v-if="bus" role="menuitem" @click="choose('add-source')">Add source…</button>
-            <button v-if="bus" role="menuitem" @click="choose('subgroup')">{{ s.subgroup ? "Plain bus…" : "Subgroup…" }}</button>
-            <button role="menuitem" class="danger" @click="choose('delete')">Delete…</button>
-          </div>
+          <StripMenu v-if="menu" :signal="s" :bus="bus" @close="menu = false" @choose="choose" />
         </div>
       </div>
     </div>
@@ -375,7 +366,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
     </div>
     <div class="muterow">
       <button data-learn="mute" class="btn mute" :class="[s.mute ? 'danger' : 'secondary', { othermute: !s.mute && otherMute }]" :aria-pressed="s.mute" :title="otherMute ? `muted by a ${otherMute === 'VCA' ? 'VCA' : 'mute group'}` : ''" @click="patchSignal(s.id, { mute: !s.mute })">Mute</button>
-      <button v-if="!compact" class="btn sel" :class="selected ? '' : 'secondary'" :aria-pressed="selected" :aria-label="`${s.name} select`" title="select: the processing view edits it" @click="toggleSelect">Sel</button>
+      <button v-if="!compact" class="btn sel" :class="selected ? '' : 'secondary'" :aria-pressed="selected" :aria-label="`${s.name} select`" title="select: the processing view edits it" @click="pickSignal(s.id, $event)">Sel</button>
     </div>
     <button
       v-if="auto !== undefined"
@@ -462,9 +453,10 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       </div>
     </Modal>
     <Modal v-if="dialog === 'format'" :title="`Format: ${s.name}`" @close="dialog = ''">
-      <FormatSelect :signal="s" actions @close="dialog = ''" />
+      <FormatSelect :signal="s" :ids="group" actions @close="dialog = ''" />
     </Modal>
-    <Modal v-if="dialog === 'delete'" :title="`Delete ${kind} ${s.name}?`" @close="dialog = ''">
+    <Modal v-if="dialog === 'delete'" :title="group.length > 1 ? `Delete ${group.length} ${kind === 'bus' ? 'buses' : 'strips'}?` : `Delete ${kind} ${s.name}?`" @close="dialog = ''">
+      <p v-if="group.length > 1">With it: {{ group.filter((id) => id !== s.id).map((id) => signalOf(id)?.name || id).join(", ") }} (selected), each with what goes with it.</p>
       <p>{{ s.name }} ({{ s.id }}) is removed from the mix at once<template v-if="refs.length">, with {{ refs.join("; ") }}</template>.</p>
       <p v-if="talkRefs.length">Talkback destination{{ talkRefs.length === 1 ? "" : "s" }} {{ talkRefs.join(", ") }} go{{ talkRefs.length === 1 ? "es" : "" }} with it.</p>
       <p v-if="keyRefs.length" class="warnbox">The key of {{ keyRefs.join(", ") }} is cleared: a compressor keys itself again, a ducker hears nothing.</p>
@@ -474,7 +466,7 @@ const fmtSend = (v) => (v <= -60 ? "−∞" : fmtSigned(v));
       <p class="note">This cannot be undone; snapshots keep their values but not the {{ kind }}.</p>
       <div class="actions">
         <button class="btn secondary" @click="dialog = ''">Cancel</button>
-        <button class="btn danger" @click="remove">Delete {{ s.name }}</button>
+        <button class="btn danger" @click="remove">Delete {{ group.length > 1 ? `${group.length} ${kind === "bus" ? "buses" : "strips"}` : s.name }}</button>
       </div>
     </Modal>
   </section>

@@ -1,8 +1,9 @@
-// Browser check of the console strip of 1.6.0 (A1–A13) against a running mixer (tests/integration/ui.sh):
-// the input dialog, the name at the bottom, the first strip's menu, the format dialog, the L/R pan above
-// PFL/AFL, the surround panner in a dialog (mono, and per channel on a 5.1 strip), the auto-mix mark and
-// switch, the VCA cap, Select, and the unfolded strip with linked and unlinked members. Every action
-// through the UI, checked on the API. Screenshots go to <out dir>.
+// Browser check of the console's 1.6.0 items B1–B11 against a running mixer (tests/integration/ui.sh,
+// strips vox and gtr, buses main and aux): the view and bank beside the tabs, the multi-selection with
+// linked (relative) faders, the same mute and PFL on all, linked processing, moving strips and buses, the
+// Inputs and Buses views and a custom view, the strip and bus menus as dialogs (meters, + bus, auto-mix,
+// MIDI learn, auto, operations, copy). Every action through the UI, checked on the API. Screenshots go to
+// <out dir> (amx16-B<n>-*.png).
 //
 // node web/tests/console16.mjs <http base> <out dir>
 import { mkdirSync } from "node:fs";
@@ -32,244 +33,263 @@ async function until(what, fn, ms = 5000) {
   throw new Error(`timed out: ${what} (last: ${JSON.stringify(last)})`);
 }
 const pass = (what) => console.log(`[console16.mjs] PASS: ${what}`);
-const strip16 = (id) => api(`/api/v1/strips/${id}`);
+const db = (v) => (v === "-inf" ? -Infinity : v);
 
 const browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
-const made = { strips: [], buses: [], vcas: [], automixes: [] };
+const before = { strips: (await api("/api/v1/strips")).map((s) => s.id), buses: (await api("/api/v1/buses")).map((b) => b.id), layouts: await api("/api/v1/layouts") };
+const hpf = { id: "hpf", type: "filter", mode: "high-pass", freq_hz: 80, slope_db_per_oct: 24 };
+let amId = "";
 try {
-  const p = (n) => Array.from({ length: n }, (_, c) => ({ input: 1, channel: c + 1 }));
-  await send("POST", "/api/v1/buses", { id: "a16-sur", name: "Sur16", format: "5.1" });
-  made.buses.push("a16-sur");
-  await send("POST", "/api/v1/strips", { id: "a16-st", name: "St16", format: "stereo", patch: p(2) });
-  await send("POST", "/api/v1/strips", { id: "a16-51", name: "Bed16", format: "5.1", patch: p(2).concat([null, null, null, null]) });
-  await send("POST", "/api/v1/strips", { id: "a16-m", name: "Mic16", format: "mono", patch: p(1) });
-  await send("POST", "/api/v1/strips", { id: "a16-m2", name: "Mic16b", format: "mono", patch: p(1) });
-  made.strips.push("a16-st", "a16-51", "a16-m", "a16-m2");
-  await send("PUT", "/api/v1/sends/a16-m/a16-sur");
-  await send("PUT", "/api/v1/sends/a16-51/a16-sur");
-  await send("POST", "/api/v1/buses", { id: "a16-sur7", name: "Sur16b", format: "7.1" });
-  made.buses.push("a16-sur7");
-  await send("PUT", "/api/v1/sends/a16-m/a16-sur7", { block_delay: true });
-  await send("POST", "/api/v1/vcas", { id: "a16-vca", name: "V16", fader_db: -6, members: ["a16-st"] });
-  made.vcas.push("a16-vca");
-  await send("POST", "/api/v1/automixes", { id: "a16-am", name: "AM16", members: ["a16-m", "a16-m2"] });
-  made.automixes.push("a16-am");
-
-  const ctx = await browser.newContext({ viewport: { width: 1900, height: 1100 }, colorScheme: "dark" });
+  for (const id of ["vox", "gtr"]) {
+    await send("PATCH", `/api/v1/strips/${id}`, { fader_db: id === "vox" ? -10 : -20, mute: false });
+    await send("POST", `/api/v1/strips/${id}/chain`, { ...hpf, freq_hz: id === "vox" ? 80 : 160 });
+  }
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, colorScheme: "dark" });
   const page = await ctx.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(`${base}/#console`);
   await page.locator("header .pill", { hasText: /^live$/ }).waitFor();
   const strip = (id) => page.locator(`[data-signal="${id}"]`);
-  await strip("a16-51").waitFor();
+  await strip("gtr").waitFor();
+  const menu = async (id, item) => {
+    await strip(id).getByRole("button", { name: /menu$/ }).click();
+    if (item) await page.getByRole("menuitem", { name: item }).click();
+  };
 
-  // A1: a wider strip shows channel 1's source only; the dialog has every channel and the Link switch.
-  if (await strip("a16-st").locator("select").count()) throw new Error("the stereo strip has a select");
-  await strip("a16-st").getByLabel("St16 input", { exact: true }).click();
-  const inputs = page.getByRole("dialog", { name: "Input: St16" });
-  await inputs.getByLabel("St16 link channels").waitFor();
-  if ((await inputs.locator("select").count()) !== 2) throw new Error("not two channels");
-  await inputs.getByLabel("St16 link channels").uncheck();
-  await inputs.getByLabel("St16 channel 2 input").selectOption("1:1");
-  await until("R on 1·1", async () => (await strip16("a16-st")).patch[1]?.channel === 1);
-  await inputs.getByLabel("St16 link channels").check();
-  await inputs.getByLabel("St16 channel 1 input").selectOption("1:1");
-  await until("linked again: R on 1·2", async () => (await strip16("a16-st")).patch[1]?.channel === 2);
-  await inputs.screenshot({ path: `${out}/console16-A1-input.png` });
+  // B4: the view and bank beside the tabs, right of them.
+  const tools = page.locator("nav #tabtools");
+  await tools.getByRole("group", { name: "Console view" }).waitFor();
+  const tabsBox = await page.locator("nav button", { hasText: "Settings" }).boundingBox();
+  const toolsBox = await tools.boundingBox();
+  if (!(toolsBox.x > tabsBox.x + tabsBox.width) || Math.abs(toolsBox.y - tabsBox.y) > 30) throw new Error(`tab tools at ${JSON.stringify(toolsBox)}, tabs end ${JSON.stringify(tabsBox)}`);
+  await page.screenshot({ path: `${out}/amx16-B4-tabtools.png`, clip: { x: 0, y: 0, width: 1600, height: 220 } });
+  pass("B4: the view and bank sit beside the tabs, right aligned");
+
+  // B1: a click selects, Ctrl adds one, Shift a range; the toolbar says how many.
+  await strip("vox").locator(".sfoot").click();
+  await page.locator('[data-signal="vox"].selected').waitFor();
+  await strip("gtr").locator(".sfoot").click({ modifiers: ["Control"] });
+  await page.locator('[data-signal="gtr"].selected').waitFor();
+  await page.locator("[data-selection]", { hasText: "2 selected" }).waitFor();
+  await strip("gtr").locator(".sfoot").click();
+  if (await page.locator('[data-signal="vox"].selected').count()) throw new Error("a plain click kept vox selected");
+  await strip("vox").locator(".sfoot").click({ modifiers: ["Shift"] });
+  await page.locator('[data-signal="vox"].selected').waitFor();
+  const order = (await api("/api/v1/strips")).map((s) => s.id);
+  const range = order.slice(Math.min(order.indexOf("vox"), order.indexOf("gtr")), Math.max(order.indexOf("vox"), order.indexOf("gtr")) + 1);
+  await until("the Shift range selected", async () => (await page.locator(".strips .strip.selected").count()) === range.length);
+  // Only vox and gtr from here on.
+  await strip("vox").locator(".sfoot").click();
+  await strip("gtr").locator(".sfoot").click({ modifiers: ["Control"] });
+  pass(`B1: click, Ctrl+click, Shift+click (range ${range.join(", ")})`);
+
+  // B1: linked fader: relative, one request per step.
+  const batches = [];
+  page.on("request", (r) => r.url().endsWith("/api/v1/signals") && batches.push(r.method()));
+  await strip("vox").locator(".vtrack").focus();
+  for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowUp");
+  await until("vox −8, gtr −18", async () => {
+    const [v, g] = await Promise.all([api("/api/v1/strips/vox"), api("/api/v1/strips/gtr")]);
+    return db(v.fader_db) === -8 && db(g.fader_db) === -18;
+  });
+  if (!batches.length || batches.some((m) => m !== "PATCH")) throw new Error(`batches ${batches}`);
+  // To the bottom and back within one move: the offset from the start of the move survives the end of
+  // the travel (vox −10 / gtr −20 at its start).
+  await page.keyboard.press("End");
+  await page.keyboard.press("Home");
+  await until("vox 0, gtr −10 after the bottom", async () => db((await api("/api/v1/strips/vox")).fader_db) === 0 && db((await api("/api/v1/strips/gtr")).fader_db) === -10);
+  pass(`B1: a fader move of two selected keeps the offset (vox −10 → −8, gtr −20 → −18) in ${batches.length} PATCH /api/v1/signals`);
+
+  // Mute and PFL: the same on all.
+  await strip("vox").locator(".btn.mute").click();
+  await until("both muted", async () => (await api("/api/v1/strips/vox")).mute && (await api("/api/v1/strips/gtr")).mute);
+  await strip("vox").getByRole("button", { name: "PFL Vox" }).click();
+  await until("both PFL", async () => {
+    const s = (await api("/api/v1/status")).solo || {};
+    return s.vox === "pfl" && s.gtr === "pfl";
+  });
+  await page.screenshot({ path: `${out}/amx16-B1-selection.png` });
+  await strip("vox").getByRole("button", { name: "PFL Vox" }).click();
+  await until("PFL off on both", async () => {
+    const s = (await api("/api/v1/status")).solo || {};
+    return !s.vox && !s.gtr;
+  });
+  await strip("gtr").locator(".btn.mute").click();
+  await until("both unmuted", async () => !(await api("/api/v1/strips/vox")).mute && !(await api("/api/v1/strips/gtr")).mute);
+  pass("B1: mute and PFL set the same on both selected");
+
+  // Linked processing: the bypass on both, a frequency by the same factor.
+  await strip("vox").getByRole("button", { name: "Vox processing" }).click();
+  await page.locator("[data-linked]").waitFor();
+  const hpfCard = page.locator(".nodecard").filter({ has: page.locator("code", { hasText: /^hpf$/ }) });
+  await hpfCard.getByRole("button", { name: "Bypass" }).click();
+  let chains = null;
+  await until("hpf bypassed on both", async () => {
+    const [v, g] = await Promise.all([api("/api/v1/strips/vox/chain"), api("/api/v1/strips/gtr/chain")]);
+    chains = { vox: v.map((n) => `${n.id}:${n.type}:${n.bypass}`), gtr: g.map((n) => `${n.id}:${n.type}:${n.bypass}`) };
+    return v.find((n) => n.id === "hpf")?.bypass && g.find((n) => n.id === "hpf")?.bypass;
+  }).catch((e) => {
+    throw new Error(`${e.message} ${JSON.stringify(chains)}`);
+  });
+  await page.screenshot({ path: `${out}/amx16-B1-processing.png` });
+  await hpfCard.getByRole("button", { name: "Bypass" }).click();
+  await until("hpf on again on both", async () => !(await api("/api/v1/strips/vox/chain/hpf")).bypass && !(await api("/api/v1/strips/gtr/chain/hpf")).bypass);
+  // A new node on both, in one request (all or none).
+  const gates = async (id) => (await api(`/api/v1/strips/${id}/chain`)).filter((n) => n.type === "gate").length;
+  const before16 = { vox: await gates("vox"), gtr: await gates("gtr") };
+  const sent = batches.length;
+  await page.locator(".palette .pchip", { hasText: /^Gate/ }).click();
+  await until("a gate on both", async () => (await gates("vox")) === before16.vox + 1 && (await gates("gtr")) === before16.gtr + 1);
+  if (batches.length !== sent + 1) throw new Error(`${batches.length - sent} batch requests for one new node`);
+  pass("B1: a processing view action (bypass, a new node in one request) runs on both selected");
+  await page.locator("nav button", { hasText: "Console" }).click();
+  await strip("gtr").waitFor();
+
+  // B10, B11: the menu is a dialog; copy vox's settings to the selected gtr (not its name).
+  await send("PATCH", "/api/v1/strips/vox", { trim_db: 6, fader_db: -4 });
+  await menu("vox");
+  await page.locator("[data-strip-menu]").waitFor();
+  await page.screenshot({ path: `${out}/amx16-B10-menu.png` });
+  await page.getByRole("menuitem", { name: "Copy settings…" }).click();
+  await page.screenshot({ path: `${out}/amx16-B11-copy.png` });
+  await page.locator("[data-copy-selected]").click();
+  await until("gtr has vox's settings", async () => {
+    const g = await api("/api/v1/strips/gtr");
+    return g.trim_db === 6 && db(g.fader_db) === -4 && g.name === "Guitar" && g.chain.find((n) => n.id === "hpf")?.freq_hz === 80;
+  });
+  pass("B10, B11: the strip menu is a dialog over the mixer; Copy settings to the selected gives gtr vox's trim, fader and processing, not its name");
+
+  // B7: auto-mix from the menu: both selected join, then none.
+  amId = (await send("POST", "/api/v1/automixes", { name: "Panel 16" })).id;
+  await menu("vox", "Auto-mix…");
+  await page.getByRole("button", { name: "Panel 16" }).click();
+  await until("vox and gtr in the auto-mix", async () => (await api(`/api/v1/automixes/${amId}`)).members.map((m) => m.signal).sort().join() === "gtr,vox");
+  await menu("gtr", "Auto-mix…");
+  await page.screenshot({ path: `${out}/amx16-B7-automix.png` });
+  await page.getByRole("button", { name: "None" }).click();
+  await until("none in the auto-mix", async () => (await api(`/api/v1/automixes/${amId}`)).members.length === 0);
+  await menu("vox", "Auto-mix…");
+  await page.getByRole("button", { name: "Add auto-mix…" }).click();
+  await page.getByRole("dialog", { name: "Auto-mixes (gain sharing)" }).waitFor();
   await page.keyboard.press("Escape");
-  if ((await strip("a16-m").locator("select").count()) !== 1) throw new Error("a mono strip picks in the strip");
-  pass("A1: the stereo strip shows its first source; the dialog routes every channel, with Link");
+  pass("B7: Auto-mix in the strip menu: the two selected join and leave; Add auto-mix opens the auto-mix dialog");
 
-  // A2: the name at the very bottom; a long name wraps to two lines, then …, the full name as tooltip.
-  const long = "A very long strip name that does not fit at all";
-  await send("PATCH", "/api/v1/strips/a16-m2", { name: long });
-  const nm = strip("a16-m2").locator(":scope > .sname .nm");
-  await until("long name", async () => (await nm.textContent()) === long);
-  const fader = await strip("a16-m2").locator(".faderrow").boundingBox();
-  const name = await strip("a16-m2").locator(":scope > .sname").boundingBox();
-  if (name.y < fader.y + fader.height) throw new Error("the name is not below the fader");
-  const lines = await nm.evaluate((el) => ({ h: el.clientHeight, line: parseFloat(getComputedStyle(el).lineHeight), cut: el.scrollHeight > el.clientHeight + 1 }));
-  if (lines.h > lines.line * 2.2 || !lines.cut) throw new Error(`name lines ${JSON.stringify(lines)}`);
-  if (!(await strip("a16-m2").locator(":scope > .sname").getAttribute("title")).includes(long)) throw new Error("no tooltip");
-  await strip("a16-m2").screenshot({ path: `${out}/console16-A2-name.png` });
-  pass("A2: the name sits below the fader, two lines then …, with the full name as tooltip");
-
-  // A3: the first strip's menu is not covered at the left edge.
-  const first = page.locator(".strips > .strip").first();
-  await first.getByRole("button", { name: /menu$/ }).click();
-  const menu = first.getByRole("menu");
-  await menu.waitFor();
-  const mb = await menu.boundingBox();
-  if (mb.x < 0) throw new Error(`menu at x ${mb.x}`);
-  const onTop = await menu.evaluate((el) => {
-    const r = el.getBoundingClientRect();
-    return [r.left + 4, r.right - 4].every((x) => el.contains(document.elementFromPoint(x, r.top + r.height / 2)));
-  });
-  if (!onTop) throw new Error("the menu is covered");
-  await page.screenshot({ path: `${out}/console16-A3-menu.png`, clip: { x: 0, y: 0, width: 500, height: 500 } });
-  pass("A3: the first strip's menu opens inside the window, nothing covers it");
-
-  // A4: the format dialog: "Change to …" beside Close, the same style.
-  await menu.getByRole("menuitem", { name: "Format…" }).click();
-  const fmt = page.getByRole("dialog", { name: /^Format: / });
-  const fmtSel = fmt.locator("select");
-  const now = await fmtSel.inputValue();
-  await fmtSel.selectOption(now === "stereo" ? "mono" : "stereo");
-  const change = fmt.locator(".actions").getByRole("button", { name: /^Change to / });
-  const close = fmt.locator(".actions").getByRole("button", { name: "Close" });
-  const [cc, cl] = [await change.getAttribute("class"), await close.getAttribute("class")];
-  if (cc !== cl) throw new Error(`classes "${cc}" and "${cl}"`);
-  const [cb, lb] = [await change.boundingBox(), await close.boundingBox()];
-  if (Math.abs(cb.y - lb.y) > 2 || Math.abs(cb.height - lb.height) > 1) throw new Error("not in one row");
-  await fmt.screenshot({ path: `${out}/console16-A4-format.png` });
-  await close.click();
-  await fmt.waitFor({ state: "detached" });
-  pass("A4: Change to … sits beside Close in the format dialog, the same style");
-
-  // A5: the L/R pan right above PFL/AFL, on every format: the 5.1 strip's balance.
-  const panBox = await strip("a16-51").locator(".strippan").boundingBox();
-  const soloBox = await strip("a16-51").locator(".solo").boundingBox();
-  if (soloBox.y - (panBox.y + panBox.height) > 8 || soloBox.y < panBox.y) throw new Error("the pan is not right above PFL/AFL");
-  await strip("a16-51").locator(".strippan .minipot", { hasText: "Bal" }).locator("input").fill("0.5");
-  await until("5.1 balance 0.5", async () => (await strip16("a16-51")).pan === 0.5);
-  if (await strip("a16-51").locator(".surroundpad").count()) throw new Error("a panner picture in the strip");
-  pass("A5: L/R pan above PFL/AFL; the 5.1 strip has a balance; no surround picture in the strip");
-
-  // A6: Mic16 sends to a 5.1 bus: the surround button opens the panner.
-  await strip("a16-m").getByLabel("Mic16 surround pan").click();
-  const sd = page.getByRole("dialog", { name: "Surround pan: Mic16 into 5.1" });
-  const pad = sd.locator("svg.surroundpad");
-  const box = await pad.boundingBox();
-  await pad.click({ position: { x: box.width * 0.95, y: box.height * 0.5 } });
-  await until("Mic16 right", async () => {
-    const s = (await strip16("a16-m")).surround?.[0];
-    return s && s.azimuth_deg > 80 && s.azimuth_deg < 100;
-  });
-  await sd.getByRole("slider", { name: "Spread" }).fill("40");
-  await until("spread 40", async () => (await strip16("a16-m")).surround[0].spread_pct === 40);
-  // A block-delay send into a surround bus is not panned, and the dialog says so.
-  await sd.locator("[data-unpanned]", { hasText: "Sur16b (block delay" }).waitFor();
-  await sd.screenshot({ path: `${out}/console16-A6-surround.png` });
-  await sd.getByRole("button", { name: "Restore 1:1" }).click();
-  await until("Mic16 1:1", async () => !(await strip16("a16-m")).surround);
+  // B5: the meter scale from the menu.
+  await menu("main");
+  await page.getByLabel("Meter scale").selectOption("ebu");
   await page.keyboard.press("Escape");
-  pass("A6: the surround panner in a dialog from the strip: position and spread; Restore 1:1 removes it");
-
-  // A7: no surround panner block: the API refuses one in a chain.
-  const r = await fetch(`${base}/api/v1/strips/a16-m/chain`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "surround-pan", layout: "5.1", azimuth_deg: 0 }) });
-  if (r.status !== 400 || !(await r.text()).includes("surround")) throw new Error(`a panner block: HTTP ${r.status}`);
-  pass("A7: a surround panner block is refused (400); it is the strip's surround pan");
-
-  // A8: the 5.1 strip: a panner per channel (no LFE); C moved to the right rear; Restore 1:1.
-  await strip("a16-51").getByLabel("Bed16 surround pan").click();
-  const wd = page.getByRole("dialog", { name: "Surround pan: Bed16 into 5.1" });
-  if ((await wd.locator(".surcell").count()) !== 5) throw new Error("not 5 panners");
-  if (await wd.locator('[data-channel="LFE"]').count()) throw new Error("an LFE panner");
-  const cpad = wd.locator('[data-channel="C"] svg.surroundpad');
-  const cb2 = await cpad.boundingBox();
-  await cpad.click({ position: { x: cb2.width * 0.9, y: cb2.height * 0.85 } });
-  await until("C panned", async () => {
-    const s = (await strip16("a16-51")).surround;
-    return s?.length === 6 && s[2] && s[2].azimuth_deg > 100 && s.filter(Boolean).length === 1;
-  });
-  await wd.locator('[data-channel="C"]').getByRole("button", { name: "Bed16 C 1:1" }).waitFor();
-  await wd.screenshot({ path: `${out}/console16-A8-per-channel.png` });
-  await wd.getByRole("button", { name: "Restore 1:1" }).click();
-  await until("Bed16 1:1", async () => !(await strip16("a16-51")).surround);
+  await until("the scale stored", async () => (await page.evaluate(() => localStorage.getItem("mxl-audio-mixer.meter.scale"))) === "ebu");
+  await menu("main");
+  await page.getByLabel("Meter scale").selectOption("dbfs");
   await page.keyboard.press("Escape");
-  pass("A8: a 5.1 strip has a panner per channel (LFE none); one click restores 1:1");
+  pass("B5: Meters in the bus menu sets the scale");
 
-  // A9: both auto-mix members carry the same colour mark.
-  const mark = (id) => strip(id).locator('.ammark[data-automix="a16-am"]');
-  await mark("a16-m").waitFor();
-  const c1 = await mark("a16-m").evaluate((el) => getComputedStyle(el).backgroundColor);
-  const c2 = await mark("a16-m2").evaluate((el) => getComputedStyle(el).backgroundColor);
-  if (c1 !== c2 || !c1) throw new Error(`marks ${c1} ${c2}`);
-  if (await strip("a16-st").locator(".ammark").count()) throw new Error("a mark on a strip of no auto-mix");
-  pass(`A9: the auto-mix members carry its colour mark (${c1})`);
+  // B8: MIDI learn from the menu picks the strip's fader (one strip: off while several are selected).
+  await menu("vox");
+  if (!(await page.getByRole("menuitem", { name: "MIDI learn" }).isDisabled())) throw new Error("MIDI learn on with two selected");
+  await page.keyboard.press("Escape");
+  await strip("vox").locator(".sfoot").click();
+  await menu("vox", "MIDI learn");
+  await page.locator("[data-midi-learn]", { hasText: "Vox" }).waitFor({ timeout: 3000 });
+  await page.screenshot({ path: `${out}/amx16-B8-midilearn.png` });
+  await page.locator("[data-midi-learn]").getByRole("button", { name: "Done" }).click();
+  pass("B8: MIDI learn in the strip menu: learn mode with the strip's fader picked; off while several are selected");
 
-  // A11: a click on the auto-mix meter takes Mic16 out of the sharing (grey), again back in.
-  const meter = strip("a16-m").getByLabel("Mic16 auto gain");
-  await meter.waitFor({ timeout: 8000 });
-  const member = async () => (await api("/api/v1/automixes/a16-am")).members.find((m) => m.signal === "a16-m");
-  await meter.click();
-  await until("Mic16 out of the sharing", async () => (await member()).bypass === true);
-  await until("shown off", async () => (await meter.getAttribute("class")).includes("off"));
-  await strip("a16-m").screenshot({ path: `${out}/console16-A11-automix-off.png` });
-  await meter.click();
-  await until("Mic16 back in", async () => (await member()).bypass === false);
-  pass("A11: the auto-mix meter switches the strip out of the sharing (grey) and back");
+  // B9: Auto and Operations from the menu; B6: + Bus from the bus menu.
+  await strip("gtr").locator(".sfoot").click();
+  await menu("gtr", "Auto…");
+  await page.getByRole("dialog", { name: "Auto-level, ducking and voice detection" }).waitFor();
+  await page.keyboard.press("Escape");
+  await menu("gtr", "Operations…");
+  await page.getByRole("dialog", { name: "Operations" }).waitFor();
+  await page.keyboard.press("Escape");
+  await menu("main", "+ Bus…");
+  await page.getByRole("dialog", { name: "New bus" }).locator("input").nth(0).fill("b16");
+  await page.getByRole("dialog", { name: "New bus" }).getByRole("button", { name: "Add", exact: true }).click();
+  await until("bus b16", async () => (await api("/api/v1/buses")).some((b) => b.id === "b16"));
+  pass("B6, B9: + Bus in the bus menu, Auto and Operations in the menus (dialogs)");
 
-  // A10: St16 under a VCA at −6 dB: a grey VCA cap at −6 dB.
-  const ghost = strip("a16-st").locator(".cap.ghost");
-  await until("VCA cap at −6", async () => (await ghost.getAttribute("data-ghost")) === "-6.0");
-  await send("PATCH", "/api/v1/vcas/a16-vca", { fader_db: -10 });
-  await until("VCA cap at −10", async () => (await ghost.getAttribute("data-ghost")) === "-10.0");
-  if ((await ghost.textContent()).trim() !== "VCA") throw new Error("no VCA label");
-  if (await strip("a16-m").locator(".cap.ghost").count()) throw new Error("a VCA cap without a VCA");
-  pass("A10: a grey VCA cap shows the fader with its VCAs (−6, then −10 dB)");
+  // Delete of two selected buses: one request; their ids leave the selection.
+  for (const id of ["x16a", "x16b"]) await send("POST", "/api/v1/buses", { id, format: "mono" });
+  await strip("x16b").waitFor();
+  await strip("x16a").locator(".sfoot").click();
+  await strip("x16b").locator(".sfoot").click({ modifiers: ["Control"] });
+  await menu("x16a", "Delete…");
+  const delSent = batches.length;
+  await page.getByRole("button", { name: "Delete 2 buses" }).click();
+  await until("both deleted", async () => !(await api("/api/v1/buses")).some((b) => b.id.startsWith("x16")));
+  if (batches.length !== delSent + 1) throw new Error("the delete was not one request");
+  await until("the selection pruned", async () => JSON.parse(await page.evaluate(() => localStorage.getItem("mxl-audio-mixer.selection"))).every((id) => !id.startsWith("x16")));
+  pass("B1: two selected buses deleted in one request; the selection drops their ids");
 
-  // A12: Select beside Mute.
-  const sel = strip("a16-m2").getByLabel(`${long} select`);
-  const [mute, selb] = [await strip("a16-m2").locator(".btn.mute").boundingBox(), await sel.boundingBox()];
-  if (Math.abs(mute.y - selb.y) > 2) throw new Error("Select is not beside Mute");
-  await sel.click();
-  await strip("a16-m2").and(page.locator(".selected")).waitFor();
-  if ((await sel.getAttribute("aria-pressed")) !== "true") throw new Error("not pressed");
-  pass("A12: Select beside Mute selects the strip");
-
-  // A13: unfold St16: linked, a member moves the strip; unlinked, an offset; a member mute; clear.
-  await strip("a16-st").getByLabel("St16 unfold").click();
-  const bar = strip("a16-st").getByLabel("St16 members linked");
-  await bar.waitFor();
-  if ((await bar.getAttribute("aria-pressed")) !== "true") throw new Error("not linked by default");
-  await strip("a16-st").getByLabel("St16 R fader down").click();
-  await until("linked: the strip at −0.5", async () => (await strip16("a16-st")).fader_db === -0.5);
-  if ((await strip16("a16-st")).members) throw new Error("linked made an offset");
-  await bar.click();
-  await until("unlinked", async () => (await strip16("a16-st")).unlinked === true);
-  await strip("a16-st").getByLabel("St16 R fader down").click();
-  await strip("a16-st").getByLabel("St16 R fader down").click();
-  await until("R offset −1 dB", async () => {
-    const s = await strip16("a16-st");
-    return s.fader_db === -0.5 && s.members?.[1]?.fader_db === -1 && !s.members[0].fader_db;
+  // B2: move a bus and a strip by its grip (keys and a drag): the show's order.
+  await page.locator('[data-slot="b16"] .grip').focus();
+  await page.keyboard.press("ArrowLeft");
+  await until("b16 before the last bus", async () => {
+    const ids = (await api("/api/v1/buses")).map((b) => b.id);
+    return ids.indexOf("b16") === ids.length - 2;
   });
-  await strip("a16-st").getByLabel("St16 L mute").click();
-  await until("L muted alone", async () => {
-    const s = await strip16("a16-st");
-    return s.members?.[0]?.mute === true && !s.mute;
+  const gripOf = await page.locator('[data-slot="gtr"] .grip').boundingBox();
+  const voxBox = await page.locator('[data-slot="vox"]').boundingBox();
+  await page.mouse.move(gripOf.x + gripOf.width / 2, gripOf.y + gripOf.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(voxBox.x + voxBox.width / 2, voxBox.y + 200, { steps: 8 });
+  await page.screenshot({ path: `${out}/amx16-B2-drag.png` });
+  await page.mouse.up();
+  await until("gtr before vox", async () => {
+    const ids = (await api("/api/v1/strips")).map((s) => s.id);
+    return ids.indexOf("gtr") === ids.indexOf("vox") - 1;
   });
-  await bar.click();
-  await until("linked again, offsets kept", async () => {
-    const s = await strip16("a16-st");
-    return !s.unlinked && s.members?.[1]?.fader_db === -1;
+  await until("the console shows gtr before vox", async () => {
+    const shownOrder = await page.locator(".strips [data-signal]").evaluateAll((els) => els.map((e) => e.dataset.signal));
+    return shownOrder.indexOf("gtr") < shownOrder.indexOf("vox");
   });
-  await strip("a16-st").getByLabel("St16 R fader up").click();
-  await until("linked: the strip moves, R keeps −1", async () => {
-    const s = await strip16("a16-st");
-    return s.fader_db === 0 && s.members?.[1]?.fader_db === -1;
-  });
-  // Linked, a member's own mute is still cleared by its button (the strip stays unmuted).
-  await strip("a16-st").getByLabel("St16 L mute").click();
-  await until("L's own mute cleared", async () => {
-    const s = await strip16("a16-st");
-    return !s.mute && !s.members?.[0]?.mute && s.members?.[1]?.fader_db === -1;
-  });
-  await strip("a16-st").screenshot({ path: `${out}/console16-A13-unfolded.png` });
-  await strip("a16-st").getByLabel("St16 clear member offsets").click();
-  await until("offsets cleared", async () => !(await strip16("a16-st")).members);
-  await strip("a16-st").getByLabel("St16 unfold").click();
-  await strip("a16-st").locator(".faderrow").waitFor();
-  pass("A13: unfolded: linked moves all and keeps offsets, unlinked makes an offset and a member mute");
+  pass("B2: a bus moved by its grip with the arrow keys, a strip dragged before another (the show's order, shown at once)");
 
-  await page.screenshot({ path: `${out}/console16.png` });
+  // B3: the Inputs and Buses views, and a custom view with a strip, a bus and a VCA.
+  await tools.getByRole("button", { name: "Inputs" }).click();
+  await until("only strips", async () => (await page.locator(".busesec").count()) === 0 && (await page.locator('.strips [data-signal="vox"]').count()) === 1);
+  await tools.getByRole("button", { name: "Buses" }).click();
+  await until("only buses", async () => (await page.locator('.strips [data-signal="main"]').count()) === 1 && (await page.locator('.strips [data-signal="vox"]').count()) === 0);
+  await page.screenshot({ path: `${out}/amx16-B3-buses-view.png` });
+  await send("POST", "/api/v1/vcas", { id: "v16", name: "VCA 16", members: ["vox"] });
+  await tools.getByRole("button", { name: "Edit views…" }).click();
+  const editor = page.getByRole("dialog", { name: "Views" });
+  await editor.getByRole("button", { name: "+ View" }).click();
+  await editor.getByLabel("View name").fill("Talk");
+  await editor.locator('[data-put="main"]').click();
+  await editor.locator('[data-put="v16"]').click();
+  await editor.locator('[data-put="vox"]').click();
+  await editor.getByRole("button", { name: "+ Bank" }).click();
+  await editor.locator('[data-put="gtr"]').click();
+  await page.screenshot({ path: `${out}/amx16-B3-view-editor.png` });
+  await editor.getByRole("button", { name: "Save views" }).click();
+  await until("view Talk saved", async () => {
+    const l = (await api("/api/v1/layouts")).find((x) => x.name === "Talk");
+    return l && l.pages[0].signals.join() === "main,v16,vox" && l.pages[1].signals.join() === "gtr";
+  });
+  await until("the Talk view shown", async () => (await page.locator(".strips > .slot").evaluateAll((els) => els.map((e) => e.dataset.slot))).join() === "main,v16,vox");
+  await page.screenshot({ path: `${out}/amx16-B3-custom-view.png` });
+  // In a custom view a drag changes the view, not the show's order.
+  await page.locator('[data-slot="vox"] .grip').focus();
+  await page.keyboard.press("ArrowLeft");
+  await until("vox before the VCA in the view", async () => (await api("/api/v1/layouts")).find((x) => x.name === "Talk").pages[0].signals.join() === "main,vox,v16");
+  await tools.getByRole("button", { name: "All strips" }).click();
+  pass("B3: Inputs and Buses views; a custom view (a bus, a VCA, a strip; a second bank) made in the view editor, saved in the show; moving in it changes the view");
+
   if (errors.length) throw new Error(`page errors: ${errors.join("; ")}`);
-  pass("no page errors");
+  await ctx.close();
 } finally {
-  for (const id of made.automixes) await fetch(`${base}/api/v1/automixes/${id}`, { method: "DELETE" }).catch(() => {});
-  for (const id of made.vcas) await fetch(`${base}/api/v1/vcas/${id}`, { method: "DELETE" }).catch(() => {});
-  for (const id of made.strips) await fetch(`${base}/api/v1/strips/${id}`, { method: "DELETE" }).catch(() => {});
-  for (const id of made.buses) await fetch(`${base}/api/v1/buses/${id}`, { method: "DELETE" }).catch(() => {});
   await browser.close();
+  // Back as it was: the order, the nodes, the auto-mix, the VCA, the bus, the layouts.
+  for (const id of ["vox", "gtr"]) await fetch(`${base}/api/v1/strips/${id}/chain/hpf`, { method: "DELETE" });
+  await send("PATCH", "/api/v1/strips/gtr", { trim_db: 0, fader_db: 0 }).catch(() => {});
+  await send("PATCH", "/api/v1/strips/vox", { trim_db: 0, fader_db: 0 }).catch(() => {});
+  if (amId) await fetch(`${base}/api/v1/automixes/${amId}`, { method: "DELETE" });
+  await fetch(`${base}/api/v1/vcas/v16`, { method: "DELETE" });
+  await fetch(`${base}/api/v1/buses/b16`, { method: "DELETE" });
+  await send("PUT", "/api/v1/layouts", before.layouts).catch(() => {});
+  for (const [i, id] of before.strips.entries()) await send("POST", `/api/v1/strips/${id}/move`, { position: i }).catch(() => {});
+  for (const [i, id] of before.buses.entries()) await send("POST", `/api/v1/buses/${id}/move`, { position: i }).catch(() => {});
 }

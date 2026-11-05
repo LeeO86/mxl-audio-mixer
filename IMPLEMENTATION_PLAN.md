@@ -2464,6 +2464,39 @@ moved it to `mix.json.bad` and the mixer started with an empty mix.
 | --- | --- | --- |
 | D279 | Saved show state (`mix.json`, show-history versions) is parsed strictly first; only when that fails it is repaired on the JSON at the path of each error: an unknown field is removed (inside a `flatten`ed part, where the path stops at the node or block, the first key of that name at or below it); an unknown variant removes the array element it is in (a chain node, a logic block with its wires, a list entry), or the field when it is not in an array; anything else (a wrong type, a missing field, an untagged enum that matches no variant) is not repaired and the file goes to `mix.json.bad` as before. Then the normal validation runs; a mix that is not valid without the dropped parts (e.g. a logic `set-param` on a dropped node) is not repaired further (no reference cleaner besides the wires of a dropped block). The original stays as `mix.json.newer` (`mix.json.newer-<seconds>` when that exists); one WARN lists the dropped paths; `load_warnings` in the status and a banner in the UI show them. The API (and the show import) stays strict (`deny_unknown_fields`). | A rollback keeps what this version understands; a typo in an API call is still an error. Strict first, so a mix of this version never takes the repair path. |
 
+## 1.6.0: console menus, selection, views (B1–B11)
+
+From the operators' feedback (Confluence "Feedback MXL Audio-Mixer", scope of
+2026-11-05, part B).
+
+#### What exists
+
+- `src/console_api.rs`: `PATCH /api/v1/signals` (`apply_batch`: strip and bus fields,
+  node merge patches, solos; one `apply`, so one revision, all or none) and
+  `POST /api/v1/{strips,buses}/<id>/move` (`move_in`); `Control::set_solos` /
+  `restore_solo` in `src/control.rs` (several solos at once; interlock replaces the
+  others together).
+- UI: `web/src/link.js` (the linked values, the copy body, the click selection; pure
+  functions), the selection and `patchBatch` in `store.js` (`patchSignal`,
+  `patchNode` and `toggleSolo` link while the signal is one of several selected),
+  `consoleui.js` (meter scale and the dialogs a menu opens), `StripMenu.vue`,
+  `ViewEditor.vue`, `ConsoleTab.vue` (views, grips, the tab tools), `ChainTab.vue`
+  (add, move, delete on all selected), `FormatSelect.vue` (`ids`), `midi.js`
+  (`startLearn(target)`).
+- Tests: `console_api` unit tests; `web/tests/link.mjs` (no browser) and
+  `web/tests/console16.mjs` in `tests/integration/ui.sh`.
+
+#### Decisions
+
+| ID | Decision | Reason |
+| --- | --- | --- |
+| D280 | The selection is per browser (localStorage), not in the show; the processing view's signal stays `live.selected`, and selecting a strip outside the selection (gear, Mackie select, the processing view's list) makes it the only one. | Each operator selects for themself; a shared selection would move another operator's linked changes. |
+| D281 | Linked changes are computed in the browser and sent as absolute values in one `PATCH /api/v1/signals` per step (rate-limited and merged like a single PATCH). Relative: fader, trim, width (dB or value offsets; a fader counts −∞ as −80 dB and gives −∞ at or below it), numeric node parameters (frequencies, Q, ratios and times by a factor, the rest by an offset, clamped to the server's ranges; band lists item by item). The same on all: mute, polarity, solo/PFL/AFL, bypass and every choice, colour and the safes. Not linked: pan (also the surround panner node), name, input patch, format, tally. A relative field takes its offset from the values at the start of the move (until 1 s without a change of the same strip and fields), so it survives the end of the travel; an EQ band added or removed is added or removed on the others only. New nodes and deletes on several selected are one batch too (`add`, `delete`), all or none; an empty batch changes nothing (no revision). The selection drops ids that are no longer in the mix with every pushed mix (a new strip may get a freed id). A node matches by id and type, else by its place among the nodes of its type. | One request keeps the change atomic and the mix revision single, so other clients and MIDI feedback never see half a group; the server needs no notion of selection. |
+| D282 | The console order of strips and of buses is the order of `mix.strips` / `mix.buses` (in the show, shared); a custom view keeps its own order in its pages. A move only reorders the lists (no node changes its signature, so nothing fades). | "Operators share a console": one order for all, the same order MIDI banks and widgets follow. |
+| D283 | Custom views are the existing layouts (same API, same show data); a custom view shows only what it places (no bus or VCA section beside it). "Inputs" and "Buses" are built-in views (`:inputs`, `:buses`, not names of layouts). | No second model for the same thing; "placed freely" means the view decides. |
+| D284 | The strip and bus menus are a dialog (`StripMenu`), the toolbar keeps "VCAs & groups" (beside the console: its VCAs are spilled while it is open) and "MIDI"; Meters, + Strip/+ Bus, Auto, Operations and the auto-mixes moved into the menus. MIDI learn from a menu needs a single strip. | B5–B10; the groups panel is used together with the strips. |
+| D285 | Copy settings (B11) takes everything a snapshot would plus the processing: fader, mute, trim, polarity (same channel count, else all channels from the source's), pan, width, chain, loudness, colour, the safes, a bus's `compensate`; not the name, id, input patch, format, sends, tally, a bus's mix-minus, subgroup or down-mix. | "All settings and the processing, not the label"; routing is not a setting of the strip. |
+
 ## 1.6.0: console strip (A1–A13)
 
 From the operators' feedback page (2026-11-05), section A. `web/src/components/Strip.vue`,
@@ -2472,7 +2505,7 @@ From the operators' feedback page (2026-11-05), section A. `web/src/components/S
 block); the model in `src/mix/model.rs` (`Strip.surround`, `members`, `unlinked`,
 `Mix::strip_surround`), the plan in `src/mix/compile.rs`, the old shows in
 `src/mix/upgrade.rs` (called by `tolerant::mix` and the show import). Checked by
-`web/tests/console16.mjs` (in `tests/integration/ui.sh`) and unit tests
+`web/tests/strip16.mjs` (in `tests/integration/ui.sh`) and unit tests
 (`surround_panner_feeds_a_surround_bus`, `a_wide_strip_pans_each_channel`,
 `members_offset_fader_trim_and_mute`, `surround_panner_lifts_into_a_height_bus`,
 `upgrade::a_151_show_loads_with_the_panner_as_the_strip_surround`).
@@ -2484,5 +2517,6 @@ block); the model in `src/mix/model.rs` (`Strip.surround`, `members`, `unlinked`
 | D302 | A strip wider than stereo has a balance (A5): the left channels (labels L, Ls, Lss, Lrs, Ltf, Ltr) and the right ones get the stereo balance gains of `pan`, the others (C, LFE) none; one gain node `strip/<id>/balance` that is always there, so moving it never rewires. | The strip shows a L/R pan whatever the format; a balance is what L/R means for a bed. |
 | D303 | Unfolded members (A13) are offsets in the show (`members`: `fader_db`, `trim_db`, `mute` per channel), applied as per-channel values of the existing trim, fader and mute nodes; `unlinked` only tells the console how a member moves (linked: the strip's value, so the offsets stay; unlinked: the member's offset). Offsets of ±100 dB (fader also −∞), results held to the strip's ranges. Pan is never linked (the surround panner has a position per channel); processing, sends and patch stay per strip. The unfold state is per browser. | No second strip model and no plan change for a member move; linking keeps offsets like B1's relative linking. Per-channel processing parameters would need a parameter set per channel in every processor: left out. |
 | D304 | Old shows (a 1.5 `surround-pan` node) are converted after the tolerant parse, for `mix.json`, show-history versions and the show import (`mix::upgrade`): an active node becomes the strip's position, a bypassed one, one on a bus or a second one goes, a snapshot's saved node becomes its surround position, and a logic `set-param` on a removed node is removed with its wires and listed in `load_warnings` (else the whole mix would be invalid). A chain node `surround-pan` from the API is refused (400). | Tolerant load (coordinator default): a 1.5.1 show must start with its panning, not as `mix.json.bad`. |
-| D305 | The auto-mix mark (A9) is a fixed colour per auto-mix by its place in the list (8 colours), the auto-mix meter a button that toggles the member's `bypass` (A11). The VCA cap (A10) is drawn from the mix (fader plus the VCAs above, at most +15 dB), not measured. The strip menu (A3) is a fixed layer placed below its button inside the window. | No model change for a mark; `bypass` already means "out of the sharing at 0 dB". |
+| D305 | The auto-mix mark (A9) is a fixed colour per auto-mix by its place in the list (8 colours), the auto-mix meter a button that toggles the member's `bypass` (A11). The VCA cap (A10) is drawn from the mix (fader plus the VCAs above, at most +15 dB), not measured. The strip menu (A3) became a dialog with B10 (D284). | No model change for a mark; `bypass` already means "out of the sharing at 0 dB". |
 | D306 | Review of #67: a mix has `schema` (16 since 1.6.0, absent before), so the upgrade runs once (it centres stale L/R pans: on converted strips and on strips wider than stereo, where pan did nothing before). Its notes go into `load_warnings` with the prefix "1.5 show: " (only a non-note entry keeps `mix.json.newer` and says "newer version"), the import answers them as `upgraded`. A send's `pan` stops the strip's panner only where it applies (`Mix::send_pan`, a mono or stereo source). A 1.5 snapshot with a bypassed panner recalls `surround: []`. Members recall by class (fader, trim, mute). Linked, a member's own mute is cleared by its button, and a value beyond the strip's range goes into that member's offset. The column sends of a wide strip stay as they are: the send skips zero coefficients, so the identity costs one multiply-add per bus channel and column. | Old shows must load audibly close and say what changed; a 1.6 show must never be "upgraded" again. |
+| D307 | Merge with B (#66): the linked multi-selection never links `surround`, `members` or `unlinked` (only B's relative and same-value fields are linked; pan never is), and "Sel" is a click selection (`pickSignal`, Shift and Ctrl too). A copy of settings (B11, D285) takes the surround panner where the formats fit (one position between mono and stereo, else the same format) and the member offsets and `unlinked` where the channel counts match; otherwise the target's go. | Pan is never linked (A13, B1); a copy is all settings. |
