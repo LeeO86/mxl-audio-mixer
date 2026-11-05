@@ -259,9 +259,20 @@ rates other than 48 kHz, recording.
   published signal is an NMOS sender (Source + Flow + Sender), group hint by signal
   name. Publishing/unpublishing at runtime creates/removes the sender; IDs derive from
   `NMOS_SEED` + stable signal ID, so they survive restarts (G3).
-- A strip is published as its direct out, a bus as its bus out: post-fader, or at any
-  tap of the signal (`outputs[].tap`, set in the flow view of the processing view,
-  §12.2); its reported processing latency is the tap's.
+- A bus is published as its bus out: post-fader, or at any tap of the signal
+  (`outputs[].tap`, set in the flow view of the processing view, §12.2); its
+  reported processing latency is the tap's.
+- **Direct outs (C5, 1.6.0)** are blocks of a strip's flow (`direct-out` nodes, §5.1),
+  several per strip, each published where it sits. Output keys: the strip's id for
+  the direct out `out` (the key a strip's direct out had before 1.6, so its MXL flow
+  and NMOS sender ids stay), `<strip>/<node>` for the others. A pre-1.6 direct out
+  (`outputs[]` of a strip) becomes the block `out` at the same point when the show
+  loads (a `fader` node in front of it for post-fader; an `auto` node before it for
+  pre-fader, which was after the auto gain): same sound, same ids. At the `input`
+  or `post-pan` tap (outside the chain) it stays in `outputs[]`.
+- **Inserts (C4, 1.6.0)** send as a published output too (key `<signal>/<node>`, §5.1).
+  The key, `source`, `node` and `kind` of these outputs are in the status, so the
+  routing can offer them (D1).
 - Outputs are written into the mixer's own domain (G2) on the TAI timeline.
   - **Commit size is separate from the DSP block size:** `MIXER_OUTPUT_COMMIT_SAMPLES`
     (default = one block; per output overridable, e.g. 240 or 480).
@@ -338,6 +349,41 @@ rates other than 48 kHz, recording.
 - **Matrix:** any signal → any summing point at a gain (−∞…+10 dB), with mute and
   phase; pre/post tap selectable per send (tap points: input, pre-EQ, post-EQ,
   pre-dynamics, post-dynamics, pre-fader, post-fader, post-pan, or after any node).
+### 5.1 The signal flow (1.6.0, C3–C7)
+
+- A strip is patch → trim and polarity → **its flow** → panner; a bus is the sum of
+  its sends → its flow. The flow is the chain (§6): processing nodes and the flow
+  blocks, in order:
+  - `fader` (C3): the fader stage (fader, audio-follows-video, mute; a bus: fader
+    and mute) runs here; nodes after it run post-fader. At most one. Without one the
+    fader stage follows the chain (every show before 1.6: the same sound).
+  - `auto` (C6): the gain-sharing automixer and ducking (§8); anywhere, also after
+    the fader. Without one it acts just before the fader stage. The VAD reads at its
+    input.
+  - `direct-out` (C5): published here (§4.3); the signal passes on. Strips only.
+  - `insert` (C4): the signal leaves as a published MXL flow (the send, at its send
+    level, metered) and comes back on a chosen input (the return: from a first
+    channel, the signal's channel count, at its return level, metered), which replaces
+    it from here on. **No delay compensation** (the owner, 2026-11-05): the return is
+    mixed in when it arrives. Bypass ramps to the dry signal; the send keeps going. The
+    round trip is measured off the DSP thread: the meter thread, which gets the send
+    and return blocks anyway, sums each to mono, decimates by 8, and about once a
+    second cross-correlates the last 2048 return samples with the send at every lag
+    up to 500 ms; the best normalised correlation, when ≥ 0.5, gives the lag
+    (parabolic refinement), shown with the output (`round_trip_ms`). A return without
+    an input passes dry.
+- **Taps** (C7): `pre-fader` is the fader stage's input, `post-fader` the flow's end
+  (after the fader and every node after it; what goes to the panner), `{"after":
+  "fader"}` right after the fader, `{"after": <node>}` after any block. A send, key,
+  bus out or virtual output takes any of them; the flow view sets them by drag.
+  Before 1.6 these were the same points (nothing ran after the fader).
+- **Meter:** a strip's meter reads after its fader and before its mute (A3), also
+  with nodes after the fader; a bus's reads its output.
+- **Real time:** the blocks are gain steps, patches, meters and output steps of the
+  plan like every other; nothing allocates on the DSP thread.
+
+### 5.2 Routing details
+
 - **Per-send surround panning:** a send from a mono or stereo source into a 5.1, 7.1,
   5.1.4 or 7.1.4 bus can have its own surround panner (`pan`: position, spread,
   divergence, LFE, as the surround panner node; the heights of 5.1.4/7.1.4 get none).
@@ -348,6 +394,19 @@ rates other than 48 kHz, recording.
   stereo→mono (sum −3 dB or −6 dB), up/down-mix for 5.1/7.1. The down-mix is
   adjustable (ITU-R BS.775 style: centre, surround and LFE levels, normalisation):
   a mix-wide default and an override per target bus or monitor.
+- **Down-mix settings (C8, 1.6.0):** several named settings, each a gain matrix for
+  every pair of formats, so they cover the largest bus format (7.1.4 and every
+  narrower one). The reference and default is the owner's `downmix.json`
+  (`assets/downmix.json`, kept verbatim): for each source channel an ordered list of
+  alternatives (target channels with gains); the first whose channels the target
+  has all is taken, a channel without one is dropped (5.1's Ls / Rs are its Lrs / Rrs,
+  mono is its C; −3 dB is 1/√2). A setting starts from its rules (`Downmix`, or with
+  `Downmix_Surround_To_Side` / `…_SideAndRear` for the surrounds) and keeps the pairs
+  edited in the matrix view. It applies where the target lacks a channel of the
+  source; mono sources and stereo into mono keep the pan law and the mono sum. The
+  mix, a bus or a monitor picks a setting; a show without one keeps the parametric
+  down-mix above (a 1.5 show sounds the same); a new show starts with the
+  reference.
 - **High-level operations** that generate the graph:
   - **Group:** selected strips → new subgroup bus with routing.
   - **N-1:** selected strips → N-1 bus per selected participant (each receives the sum
@@ -371,6 +430,7 @@ across multichannel signals, parameter smoothing.
 | Dynamics | compressor (feed-forward, soft knee, sidechain with filter), limiter (look-ahead, true-peak option), expander, gate (with hysteresis, hold), **de-esser** (split-band and wide-band modes, frequency 2–12 kHz, threshold, range, listen/sidechain monitor), ducker (keyed by any signal or by VAD), multiband dynamics (3–5 bands, linear-phase crossover option) |
 | Loudness | auto-level (speech-aware loudness controller, §8.2), loudness normaliser for outputs, **leveler** for buses and streams (below) |
 | Utility | oscillator/tone (sine, pink/white noise, sweep, EBU stereo ident), block delay (feedback), meter tap |
+| Flow (1.6.0, §5.1) | fader position, automixer, direct out (several), insert (MXL send and return) |
 
 - Filter design: biquads/state-variable filters with coefficient smoothing; designs
   documented with references; verified against reference responses (§14).
@@ -620,6 +680,14 @@ new ones:
 
 ### 12.2 Processing chain editor
 
+- 1.6.0 (C1, C2): the header has the signal select with ◀ ▶, under it "n of m"
+  (its place among the strips and buses), the node count and the latency; "Format"
+  stands left of its dropdown. Colours are 16 fixed, muted ones (an older show's own
+  colour stays until changed). The fader is a tile of the flow (dashed while it
+  follows the chain); a palette unit clicked in goes before it, the drop zone at the
+  end is after it. An automixed signal without an automixer node shows a dashed
+  automixer before the fader. The insert shows its meters out and in, levels, the
+  return input and its MXL flow, and the measured round trip.
 - Select any signal → its chain is shown; drag processing nodes from a palette into
   the chain ("I want an EQ here"), reorder by drag, bypass, detail editors for each
   node (EQ curve with handles, compressor transfer curve, de-esser with listen).

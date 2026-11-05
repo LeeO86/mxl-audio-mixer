@@ -120,6 +120,9 @@ try {
 
   // Down-mix: the global one in Settings (a draft until Apply), a bus's own in its settings.
   await page.goto(`${base}/#settings`);
+  // A new show uses the downmix.json reference (1.6.0, C8): the parametric one first.
+  await page.getByLabel("Mix down-mix").selectOption("");
+  await until("the parametric down-mix", async () => (await api("/api/v1/mix/settings")).downmix_set === undefined);
   await page.getByLabel("Down-mix: centre value").fill("-6");
   await page.getByLabel("Down-mix: centre value").press("Tab");
   if ((await api("/api/v1/mix/settings")).downmix.centre_db !== -3) throw new Error("applied before Apply");

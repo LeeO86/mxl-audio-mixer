@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — 1.6.0
+
+- C1: processing view header: "n of m", node count and latency under the signal select, "Format" left of its dropdown, the key hint at the right removed.
+- C2: strip and bus colours are 16 fixed, muted colours (no colour picker); an older show's own colour stays until changed.
+- C3: processing blocks can run after the fader: the `fader` node places the fader stage (fader, AFV, mute) in the flow; `post-fader` is the flow's end, `{"after": "fader"}` right after the fader; shows without one sound as before.
+- C4: `insert` block: the signal leaves as an MXL flow (output `<signal>/<node>`) and returns on a chosen input (and its flow), levels and meters out and in, bypass; no delay compensation, the measured round trip in `round_trip_ms` of the output.
+- C5: direct outs are `direct-out` blocks, several per strip (`out` publishes as the strip, others as `<strip>/<node>`); a 1.5 direct out becomes the block `out` at its old point (same sound, flow and sender ids); outputs have `source`, `node`, `kind`.
+- C6: the automixer is a block of the flow (also after the fader); an automixed signal without one shows it before the fader in the chain and the flow view.
+- C7: send taps (and keys, bus outs) are set in the flow at any point, including after the fader and around the automixer.
+- C8: named down-mix settings (`settings.downmixes`, `downmix_set` of the mix, buses and monitors): a matrix for every pair of formats from `downmix.json` (`assets/downmix.json`), edited as a matrix in Settings; `GET /api/v1/downmix-matrix`; a new show starts with the reference, a 1.5 show keeps its parametric down-mix.
+- Downgrade (C3–C8): 1.5.1 drops the `fader`, `direct-out` and `insert` nodes and the down-mix settings (tolerant load, `load_warnings`): direct-out blocks are unpublished and post-fader units run pre-fader there; re-publish direct outs after going back. A send, key or output tapped `{"after": …}` one of those nodes makes the 1.5.1 mix invalid (it starts empty, `mix.json.bad`): move such taps to a named tap first.
+
 ## 1.5.1 (2026-10-31)
 
 - **Behaviour change for the platform: outputs keep the input timestamps.** A sample read from an input at MXL index i leaves on every output (bus, direct out, monitor, published and virtual output) at index i, not at the mixer's block clock ("now"). Before, every output was re-stamped by the read offset plus the input's extra delay: an AV-sync signal through an input straight to a virtual output was +39 ms (37.0–41.2) late against its video on the test platform; in the lab (a ramp whose samples tell their index) +41.1 ms for a writer that commits a 25 fps video frame of audio at once, +39.0 ms for the same 25 ms early, +5.0 ms and +2.0 ms for writers per block on time and 25 ms early; now 0 samples in every case. The old shift was the read offset plus the input's automatic delay, so it depended on how the source commits. An output that mixes inputs of different delays takes the largest of them. Look-ahead (limiter, leveler) is taken off the index too. When samples are written is unchanged, so listening latency is unchanged.

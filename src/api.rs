@@ -987,6 +987,14 @@ async fn put_output(
 async fn delete_output(State(app): State<App>, Path(signal): Path<String>) -> Response {
     let run = async {
         apply(&app, 0, |m| {
+            if m.chain_outputs()
+                .iter()
+                .any(|o| o.key == signal && o.insert)
+            {
+                return Err(bad(format!(
+                    "{signal} is an insert's send: remove the insert from its chain"
+                )));
+            }
             if !m.unpublish(&signal) {
                 return Err(not_found(format!("{signal} is not published")));
             }
@@ -1086,15 +1094,16 @@ async fn chain_add(
             o.insert("id".into(), json!("new"));
         }
         let mut node: Proc = serde_json::from_value(v).map_err(|e| bad(e.to_string()))?;
-        let node_id = {
-            let chain = chain_of(&app, kind, &id)?;
-            given.unwrap_or_else(|| crate::mix::chain::next_id(&chain, &node.kind))
-        };
-        node.id = node_id.clone();
+        // The id is found on the mix it goes into, so two adds in a row get two.
+        let mut node_id = String::new();
         let errors = apply(&app, crate::engine::FADE_SAMPLES, |m| {
             let chain = chain_mut(m, kind, &id)?;
+            node.id = given
+                .clone()
+                .unwrap_or_else(|| crate::mix::chain::next_id(chain, &node.kind));
+            node_id = node.id.clone();
             let at = position.map_or(chain.len(), |p| (p as usize).min(chain.len()));
-            chain.insert(at, node);
+            chain.insert(at, node.clone());
             Ok(())
         })
         .await?;
