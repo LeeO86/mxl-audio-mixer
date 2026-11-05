@@ -14,6 +14,12 @@ check("a fader move keeps every offset", () => {
   assert.deepEqual(linkSignal(a, { fader_db: "-inf" }, strip("b", { fader_db: -20 })), { fader_db: "-inf" }, "to the bottom");
   assert.deepEqual(linkSignal(strip("a", { fader_db: "-inf" }), { fader_db: -10 }, strip("b", { fader_db: "-inf" })), { fader_db: -10 }, "from the bottom together");
 });
+check("the offset from the start of a move survives the end of the travel", () => {
+  // A at 0, B at +10: A up to +10 and back to 0 within one move; B is +10 again, not +5.
+  const from = { src: { fader_db: 0 }, other: { fader_db: 10 } };
+  assert.deepEqual(linkSignal(strip("a", { fader_db: 5 }), { fader_db: 10 }, strip("b", { fader_db: 15 }), from), { fader_db: 15 });
+  assert.deepEqual(linkSignal(strip("a", { fader_db: 10 }), { fader_db: 0 }, strip("b", { fader_db: 15 }), from), { fader_db: 10 });
+});
 check("trim and width are relative, mute and polarity the same, pan and name not linked", () => {
   const a = strip("a", { trim_db: 3 });
   assert.deepEqual(linkSignal(a, { trim_db: 6 }, strip("b", { trim_db: -2 })), { trim_db: 1 });
@@ -40,9 +46,13 @@ check("EQ bands item by item; the other's band types stay", () => {
   const out = linkNode(src, { bands: [{ type: "bell", freq_hz: 2000, q: 1, gain_db: 3 }] }, other);
   assert.deepEqual(out.bands[0], { type: "high-shelf", freq_hz: 10000, q: 0.7, gain_db: 5 });
   assert.deepEqual(out.bands[1], other.bands[1]);
-  // A band added on the source: the list is the same on all.
-  const added = [...src.bands, { type: "bell", freq_hz: 500, q: 1, gain_db: 0 }];
-  assert.deepEqual(linkNode(src, { bands: added }, other).bands, added);
+  // A band added on the source: only that band is added on the other (appended: at its end).
+  const band = { type: "bell", freq_hz: 500, q: 1, gain_db: 0 };
+  assert.deepEqual(linkNode(src, { bands: [...src.bands, band] }, other).bands, [...other.bands, band]);
+  assert.deepEqual(linkNode(src, { bands: [band, ...src.bands] }, other).bands, [band, ...other.bands]);
+  // A band taken out: the other loses the band at that place only.
+  const two = { ...src, bands: [src.bands[0], band] };
+  assert.deepEqual(linkNode(two, { bands: [band] }, other).bands, [other.bands[1]]);
 });
 check("the matching node: the same id, else the same place among its type", () => {
   const a = { chain: [{ id: "eq", type: "eq" }, { id: "c1", type: "compressor" }] };

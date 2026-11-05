@@ -27,22 +27,25 @@ export const linksField = (key) => key in RELATIVE || SAME.has(key);
 
 /**
  * The part of `body` (a change of signal `src`) that signal `other` takes: relative fields keep their
- * offset, on/off fields the same value. Returns null when nothing is linked.
+ * offset, on/off fields the same value. Returns null when nothing is linked. `from` ({ src, other }: the
+ * relative fields of both at the start of the move) keeps the offset over the end of the travel.
  */
-export function linkSignal(src, body, other) {
+export function linkSignal(src, body, other, from = null) {
   const out = {};
   for (const [key, value] of Object.entries(body)) {
     const r = RELATIVE[key];
     if (r) {
       if (!(key in other)) continue; // a bus has no trim or width
+      const a = from && key in from.src ? from.src[key] : src[key];
+      const b = from && key in from.other ? from.other[key] : other[key];
       if (r.floor) {
-        const from = Math.max(r.min, dbNum(src[key]));
+        const start = Math.max(r.min, dbNum(a));
         const to = Math.max(r.min, dbNum(value));
-        const mine = Math.max(r.min, dbNum(other[key]));
-        const v = round(Math.min(r.max, mine + (to - from)), 1);
+        const mine = Math.max(r.min, dbNum(b));
+        const v = round(Math.min(r.max, mine + (to - start)), 1);
         out[key] = v <= r.min ? "-inf" : v;
       } else {
-        out[key] = round(clamp(Number(other[key]) + (Number(value) - Number(src[key])), r.min, r.max));
+        out[key] = round(clamp(Number(b) + (Number(value) - Number(a)), r.min, r.max));
       }
     } else if (SAME.has(key)) {
       if (key === "polarity") {
@@ -84,9 +87,25 @@ function relate(type, key, from, to, mine) {
     const v = LOG.has(key) && from > 0 && mine > 0 ? mine * (to / from) : mine + (to - from);
     return round(clamp(v, lo, hi), 3);
   }
-  // A list of the same length (bands, crossovers): item by item, as far as the other has items.
-  if (Array.isArray(to) && Array.isArray(from) && Array.isArray(mine) && to.length === from.length)
-    return mine.map((m, i) => (i < to.length ? relate(type, key, from[i], to[i], m) : m));
+  if (Array.isArray(to) && Array.isArray(from) && Array.isArray(mine)) {
+    // A list of the same length (bands, crossovers): item by item, as far as the other has items.
+    if (to.length === from.length) return mine.map((m, i) => (i < to.length ? relate(type, key, from[i], to[i], m) : m));
+    // One item added or taken out (an EQ band): only that one, at its place, on the other.
+    const at = (long, short) => {
+      let i = 0;
+      while (i < short.length && same(long[i], short[i])) i++;
+      return long.slice(i + 1).every((x, k) => same(x, short[i + k])) ? i : -1;
+    };
+    if (to.length === from.length + 1) {
+      const i = at(to, from);
+      const pos = i === from.length ? mine.length : Math.min(i, mine.length); // appended: at the other's end
+      if (i >= 0) return [...mine.slice(0, pos), to[i], ...mine.slice(pos)];
+    }
+    if (to.length === from.length - 1) {
+      const i = at(from, to);
+      if (i >= 0) return i < mine.length ? mine.filter((_, k) => k !== i) : mine;
+    }
+  }
   if (to && from && mine && typeof to === "object" && typeof from === "object" && typeof mine === "object" && !Array.isArray(to)) {
     const out = { ...mine };
     for (const k of Object.keys(to)) out[k] = relate(type, k, from[k], to[k], mine[k]);

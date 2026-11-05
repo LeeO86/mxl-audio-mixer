@@ -2,7 +2,7 @@
 
 ## Unreleased — 1.6.0
 
-- B1: multi-select in the console (click, Shift range, Ctrl/⌘ toggle; per browser): several selected are linked, relative (offsets kept; −∞ counts as −80 dB) for faders, trim, width and processing parameters, the same on all for mute, solo/PFL, processor on/off; pan and name not linked; menu and processing-view actions (add, move, delete a node) run on all selected; new `PATCH /api/v1/signals` changes several strips, buses, nodes and solos in one mix revision.
+- B1: multi-select in the console (click, Shift range, Ctrl/⌘ toggle; per browser): several selected are linked, relative (offsets from the start of a move kept; −∞ counts as −80 dB) for faders, trim, width and processing parameters (an EQ band added or removed: only that band), the same on all for mute, solo/PFL, processor on/off; pan (also the surround panner) and name not linked; menu and processing-view actions (add, move, delete a node; delete) run on all selected; new `PATCH /api/v1/signals` changes, adds nodes to and deletes several strips and buses and their solos in one mix revision (all or none). Layouts named `all`, `:inputs` or `:buses` are refused.
 - B2: strips and buses are moved by their grip (drag or arrow keys); new `POST /api/v1/{strips,buses}/<id>/move` `{"position"}`; the order is the show's, in a custom view the view's.
 - B3: views "Inputs" (only strips) and "Buses" (only buses) besides "All strips"; custom views (the show's layouts) with strips, VCAs and buses in banks, made in "Edit views…"; a custom view shows only what it places.
 - B4: the view and bank choice moved next to the tabs, right aligned.

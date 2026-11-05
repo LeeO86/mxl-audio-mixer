@@ -94,11 +94,11 @@ try {
     return db(v.fader_db) === -8 && db(g.fader_db) === -18;
   });
   if (!batches.length || batches.some((m) => m !== "PATCH")) throw new Error(`batches ${batches}`);
-  // To the bottom and back: the offset is lost only at the end of the travel.
+  // To the bottom and back within one move: the offset from the start of the move survives the end of
+  // the travel (vox −10 / gtr −20 at its start).
   await page.keyboard.press("End");
-  await until("both at −inf", async () => (await api("/api/v1/strips/gtr")).fader_db === "-inf" && (await api("/api/v1/strips/vox")).fader_db === "-inf");
   await page.keyboard.press("Home");
-  await until("both at 0 from the bottom", async () => db((await api("/api/v1/strips/gtr")).fader_db) === 0 && db((await api("/api/v1/strips/vox")).fader_db) === 0);
+  await until("vox 0, gtr −10 after the bottom", async () => db((await api("/api/v1/strips/vox")).fader_db) === 0 && db((await api("/api/v1/strips/gtr")).fader_db) === -10);
   pass(`B1: a fader move of two selected keeps the offset (vox −10 → −8, gtr −20 → −18) in ${batches.length} PATCH /api/v1/signals`);
 
   // Mute and PFL: the same on all.
@@ -135,7 +135,14 @@ try {
   await page.screenshot({ path: `${out}/amx16-B1-processing.png` });
   await hpfCard.getByRole("button", { name: "Bypass" }).click();
   await until("hpf on again on both", async () => !(await api("/api/v1/strips/vox/chain/hpf")).bypass && !(await api("/api/v1/strips/gtr/chain/hpf")).bypass);
-  pass("B1: a processing view action (bypass) runs on both selected");
+  // A new node on both, in one request (all or none).
+  const gates = async (id) => (await api(`/api/v1/strips/${id}/chain`)).filter((n) => n.type === "gate").length;
+  const before16 = { vox: await gates("vox"), gtr: await gates("gtr") };
+  const sent = batches.length;
+  await page.locator(".palette .pchip", { hasText: /^Gate/ }).click();
+  await until("a gate on both", async () => (await gates("vox")) === before16.vox + 1 && (await gates("gtr")) === before16.gtr + 1);
+  if (batches.length !== sent + 1) throw new Error(`${batches.length - sent} batch requests for one new node`);
+  pass("B1: a processing view action (bypass, a new node in one request) runs on both selected");
   await page.locator("nav button", { hasText: "Console" }).click();
   await strip("gtr").waitFor();
 
@@ -202,6 +209,19 @@ try {
   await page.getByRole("dialog", { name: "New bus" }).getByRole("button", { name: "Add", exact: true }).click();
   await until("bus b16", async () => (await api("/api/v1/buses")).some((b) => b.id === "b16"));
   pass("B6, B9: + Bus in the bus menu, Auto and Operations in the menus (dialogs)");
+
+  // Delete of two selected buses: one request; their ids leave the selection.
+  for (const id of ["x16a", "x16b"]) await send("POST", "/api/v1/buses", { id, format: "mono" });
+  await strip("x16b").waitFor();
+  await strip("x16a").locator(".sfoot").click();
+  await strip("x16b").locator(".sfoot").click({ modifiers: ["Control"] });
+  await menu("x16a", "Delete…");
+  const delSent = batches.length;
+  await page.getByRole("button", { name: "Delete 2 buses" }).click();
+  await until("both deleted", async () => !(await api("/api/v1/buses")).some((b) => b.id.startsWith("x16")));
+  if (batches.length !== delSent + 1) throw new Error("the delete was not one request");
+  await until("the selection pruned", async () => JSON.parse(await page.evaluate(() => localStorage.getItem("mxl-audio-mixer.selection"))).every((id) => !id.startsWith("x16")));
+  pass("B1: two selected buses deleted in one request; the selection drops their ids");
 
   // B2: move a bus and a strip by its grip (keys and a drag): the show's order.
   await page.locator('[data-slot="b16"] .grip').focus();

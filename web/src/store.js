@@ -220,12 +220,32 @@ export function patchSignal(id, body) {
   if (group.length > 1) return patchLinkedSignal(id, body, group);
   changeLocally(() => signalOf(id), signalPath(id), body);
 }
+// A linked move keeps each strip's offset from the start of the move (until 1 s without a change of
+// the same strip and fields), so an offset survives the end of the travel.
+let moveStart = null; // { id, keys, group, at, values: { id: { field: value } } }
+const MOVE_IDLE_MS = 1000;
+function startOf(id, body, group) {
+  const keys = Object.keys(body).sort().join();
+  const now = performance.now();
+  const m = moveStart;
+  if (!m || m.id !== id || m.keys !== keys || m.group !== group.join() || now - m.at > MOVE_IDLE_MS) {
+    const values = {};
+    for (const x of group) {
+      const sig = signalOf(x);
+      if (sig) values[x] = Object.fromEntries(Object.keys(body).map((k) => [k, sig[k]]));
+    }
+    moveStart = { id, keys, group: group.join(), values };
+  }
+  moveStart.at = now;
+  return moveStart.values;
+}
 function patchLinkedSignal(id, body, group) {
   const src = signalOf(id);
+  const start = startOf(id, body, group);
   const signals = { [id]: body };
   for (const other of group) {
     const o = other !== id && signalOf(other);
-    const b = o && linkSignal(src, body, o);
+    const b = o && linkSignal(src, body, o, start[id] && start[other] ? { src: start[id], other: start[other] } : null);
     if (b) signals[other] = b;
   }
   if (Object.keys(signals).length === 1) return changeLocally(() => signalOf(id), signalPath(id), body);
@@ -238,7 +258,8 @@ export function patchNode(id, node, body) {
   const group = linkedWith(id);
   const src = signalOf(id);
   const srcNode = src?.chain?.find((n) => n.id === node);
-  if (group.length > 1 && srcNode) {
+  // The surround panner is pan: never linked (B1).
+  if (group.length > 1 && srcNode && srcNode.type !== "surround-pan") {
     const nodes = { [id]: { [node]: body } };
     for (const other of group) {
       const o = other !== id && signalOf(other);
@@ -419,6 +440,9 @@ function onMessage(m) {
     if (m.revision < live.revision) return;
     live.mix = m.mix;
     live.revision = m.revision;
+    // Ids of deleted signals leave the selection (a new strip may get a freed id).
+    const kept = selection.ids.filter((x) => signalOf(x));
+    if (kept.length !== selection.ids.length) setSelection(kept);
     for (const [key, u] of unacked) {
       if (m.revision >= u.until) unacked.delete(key);
       else reassign(u);

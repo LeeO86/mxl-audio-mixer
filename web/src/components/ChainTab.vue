@@ -56,12 +56,17 @@ onUnmounted(() => {
 const group = computed(() => (sig.value ? linkedWith(sig.value.id) : []));
 async function add(type, position) {
   if (!sig.value) return;
-  for (const id of group.value) {
-    const others = signals.value.filter((s) => s.id !== id).map((s) => s.id);
-    const body = NODE_TYPES[type].make(others);
+  const node = (id) => {
+    const body = NODE_TYPES[type].make(signals.value.filter((s) => s.id !== id).map((s) => s.id));
     if (position !== undefined) body.position = position;
-    if (!(await act(() => api.post(`${signalPath(id)}/chain`, body)))) return;
+    return body;
+  };
+  if (group.value.length > 1) {
+    // On every selected one, all or none (one request).
+    await act(() => api.patch("/api/v1/signals", { add: Object.fromEntries(group.value.map((id) => [id, [node(id)]])) }));
+    return;
   }
+  await act(() => api.post(`${signalPath(sig.value.id)}/chain`, node(sig.value.id)));
 }
 // The new chains of the selected others after `change(chain, node)` of their matching node.
 function linkedChains(node, change) {

@@ -48,21 +48,53 @@ pub struct Batch {
     /// Per strip or bus, per node id: a JSON merge patch of the node.
     #[serde(default)]
     pub nodes: BTreeMap<String, BTreeMap<String, Value>>,
+    /// Per strip or bus: new nodes (each as for `POST …/chain`: `id` and
+    /// `position` optional), after the node patches.
+    #[serde(default)]
+    pub add: BTreeMap<String, Vec<Value>>,
+    /// Strips and buses to delete (with their references), last.
+    #[serde(default)]
+    pub delete: Vec<String>,
     /// Per strip or bus: `"pfl"`, `"afl"` or `null` (no solo).
     #[serde(default)]
     pub solo: BTreeMap<String, Option<SoloKind>>,
     pub ramp_ms: Option<f64>,
 }
 
-/// Apply the signal fields and node patches of `batch` to `mix`: all or none.
-/// Returns the notes of format changes.
-pub fn apply_batch(
-    mix: &mut Mix,
-    signals: BTreeMap<String, Value>,
-    nodes: BTreeMap<String, BTreeMap<String, Value>>,
-) -> ApiResult<Vec<String>> {
+impl Batch {
+    /// Nothing to change.
+    pub fn is_empty(&self) -> bool {
+        self.signals.is_empty()
+            && self.nodes.is_empty()
+            && self.add.is_empty()
+            && self.delete.is_empty()
+            && self.solo.is_empty()
+    }
+}
+
+fn chain_of<'a>(mix: &'a mut Mix, id: &str) -> ApiResult<&'a mut Vec<crate::mix::chain::Proc>> {
+    match mix.kind(id) {
+        Some(Kind::Strip) => Ok(&mut mix
+            .strips
+            .iter_mut()
+            .find(|s| s.id == id)
+            .expect("exists")
+            .chain),
+        Some(Kind::Bus) => Ok(&mut mix
+            .buses
+            .iter_mut()
+            .find(|b| b.id == id)
+            .expect("exists")
+            .chain),
+        None => Err(not_found(format!("signal {id} does not exist"))),
+    }
+}
+
+/// Apply the signal fields, node patches, new nodes and deletes of a batch to
+/// `mix` (in that order): all or none. Returns the notes of format changes.
+pub fn apply_batch(mix: &mut Mix, b: &mut Batch) -> ApiResult<Vec<String>> {
     let mut notes = Vec::new();
-    for (id, v) in signals {
+    for (id, v) in std::mem::take(&mut b.signals) {
         let kind = mix
             .kind(&id)
             .ok_or_else(|| not_found(format!("signal {id} does not exist")))?;
@@ -98,26 +130,8 @@ pub fn apply_batch(
             }
         }
     }
-    for (id, patches) in nodes {
-        let chain = match mix.kind(&id) {
-            Some(Kind::Strip) => {
-                &mut mix
-                    .strips
-                    .iter_mut()
-                    .find(|s| s.id == id)
-                    .expect("exists")
-                    .chain
-            }
-            Some(Kind::Bus) => {
-                &mut mix
-                    .buses
-                    .iter_mut()
-                    .find(|b| b.id == id)
-                    .expect("exists")
-                    .chain
-            }
-            None => return Err(not_found(format!("signal {id} does not exist"))),
-        };
+    for (id, patches) in std::mem::take(&mut b.nodes) {
+        let chain = chain_of(mix, &id)?;
         for (node, mut patch) in patches {
             if take(&mut patch, "id").is_some_and(|v| v.as_str() != Some(node.as_str())) {
                 return Err(bad("a node id cannot be changed"));
@@ -131,16 +145,55 @@ pub fn apply_batch(
             *p = serde_json::from_value(v).map_err(|e| bad(format!("{id} {node}: {e}")))?;
         }
     }
+    for (id, list) in std::mem::take(&mut b.add) {
+        let chain = chain_of(mix, &id)?;
+        for mut v in list {
+            let position = take(&mut v, "position").and_then(|p| p.as_u64());
+            let given = take(&mut v, "id").and_then(|i| i.as_str().map(str::to_string));
+            if let Some(o) = v.as_object_mut() {
+                o.insert("id".into(), json!("new"));
+            }
+            let mut node: crate::mix::chain::Proc =
+                serde_json::from_value(v).map_err(|e| bad(format!("{id}: {e}")))?;
+            node.id = given.unwrap_or_else(|| crate::mix::chain::next_id(chain, &node.kind));
+            let at = position.map_or(chain.len(), |p| (p as usize).min(chain.len()));
+            chain.insert(at, node);
+        }
+    }
+    for id in std::mem::take(&mut b.delete) {
+        if mix.kind(&id).is_none() {
+            return Err(not_found(format!("signal {id} does not exist")));
+        }
+        mix.remove_signal(&id);
+    }
     Ok(notes)
 }
 
 async fn patch_signals(State(app): State<App>, bytes: axum::body::Bytes) -> Response {
     let run = async {
-        let b: Batch = body(&bytes)?;
+        let mut b: Batch = body(&bytes)?;
         let ramp = ramp(b.ramp_ms)?;
-        let mut changed: Vec<String> = b.signals.keys().chain(b.nodes.keys()).cloned().collect();
+        let mut changed: Vec<String> = b
+            .signals
+            .keys()
+            .chain(b.nodes.keys())
+            .chain(b.add.keys())
+            .chain(b.delete.iter())
+            .cloned()
+            .collect();
         changed.sort();
         changed.dedup();
+        // Nothing to change: no revision, no save.
+        if b.is_empty() {
+            let v = json!({"signals": changed, "soloed": app.control().solo()});
+            return Ok(Json(v).into_response());
+        }
+        // A new node or a delete rewires: fade as `POST …/chain` and `DELETE` do.
+        let ramp = if b.add.is_empty() && b.delete.is_empty() {
+            ramp
+        } else {
+            ramp.max(crate::engine::FADE_SAMPLES)
+        };
         let _serial = app.changes.lock().await;
         // The solos first (the plan is compiled with them); taken back if the
         // change is refused.
@@ -159,7 +212,7 @@ async fn patch_signals(State(app): State<App>, bytes: axum::body::Bytes) -> Resp
         };
         let mut notes = Vec::new();
         let result = apply_held(&app, ramp, |m| {
-            notes = apply_batch(m, b.signals, b.nodes)?;
+            notes = apply_batch(m, &mut b)?;
             Ok(())
         })
         .await;
@@ -265,8 +318,10 @@ mod tests {
         let mut m = mix();
         let notes = apply_batch(
             &mut m,
-            map(json!({"a": {"fader_db": -3.0, "mute": true}, "b": {"fader_db": "-inf"}, "main": {"fader_db": -6.0}})),
-            map(json!({"a": {"hpf": {"freq_hz": 100.0}}, "c": {"hpf": {"bypass": true}}})),
+            &mut map(json!({
+                "signals": {"a": {"fader_db": -3.0, "mute": true}, "b": {"fader_db": "-inf"}, "main": {"fader_db": -6.0}},
+                "nodes": {"a": {"hpf": {"freq_hz": 100.0}}, "c": {"hpf": {"bypass": true}}},
+            })),
         )
         .unwrap();
         assert!(notes.is_empty());
@@ -294,10 +349,8 @@ mod tests {
             (json!({"main": {"trim_db": 3}}), json!({})),
         ] {
             let mut m = mix();
-            assert!(
-                apply_batch(&mut m, map(signals.clone()), map(nodes)).is_err(),
-                "{signals}"
-            );
+            let mut b = map(json!({"signals": signals, "nodes": nodes}));
+            assert!(apply_batch(&mut m, &mut b).is_err(), "{signals}");
         }
     }
 
@@ -306,8 +359,7 @@ mod tests {
         let mut m = mix();
         apply_batch(
             &mut m,
-            map(json!({"a": {"format": "stereo"}, "b": {"format": "stereo"}})),
-            BTreeMap::new(),
+            &mut map(json!({"signals": {"a": {"format": "stereo"}, "b": {"format": "stereo"}}})),
         )
         .unwrap();
         assert_eq!(
@@ -315,6 +367,25 @@ mod tests {
             (Format::Stereo, Format::Stereo)
         );
         assert_eq!(m.strips[0].patch.len(), 2);
+    }
+
+    #[test]
+    fn a_batch_adds_nodes_and_deletes_signals() {
+        let mut m = mix();
+        let comp = json!({"type": "compressor", "threshold_db": -20.0, "ratio": 3.0, "knee_db": 6.0, "attack_ms": 10.0, "release_ms": 150.0, "makeup_db": 0.0, "detector": "rms"});
+        let mut first = comp.clone();
+        first["position"] = json!(0);
+        let mut b: Batch =
+            map(json!({"add": {"a": [comp.clone()], "b": [first]}, "delete": ["c"]}));
+        apply_batch(&mut m, &mut b).unwrap();
+        assert_eq!(m.strips.len(), 2);
+        assert_eq!(m.strips[0].chain[1].kind, m.strips[1].chain[0].kind);
+        assert_eq!(m.strips[0].chain[1].id, m.strips[1].chain[0].id);
+        assert_eq!(m.validate(4, 48), Ok(()));
+        // One bad entry: an error (the caller's copy is dropped).
+        let mut b: Batch = map(json!({"add": {"a": [comp]}, "delete": ["nope"]}));
+        assert!(apply_batch(&mut mix(), &mut b).is_err());
+        assert!(map::<Batch>(json!({})).is_empty());
     }
 
     #[test]

@@ -195,10 +195,11 @@ const talkRefs = computed(() => {
 async function remove() {
   const ids = group.value;
   const names = ids.map((id) => signalOf(id)?.name || id).join(", ");
-  for (const id of ids) {
-    if (!(await act(() => api.del(signalPath(id)), `${kind.value === "bus" ? "Bus" : "Strip"} ${names} deleted.`))) return;
-    if (live.selected === id) select("");
-  }
+  const what = kind.value === "bus" ? (ids.length > 1 ? "Buses" : "Bus") : ids.length > 1 ? "Strips" : "Strip";
+  // Several selected: deleted together, all or none (one request).
+  const done = await act(() => (ids.length > 1 ? api.patch("/api/v1/signals", { delete: ids }) : api.del(signalPath(ids[0]))), `${what} ${names} deleted.`);
+  if (!done) return;
+  if (ids.includes(live.selected)) select("");
   dialog.value = "";
 }
 

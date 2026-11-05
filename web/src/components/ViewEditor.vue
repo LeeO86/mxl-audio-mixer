@@ -73,6 +73,7 @@ const problem = computed(() => {
   const names = draft.value.map((l) => l.name.trim());
   if (names.some((n) => !n || n.length > 64)) return "Every view needs a name (1 to 64 characters).";
   if (new Set(names).size !== names.length) return "Two views have the same name.";
+  if (names.some((n) => ["all", ":inputs", ":buses"].includes(n))) return "That name is a built-in view.";
   if (draft.value.some((l) => !l.pages.length)) return "Every view needs a bank.";
   if (draft.value.some((l) => l.pages.some((p) => !p.name.trim()))) return "Every bank needs a name.";
   return "";
