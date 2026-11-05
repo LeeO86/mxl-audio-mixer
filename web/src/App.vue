@@ -73,6 +73,9 @@ const outputErrors = computed(() => (live.status?.outputs || []).reduce((n, o) =
 const masterLost = computed(() => live.status?.link?.role === "slave" && live.status?.link?.seen && !live.status?.link?.up);
 // What loading the saved show dropped because a newer version wrote it (D279); dismissed per page load.
 const loadWarnings = computed(() => live.status?.load_warnings || []);
+// Since 1.6.0 also what loading an older version's show changed ("1.5 show: …").
+const loadNewer = computed(() => loadWarnings.value.filter((w) => !w.startsWith("1.5 show: ")));
+const loadOlder = computed(() => loadWarnings.value.filter((w) => w.startsWith("1.5 show: ")).map((w) => w.slice(10)));
 const loadDismissed = ref(false);
 const takeoverDenied = computed(() => masterLost.value && settingValue("MIXER_LINK_TAKEOVER") === "deny");
 
@@ -110,7 +113,10 @@ onUnmounted(() => {
   <div v-if="ready && !ready.timing_trusted" class="banner bad">Timing is not trusted: the kernel TAI offset is not set. Blocks may be scheduled on the wrong clock.</div>
   <div v-if="masterLost" class="banner warn">Master lost. The far-side mix is held.<template v-if="takeoverDenied"> Local changes are refused until the master is back.</template></div>
   <div v-if="loadWarnings.length && !loadDismissed" class="banner warn load-warnings">
-    The saved show came from a newer version; dropped: {{ loadWarnings.join(", ") }}
+    <span>
+      <template v-if="loadNewer.length">The saved show came from a newer version; dropped: {{ loadNewer.join(", ") }}.</template>
+      <template v-if="loadOlder.length"> The saved show came from 1.5 and sounds a little different now: <template v-for="(w, i) in loadOlder" :key="i">{{ i ? " · " : "" }}{{ w }}</template>.</template>
+    </span>
     <span class="spacer"></span>
     <button class="btn small secondary" @click="loadDismissed = true">Dismiss</button>
   </div>

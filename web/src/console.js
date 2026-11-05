@@ -74,19 +74,30 @@ export function memberValue(s, n, ch) {
 /**
  * The PATCH body for moving member `ch`'s `field` ("fader_db", "trim_db" or "mute") to `value`. Linked:
  * the strip's own value moves so that member lands there, every offset stays (a member at −∞ cannot
- * lead the fader). Unlinked: only that member's offset changes; a strip fader at −∞ goes to 0 dB and the
- * other members keep −∞.
+ * lead the fader); where the strip's range ends, the rest goes into that member's offset, so it still
+ * lands there. A member's own mute is cleared by its button, linked or not. Unlinked: only that member's
+ * offset changes; a strip fader at −∞ goes to 0 dB and the other members keep −∞.
  */
 export function memberChange(s, n, ch, field, value) {
   const list = membersOf(s, n);
   const m = list[ch];
   if (field === "mute") {
+    if (!value && m.mute) {
+      list[ch] = { ...m, mute: false };
+      return s.unlinked || !s.mute ? { members: list } : { members: list, mute: false };
+    }
     if (!s.unlinked) return { mute: !!value };
     list[ch] = { ...m, mute: !!value };
     return { members: list };
   }
   if (field === "trim_db") {
-    if (!s.unlinked) return { trim_db: clamp(Math.round((value - m.trim_db) * 10) / 10, -TRIM_RANGE, TRIM_RANGE) };
+    if (!s.unlinked) {
+      const want = Math.round((value - m.trim_db) * 10) / 10;
+      const trim = clamp(want, -TRIM_RANGE, TRIM_RANGE);
+      if (trim === want) return { trim_db: trim };
+      list[ch] = { ...m, trim_db: clamp(Math.round((value - trim) * 10) / 10, -MAX_OFFSET, MAX_OFFSET) };
+      return { trim_db: trim, members: list };
+    }
     list[ch] = { ...m, trim_db: clamp(Math.round((value - s.trim_db) * 10) / 10, -MAX_OFFSET, MAX_OFFSET) };
     return { members: list };
   }
@@ -94,7 +105,11 @@ export function memberChange(s, n, ch, field, value) {
   const off = num(m.fader_db);
   if (!s.unlinked) {
     if (!Number.isFinite(off)) return null;
-    return { fader_db: out(Number.isFinite(d) ? Math.min(FADER_MAX, d - off) : -Infinity) };
+    if (!Number.isFinite(d)) return { fader_db: "-inf" };
+    const want = d - off;
+    if (want <= FADER_MAX) return { fader_db: out(want) };
+    list[ch] = { ...m, fader_db: out(clamp(d - FADER_MAX, -MAX_OFFSET, MAX_OFFSET)) };
+    return { fader_db: FADER_MAX, members: list };
   }
   const body = {};
   let base = num(s.fader_db);

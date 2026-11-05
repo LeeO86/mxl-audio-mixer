@@ -44,7 +44,8 @@ pub struct SignalState {
     /// 1.5 (a recall leaves it then).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surround: Option<Vec<Option<super::model::SurroundPos>>>,
-    /// A strip's member offsets (A13, the fader class); absent before 1.6.
+    /// A strip's member offsets (A13; recalled by the fader, trim and mute
+    /// classes); absent before 1.6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<super::model::Member>>,
 }
@@ -328,14 +329,36 @@ pub fn recall(mix: &mut Mix, snap: &Snapshot, filter: &Filter) -> usize {
         }
         if filter.class(Class::Fader) {
             s.fader_db = st.fader_db;
-            if let Some(m) = &st.members {
-                if m.is_empty() || m.len() == s.format.channels() {
-                    s.members = m.clone();
-                }
-            }
         }
         if filter.class(Class::Mute) {
             s.mute = st.mute;
+        }
+        // The member offsets (A13) by class: fader, trim, mute.
+        if let Some(saved) = st
+            .members
+            .as_ref()
+            .filter(|m| m.is_empty() || m.len() == s.format.channels())
+        {
+            let n = s.format.channels();
+            let mut members: Vec<_> = (0..n).map(|ch| s.member(ch)).collect();
+            let from = |ch: usize| saved.get(ch).copied().unwrap_or_default();
+            for (ch, m) in members.iter_mut().enumerate() {
+                if filter.class(Class::Fader) {
+                    m.fader_db = from(ch).fader_db;
+                }
+                if filter.class(Class::Trim) {
+                    m.trim_db = from(ch).trim_db;
+                }
+                if filter.class(Class::Mute) {
+                    m.mute = from(ch).mute;
+                }
+            }
+            let none = super::model::Member::default();
+            s.members = if members.iter().all(|m| *m == none) || n < 2 {
+                Vec::new()
+            } else {
+                members
+            };
         }
         if filter.class(Class::Pan) {
             if let Some(p) = st.pan {

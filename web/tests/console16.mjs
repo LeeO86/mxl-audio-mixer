@@ -47,6 +47,9 @@ try {
   made.strips.push("a16-st", "a16-51", "a16-m", "a16-m2");
   await send("PUT", "/api/v1/sends/a16-m/a16-sur");
   await send("PUT", "/api/v1/sends/a16-51/a16-sur");
+  await send("POST", "/api/v1/buses", { id: "a16-sur7", name: "Sur16b", format: "7.1" });
+  made.buses.push("a16-sur7");
+  await send("PUT", "/api/v1/sends/a16-m/a16-sur7", { block_delay: true });
   await send("POST", "/api/v1/vcas", { id: "a16-vca", name: "V16", fader_db: -6, members: ["a16-st"] });
   made.vcas.push("a16-vca");
   await send("POST", "/api/v1/automixes", { id: "a16-am", name: "AM16", members: ["a16-m", "a16-m2"] });
@@ -145,6 +148,8 @@ try {
   });
   await sd.getByRole("slider", { name: "Spread" }).fill("40");
   await until("spread 40", async () => (await strip16("a16-m")).surround[0].spread_pct === 40);
+  // A block-delay send into a surround bus is not panned, and the dialog says so.
+  await sd.locator("[data-unpanned]", { hasText: "Sur16b (block delay" }).waitFor();
   await sd.screenshot({ path: `${out}/console16-A6-surround.png` });
   await sd.getByRole("button", { name: "Restore 1:1" }).click();
   await until("Mic16 1:1", async () => !(await strip16("a16-m")).surround);
@@ -244,6 +249,12 @@ try {
   await until("linked: the strip moves, R keeps −1", async () => {
     const s = await strip16("a16-st");
     return s.fader_db === 0 && s.members?.[1]?.fader_db === -1;
+  });
+  // Linked, a member's own mute is still cleared by its button (the strip stays unmuted).
+  await strip("a16-st").getByLabel("St16 L mute").click();
+  await until("L's own mute cleared", async () => {
+    const s = await strip16("a16-st");
+    return !s.mute && !s.members?.[0]?.mute && s.members?.[1]?.fader_db === -1;
   });
   await strip("a16-st").screenshot({ path: `${out}/console16-A13-unfolded.png` });
   await strip("a16-st").getByLabel("St16 clear member offsets").click();

@@ -300,12 +300,15 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
         );
     }
     let mut show = show;
+    // An older version's show in this one's model (a 1.5 surround panner node
+    // becomes the strip's surround pan); what changes is in the answer.
+    let mut upgraded = Vec::new();
     if let Some(mix) = &mut show.mix {
-        // An older version's show in this one's model (a 1.5 surround panner
-        // node becomes the strip's surround pan).
-        for n in crate::mix::upgrade::upgrade(mix).0 {
+        let (notes, log) = crate::mix::upgrade::upgrade(mix);
+        for n in log.iter().chain(&notes) {
             tracing::info!("imported show: {n}");
         }
+        upgraded = notes;
     }
     if let Some(mix) = &show.mix {
         let inputs = app.control().inputs.len();
@@ -348,6 +351,7 @@ async fn import(State(app): State<App>, body: axum::body::Bytes) -> Response {
         "imported": true,
         "rejected_connections": failed.iter().map(|(_, key, reason)| json!({"key": key, "reason": reason})).collect::<Vec<_>>(),
         "output_errors": output_errors,
+        "upgraded": upgraded,
     }))
     .into_response()
 }

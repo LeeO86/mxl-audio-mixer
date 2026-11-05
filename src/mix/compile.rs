@@ -924,7 +924,11 @@ impl Compiler {
                         }
                         // The strip's surround panner (A6): a matrix into the bus;
                         // a wide strip's (A8) one column per channel (a node holds
-                        // at most MAX_NODE_VALUES), each summed in by the send.
+                        // at most MAX_NODE_VALUES), each summed in by the send. The
+                        // send skips zero coefficients, so its identity costs one
+                        // multiply-add per bus channel per column (7.1.4 into
+                        // 7.1.4: 12 × 12 for the columns, 12 × 12 for the sends,
+                        // per sample), as much as one 12 × 12 matrix twice.
                         let mut parts = vec![src];
                         if let Some((_, f, m)) = surround {
                             let rows = bus.format.channels();
@@ -3141,6 +3145,25 @@ mod tests {
         for (ch, w) in want.iter().enumerate() {
             assert!((sur[ch][0] - w).abs() < 1e-6, "{ch}: {}", sur[ch][0]);
         }
+        // A send pan left from when the strip was mono does not apply to a 5.1
+        // source (B6), so it does not stop the strip's panner either.
+        let mut stale = m.clone();
+        stale.sends[0].pan = Some(crate::mix::model::SendPan {
+            azimuth_deg: -110.0,
+            spread_pct: 0.0,
+            divergence_pct: 0.0,
+            lfe_db: crate::mix::chain::LFE_OFF_DB,
+        });
+        assert!(stale.strip_surround(&stale.sends[0]).is_some());
+        let mut d = compiler.compile(&stale, 48, 0, &slots, &HashMap::new());
+        let out = run(&mut d, &inputs, 1);
+        for (ch, w) in want.iter().enumerate() {
+            assert!(
+                (out.0[&0][ch][0] - w).abs() < 1e-6,
+                "stale {ch}: {}",
+                out.0[&0][ch][0]
+            );
+        }
         // A mono strip's position cannot be null.
         m.strips.push(strip("vox", Format::Mono, 1));
         m.strips[1].surround = vec![None];
@@ -3208,6 +3231,30 @@ mod tests {
         moved.strips[1].pan = 0.0;
         let d = compiler.compile(&moved, 48, 0, &slots, &HashMap::new());
         assert_eq!(c.structure, d.structure);
+        // A snapshot recalls the member offsets by class: fader, trim, mute.
+        let snap = crate::mix::show::capture(&m, "s".into(), "S".into(), 0);
+        let mut later = m.clone();
+        later.strips[0].members[0] = Member {
+            fader_db: Db(-20.0),
+            trim_db: 3.0,
+            mute: true,
+        };
+        let only = |c| crate::mix::show::Filter {
+            classes: Some(vec![c]),
+            ..Default::default()
+        };
+        crate::mix::show::recall(&mut later, &snap, &only(crate::mix::show::Class::Fader));
+        assert_eq!(
+            later.strips[0].members[0],
+            Member {
+                fader_db: Db(6.0),
+                trim_db: 3.0,
+                mute: true
+            }
+        );
+        crate::mix::show::recall(&mut later, &snap, &only(crate::mix::show::Class::Trim));
+        crate::mix::show::recall(&mut later, &snap, &only(crate::mix::show::Class::Mute));
+        assert_eq!(later.strips[0].members, m.strips[0].members);
         // The member list has one entry per channel.
         let mut bad = m.clone();
         bad.strips[0].members.pop();

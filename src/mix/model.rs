@@ -701,10 +701,35 @@ impl MixSettings {
     }
 }
 
+/// The model version of a saved mix (1.6.0): 0 (left out) for a mix of 1.5 or
+/// older, which [`super::upgrade`] brings to this one; a new mix has the
+/// current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Schema(pub u32);
+
+impl Schema {
+    /// The model of 1.6.0.
+    pub const CURRENT: Schema = Schema(16);
+
+    fn old() -> Self {
+        Schema(0)
+    }
+}
+
+impl Default for Schema {
+    fn default() -> Self {
+        Self::CURRENT
+    }
+}
+
 /// The whole mix.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Mix {
+    /// The model version (1.6.0): absent in shows of 1.5 and older.
+    #[serde(default = "Schema::old")]
+    pub schema: Schema,
     #[serde(default)]
     pub settings: MixSettings,
     #[serde(default)]
@@ -822,7 +847,8 @@ impl Mix {
     /// reads (post-fader: the strip before its L/R panner), the strip's format
     /// there and the matrix (row-major, the bus's channels × the strip's) into
     /// the bus. `None` when it does not apply: a send that is not post-pan, has
-    /// a pan of its own (B6) or a block delay, a bus that is not 5.1, 7.1,
+    /// a pan of its own that applies (B6: the strip is mono or stereo) or a
+    /// block delay, a bus that is not 5.1, 7.1,
     /// 5.1.4 or 7.1.4, a strip without a surround panner. A channel without a
     /// position (and every LFE) maps 1:1 as without a panner.
     pub fn strip_surround(&self, send: &Send) -> Option<(Tap, Format, Vec<f32>)> {
@@ -830,7 +856,7 @@ impl Mix {
         let bus = self.bus(&send.to)?;
         if s.surround.is_empty()
             || send.tap != Tap::PostPan
-            || send.pan.is_some()
+            || self.send_pan(send).is_some()
             || send.block_delay
             || !is_surround(bus.format)
             || s.surround.len() != surround_entries(s.format)

@@ -371,7 +371,12 @@ rates other than 48 kHz, recording.
   panner has a position per channel); the chain, its order and parameters, the sends,
   the patch and the polarity stay one per strip. A format change resizes the members
   (a mono strip has none) and keeps the surround panner only where it still fits.
-  Snapshots keep the members (fader class) and the surround panner (pan class).
+  Snapshots keep the members (their fader, trim and mute offsets recalled by the
+  fader, trim and mute classes) and the surround panner (pan class).
+- **Saved model version (1.6.0):** a mix carries `schema` (16); one without it (1.5
+  and older) is upgraded once when it is loaded or imported, and the operator is told
+  what sounds different (one `load_warnings` entry per converted strip, starting
+  "1.5 show: "; a banner; `upgraded` in the import's answer).
 - **Width mapping:** mono→stereo (pan law selectable: −3 dB default, −4.5, −6, 0),
   stereo→mono (sum −3 dB or −6 dB), up/down-mix for 5.1/7.1. The down-mix is
   adjustable (ITU-R BS.775 style: centre, surround and LFE levels, normalisation):

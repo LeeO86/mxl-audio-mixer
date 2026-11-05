@@ -11,23 +11,32 @@ import SurroundPad from "./SurroundPad.vue";
 import { fmtPan } from "../api.js";
 import { channelLabels } from "../console.js";
 import { HEIGHT_LAYOUTS } from "../nodes.js";
+import { sendPanBed } from "../sendpan.js";
 import { isSubgroup, patchSignal, sends, signalOf } from "../store.js";
 
 const props = defineProps({ signal: { type: Object, required: true } });
 const s = computed(() => props.signal);
 const open = ref(false);
 
-// The widest surround bus a post-pan send of the strip feeds (the panner pans into each in its layout).
+// The widest surround bus a post-pan send of the strip feeds (the panner pans into each in its layout),
+// as the server's Mix::strip_surround: not a send whose own pan applies (B6), not one with a block delay.
 const LAYOUTS = ["7.1.4", "5.1.4", "7.1", "5.1"];
+const postPan = computed(() => sends.value.filter((x) => x.from === s.value.id && (x.tap === "post-pan" || isSubgroup(x.to)) && LAYOUTS.includes(signalOf(x.to)?.format)));
 const layouts = computed(() => {
-  const set = new Set(sends.value.filter((x) => x.from === s.value.id && !x.pan && (x.tap === "post-pan" || isSubgroup(x.to))).map((x) => signalOf(x.to)?.format));
+  const set = new Set(postPan.value.filter((x) => !x.block_delay && !(x.pan && sendPanBed(x))).map((x) => signalOf(x.to)?.format));
   return LAYOUTS.filter((f) => set.has(f));
 });
-const layout = computed(() => layouts.value[0] || "5.1");
+// Post-pan sends into surround buses the panner does not pan: their own pan, or a block delay (A7 review).
+const unpanned = computed(() =>
+  postPan.value
+    .filter((x) => x.block_delay || (x.pan && sendPanBed(x)))
+    .map((x) => `${signalOf(x.to)?.name || x.to} (${x.block_delay ? "block delay: 1:1" : "its own send pan"})`),
+);
+const layout = computed(() => layouts.value[0] || LAYOUTS.find((f) => postPan.value.some((x) => signalOf(x.to)?.format === f)) || "5.1");
 const narrow = computed(() => s.value.format === "mono" || s.value.format === "stereo");
 const positions = computed(() => s.value.surround || []);
 const active = computed(() => positions.value.some(Boolean));
-const offered = computed(() => layouts.value.length > 0 || active.value);
+const offered = computed(() => postPan.value.length > 0 || active.value);
 const height = computed(() => HEIGHT_LAYOUTS.has(layout.value));
 
 const fmtAz = (a) => {
@@ -105,6 +114,7 @@ const padNode = (p) => ({ layout: layout.value, ...DEFAULT, ...p });
         Pans the post-pan sends into {{ layouts.length ? layouts.join(", ") : "surround buses" }}, each in its own layout (heights on 5.1.4 and 7.1.4 only); a send with a pan of
         its own keeps it. The L/R pan on the strip feeds every other bus.
       </p>
+      <p v-if="unpanned.length" class="warnbox" data-unpanned>Not panned here: {{ unpanned.join(", ") }}.</p>
       <template v-if="narrow">
         <div class="surround1">
           <SurroundPad :node="padNode(positions[0])" :size="220" @change="(b) => setPos(0, b)" />

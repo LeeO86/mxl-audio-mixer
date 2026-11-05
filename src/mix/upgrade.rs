@@ -50,38 +50,137 @@ fn take_panners(chain: &mut Vec<Proc>) -> (Option<SurroundPos>, Vec<String>) {
     (found, removed)
 }
 
-/// Bring `mix` to this version's model. Returns what changed, one line each
-/// (for the log), and the paths of the logic blocks removed (as the tolerant
-/// load lists what it dropped, D279).
+/// The prefix of what an upgrade tells the operator (in `load_warnings`, next
+/// to the paths a tolerant load dropped).
+pub const NOTE: &str = "1.5 show: ";
+
+/// Whether a load warning is an upgrade note (not a dropped path of a newer
+/// version's show).
+pub fn is_note(w: &str) -> bool {
+    w.starts_with(NOTE)
+}
+
+fn fmt_name(f: super::Format) -> String {
+    super::compile::format_name(f).to_string()
+}
+
+/// What a converted panner changes in how the strip sounds (1.6.0, D300): its
+/// post-pan sends into surround buses are panned in each bus's layout, the
+/// other buses and its post-pan outputs get the L/R pan (reset to the centre).
+fn converted_note(mix: &Mix, id: &str, layout: super::Format, p: &SurroundPos) -> String {
+    use super::model::{is_surround, OutputSource, Tap};
+    let name = |b: &str| mix.bus(b).map_or(b.to_string(), |b| b.name.clone());
+    let post: Vec<_> = mix
+        .all_sends()
+        .into_iter()
+        .filter(|x| x.from == id && x.tap == Tap::PostPan)
+        .collect();
+    let mut parts = vec![format!(
+        "strip {id}: its surround panner node ({}, {}°) is the strip's surround pan, its L/R pan is centred",
+        fmt_name(layout),
+        p.azimuth_deg
+    )];
+    let mut surround = Vec::new();
+    let mut other = Vec::new();
+    let mut flat = Vec::new();
+    for x in &post {
+        let Some(b) = mix.bus(&x.to) else { continue };
+        if !is_surround(b.format) {
+            other.push(name(&x.to));
+        } else {
+            surround.push(format!("{} ({})", name(&x.to), fmt_name(b.format)));
+            let height = matches!(
+                b.format,
+                super::Format::Surround514 | super::Format::Surround714
+            );
+            if p.elevation_deg > 0.0 && !height {
+                flat.push(name(&x.to));
+            }
+        }
+    }
+    if !surround.is_empty() {
+        parts.push(format!(
+            "it pans into {} in each one's layout",
+            surround.join(", ")
+        ));
+    }
+    if !other.is_empty() {
+        parts.push(format!(
+            "{} get{} the L/R pan instead of the down-mix",
+            other.join(", "),
+            if other.len() == 1 { "s" } else { "" }
+        ));
+    }
+    if !flat.is_empty() {
+        parts.push(format!("its height is lost in {}", flat.join(", ")));
+    }
+    let outs = mix
+        .outputs
+        .iter()
+        .filter(|o| o.signal == id && o.tap() == Tap::PostPan)
+        .count()
+        + mix
+            .virtual_outputs
+            .iter()
+            .filter(|v| matches!(&v.source, OutputSource::Signal { signal, tap: Some(Tap::PostPan) } if signal == id))
+            .count();
+    if outs > 0 {
+        parts.push(format!(
+            "{outs} post-pan output{} stereo now, not {}",
+            if outs == 1 { " is" } else { "s are" },
+            fmt_name(layout)
+        ));
+    }
+    format!("{NOTE}{}", parts.join("; "))
+}
+
+/// Bring a mix of an older version (`schema` below the current one) to this
+/// version's model. Returns what the operator should know (for
+/// `load_warnings`, prefixed [`NOTE`]) and what is only logged. A mix of this
+/// version is left alone.
 pub fn upgrade(mix: &mut Mix) -> (Vec<String>, Vec<String>) {
-    let mut notes = Vec::new();
+    let mut warnings = Vec::new();
+    let mut log = Vec::new();
+    if mix.schema >= super::model::Schema::CURRENT {
+        return (warnings, log);
+    }
+    mix.schema = super::model::Schema::CURRENT;
     // (signal, node) of every removed panner.
     let mut gone: Vec<(String, String)> = Vec::new();
-    for s in &mut mix.strips {
+    for k in 0..mix.strips.len() {
+        let s = &mut mix.strips[k];
+        let layout = s.chain.iter().find_map(|p| match &p.kind {
+            ProcKind::SurroundPan { layout, .. } if !p.bypass => Some(*layout),
+            _ => None,
+        });
         let (pos, removed) = take_panners(&mut s.chain);
         let one = surround_entries(s.format) == 1;
-        match pos {
-            Some(p) if one && s.surround.is_empty() => {
+        let id = s.id.clone();
+        // A strip wider than stereo had no pan before 1.6 (D302): a stale value
+        // would now be a balance.
+        if !one {
+            s.pan = 0.0;
+        }
+        match (pos, layout) {
+            (Some(p), Some(layout)) if one && s.surround.is_empty() => {
                 s.surround = vec![Some(p)];
-                notes.push(format!(
-                    "strip {}: surround panner node {} is the strip's surround pan now",
-                    s.id, removed[0]
-                ));
+                // The L/R pan did nothing while the panner was on (D5).
+                s.pan = 0.0;
+                warnings.push(converted_note(mix, &id, layout, &p));
             }
-            _ if !removed.is_empty() => notes.push(format!(
-                "strip {}: surround panner node{} {} removed (bypassed or not used)",
-                s.id,
+            _ if !removed.is_empty() => log.push(format!(
+                "strip {id}: surround panner node{} {} removed (bypassed or not used)",
                 if removed.len() == 1 { "" } else { "s" },
                 removed.join(", ")
             )),
             _ => {}
         }
-        gone.extend(removed.into_iter().map(|n| (s.id.clone(), n)));
+        gone.extend(removed.into_iter().map(|n| (id.clone(), n)));
     }
     for b in &mut mix.buses {
         let (_, removed) = take_panners(&mut b.chain);
         if !removed.is_empty() {
-            notes.push(format!(
+            log.push(format!(
                 "bus {}: surround panner node {} removed (it did nothing on a bus)",
                 b.id,
                 removed.join(", ")
@@ -91,6 +190,7 @@ pub fn upgrade(mix: &mut Mix) -> (Vec<String>, Vec<String>) {
     }
     for snap in &mut mix.snapshots {
         for (id, st) in snap.signals.iter_mut() {
+            let mut found = false;
             let mut pos = None;
             st.chain.retain(|v| {
                 let Ok(p) = serde_json::from_value::<Proc>(v.clone()) else {
@@ -99,6 +199,7 @@ pub fn upgrade(mix: &mut Mix) -> (Vec<String>, Vec<String>) {
                 if !matches!(p.kind, ProcKind::SurroundPan { .. }) {
                     return true;
                 }
+                found = true;
                 if !p.bypass && pos.is_none() {
                     pos = position(&p.kind);
                 }
@@ -109,12 +210,15 @@ pub fn upgrade(mix: &mut Mix) -> (Vec<String>, Vec<String>) {
                 .iter()
                 .find(|s| &s.id == id)
                 .is_some_and(|s| surround_entries(s.format) == 1);
-            if let (Some(p), true, true) = (pos, one, st.surround.is_none()) {
-                st.surround = Some(vec![Some(p)]);
+            if found && st.surround.is_none() && one {
+                // A bypassed panner: the recall turns the surround pan off.
+                st.surround = Some(pos.map(|p| vec![Some(p)]).unwrap_or_default());
+                if pos.is_some() {
+                    st.pan = st.pan.map(|_| 0.0);
+                }
             }
         }
     }
-    let mut dropped = Vec::new();
     if !gone.is_empty() {
         let names = |signal: &str, node: &str| gone.iter().any(|(s, n)| s == signal && n == node);
         let mut clean = |what: &str,
@@ -127,7 +231,10 @@ pub fn upgrade(mix: &mut Mix) -> (Vec<String>, Vec<String>) {
                 let hit = matches!(&b.kind, super::logic::BlockKind::SetParam { signal, node, .. } if names(signal, node));
                 if hit {
                     ids.push(b.id.clone());
-                    dropped.push(format!("{what}[{i}].blocks[{k}]"));
+                    warnings.push(format!(
+                        "{NOTE}{what}[{i}].blocks[{k}] ({}) removed: it set the strip's old surround panner node",
+                        b.id
+                    ));
                 }
                 k += 1;
                 !hit
@@ -141,7 +248,7 @@ pub fn upgrade(mix: &mut Mix) -> (Vec<String>, Vec<String>) {
             clean("logic_macros", i, &mut m.blocks, &mut m.wires);
         }
     }
-    (notes, dropped)
+    (warnings, log)
 }
 
 #[cfg(test)]
@@ -157,8 +264,32 @@ mod tests {
         m.strips.push(Strip::new("vox", Format::Mono));
         m.strips.push(Strip::new("fx", Format::Stereo));
         m.strips.push(Strip::new("off", Format::Mono));
+        m.strips.push(Strip::new("bed", Format::Surround51));
+        m.strips[0].pan = -0.7; // unused while the panner was on
+        m.strips[3].pan = 0.4; // unused on a 5.1 strip in 1.5
         m.buses.push(Bus::new("sur", Format::Surround51));
+        m.buses.push(Bus::new("main", Format::Stereo));
+        for (from, to) in [("vox", "sur"), ("vox", "main"), ("fx", "sur")] {
+            m.sends.push(crate::mix::model::Send {
+                from: from.into(),
+                to: to.into(),
+                tap: crate::mix::model::Tap::PostPan,
+                gain_db: crate::mix::model::Db(0.0),
+                mute: false,
+                phase: false,
+                block_delay: false,
+                pan: None,
+            });
+        }
+        m.outputs.push(crate::mix::model::Output {
+            signal: "vox".into(),
+            format: None,
+            commit_samples: None,
+            tap: Some(crate::mix::model::Tap::PostPan),
+        });
         let mut v = serde_json::to_value(&m).unwrap();
+        // 1.5 wrote no schema.
+        v.as_object_mut().unwrap().remove("schema");
         v["strips"][0]["chain"] = json!([
             {"id": "eq-1", "type": "eq", "bands": [{"type": "bell", "freq_hz": 1000, "q": 1, "gain_db": 3}]},
             {"id": "surround-pan-1", "type": "surround-pan", "layout": "5.1", "azimuth_deg": 110,
@@ -186,21 +317,46 @@ mod tests {
         }]);
         v["snapshots"] = json!([{
             "id": "s1", "name": "S1", "time": 0, "sends": [],
-            "signals": {"vox": {"fader_db": 0, "mute": false, "chain": [
-                {"id": "surround-pan-1", "type": "surround-pan", "layout": "5.1", "azimuth_deg": -30,
-                 "spread_pct": 0, "divergence_pct": 0, "lfe_db": -100}
-            ]}}
+            "signals": {
+                "vox": {"fader_db": 0, "mute": false, "pan": -0.7, "chain": [
+                    {"id": "surround-pan-1", "type": "surround-pan", "layout": "5.1", "azimuth_deg": -30,
+                     "spread_pct": 0, "divergence_pct": 0, "lfe_db": -100}
+                ]},
+                "off": {"fader_db": 0, "mute": false, "chain": [
+                    {"id": "p", "type": "surround-pan", "bypass": true, "layout": "5.1", "azimuth_deg": 90,
+                     "spread_pct": 0, "divergence_pct": 0, "lfe_db": -100}
+                ]}
+            }
         }]);
         v
     }
 
     #[test]
     fn a_151_show_loads_with_the_panner_as_the_strip_surround() {
-        let (mut m, dropped) = crate::mix::tolerant::mix(show_151()).unwrap();
-        assert_eq!(dropped, vec!["logic[0].blocks[1]".to_string()]);
+        let (mut m, warnings) = crate::mix::tolerant::mix(show_151()).unwrap();
         assert_eq!(m.validate(1, 48), Ok(()));
+        assert_eq!(m.schema, crate::mix::model::Schema::CURRENT);
+        // One note per converted strip and the removed block, all marked.
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings.iter().all(|w| is_note(w)));
+        let vox_note = warnings.iter().find(|w| w.contains("strip vox")).unwrap();
+        assert!(vox_note.contains("pans into sur (5.1)"), "{vox_note}");
+        assert!(vox_note.contains("main gets the L/R pan"), "{vox_note}");
+        assert!(
+            vox_note.contains("1 post-pan output is stereo now, not 5.1"),
+            "{vox_note}"
+        );
+        let fx_note = warnings.iter().find(|w| w.contains("strip fx")).unwrap();
+        assert!(fx_note.contains("its height is lost in sur"), "{fx_note}");
+        assert!(warnings.iter().any(|w| w.contains("logic[0].blocks[1]")));
         let vox = m.strip("vox").unwrap();
         assert_eq!(vox.chain.len(), 1, "the EQ stays");
+        assert_eq!(vox.pan, 0.0, "the stale L/R pan is centred");
+        assert_eq!(
+            m.strip("bed").unwrap().pan,
+            0.0,
+            "a wide strip's stale pan is no balance"
+        );
         let p = vox.surround[0].unwrap();
         assert_eq!((p.azimuth_deg, p.spread_pct, p.lfe_db), (110.0, 20.0, -6.0));
         // The layout goes; the height stays.
@@ -217,9 +373,14 @@ mod tests {
         let st = &m.snapshots[0].signals["vox"];
         assert!(st.chain.is_empty());
         assert_eq!(st.surround.as_ref().unwrap()[0].unwrap().azimuth_deg, -30.0);
-        // Again: nothing more to do.
-        let (notes, dropped) = upgrade(&mut m);
-        assert!(notes.is_empty() && dropped.is_empty());
+        assert_eq!(st.pan, Some(0.0));
+        // A bypassed one: the recall turns the surround pan off.
+        assert_eq!(m.snapshots[0].signals["off"].surround, Some(vec![]));
+        // Again (a 1.6 mix): nothing more to do, a balance set now stays.
+        m.strips[3].pan = 0.4;
+        let (notes, log) = upgrade(&mut m);
+        assert!(notes.is_empty() && log.is_empty());
+        assert_eq!(m.strip("bed").unwrap().pan, 0.4);
         // It saves without the node and loads strictly.
         let back: Mix = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
         assert_eq!(back, m);

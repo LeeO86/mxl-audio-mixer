@@ -537,11 +537,19 @@ an id gets `strip-<n>` or `bus-<n>`.
     and R at ∓30° from it; `elevation_deg` only on 5.1.4 and 7.1.4); wider: one entry
     per channel, `null` for a channel that maps 1:1 (the LFE always does). `[]`
     removes it (1:1).
+    A send's own `pan` takes precedence only where it applies (a mono or stereo
+    source), so a stale one on a strip made wider does not stop this panner. A
+    block-delay send is not panned (the dialog lists it).
   - `members` (1.6.0, left out while empty): per channel of a strip of 2 or more,
     `{fader_db, trim_db, mute}` added to the strip's fader (`"-inf"` silences it)
     and trim (each ±100 dB; the result is held to +15 dB and ±42 dB) and a mute of
     its own. `unlinked` (default `false`) only tells the console whether a member
-    moves the strip or its own offset.
+    moves the strip or its own offset. Snapshots recall the member offsets by
+    class (fader, trim, mute).
+  - The mix has `schema` (1.6.0: 16; absent in older shows): a show without it is
+    upgraded once at load and import (a 1.5 panner node, above), and what that
+    changes is listed in `load_warnings` as entries starting "1.5 show: "
+    (the import answers them as `upgraded`).
 - **Bus:** sum of its sends → `chain` → fader (`"-inf"` … +15) and mute; `loudness`;
   `compensate` (delay compensation, default `true`). A **subgroup** bus
   (`subgroup: true`) takes every send into it from its source's output (a strip's
