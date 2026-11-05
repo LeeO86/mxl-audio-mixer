@@ -1031,21 +1031,6 @@ impl Mix {
                 }
             }
         }
-        for s in &self.strips {
-            if s.chain
-                .iter()
-                .any(|p| matches!(p.kind, ProcKind::DirectOut { .. }))
-                && self.output(&s.id).is_some()
-            {
-                // The legacy direct out (input or post-pan tap) and the block.
-                if s.chain
-                    .iter()
-                    .any(|p| p.id == super::chain::MAIN_DIRECT_OUT)
-                {
-                    return Err(format!("strip {} has two direct outs {}", s.id, s.id));
-                }
-            }
-        }
         for b in &self.buses {
             if b.chain
                 .iter()
