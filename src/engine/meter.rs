@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::plan::MeterBank;
+use super::roundtrip::Correlator;
 use crate::dsp::reduce;
 use crate::dsp::truepeak::{self, TruePeak, PHASES, TAPS};
 
@@ -33,6 +34,8 @@ pub struct Meterer {
     taps: [[f32; TAPS]; PHASES],
     bound: f32,
     plans: Vec<(u32, Arc<MeterBank>, Vec<TruePeak>)>,
+    /// Per kept plan, a correlator per round-trip probe (C4).
+    probes: Vec<(u32, Vec<Correlator>)>,
 }
 
 impl Default for Meterer {
@@ -42,6 +45,7 @@ impl Default for Meterer {
             bound: truepeak::bound(&taps),
             taps,
             plans: Vec::new(),
+            probes: Vec::new(),
         }
     }
 }
@@ -50,10 +54,15 @@ impl Meterer {
     /// The meter bank of plan `generation` (sent before the plan runs).
     pub fn plan(&mut self, generation: u32, bank: Arc<MeterBank>) {
         let n = bank.channels.len();
+        let probes = (0..bank.probes.len())
+            .map(|_| Correlator::default())
+            .collect();
+        self.probes.push((generation, probes));
         self.plans
             .push((generation, bank, vec![TruePeak::default(); n]));
         if self.plans.len() > KEPT {
             self.plans.remove(0);
+            self.probes.remove(0);
         }
     }
 
@@ -87,6 +96,19 @@ impl Meterer {
             for k in 0..2 {
                 m.ppm[k].store(level[k].to_bits(), Ordering::Relaxed);
                 m.ppm_max[k].fetch_max(max[k].to_bits(), Ordering::Relaxed);
+            }
+        }
+        // Inserts: their send and return blocks to the round-trip probes.
+        if let Some((_, cs)) = self.probes.iter_mut().find(|(g, _)| *g == generation) {
+            for (p, c) in bank.probes.iter().zip(cs.iter_mut()) {
+                let ret = p.ret as usize == slot;
+                if p.send as usize == slot || ret {
+                    c.feed(ret, chans);
+                    if let Some(lag) = c.measure() {
+                        p.lag
+                            .store(lag.round().max(0.0) as u32 + 1, Ordering::Relaxed);
+                    }
+                }
             }
         }
         if let ([a, b, ..], Some(m)) = (chans, bank.channels.get(slot)) {

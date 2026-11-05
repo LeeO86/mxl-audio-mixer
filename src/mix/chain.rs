@@ -274,6 +274,43 @@ pub enum ProcKind {
     /// one it acts after the chain, before the fader. No parameters: the
     /// control engine sets its gain.
     Auto {},
+    /// Where the fader stage (fader, audio-follows-video, mute) sits in the flow
+    /// (C3, 1.6.0): the nodes after it run post-fader. Without one the fader
+    /// follows the chain (as before 1.6). At most one per chain.
+    Fader {},
+    /// A direct out (C5, 1.6.0): publishes the strip at this point of its flow
+    /// as an MXL flow and NMOS sender ([`output_key`]); the signal passes on
+    /// unchanged. Several per strip. Strips only (a bus has its bus out).
+    DirectOut {
+        /// Layout of the flow; `null`: the strip's format.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<super::format::Format>,
+        /// Samples per MXL commit; `null`: `MIXER_OUTPUT_COMMIT_SAMPLES`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit_samples: Option<u32>,
+    },
+    /// An insert (C4, 1.6.0): the signal goes out as an MXL flow the mixer
+    /// writes (the send, [`output_key`]) and comes back on an input (the
+    /// return), which replaces it from here on. Levels out and in, metered both
+    /// ways; bypass passes the dry signal (the send keeps running). No delay
+    /// compensation: the return is mixed in when it arrives; its measured round
+    /// trip is in the status.
+    Insert {
+        #[serde(default)]
+        send_db: f64,
+        #[serde(default)]
+        return_db: f64,
+        /// The input (1 …) that carries the return flow; `null`: none yet (the
+        /// signal passes dry).
+        #[serde(default)]
+        return_input: Option<usize>,
+        /// The return's first channel on that input (1 …).
+        #[serde(default = "first_channel")]
+        return_channel: usize,
+        /// Samples per MXL commit of the send; `null`: `MIXER_OUTPUT_COMMIT_SAMPLES`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit_samples: Option<u32>,
+    },
     /// Delay in samples, ms or frames (at `frame_rate`).
     Delay {
         time: f64,
@@ -338,6 +375,25 @@ fn lfe_off() -> f64 {
     LFE_OFF_DB
 }
 
+fn first_channel() -> usize {
+    1
+}
+
+/// The id of the direct out that publishes as the strip itself (the pre-1.6
+/// key, so its MXL flow and NMOS sender keep their ids).
+pub const MAIN_DIRECT_OUT: &str = "out";
+
+/// The output key (MXL flow, NMOS sender, `GET /api/v1/outputs`) of a direct out
+/// or an insert send `node` of `signal`: the signal's own id for the direct out
+/// `out`, else `<signal>/<node>`.
+pub fn output_key(signal: &str, node: &str, kind: &ProcKind) -> String {
+    if matches!(kind, ProcKind::DirectOut { .. }) && node == MAIN_DIRECT_OUT {
+        signal.to_string()
+    } else {
+        format!("{signal}/{node}")
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -384,6 +440,14 @@ fn times(attack: f64, release: f64) -> Result<(), String> {
     range("release_ms", release, 0.0, 10_000.0)
 }
 
+/// A commit size (the mix checks the block multiple).
+fn commit(c: Option<u32>) -> Result<(), String> {
+    match c {
+        Some(c) if c == 0 || c > 48_000 => Err("commit_samples must be 1 to 48000".into()),
+        _ => Ok(()),
+    }
+}
+
 fn ratio(v: f64) -> Result<(), String> {
     range("ratio", v, 1.0, 1000.0)
 }
@@ -409,6 +473,9 @@ impl ProcKind {
             Self::Multiband { .. } => "multiband",
             Self::Delay { .. } => "delay",
             Self::Auto {} => "auto",
+            Self::Fader {} => "fader",
+            Self::DirectOut { .. } => "direct-out",
+            Self::Insert { .. } => "insert",
             Self::Width { .. } => "width",
             Self::SurroundPan { .. } => "surround-pan",
             Self::Leveler { .. } => "leveler",
@@ -431,6 +498,9 @@ impl ProcKind {
                 Err("the surround panner pans a mono or stereo strip".into())
             }
             Self::BassManagement { .. } => Err("bass management is not a chain node".into()),
+            Self::DirectOut { .. } if !strip => {
+                Err("a direct out is on a strip (a bus has its bus out)".into())
+            }
             _ => Ok(()),
         }
     }
@@ -447,6 +517,9 @@ impl ProcKind {
             | Self::Oscillator { .. }
             | Self::BassManagement { .. }
             | Self::Auto {}
+            | Self::Fader {}
+            | Self::DirectOut { .. }
+            | Self::Insert { .. }
             | Self::Width { .. }
             | Self::SurroundPan { .. } => Category::Other,
             _ => Category::Dynamics,
@@ -666,7 +739,25 @@ impl ProcKind {
                     return Err(format!("a delay is at most {MAX_DELAY_MS} ms"));
                 }
             }
-            Self::Auto {} => {}
+            Self::Auto {} | Self::Fader {} => {}
+            Self::DirectOut { commit_samples, .. } => commit(*commit_samples)?,
+            Self::Insert {
+                send_db,
+                return_db,
+                return_input,
+                return_channel,
+                commit_samples,
+            } => {
+                range("send_db", *send_db, -40.0, 20.0)?;
+                range("return_db", *return_db, -40.0, 20.0)?;
+                if *return_input == Some(0) {
+                    return Err("return_input counts from 1".into());
+                }
+                if !(1..=64).contains(return_channel) {
+                    return Err("return_channel must be 1 to 64".into());
+                }
+                commit(*commit_samples)?;
+            }
             Self::Width { width_pct, .. } => range("width_pct", *width_pct, 0.0, 200.0)?,
             Self::SurroundPan {
                 layout,
@@ -873,10 +964,15 @@ impl ProcKind {
                 *gate_lufs,
                 *ceiling_db,
             ],
-            // Matrix nodes: the compiler computes their matrix.
-            Self::Delay { .. } | Self::Auto {} | Self::Width { .. } | Self::SurroundPan { .. } => {
-                Vec::new()
-            }
+            // Matrix nodes: the compiler computes their matrix; the fader, direct
+            // outs and inserts are gain steps of the compiler.
+            Self::Delay { .. }
+            | Self::Auto {}
+            | Self::Fader {}
+            | Self::DirectOut { .. }
+            | Self::Insert { .. }
+            | Self::Width { .. }
+            | Self::SurroundPan { .. } => Vec::new(),
         };
         v.into_iter().map(|x| x as f32).collect()
     }
@@ -926,7 +1022,17 @@ impl ProcKind {
             Self::Width { input, output, .. } => (input, output).hash(&mut h),
             Self::SurroundPan { layout, .. } => layout.hash(&mut h),
             Self::Leveler { limiter, .. } => limiter.hash(&mut h),
-            Self::Expander { .. } | Self::Gate { .. } | Self::Auto {} => {}
+            Self::DirectOut {
+                format,
+                commit_samples,
+            } => (format, commit_samples).hash(&mut h),
+            Self::Insert {
+                return_input,
+                return_channel,
+                commit_samples,
+                ..
+            } => (return_input, return_channel, commit_samples).hash(&mut h),
+            Self::Expander { .. } | Self::Gate { .. } | Self::Auto {} | Self::Fader {} => {}
         }
         h.finish()
     }
@@ -970,6 +1076,14 @@ pub fn validate(chain: &[Proc]) -> Result<(), String> {
     if chain.iter().filter(|p| p.kind == ProcKind::Auto {}).count() > 1 {
         return Err("a chain has at most one auto node".into());
     }
+    if chain
+        .iter()
+        .filter(|p| p.kind == ProcKind::Fader {})
+        .count()
+        > 1
+    {
+        return Err("a chain has at most one fader".into());
+    }
     let panners = chain
         .iter()
         .filter(|p| matches!(p.kind, ProcKind::SurroundPan { .. }))
@@ -981,7 +1095,20 @@ pub fn validate(chain: &[Proc]) -> Result<(), String> {
 }
 
 /// A free node id `<type>-<n>` in `chain`.
+/// The fader is `fader`; the first direct out `out` (the strip's own key),
+/// the others `out-2`, `out-3` ….
 pub fn next_id(chain: &[Proc], kind: &ProcKind) -> String {
+    let free = |id: &str| chain.iter().all(|p| p.id != id);
+    match kind {
+        ProcKind::Fader {} if free("fader") => return "fader".into(),
+        ProcKind::DirectOut { .. } => {
+            return std::iter::once(MAIN_DIRECT_OUT.to_string())
+                .chain((2..).map(|n| format!("{MAIN_DIRECT_OUT}-{n}")))
+                .find(|id| free(id))
+                .expect("unbounded")
+        }
+        _ => {}
+    }
     (1..)
         .map(|n| format!("{}-{n}", kind.type_name()))
         .find(|id| chain.iter().all(|p| &p.id != id))

@@ -868,6 +868,19 @@ async fn put_output(
                 return Err(not_found(format!("signal {signal} does not exist")));
             }
             m.outputs.retain(|o| o.signal != signal);
+            // A strip's direct out `out` (C5): changed in place at its point of
+            // the flow; with a tap it moves there.
+            if let Some(s) = m.strips.iter_mut().find(|s| s.id == signal) {
+                let main = crate::mix::chain::MAIN_DIRECT_OUT;
+                if let (Some(p), None) = (s.chain.iter_mut().find(|p| p.id == main), &b.tap) {
+                    p.kind = crate::mix::chain::ProcKind::DirectOut {
+                        format: b.format,
+                        commit_samples: b.commit_samples,
+                    };
+                    return Ok(());
+                }
+                s.chain.retain(|p| p.id != main);
+            }
             m.outputs.push(Output {
                 signal: signal.clone(),
                 format: b.format,
@@ -890,10 +903,9 @@ async fn put_output(
 async fn delete_output(State(app): State<App>, Path(signal): Path<String>) -> Response {
     let run = async {
         apply(&app, 0, |m| {
-            if m.output(&signal).is_none() {
+            if !m.unpublish(&signal) {
                 return Err(not_found(format!("{signal} is not published")));
             }
-            m.outputs.retain(|o| o.signal != signal);
             Ok(())
         })
         .await?;

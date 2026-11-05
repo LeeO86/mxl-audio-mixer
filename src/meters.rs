@@ -78,6 +78,10 @@ pub struct Meters {
     nodes: Vec<(String, String, usize, usize)>,
     node_values: Vec<(f32, f32, f32)>,
     node_bands: Vec<[f32; MAX_BANDS]>,
+    /// The inserts' probes of the plan (output key, probe index) and the last
+    /// round trip each measured, in samples (kept over a plan swap).
+    probes: Vec<(String, usize)>,
+    round_trips: BTreeMap<String, u32>,
 }
 
 impl Default for Meters {
@@ -91,6 +95,8 @@ impl Default for Meters {
             nodes: Vec::new(),
             node_values: Vec::new(),
             node_bands: Vec::new(),
+            probes: Vec::new(),
+            round_trips: BTreeMap::new(),
         }
     }
 }
@@ -119,6 +125,19 @@ impl Meters {
                 .or_insert_with(|| vec![0.0; *n]);
         }
         self.signals = signals;
+    }
+
+    /// Follow a new plan's round-trip probes (C4): `(insert output key, index)`.
+    pub fn set_probes(&mut self, probes: Vec<(String, usize)>) {
+        self.round_trips
+            .retain(|k, _| probes.iter().any(|(p, _)| p == k));
+        self.probes = probes;
+    }
+
+    /// The measured round trip of each insert (C4), in samples (as of the
+    /// last [`Meters::tick`]).
+    pub fn round_trips(&self) -> &BTreeMap<String, u32> {
+        &self.round_trips
     }
 
     /// Follow a new plan's node meters; `nodes` is `(signal, node id, slot,
@@ -167,6 +186,11 @@ impl Meters {
     }
 
     pub fn tick(&mut self) {
+        for (key, i) in &self.probes {
+            if let Some(lag) = self.bank.probes.get(*i).and_then(|p| p.samples()) {
+                self.round_trips.insert(key.clone(), lag);
+            }
+        }
         let window = u64::from(SAMPLE_RATE) * RMS_WINDOW.as_millis() as u64 / 1000;
         for (i, m) in self.bank.channels.iter().enumerate() {
             let c = &mut self.channels[i];

@@ -519,8 +519,8 @@ impl Control {
                 }
                 Act::Publish { signal, on } => {
                     if !on {
-                        next.outputs.retain(|o| o.signal != signal);
-                    } else if next.output(&signal).is_none() && next.kind(&signal).is_some() {
+                        next.unpublish(&signal);
+                    } else if !next.is_published(&signal) && next.kind(&signal).is_some() {
                         next.outputs.push(crate::mix::model::Output {
                             signal,
                             format: None,
@@ -1137,11 +1137,14 @@ impl Control {
         // Whatever wrote the sends (API, recall, import, the link), a subgroup's
         // keep what is heard (C12, D186).
         next.lock_subgroup_sends();
+        // Pre-1.6 direct outs become blocks of the strip's flow (C5).
+        next.lift_direct_outs();
         next.validate_except_logic(self.input_count, self.block)?;
         // The virtual outputs hold their slots: the published outputs and
         // monitors share the rest (D267).
         let free = crate::engine::MAX_OUTPUTS - self.virtual_outputs.len();
         let published = next.outputs.len()
+            + next.chain_outputs().len()
             + next
                 .control_room
                 .monitors
@@ -1304,6 +1307,7 @@ impl Control {
             compiled.plan.node_meters.clone(),
             compiled.node_meters.clone(),
         );
+        self.meters.set_probes(compiled.probes.clone());
         self.engine
             .meter_plan(compiled.plan.generation, compiled.plan.meters.clone());
         self.auto.planned(compiled.plan.generation);
@@ -1376,7 +1380,21 @@ impl Control {
     /// The published outputs with their latency.
     pub fn output_status(&self) -> Vec<crate::outputs::OutputStatus> {
         let mut status = self.outputs.status(&self.engine, &self.node);
+        let blocks = self.mix.chain_outputs();
         for o in &mut status {
+            if let Some(b) = blocks.iter().find(|b| b.key == o.signal) {
+                o.source = Some(b.signal.clone());
+                o.node = Some(b.node.clone());
+                o.kind = Some(if b.insert { "insert" } else { "direct-out" });
+                if b.insert {
+                    o.round_trip_ms = Some(
+                        self.meters
+                            .round_trips()
+                            .get(&b.key)
+                            .map(|s| f64::from(*s) / 48.0),
+                    );
+                }
+            }
             let processing = self
                 .output_latency
                 .get(&o.signal)
@@ -1570,6 +1588,23 @@ fn output_specs(
             virtual_slot: None,
         })
     });
+    // Direct outs and insert sends (C4, C5): the strip's main direct out is
+    // named as the strip, the others `<name> / <node>`.
+    let blocks = mix.chain_outputs().into_iter().filter_map(|o| {
+        let (name, signal_format) = mix.signal(&o.signal)?;
+        let name = if o.key == o.signal {
+            name.to_string()
+        } else {
+            format!("{name} / {}", o.node)
+        };
+        Some(OutputSpec {
+            signal: o.key,
+            name,
+            format: o.format.unwrap_or(signal_format),
+            commit: o.commit_samples.unwrap_or(default_commit),
+            virtual_slot: None,
+        })
+    });
     let monitors = mix
         .control_room
         .monitors
@@ -1582,7 +1617,11 @@ fn output_specs(
             commit: default_commit,
             virtual_slot: None,
         });
-    virtual_outputs.chain(published).chain(monitors).collect()
+    virtual_outputs
+        .chain(published)
+        .chain(blocks)
+        .chain(monitors)
+        .collect()
 }
 
 /// A clash `next` has that `now` has not.

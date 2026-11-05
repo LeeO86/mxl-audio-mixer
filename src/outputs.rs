@@ -65,6 +65,19 @@ pub struct OutputStatus {
     /// Input sample to output sample for local inputs (§4.4): read offset + one
     /// block + processing latency. Mirrored inputs add their extra delay.
     pub latency_ms: f64,
+    /// The strip or bus a direct out or an insert send (C4, C5, 1.6.0) takes
+    /// from, and its node; left out for the others (`signal` names the source).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// `direct-out` or `insert` for those.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    /// An insert's measured round trip (C4): send to return, in ms; `null`
+    /// until measured (the return correlates with the send). Inserts only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_trip_ms: Option<Option<f64>>,
 }
 
 pub fn nmos_key(signal: &str) -> String {
@@ -310,6 +323,10 @@ impl Outputs {
                     write_delay_ms: f64::from(c.write_delay_samples.load(Relaxed)) / 48.0,
                     processing_latency_ms: 0.0,
                     latency_ms: 0.0,
+                    source: None,
+                    node: None,
+                    kind: None,
+                    round_trip_ms: None,
                 }
             })
             .collect();

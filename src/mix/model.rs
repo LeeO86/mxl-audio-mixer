@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::chain::{Category, Proc};
+use super::chain::{Category, Proc, ProcKind};
 use super::format::{Downmix, Format, Laws, MonoSum, PanLaw};
 
 /// Largest send gain (§5: −∞ … +10 dB).
@@ -423,6 +423,19 @@ impl Output {
     pub fn tap(&self) -> Tap {
         self.tap.clone().unwrap_or(Tap::PostFader)
     }
+}
+
+/// An output a chain publishes (C4, C5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainOutput {
+    /// The output key: `<signal>` for the direct out `out`, else `<signal>/<node>`.
+    pub key: String,
+    pub signal: String,
+    pub node: String,
+    /// An insert's send (else a direct out).
+    pub insert: bool,
+    pub format: Option<Format>,
+    pub commit_samples: Option<u32>,
 }
 
 /// What feeds a virtual output (C7). In JSON exactly one of `signal`,
@@ -917,15 +930,68 @@ impl Mix {
         }
         self.signal_order()?;
         let mut published = BTreeSet::new();
-        if self.outputs.len() > MAX_OUTPUTS {
+        let blocks = self.chain_outputs();
+        if self.outputs.len() + blocks.len() > MAX_OUTPUTS {
             return Err(format!("at most {MAX_OUTPUTS} outputs"));
+        }
+        for o in &blocks {
+            if !published.insert(o.key.clone()) {
+                return Err(format!("output {} exists twice", o.key));
+            }
+            if let Some(c) = o.commit_samples {
+                if c % block != 0 {
+                    return Err(format!(
+                        "{} / {}: commit_samples must be a multiple of the block size {block}",
+                        o.signal, o.node
+                    ));
+                }
+            }
+        }
+        for (id, chain) in self.chains() {
+            for p in chain {
+                if let ProcKind::Insert {
+                    return_input: Some(i),
+                    ..
+                } = p.kind
+                {
+                    if i > inputs {
+                        return Err(format!(
+                            "{id}: insert {}: input {i} does not exist (1 to {inputs})",
+                            p.id
+                        ));
+                    }
+                }
+            }
+        }
+        for s in &self.strips {
+            if s.chain
+                .iter()
+                .any(|p| matches!(p.kind, ProcKind::DirectOut { .. }))
+                && self.output(&s.id).is_some()
+            {
+                // The legacy direct out (input or post-pan tap) and the block.
+                if s.chain
+                    .iter()
+                    .any(|p| p.id == super::chain::MAIN_DIRECT_OUT)
+                {
+                    return Err(format!("strip {} has two direct outs {}", s.id, s.id));
+                }
+            }
+        }
+        for b in &self.buses {
+            if b.chain
+                .iter()
+                .any(|p| matches!(p.kind, ProcKind::DirectOut { .. }))
+            {
+                return Err(format!("bus {}: a direct out is on a strip", b.id));
+            }
         }
         for o in &self.outputs {
             // A bus, or a strip (its post-fader direct out).
             if self.kind(&o.signal).is_none() {
                 return Err(format!("output signal {} does not exist", o.signal));
             }
-            if !published.insert(o.signal.as_str()) {
+            if !published.insert(o.signal.clone()) {
                 return Err(format!("signal {} is published twice", o.signal));
             }
             if let Some(tap) = &o.tap {
@@ -943,6 +1009,142 @@ impl Mix {
         }
         self.validate_virtual_outputs(inputs)?;
         Ok(())
+    }
+
+    /// Every output a chain publishes (C4, C5): the direct outs of the strips
+    /// and the insert sends, in chain order.
+    pub fn chain_outputs(&self) -> Vec<ChainOutput> {
+        self.chains()
+            .flat_map(|(id, chain)| {
+                chain.iter().filter_map(move |p| {
+                    let commit_samples = match &p.kind {
+                        ProcKind::DirectOut { commit_samples, .. }
+                        | ProcKind::Insert { commit_samples, .. } => *commit_samples,
+                        _ => return None,
+                    };
+                    let format = match &p.kind {
+                        ProcKind::DirectOut { format, .. } => *format,
+                        _ => None,
+                    };
+                    Some(ChainOutput {
+                        key: super::chain::output_key(id, &p.id, &p.kind),
+                        signal: id.to_string(),
+                        node: p.id.clone(),
+                        insert: matches!(p.kind, ProcKind::Insert { .. }),
+                        format,
+                        commit_samples,
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// Whether output `key` exists: a published signal (`outputs`) or a chain's
+    /// direct out or insert send.
+    pub fn is_published(&self, key: &str) -> bool {
+        self.output(key).is_some() || self.chain_outputs().iter().any(|o| o.key == key)
+    }
+
+    /// Unpublish output `key`: drop it from `outputs`, or remove the direct out
+    /// (or insert) that publishes it. Whether there was one.
+    pub fn unpublish(&mut self, key: &str) -> bool {
+        if self.output(key).is_some() {
+            self.outputs.retain(|o| o.signal != key);
+            return true;
+        }
+        let Some(o) = self.chain_outputs().into_iter().find(|o| o.key == key) else {
+            return false;
+        };
+        for s in &mut self.strips {
+            if s.id == o.signal {
+                s.chain.retain(|p| p.id != o.node);
+            }
+        }
+        for b in &mut self.buses {
+            if b.id == o.signal {
+                b.chain.retain(|p| p.id != o.node);
+            }
+        }
+        true
+    }
+
+    /// C5 (1.6.0): a strip's published output (its pre-1.6 direct out, in
+    /// `outputs`) becomes a direct-out block `out` at the same point of its
+    /// flow, so it sounds and is published as before (same key, flow and sender
+    /// ids). Post-fader adds a fader node in front of it. The input and post-pan
+    /// taps lie outside the chain: those stay in `outputs`. Returns whether
+    /// anything changed.
+    pub fn lift_direct_outs(&mut self) -> bool {
+        let mut changed = false;
+        let outputs = std::mem::take(&mut self.outputs);
+        for o in outputs {
+            let Some(s) = self.strips.iter_mut().find(|s| s.id == o.signal) else {
+                self.outputs.push(o);
+                continue;
+            };
+            let tap = o.tap();
+            let full = s.chain.len() >= super::chain::MAX_NODES - 1;
+            let taken = s
+                .chain
+                .iter()
+                .any(|p| p.id == super::chain::MAIN_DIRECT_OUT);
+            let at = match &tap {
+                _ if full || taken => None,
+                Tap::Input | Tap::PostPan => None,
+                Tap::After(node) => s.chain.iter().position(|p| &p.id == node).map(|i| i + 1),
+                Tap::PreEq => Some(Mix::category_span(&s.chain, Category::Eq).0),
+                Tap::PostEq => Some(Mix::category_span(&s.chain, Category::Eq).1),
+                Tap::PreDynamics => Some(Mix::category_span(&s.chain, Category::Dynamics).0),
+                Tap::PostDynamics => Some(Mix::category_span(&s.chain, Category::Dynamics).1),
+                Tap::PreFader => Some(
+                    s.chain
+                        .iter()
+                        .position(|p| p.kind == ProcKind::Fader {})
+                        .unwrap_or(s.chain.len()),
+                ),
+                Tap::PostFader => Some(s.chain.len()),
+            };
+            let Some(mut at) = at else {
+                self.outputs.push(o);
+                continue;
+            };
+            // Before 1.6 the pre-fader point came after the auto gain: an auto
+            // node keeps it there (it does nothing on a strip without one).
+            if tap == Tap::PreFader && !s.chain.iter().any(|p| p.kind == ProcKind::Auto {}) {
+                let kind = ProcKind::Auto {};
+                s.chain.insert(
+                    at,
+                    Proc {
+                        id: super::chain::next_id(&s.chain, &kind),
+                        bypass: false,
+                        kind,
+                    },
+                );
+                at += 1;
+            }
+            if tap == Tap::PostFader && !s.chain.iter().any(|p| p.kind == ProcKind::Fader {}) {
+                let kind = ProcKind::Fader {};
+                s.chain.push(Proc {
+                    id: super::chain::next_id(&s.chain, &kind),
+                    bypass: false,
+                    kind,
+                });
+                at = s.chain.len();
+            }
+            s.chain.insert(
+                at,
+                Proc {
+                    id: super::chain::MAIN_DIRECT_OUT.into(),
+                    bypass: false,
+                    kind: ProcKind::DirectOut {
+                        format: o.format,
+                        commit_samples: o.commit_samples,
+                    },
+                },
+            );
+            changed = true;
+        }
+        changed
     }
 
     /// The virtual outputs' sources (C7): one per output, each naming what
