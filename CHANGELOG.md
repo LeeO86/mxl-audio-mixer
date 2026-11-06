@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 1.6.0
+## 1.6.0 (2026-11-06)
 
 - **Behaviour change (A5–A7): the surround panner is no processing block any more but the strip's surround pan** (`surround` on the strip; the Panner block is gone from the add list, a new `surround-pan` node is refused with 400). It pans the strip's post-pan sends into 5.1, 7.1, 5.1.4 and 7.1.4 buses, each in that bus's own layout; every other bus, a direct out and an output get the strip's L/R pan (before: the panner's layout, down-mixed). Old shows load: an active panner node becomes the strip's surround pan (its layout is dropped, its L/R pan centred), a bypassed one is removed, a logic `set-param` on it is removed with its wires; wider strips' L/R pan (unused before) is centred. What that changes is listed per strip in `load_warnings` (entries starting "1.5 show: ": the buses that now get the L/R pan instead of the down-mix, a height lost in a bus without one, post-pan outputs that are stereo now) and in a banner; the show import answers it as `upgraded`. A mix saved by 1.6.0 carries `"schema": 16`, so this runs once. Downgrade: 1.5.x loads a 1.6 `mix.json` tolerantly without `schema`, `surround`, `members` and `unlinked` (the original kept as `mix.json.newer`): the strips pan L/R only and the member offsets are gone; its show import refuses a 1.6 show file.
 - A1: the strip shows channel 1's source; a click opens every channel's source side by side, with the Link switch.
