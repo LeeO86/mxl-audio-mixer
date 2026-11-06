@@ -20,13 +20,13 @@ current so that work can resume after an interruption.
 | 1.4.2 start-up of the inputs (last delay per flow, start-up phase, first lags after 0.1 s) | done (PR 47), **released in 1.4.2** (2026-10-23; the tag commit is added after the tag); lab runs (`docs/release-notes/1.4.2.md`) |
 | 1.4.3 a re-created flow keeps its last lag (forget only on a route change) | done (PR 49), **released in 1.4.3** (2026-10-24) |
 | 1.5.0 operator feedback (console A1–A10, processing B1–B6, graph and virtual outputs C1–C7, logic D1–D4), Silero leak and loudness memory fixes, tolerant show loading | done (PRs 51–60), **released in 1.5.0** (2026-10-30; the tag commit is added after the tag); maintainers' lab run 2026-10-30 on `2710e38`/`2e710c8` (`docs/release-notes/1.5.0.md`) |
-| 1.6.0 operator feedback (console strip A1–A13, menus, selection and views B1–B11, processing and DSP C1–C8, outputs as inputs D1), remote-input dropouts and deadline misses (D2, D3; platform D-347) | done (PRs 66–71), **released in 1.6.0** (2026-11-06; the tag commit is added after the tag); maintainers' lab run 2026-11-05 on `0efd0ca` (`docs/release-notes/1.6.0.md`) |
+| 1.6.0 operator feedback (console strip A1–A13, menus, selection and views B1–B11, processing and DSP C1–C8, outputs as inputs D1), remote-input dropouts and deadline misses (D2, D3; platform D-347) | done (PRs 66–71), **released in 1.6.0** (2026-11-06; tag `v1.6.0` = `508341e`); maintainers' lab run 2026-11-05 on `0efd0ca` (`docs/release-notes/1.6.0.md`) |
 | M10 performance | measured at every release (the §16 load); linear-phase crossovers (X3) open |
 
 ## Resume
 
-- 1.6.0 is released (2026-11-06). Release notes: `docs/release-notes/1.6.0.md`;
-  its image digest is filled in after the tag build. Earlier: `docs/release-notes/`.
+- 1.6.0 is released (2026-11-06; tag `v1.6.0` = `508341e`). Release notes and image digest:
+  `docs/release-notes/1.6.0.md`. Earlier: `docs/release-notes/`.
 - Environment: `docs/development.md`.
 
 ## Decisions
