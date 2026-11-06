@@ -400,8 +400,10 @@ rates other than 48 kHz, recording.
   before the fader, else after the nearest node 1.5.1 knows), every tap 1.5.1 lacks
   (after a new block, or after the fader) as the nearest one with the exact one in
   `tap_exact` beside it (a virtual output's beside its `source`). 1.6 reads
-  `tap_exact` back and drops the entry of `out` when it loads; 1.5.1 drops what it
-  does not know. In 1.5.1 such taps are approximate, units after the fader run before
+  `tap_exact` back and drops the entry of `out` when it loads its own file; 1.5.1 drops what it
+  does not know (also `tap_exact` and `patch_exact`) and saves `mix.json` at once, so
+  back on 1.6 the mix is 1.5.1's form; the 1.6 show stays in `mix.json.newer`, which
+  1.6 names in a `load_warnings` note (copy it over `mix.json` to go back to it). In 1.5.1 such taps are approximate, units after the fader run before
   it, inserts pass dry, other direct outs and insert sends are gone, the down-mix
   settings fall back to the parametric down-mix. The rollback uses the saved `mix.json` (and
   the history); a 1.6 export file does not import into 1.5.x (its strict import
