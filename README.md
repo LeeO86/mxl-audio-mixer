@@ -5,6 +5,8 @@ strips, broadcast DSP, loudness, a control room, VCAs and master/slave operation
 The contract is [`SPECIFICATION.md`](SPECIFICATION.md); decisions, deviations and
 results are in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
 
+Part of [mxl-stack](https://github.com/LeeO86/mxl-stack), a collection of open-source MXL media functions with Docker Compose and Kubernetes examples.
+
 **Status: 1.6.0 released** (2026-11-06; the operators' second feedback round: console strip, menus, selection and views, processing and DSP, outputs as inputs; the remote-input dropouts and the deadline-miss count); 1.5.1 (2026-10-31; outputs keep the input timestamps, a behaviour change for readers of mixer outputs); 1.5.0 (2026-10-30; the operators' feedback: console, meters and MIDI, processing and DSP, graph, routing and the designer's virtual outputs, logic; the Silero and loudness memory fixes; tolerant show loading); 1.4.3 (2026-10-24; a re-created flow keeps its last lag); 1.4.2 (2026-10-23; a smoother start of the inputs); 1.4.1
 (2026-10-22; the input fixes from test-all: late blocks raise the delay, one read wait
 per block, catch-up and re-open fixes); 1.4.0 (2026-10-22; the
